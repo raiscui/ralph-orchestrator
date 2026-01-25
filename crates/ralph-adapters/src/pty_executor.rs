@@ -586,6 +586,9 @@ impl PtyExecutor {
         let mut line_buffer = String::new();
         // Accumulate extracted text from NDJSON for event parsing
         let mut extracted_text = String::new();
+        // PTY output arrives in byte chunks; use incremental UTF-8 decoding so split
+        // CJK/emoji isn't lost.
+        let mut utf8_decoder = Utf8StreamDecoder::new();
         let timeout_duration = if !self.config.interactive || self.config.idle_timeout_secs == 0 {
             None
         } else {
@@ -676,9 +679,11 @@ impl PtyExecutor {
                             output.extend_from_slice(&data);
                             last_activity = Instant::now();
 
-                            if let Ok(text) = std::str::from_utf8(&data) {
+                            // Note: a single read() chunk is not guaranteed to be valid UTF-8.
+                            // Incremental decoding ensures split CJK/emoji isn't lost.
+                            utf8_decoder.push_bytes(&data, |text| {
                                 if is_stream_json {
-                                    // StreamJson format: Parse JSON lines from the data
+                                    // StreamJson format: Parse JSON lines from the decoded text
                                     line_buffer.push_str(text);
 
                                     // Process complete lines
@@ -691,14 +696,22 @@ impl PtyExecutor {
                                         }
                                     }
                                 } else {
-                                    // Text format: Stream raw output directly to handler
-                                    // This preserves ANSI escape codes for TUI rendering
+                                    // Text format: Stream decoded output directly to handler.
+                                    // ANSI sequences are ASCII, so incremental UTF-8 decoding won't break them.
                                     handler.on_text(text);
                                 }
-                            }
+                            });
                         }
                         Some(OutputEvent::Eof) | None => {
                             debug!("Output channel closed");
+                            // Flush any pending UTF-8 tail (rare, but prevents the last few bytes from never being emitted).
+                            utf8_decoder.flush_lossy(|text| {
+                                if is_stream_json {
+                                    line_buffer.push_str(text);
+                                } else {
+                                    handler.on_text(text);
+                                }
+                            });
                             // Process any remaining content in buffer (StreamJson only)
                             if is_stream_json && !line_buffer.is_empty()
                                 && let Some(event) = ClaudeStreamParser::parse_line(&line_buffer)
@@ -745,7 +758,7 @@ impl PtyExecutor {
                 while let Ok(event) = output_rx.try_recv() {
                     if let OutputEvent::Data(data) = event {
                         output.extend_from_slice(&data);
-                        if let Ok(text) = std::str::from_utf8(&data) {
+                        utf8_decoder.push_bytes(&data, |text| {
                             if is_stream_json {
                                 // StreamJson: parse JSON lines
                                 line_buffer.push_str(text);
@@ -757,14 +770,21 @@ impl PtyExecutor {
                                     }
                                 }
                             } else {
-                                // Text: stream raw output to handler
+                                // Text: stream decoded output to handler
                                 handler.on_text(text);
                             }
-                        }
+                        });
                     }
                 }
 
                 // Process final buffer content (StreamJson only)
+                utf8_decoder.flush_lossy(|text| {
+                    if is_stream_json {
+                        line_buffer.push_str(text);
+                    } else {
+                        handler.on_text(text);
+                    }
+                });
                 if is_stream_json
                     && !line_buffer.is_empty()
                     && let Some(event) = ClaudeStreamParser::parse_line(&line_buffer)
@@ -1377,6 +1397,100 @@ enum OutputEvent {
     Error(String),
 }
 
+// ============================================================================
+// UTF-8 stream decoding (for PTY chunked reads)
+// ============================================================================
+
+/// Incremental UTF-8 stream decoder: turns PTY output split at arbitrary byte
+/// boundaries into valid UTF-8 text segments.
+///
+/// Background: PTY `read()` can split at any byte. For CJK (often 3 bytes) and
+/// emoji (often 4 bytes), decoding each chunk with `std::str::from_utf8(&chunk)`
+/// can fail:
+/// - the chunk ends in the middle of a multibyte character -> `from_utf8` errors
+/// - previous logic dropped the whole chunk -> visible loss/garbling (more obvious
+///   in TUI/streaming output)
+///
+/// Goals:
+/// - If the tail is an incomplete UTF-8 sequence: buffer it and emit once complete
+///   (no replacement characters, no data loss).
+/// - If bytes are truly invalid: emit U+FFFD and skip them, avoiding infinite loops.
+struct Utf8StreamDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8StreamDecoder {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    /// Push a byte slice, and call `on_text` with decoded UTF-8 text segments in order.
+    fn push_bytes<F>(&mut self, bytes: &[u8], mut on_text: F)
+    where
+        F: FnMut(&str),
+    {
+        self.pending.extend_from_slice(bytes);
+
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(text) => {
+                    if !text.is_empty() {
+                        on_text(text);
+                    }
+                    self.pending.clear();
+                    break;
+                }
+                Err(err) => {
+                    let valid_up_to = err.valid_up_to();
+                    if valid_up_to > 0 {
+                        // Bytes before `valid_up_to` are guaranteed valid UTF-8 by `Utf8Error`.
+                        let prefix = std::str::from_utf8(&self.pending[..valid_up_to])
+                            .expect("Utf8Error::valid_up_to() prefix must be valid UTF-8");
+                        if !prefix.is_empty() {
+                            on_text(prefix);
+                        }
+                    }
+
+                    // Drop the processed prefix; keep the remaining tail and continue parsing.
+                    self.pending = self.pending[valid_up_to..].to_vec();
+
+                    match err.error_len() {
+                        None => {
+                            // Typical case: the tail is an incomplete UTF-8 sequence; wait for the next chunk.
+                            break;
+                        }
+                        Some(invalid_len) => {
+                            // Invalid byte sequence: emit the replacement character and skip the invalid bytes,
+                            // then continue parsing the remaining content.
+                            on_text("\u{FFFD}");
+                            if invalid_len >= self.pending.len() {
+                                self.pending.clear();
+                                break;
+                            }
+                            self.pending = self.pending[invalid_len..].to_vec();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flush remaining bytes (lossy) at the end so the last bit of content doesn't stay in pending forever.
+    fn flush_lossy<F>(&mut self, mut on_text: F)
+    where
+        F: FnMut(&str),
+    {
+        if self.pending.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&self.pending);
+        on_text(text.as_ref());
+        self.pending.clear();
+    }
+}
+
 /// Strips ANSI escape sequences from raw bytes.
 ///
 /// Uses `strip-ansi-escapes` for direct byte-level ANSI removal without terminal
@@ -1726,5 +1840,49 @@ mod tests {
             !executor.tui_mode,
             "tui_mode should be false after set_tui_mode(false)"
         );
+    }
+
+    // ========================================================================
+    // Utf8StreamDecoder Tests
+    // ========================================================================
+
+    #[test]
+    fn test_utf8_stream_decoder_handles_split_multibyte_char() {
+        // Repro: split a single CJK character (3 bytes) across two chunks.
+        // Expect: the decoder doesn't drop content and doesn't insert replacement characters.
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut out = String::new();
+
+        let prefix = vec![b'a'; 4095];
+        let chinese = "中".as_bytes(); // E4 B8 AD
+        let suffix = vec![b'b'; 5];
+
+        let mut chunk1 = prefix.clone();
+        chunk1.push(chinese[0]); // only the 1st byte -> incomplete UTF-8 tail
+        decoder.push_bytes(&chunk1, |s| out.push_str(s));
+
+        // The first push should output only 'a'; the CJK bytes are buffered.
+        assert_eq!(out, "a".repeat(4095));
+
+        let mut chunk2 = Vec::new();
+        chunk2.extend_from_slice(&chinese[1..]); // complete the remaining bytes
+        chunk2.extend_from_slice(&suffix);
+        decoder.push_bytes(&chunk2, |s| out.push_str(s));
+
+        assert_eq!(out, format!("{}中{}", "a".repeat(4095), "b".repeat(5)));
+    }
+
+    #[test]
+    fn test_utf8_stream_decoder_replaces_invalid_bytes_and_continues() {
+        // Input contains an invalid UTF-8 start byte (0xFF); emit the replacement character
+        // and continue decoding subsequent valid bytes.
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut out = String::new();
+
+        decoder.push_bytes(b"ok", |s| out.push_str(s));
+        decoder.push_bytes(&[0xFF], |s| out.push_str(s));
+        decoder.push_bytes(b"end", |s| out.push_str(s));
+
+        assert_eq!(out, "ok\u{FFFD}end");
     }
 }

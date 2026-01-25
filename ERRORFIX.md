@@ -53,3 +53,64 @@
 - `cargo test -p ralph-e2e`
 - `cargo fmt --check`
 - `cargo clippy -p ralph-e2e`
+
+## 2026-01-24 15:50 (+0800) - TUI/流式输出在中文场景下丢字
+- 问题: Ralph 默认启用的 TUI 在显示中文时出现“丢字”（复现用例中，字符 `中` 会被吞掉）。
+- 影响:
+  - TUI 观察模式下，助手输出/工具输出包含中文时可能缺字，影响可读性与调试。
+  - 该问题不只影响 TUI：只要走 `run_observe_streaming()` 的流式输出链路（即使 `--no-tui`），同样可能丢字。
+
+### 根因
+- `crates/ralph-adapters/src/pty_executor.rs` 的 `run_observe_streaming()` 把 PTY 读到的 bytes 当成“每个 chunk 都是完整 UTF-8”来处理：
+  - 逐 chunk `std::str::from_utf8(&data)`。
+  - 一旦 chunk 末尾落在中文/emoji 多字节字符中间，`from_utf8` 会失败。
+  - 旧逻辑在失败时直接跳过该 chunk，导致合法输出被丢弃（中文丢字最明显）。
+
+### 修复
+- 新增 `Utf8StreamDecoder`（UTF-8 增量解码器）：
+  - 对“不完整的 UTF-8 尾部”做缓存，等下一个 chunk 拼接补齐后再输出。
+  - 对“确实非法的字节序列”输出 U+FFFD 并跳过，避免卡死。
+- `run_observe_streaming()` 的两处输出处理点（主循环 + child exit drain）都改为通过该解码器输出文本片段。
+- 在 EOF / drain 结束处增加 `flush_lossy()`，避免极端情况下尾部 bytes 永远留在缓冲区。
+
+### 回归测试
+- `test_utf8_stream_decoder_handles_split_multibyte_char`
+- `test_utf8_stream_decoder_replaces_invalid_bytes_and_continues`
+
+### 验证
+- `cargo test -p ralph-adapters`
+- `cargo test`
+- 人工复现/验证（自定义 backend）：
+  - 输出构造：`'a'*4095 + '中' + '<MARK>' + 'b'*20`（确保 `中` 被放在 4096 bytes 边界上）
+  - 观察：TUI 与 `--no-tui` 均能稳定看到 `中<MARK>`，不再丢字
+
+## 2026-01-25 01:12 (+0800) - TUI 中文宽字符导致错位/吞英文首字母
+- 问题: TUI 内容区在“中文 + 紧随其后的英文路径/单词”场景下显示错位：
+  - 中文看起来像被插入空格
+  - 英文首字母被吞（例如 `search` 显示成 `earch`）
+- 影响: 实际内容里常见中文后直接跟路径（例如 `新增示例合集目录：examples/.../README.md:1`），会导致关键信息缺失。
+
+### 根因
+- `crates/ralph-tui/src/widgets/content.rs` 的 `ContentPane::render()` 旧实现按 `chars()` 逐个写入，并且每次 `x += 1`。
+- 但中文/CJK、emoji 等字符在终端里通常是“双宽”（占两列）：
+  - 写入第 1 列后，第 2 列是 continuation cell，终端渲染会跳过
+  - 旧实现仍把紧随其后的 ASCII 写进 continuation cell
+  - 结果：ASCII 首字母在终端渲染时被跳过 → “吞首字母/错位”
+
+### 修复
+- 改为按 grapheme cluster 渲染（`unicode-segmentation`），避免把组合 emoji 等拆开。
+- 用 `unicode-width` 计算每个 grapheme 的显示宽度，并按宽度推进光标。
+- 写入宽 grapheme 后 reset 被遮挡的 cell，保持与 ratatui `Buffer::set_stringn` 的语义一致。
+- 软换行前先清理本行剩余格子，避免上一帧残影（artifact）。
+
+### 回归测试
+- 新增: `cjk_double_width_does_not_swallow_next_ascii_char`
+  - 用 `"将search/notes"` 断言 `buf[(1,0)]` 为 `" "` 且 `buf[(2,0)]` 为 `"s"`，确保不会再把 ASCII 写进 continuation cell。
+
+### 验证
+- `cargo fmt`
+- `cargo test -p ralph-tui`
+- `cargo clippy -p ralph-tui`
+- `cargo test -p ralph-core smoke_runner`
+- `cargo test -p ralph-core kiro`
+- `cargo test`

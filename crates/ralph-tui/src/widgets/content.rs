@@ -11,6 +11,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::Widget,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Widget that renders the content of an iteration buffer.
 ///
@@ -67,9 +69,30 @@ impl Widget for ContentPane<'_> {
             let mut x = area.x;
             for span in &rendered_line.spans {
                 let content = span.content.as_ref();
-                for ch in content.chars() {
-                    // Soft wrap: when we reach the edge, move to next row
-                    if x >= area.x + area.width {
+
+                for grapheme in UnicodeSegmentation::graphemes(content, true)
+                    .filter(|symbol| !symbol.contains(char::is_control))
+                {
+                    let width = grapheme.width() as u16;
+                    if width == 0 {
+                        continue;
+                    }
+
+                    // Keep behavior consistent with ratatui's `Buffer::set_stringn`: if a grapheme
+                    // is wider than the viewport, it can't be drawn; skip it.
+                    if width > area.width {
+                        continue;
+                    }
+
+                    // Soft wrap: if the grapheme doesn't fit on this row, move to next row.
+                    // Clear the remaining cells on this row before wrapping, otherwise we can
+                    // leave artifacts from the previous frame.
+                    if x + width > area.x + area.width {
+                        while x < area.x + area.width {
+                            buf[(x, y)].set_char(' ').set_style(Style::default());
+                            x += 1;
+                        }
+
                         y += 1;
                         x = area.x;
                         // Stop if we've filled the viewport
@@ -77,8 +100,17 @@ impl Widget for ContentPane<'_> {
                             return;
                         }
                     }
-                    buf[(x, y)].set_char(ch).set_style(span.style);
+
+                    // Key: write by grapheme cluster and advance by display width, so we don't
+                    // write ASCII into a CJK/emoji continuation cell and "swallow" the next char.
+                    buf[(x, y)].set_symbol(grapheme).set_style(span.style);
+
+                    let next_symbol = x + width;
                     x += 1;
+                    while x < next_symbol {
+                        buf[(x, y)].reset();
+                        x += 1;
+                    }
                 }
             }
 
@@ -501,6 +533,29 @@ mod tests {
             "third row should have remaining text, got: {:?}",
             lines[2]
         );
+    }
+
+    #[test]
+    fn cjk_double_width_does_not_swallow_next_ascii_char() {
+        // This test reproduces a subtle but common TUI issue:
+        // when a double-width CJK character is immediately followed by ASCII, if the renderer
+        // iterates with `chars()` and advances the cursor with `x += 1`,
+        // the next column is actually a continuation cell that terminals skip, causing the ASCII
+        // first letter to disappear.
+        let mut buffer = IterationBuffer::new(1);
+        buffer.append_line(Line::from("将search/notes"));
+
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+
+        let widget = ContentPane::new(&buffer);
+        widget.render(area, &mut buf);
+
+        // Expected behavior: the CJK character (U+5C06) occupies two columns; x=1 should be a
+        // blank/reset continuation cell, and the ASCII 's' should start at x=2.
+        assert_eq!(buf[(0, 0)].symbol(), "将");
+        assert_eq!(buf[(1, 0)].symbol(), " ");
+        assert_eq!(buf[(2, 0)].symbol(), "s");
     }
 
     // =========================================================================
