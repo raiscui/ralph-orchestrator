@@ -1,37 +1,152 @@
 # WORKLOG
 
-## 2026-01-23 16:02 (CST)
-- 新建 `task_plan.md` / `notes.md` / `WORKLOG.md` / `ERRORFIX.md`，进入四文件上下文模式。
+> 用于记录本次任务的最终产出与关键结论（在完成时追加到文件末尾）。
 
-## 2026-01-23 16:10 (CST)
-- 修复 `crates/ralph-cli/src/display.rs`：把 `truncate()` 和事件表格里的 `payload_preview` 改成 UTF-8 安全截断，避免 `&str` 在非字符边界切片导致 panic。
-- 增加回归测试：覆盖多字节字符(emoji)在截断边界附近的场景，确保不再出现 "not a char boundary"。
-- 验证：已运行 `cargo test -p ralph-cli`、`cargo test`、`cargo fmt --check`、`cargo clippy -p ralph-cli`，全部通过。
+## 2026-01-26 14:21:11 +0800｜并行 HatInstance + Supervisor + Human Async Loop（设计稿）
 
-## 2026-01-23 17:07 (CST)
-- 修复 `crates/ralph-e2e/src/scenarios/*.rs`：把 7 处重复 `truncate()` 从按字节切片改为 UTF-8 安全截断，避免 e2e 在输出含中文/emoji 时 panic。
-- 增加回归测试：每个场景文件各补 1 个 “多字节字符靠近边界不 panic” 的测试用例。
-- 验证：已运行 `cargo test -p ralph-e2e`、`cargo fmt --check`、`cargo clippy -p ralph-e2e`，全部通过。
+### 产出
+- 新增设计规格：`specs/parallel-hat-instances.spec.md`
+  - 已包含 `flowchart`（组件/数据流）与 `sequenceDiagram`（一次 worktree job 的完整时序）
+  - Mermaid 语法已用 `mermaid-validator` 校验通过
 
-## 2026-01-23 17:29 (CST)
-- 加固 `crates/ralph-cli/src/display.rs`：修复时间字段 `ts` 的截断逻辑，避免异常 `ts` 含多字节字符时 `&time_str[..8]` 触发 panic。
-- 增加回归测试：新增 `test_print_events_table_does_not_panic_on_multibyte_ts` 覆盖该场景。
-- 验证：已运行 `cargo test -p ralph-cli`、`cargo test`、`cargo fmt --check`、`cargo clippy -p ralph-cli`，全部通过。
+### 关键决定（已对齐）
+- 架构：选择 **HatInstance Actor 模型**（tokio task/actor 负责调度与状态；实例之间并行）
+- 并行范围：支持“不同 hat 并行”与“同 hat 多实例并行”；并行 hats 全部 headless
+- 执行模型：**每个 job = 一次 CLI invocation**（codex/claude code/...），并行的本质是“多个 CLI 子进程并行”
+- 事件语义：topic 投递语义 **必须显式声明** `queue | fanout`，并支持 **实例级（HatInstanceId）受众限制**
+- Workspace/权限：
+  - 临时 worktree（每 job 一次）可用，但必须同时满足：hat capabilities 允许 + LLM preflight 建议
+  - capabilities 采用字符串白名单（例如 `workspace.worktree` / `git.merge` / `verify.tests`）
+  - 权限条目 1-5 全部存在，初期默认 allow（未来可切 ask/deny）
+  - worktree hooks：`on_acquire` / `on_release`（pre/post script），由 hat 设计者配置（包括 submodules 初始化）
 
-## 2026-01-24 15:50 (+0800)
-- 排查并修复 “TUI/流式输出中文丢字” 问题：根因是 PTY 流式输出逐 chunk `from_utf8`，在多字节字符跨 chunk 时会解码失败并丢弃 chunk。
-- 实现 `Utf8StreamDecoder` 做 UTF-8 增量解码，并接入 `crates/ralph-adapters/src/pty_executor.rs` 的 `run_observe_streaming()`（主循环 + drain）。
-- 增加回归测试：覆盖“拆分中文字符”和“非法字节替换并继续”两类场景。
-- 验证：已运行 `cargo test -p ralph-adapters`、`cargo test`；并用 `.ralph/tui_chinese_custom.yml` 人工验证 TUI 与 `--no-tui` 均能看到 `中<MARK>`。
+### 实现前的硬门槛（spec 已点名）
+- headless 执行必须支持“每次 invocation 指定 cwd”（否则 worktree 无法生效）
+- headless 输出必须“真流式”（否则 Supervisor TUI 无法实时展示并发实例输出）
 
-## 2026-01-25 01:12 (+0800)
-- 修复 “TUI 中文宽字符导致错位/吞英文首字母”：
-  - 根因：`crates/ralph-tui/src/widgets/content.rs` 的 `ContentPane::render()` 按 `chars()` 写入并 `x += 1`，把 ASCII 写进 CJK/emoji 的 continuation cell，终端渲染会跳过该格。
-  - 修复：改为按 grapheme cluster 渲染，并按显示宽度推进光标；软换行前清理本行剩余格子避免残影。
-- 增加回归测试：`cjk_double_width_does_not_swallow_next_ascii_char`（覆盖 `"将search/notes"`）。
-- 验证：已运行 `cargo fmt`、`cargo test -p ralph-tui`、`cargo clippy -p ralph-tui`、`cargo test -p ralph-core smoke_runner`、`cargo test -p ralph-core kiro`、`cargo test`，全部通过。
+## 2026-01-26 15:15:37 +0800｜补充：缺失实例引用的最佳处理
 
-## 2026-01-25 23:21 (+0800)
-- 将未提交变更中新增的中文代码注释翻译为英文（只改注释文本，不改动测试用的中文字符串）。
-- 涉及文件：`crates/ralph-adapters/src/pty_executor.rs`、`crates/ralph-tui/src/widgets/content.rs`。
-- 验证：已运行 `cargo fmt --check`、`cargo test`，全部通过。
+### 背景
+- 并行 + 实例可动态结束 + human async loop，会自然产生“消息/事件指向不存在的实例（如 writer#2）”。
+- 这不是靠一个全局 A/B/C 就能优雅解决的问题。
+
+### 设计补充（已写入 spec）
+- 在 `specs/parallel-hat-instances.spec.md` 增补 5.5：
+  - 区分短生命周期目标（HatInstanceId）与长生命周期目标（ThreadId/WorkItemId）
+  - human async chat 推荐以 `ThreadId` 为路由主键，实例仅作为可变 owner
+  - 缺失策略按消息类型决定，并将路由决策写入事件日志，保证 replay 可复现
+
+## 2026-01-26 15:42:18 +0800｜补充：LLM 决策边界（提议 vs 执行）
+
+### 背景
+- 用户问：“可否由 LLM 决策？”
+- 并行系统里，如果不明确“谁有最终决策权”，会直接破坏可回放与安全 gate。
+
+### 结论（已写入 spec）
+- 推荐模式：**LLM 提议 + Supervisor 校验/执行**。
+  - LLM 负责给出策略提议（例如是否启用 worktree、要跑哪些测试、是否 spawn 新实例）。
+  - Supervisor 负责 capabilities/permissions/human gate，并做机械执行与全局仲裁。
+- 规格落点：`specs/parallel-hat-instances.spec.md` 新增 `7.3 可否由 LLM 决策？（推荐：LLM 提议 + Supervisor 执行）`
+
+## 2026-01-26 15:53:02 +0800｜补充：queue 派发由 LLM 决策 + human gate 超时
+
+### 新增用户决定
+- `queue` 派发（投递到哪个具体实例）由 LLM 决策（用户选 B）。
+- human gate 支持两种模式：
+  - 普通 gate：等待 human
+  - 超时 gate：默认 60s，超时后由 LLM 自行决策
+
+### 规格落点
+- `specs/parallel-hat-instances.spec.md`：
+  - `5.2` 增加 `queue_selection: llm | deterministic`
+  - `5.3` 明确 queue 派发必须落盘（候选集 + 选择结果 + 可选原因）
+  - `5.4.1` 新增 `gate.request / gate.resolve / gate.timeout` 协议（用于 consult/approval）
+  - `8.2` UI 增加 gate 倒计时与 `!resolve` 命令
+
+## 2026-01-26 16:05:41 +0800｜补充：approval 超时后允许 LLM 自决 + human 异步调整需求通道
+
+### 新增用户决定
+- `kind=approval` 默认也支持超时 gate（用户选 B）：
+  - 等待最多 60s
+  - 超时后由 LLM 自行决策 `approve|deny` 并继续
+- human 可以随时 async 发送“调整需求/新约束/新信息”，不阻断并行 hats 的运行。
+  - 你倾向用文件系统事件/日志做通道，并希望 LLM 能经常读取。
+
+### 规格落点
+- `specs/parallel-hat-instances.spec.md`：
+  - `5.4.1` 明确 approval 也可超时自决，并保留 `timeout_seconds=null` 的“严格等待 human”能力
+  - `5.4.2` 新增“Human 异步调整需求”机制：
+    - `events.jsonl` 作为唯一真相（可回放）
+    - `.agent/inbox/{hat_instance_id}.jsonl` 作为轻量 inbox（便于 LLM 高频读取）
+    - `human.directive(priority=normal|urgent)` 作为事件形态（默认不打断；urgent 才允许 cancel+重启）
+
+## 2026-01-26 16:18:37 +0800｜补充：LLM 决策层的工程落地方式
+
+### 背景
+- 用户指出：当前 Ralph orchestrator 并不会真的“调用另一个 LLM 做评审/派发”，所以担心 LLM 决策层无法落地。
+
+### 结论（已写入 spec）
+- 现状原因：multi-hat 只是拓扑注入，执行器永远是 ralph（`EventLoop::next_hat()` multi-hat 时总返回 ralph）。
+- 目标态：方向1 HatInstance Actor 推翻该限制，让 reviewer/tester/decider 都能真正并行执行。
+- 工程落地：不在 Rust 内接 LLM SDK，而是把“LLM 决策”实现成“决策类 HatJob”，同样通过 headless CLI invocation 完成。
+  - 事件输出仍使用 `<event ...>`，复用 `EventParser`，并把决策落盘保证 replay。
+  - 支持 batch 与 deterministic fallback 做成本/稳定性刹车。
+- 规格落点：`specs/parallel-hat-instances.spec.md` 新增 `7.4 LLM 决策层怎么落地？`
+
+## 2026-01-26 16:25:12 +0800｜补充：`ralph` hat 的来源与现状限制
+
+### 发现
+- `ralph` hat 是内置的 catch-all coordinator，不是 YAML 配置出来的。
+  - `crates/ralph-core/src/event_loop/mod.rs:145` 在 EventLoop 初始化时无条件注册 `ralph` 并 `subscribe("*")`。
+
+### 影响
+- 这解释了“为什么现在看不到 reviewer/tester 单独调用 LLM”：现状 multi-hat 只是拓扑注入，执行器仍固定为 `ralph`。
+
+## 2026-01-26 16:34:02 +0800｜决定：LLM 决策层默认使用内置 `ralph` hat
+
+### 决定
+- 你确认：第一版不引入新的 `decider` hat 名字。
+- 决策类 HatJob（queue 派发、gate 超时自决等）默认使用 `hat_id="ralph"` 运行。
+
+### 意义
+- 仍然保持“LLM = 外部 CLI agent invocation”的架构，不把 SDK 接进 Rust。
+- 只是在调度层面把“决策”也视为一种 job，并复用现有 `<event ...>` 输出 + `EventParser` + `events.jsonl` 的可回放链路。
+
+## 2026-01-26 16:40:16 +0800｜决定：human async chat 以 `ThreadId` 作为路由主键
+
+### 决定
+- 你确认：human async chat 默认用 `ThreadId` 路由（长期存在）。
+- `@writer#2` 这类实例引用只作为 UI alias，不作为长期可靠引用。
+
+### 影响
+- “指向不存在实例”的问题大幅缓解：实例结束并不影响 thread，消息不会丢，只会进入 thread inbox 等待重新分配。
+- 更符合你要的 human-in-async-loop：人类对话像工单而不是进程控制。
+
+## 2026-01-26 16:46:57 +0800｜决定：`audience_override.instances` 默认 best-effort
+
+### 决定
+- 你确认：点名实例（例如 `audience_override.instances=["writer#2"]`）默认语义是 **best-effort**。
+- 指定实例不存在时：
+  - 不视为失败
+  - 按 `missing_instance_policy` 处理（spawn/queue/escalate/drop）
+- 如需“必须送达”，事件可显式声明 `audience_override.require_delivery=true`，送不到就 `escalate`。
+
+### 规格落点
+- `specs/parallel-hat-instances.spec.md`：
+  - `5.3` 增补 best-effort 默认语义与 `require_delivery` 开关
+  - `13` 从“未决问题”改为“确认清单”，并标记该项已决定
+
+## 2026-01-26 16:54:10 +0800｜决定：hooks 失败由 LLM 优先自愈（bounded）
+
+### 决定
+- 你确认：`on_acquire/on_release` hooks 失败后，默认让 LLM 先判断并尽量自我修复。
+- 机制（已写入 spec）：
+  - 先发布 `workspace.hook_failed`（阶段/attempt/退出码/输出落盘）
+  - 再由 `ralph(decision)` 决策恢复动作（retry/repair_then_retry/escalate/abort），Supervisor 机械执行
+  - bounded 重试：默认建议 `max_attempts=3`（含首次），超过即 abort 当前 job（不阻断其他 hats）
+
+### 规格落点
+- `specs/parallel-hat-instances.spec.md`：
+  - `10` hooks 语义补充“自愈回路”
+  - `13` 将 hooks 失败策略标记为已决定
+  - `6.1` YAML 示例补充 `repair_commands` 与 `retry`（max_attempts/backoff）

@@ -1,123 +1,213 @@
-# 笔记：`ralph events` 非 ASCII payload 导致 panic
+# 笔记：多 Hat 并行运行设计调研
 
-> 创建时间: 2026-01-23 16:02 (CST)
+## 来源
 
-## 现象
-- 运行 `ralph events` 时，如果某条事件的 payload 含中文/emoji 等非 ASCII 字符，可能触发 panic。
+### 来源1：现有规格（Hatless Ralph）
+- 路径：`specs/event-loop/design/detailed-design.md`
+- 关键摘录：
+  - "Sequential hats" / "No parallel delegation"
+  - "Single executor"
+- 要点：
+  - 现有 Hatless Ralph 设计明确以 **KISS** 为目标，假设“串行执行帽子”，不做并行。
+  - 如果要“多个 hat 同时运行”，属于**突破既有约束**，需要重新定义：并行的边界、资源隔离、TUI/PTY 支持范围。
 
-## 初步定位(代码点)
-### `crates/ralph-cli/src/display.rs`
-- `truncate(s, max_len)` 使用 `&s[..max_len - 1]` 按字节切片。
-  - 当 `max_len - 1` 落在 UTF-8 多字节字符中间时，会 panic: "byte index is not a char boundary"。
-- `print_events_table()` 里构造 `payload_preview` 时使用 `&record.payload[..40]`，同样会在非 ASCII payload 上 panic。
-- `print_events_table()` 里解析时间字段时使用 `&time_str[..N]`（取前 8 字节），如果 `ts` 文本异常包含多字节字符，也可能 panic。
+### 来源2：当前实现（EventLoop 选帽与构建 prompt）
+- 路径：`crates/ralph-core/src/event_loop/mod.rs`
+- 关键摘录：
+  - `next_hat()` 注释：multi-hat 模式 "Always returns \"ralph\" if ANY hat has pending events"
+  - `build_prompt()` 注释：multi-hat 模式 "Ralph is the sole executor, custom hats define topology only"
+- 要点：
+  - 当前实现把“multi-hat”做成了**拓扑/指令注入**：收集所有 pending events，算出 active hats，然后只构建 Ralph 的 prompt。
+  - 代码里保留了“非 ralph hat 的 prompt 构建”分支，但注释明确这条路径在 multi-hat 下“不应该发生”。
 
-## 修复方案(已实现)
-### `crates/ralph-cli/src/display.rs`
-- 用 `char_indices()` 计算合法 UTF-8 边界，再进行 `&s[..boundary]` 切片。
-- 将可复用逻辑抽成私有函数 `truncate_prefix_bytes()`，同时服务于：
-  - `truncate()`(保持原先“max_len-1 + ...”的行为，但不再 panic)
-  - `payload_preview`(保持原先“40 bytes + ...”的行为，但不再 panic)
-- 补齐时间字段的 UTF-8 边界保护：在取前 8 字节前先回退到合法 `is_char_boundary()` 位置。
-- 新增了 3 个回归测试，覆盖 payload/ts/截断边界附近的多字节字符场景。
+### 来源3：当前实现（CLI 主循环）
+- 路径：`crates/ralph-cli/src/loop_runner.rs`
+- 要点：
+  - 运行时是典型的**单循环串行**：每轮 `event_loop.next_hat()` → `build_prompt()` → `execute()` → `process_output()`。
+  - 目前只构造了**一个** `CliBackend`（来自 `config.cli`），执行阶段不会按 hat 切换 backend。
 
-## 相关线索(可复用实现)
-### `crates/ralph-adapters/src/stream_handler.rs`
-- 已存在一个“用 `char_indices()` 找 UTF-8 边界”的 `truncate` 实现，且有 emoji/箭头字符的测试用例。
+### 来源4：测试场景（multi_hat.yml）
+- 路径：`crates/ralph-core/tests/scenarios/multi_hat.yml`
+- 要点：
+  - 场景表达了 builder/reviewer 的订阅链路，但它并不等价于“真正并行执行多个 hat”。
 
-## 风险评估
-- 修复 `ralph-cli` 的截断逻辑属于纯展示层变更，风险低。
-- 若只修 `truncate` 而不修 `payload_preview`，`ralph events` 仍可能 panic，所以两个点都要修。
+## 综合发现（待填）
 
-## 延伸修复：`ralph-e2e` 同类风险
-### `crates/ralph-e2e/src/scenarios/*`
-- 多个场景文件各自定义了 `fn truncate(s: &str, max_len: usize) -> String`，旧实现同样是 `&s[..max_len]` 按字节切片。
-- 这些 `truncate()` 主要用于“把 stdout/stderr/payload 缩短后拼进断言失败信息”，一旦输出包含中文/emoji 就可能在 e2e 里 panic，反而掩盖真正的失败原因。
-- 我已把它们统一改为：先用 `is_char_boundary()` 回退到合法 UTF-8 边界，再切片并追加 "..."，并加了回归测试。
+### 现状总结
+- 现在的“multi-hat”更接近：**单执行器 + 多角色拓扑**，不是“多执行器并行”。
+- 想实现“多个 hat 同时跑、可独立结束”，需要先澄清：
+  - 你说的“同时”是**真并行**，还是**快速轮转/并发语义**？
+  - 是否要求在 TUI/PTY 模式下也支持并行？
+  - 全局完成条件如何定义（哪个事件表示整场 run 结束）？
 
----
+### 用户新增需求（2026-01-25）
+- 选择方案：**A 真并行**。
+- 并行的 hats 全部是 **headless**（不依赖 PTY/交互式子进程）。
+- 需要一个更高级的“上层界面”（Supervisor UI）：
+  - 能列出当前运行中的 hats（以及它们的状态）
+  - 能切换查看某个 hat 的界面（你希望复用/对齐“现在的 TUI”体验）
+  - 上层界面需要新增一个 “agent chat” 输入/输出区域，用于更高层级的 human-in-loop
 
-# 笔记：TUI 中文显示异常（排查中）
+### 用户补充的并行协作场景（2026-01-25）
+- **Writer/Reviewer/Tester 并行**：
+  - 一个 hat 写代码的同时，另一个 hat 做检查/Review。
+  - 写完后，另一个 hat 去跑测试，而写代码的 hat 继续往下做下一步（并行推进）。
+- **并行探索路线**：
+  - 多个写代码 hat 同时实现不同方案/不同优化路线。
+  - 最后一起进入“测试/评估”阶段，再决定采用哪条路线。
+- **Human in async loop（异步人类介入）**：
+  - 检查者 hat 发现潜在更优思路，但需要跑测试/基准才知道是否更好。
+  - 检查者可以发起“询问 human 是否尝试”的异步 chat，不阻塞它继续检查。
+  - 当 human 回复“可以尝试”后，Ralph 可以再启动一个并行写代码 hat 做探索性实现。
 
-> 追加时间: 2026-01-24 15:50 (+0800)
+### 用户对工作区策略的取向（2026-01-25）
+- 不是固定选一个模式，而是“看情况”：
+  - 改动很少时：倾向 **patch**（或必要时用文件锁）在共享工作区快速落地。
+  - 改动较大、反复迭代时：倾向 **git worktree** 做隔离开发。
+- 期望该策略可以在 **hat 设定**里配置（同时允许运行时按情况升级/切换）。
 
-## 现象（用户反馈）
-- Ralph 默认启用的 TUI 在显示中文时“有问题”（具体表现待进一步明确）。
+### 术语对齐：Supervisor vs Ralph（2026-01-25）
+- 需要区分两件事：
+  - **Orchestrator 进程**：就是 `ralph` 这个 Rust CLI 程序本身，会在一次 `ralph run` 期间持续运行，负责事件循环、状态、TUI 等。
+  - **LLM/Agent 调用**：每个 iteration 会通过 backend（claude/kiro/等）执行一次 prompt；按现有设计是 “one iteration = one invocation”，并不是一个一直常驻的“ralph agent 进程”。
+- 因此，“Supervisor”这类职责更适合落在 **Orchestrator 进程**（Rust）上：
+  - 管理并行 headless hats（调度/取消/超时）
+  - 汇总各 hat 的输出/事件，驱动上层 TUI
+  - 维护 human async chat 的收发与关联
+- 但也可以让 **Ralph（LLM 角色）**在“决策层面”承担 Supervisor 的一部分：
+  - 例如它提出“需要开一个探索性 writer#2”、“需要升级到 worktree”、“需要 human 批准”
+  - 真正的并发与隔离仍由 Orchestrator 执行（避免把并发复杂度塞给 LLM）
 
-## 可能原因（按概率排序的假设列表）
-### 假设A：PTY 流式读写导致 UTF-8 分片，解码方式不正确（高概率）
-- PTY `read()` 返回的 byte chunk 可能在任意字节边界断开。
-- UTF-8 的中文字符通常是 3 字节（emoji 常见 4 字节）。
-- 如果 chunk 末尾恰好只包含“一个字符的一部分字节”，对这个 chunk 做 `from_utf8()` 会失败。
+### 事件投递语义的决定（2026-01-25）
+- 你选择：**C（必须显式声明）** —— topic/事件必须明确是 `queue` 还是 `fanout`。
+- 你补充：对 fanout（广播）语义，希望能“针对某一事件，指定/限制哪些 hat 可以拿走”。
+  - 这暗示我们需要一个“受众过滤器（audience filter）”机制：
+    - 可能是 hat 类型白名单（reviewer/tester 才能消费）
+    - 也可能是更细的 selector（按实例标签/能力/优先级）
+  - 这一点会直接影响 Event 数据结构、EventBus 路由算法，以及 replay 测试的确定性。
 
-**关键代码证据**
-- `crates/ralph-adapters/src/pty_executor.rs` 的 `run_observe_streaming()`：
-  - 对每个 `OutputEvent::Data(data)` 都直接 `std::str::from_utf8(&data)`。
-  - 只有 `Ok(text)` 才会继续解析/渲染；`Err(_)` 会导致该 chunk **完全被丢弃**（不会进入 handler，也不会进入 NDJSON 行缓冲）。
+### 架构方案选择（2026-01-25）
+- 你选择：**方案1（HatInstance Actor 模型）**。
+  - 并行不仅支持“同一 hat 多实例”，也支持“不同 hat 并行”。
+  - 并发基本单位 = `HatInstance`（每个实例是一个独立可调度主体），实例内部串行执行 job，实例之间并行。
 
-这会造成：
-- 中文输出出现丢字/乱码（例如出现 `�` 或直接缺失）。
-- 在 StreamJson 模式下，可能连 JSON 行解析都会受影响（因为 line_buffer 丢 chunk）。
+### 受众限制粒度（2026-01-25）
+- 你选择：受众限制做到 **2（按实例）**。
+  - 即：fanout / queue 的目标选择不仅能写 `reviewer`，也能写 `reviewer#2` 这种实例级 ID。
 
-### 假设B：宽字符显示宽度（CJK double-width / emoji）导致布局错位（中概率）
-- ratatui 的布局按“终端列宽”计算。
-- 如果我们在自己的代码里用 `.len()` 或 `chars().count()` 去做对齐/截断，会和真实显示宽度不一致。
-- 这类问题一般表现为：边框/表格错位、内容挤压、意外换行，但字符本身通常不“乱码”。
+### CLI 执行模型的决定（2026-01-25）
+- 你选择：**A（一份 job = 一次 CLI invocation）**。
+  - `HatInstance` 作为 tokio task/actor 只负责调度与状态机。
+  - 真正干活的是被 spawn 出来的 CLI 进程（codex/claude code/…）。
+  - 这样并行的本质就是“多个 CLI 子进程并行运行”，更符合 headless 并发的可控性与可回放性。
 
-### 假设C：ANSI/markdown 渲染链路对 Unicode 处理不当（中低概率）
-- TUI 渲染链：`termimad`（markdown→ANSI）→ `ansi_to_tui`（ANSI→ratatui Text）。
-- 如果 ANSI 序列与 Unicode 混排处理有 bug，也可能导致错位或丢样式。
+### 可否由 LLM 决策？（2026-01-26）
 
-### 假设D：终端环境/字体/locale（低概率，但需要排除）
-- 字体不支持中文会显示方块。
-- locale 非 UTF-8 时可能出现乱码（macOS 一般默认 UTF-8）。
+你问“可否由 LLM 决策”。
+我认为可以，而且应该让 LLM 参与决策。
 
-## 下一步（验证路径）
-- 先区分问题类型：是“乱码/丢字”（更像假设A）还是“对齐/换行错位”（更像假设B）。
-- 设计一个可控的最小复现：用 `custom` backend 输出包含中文的超长行，让 PTY 更容易在字符中间分片。
+但在并行系统里，更稳的落地方式是：
 
-## 结论（已验证并修复）
-- 复现方式：使用 `custom` backend 打印一行 `a*4095 + 中 + <MARK> + b*20`，确保 `中` 落在 4096 bytes 边界上。
-  - 旧实现会稳定出现 `中` 被吞掉（TUI 与 `--no-tui` 均可复现）。
-- 根因确认：`run_observe_streaming()` 逐 chunk `from_utf8(&data)`，在 UTF-8 被拆分时解码失败并丢弃 chunk。
-- 修复完成：引入 `Utf8StreamDecoder` 做 UTF-8 增量解码，并接入 `run_observe_streaming()`（主循环 + drain）。
-- 回归测试：已添加针对“拆分多字节字符”的单测，保证以后不回退。
+- **LLM 只负责提议**（策略/路线/是否升级成本）
+- **Supervisor 负责校验与执行**（capabilities/permissions/human gate/机械执行/全局仲裁）
 
----
+这样做能同时满足：
 
-# 追加笔记：TUI 中文宽字符错位/吞首字母（已修复）
+- 你要的“LLM 驱动为主”
+- 并行系统必须具备的“可控、可回放、可追责（决策落盘）”
 
-> 追加时间: 2026-01-25 01:12 (+0800)
+并且能自然对齐你已确认的权限模型：
 
-## 新现象（用户反馈）
-- 中文字符之间像被插入空格
-- 中文后面的英文会缺首字母（例如 `search/notes` 变成 `earch/notes`）
-- 典型输入：中文后面紧贴英文路径，例如 `新增示例合集目录：examples/.../README.md:1`（来自 `iced_emg/PROMPT.md`）
+- LLM 可以提议触发权限条目 1-5
+- 但不能绕过 Permission Gate（默认 allow，但可随时切 ask/deny）
 
-## 根因（高置信）
-### `crates/ralph-tui/src/widgets/content.rs`
-- `ContentPane::render()` 旧实现：
-  - 逐 `chars()` 写入 cell
-  - 每写一个字符都 `x += 1`
+关键工程约束（为 replay 服务）：
 
-当遇到中文/CJK 或 emoji 这类“显示宽度为 2”的字符时：
-- 该字符会占用两列
-- 下一列是 continuation cell（终端渲染会跳过这一列）
-- 旧逻辑仍会把紧随其后的 ASCII 首字母写进 continuation cell
-- 实际渲染时这格会被跳过 → 就出现“吞首字母”和“看起来像插空格”的错位
+- LLM 的决策必须显式编码成事件（`decision.request` / `gate.request` / `decision.result` / `gate.resolve`）
+- 这些事件必须写入 `events.jsonl`，replay 时直接回放，不重新问 LLM
 
-## 复现证据
-- 新增单测：`cjk_double_width_does_not_swallow_next_ascii_char`
-  - 渲染 `"将search/notes"` 时，旧实现会让 `buf[(1,0)] == "s"`（把 s 写进 continuation cell），从而复现问题。
+### queue 派发由 LLM 决策（2026-01-26）
+- 你选择：`queue` 语义下由 LLM 决定“投递到哪个具体实例”（而不是 round-robin/least-busy）。
+- 关键约束：派发决策必须落盘（候选集 + 选择结果 + 可选原因），replay 时不重新决策。
+- 允许兜底：当 LLM 不可用/超时/成本受限时，可回退 deterministic 算法，但同样要落盘。
 
-## 修复方案（已实现）
-- 改为按 grapheme cluster（`unicode-segmentation`）迭代，而不是 `chars()`。
-- 用 `unicode-width` 计算每个 grapheme 的显示宽度（列宽）。
-- 写入时遵循 ratatui `Buffer::set_stringn` 的策略：
-  - 宽 grapheme 写入首格
-  - 后续被遮挡的格子 reset
-  - 光标按显示宽度推进，避免写进 continuation cell
-- 软换行时先清理当前行剩余格子，避免残影（artifact）
+### human gate 支持超时（2026-01-26）
+- 你希望：LLM 可以通过 human gate 寻求决策，并可选择两种 gate：
+  - 普通 gate：等待 human 回复
+  - 超时 gate：等待最多 60s，超时后由 LLM 自行决策
+- 工程约束：必须把最终 `gate.resolve` 写入事件日志，replay 不等待、不重问。
 
-## 验证
-- `cargo test -p ralph-tui`、`cargo clippy -p ralph-tui`、`cargo test` 全通过
+### human 可随时异步调整需求（2026-01-26）
+- 你希望：human 可以随时 async 发送“调整需求/新约束”，不阻断并行 hats 的运行。
+- 你倾向用文件系统事件/日志做通道，并希望 LLM 能经常读取。
+- 推荐落地：
+  - `events.jsonl` 作为唯一真相（可回放）
+  - 每个 HatInstance 维护轻量 inbox 文件（例如 `.agent/inbox/{instance}.jsonl`），方便 LLM 高频读取
+  - 默认不打断（你已确认）：`priority=normal` 只在安全点应用；`priority=urgent` 才允许 cancel 并重启
+
+### LLM 决策层怎么落地（2026-01-26）
+- 你发现“orchestrator 不调用 LLM 做评审”，这在现状下是对的：multi-hat 只是拓扑注入。
+  - `EventLoop::next_hat()` 在 multi-hat 时会“总是返回 ralph”，所以 reviewer/tester 并不会真的执行。
+- 目标态（方向1 HatInstance Actor）会推翻这个限制：每个 HatInstance 都能真正执行一次 headless CLI invocation。
+- LLM 决策层不建议在 Rust 内接 SDK，而是复用现有模型：**LLM = 外部 CLI agent**。
+  - 把“派发决策 / gate 超时自决”等变成“决策类 HatJob”
+  - 通过 `CliExecutor` spawn CLI 进程，要求输出结构化 `<event ...>`，由 `EventParser` 解析并落盘，replay 时直接回放。
+
+### `ralph` 这个 hat 从哪来？（2026-01-26）
+- **是内置的、默认永远存在的。**不是你在 YAML 里声明出来的那种 hat。
+- 代码里在 EventLoop 初始化时“无条件注册”：
+  - `crates/ralph-core/src/event_loop/mod.rs:145`：`ralph_proto::Hat::new("ralph", "Ralph").subscribe("*")`
+  - 并且注释明确写了 “Hatless Ralph is constant — Cannot be replaced, overwritten, or configured away”
+- 现状下，即使你配置了自定义 hats，multi-hat 也仍然会把执行者固定为 `ralph`（拓扑注入，不是真并行）。
+
+### LLM 决策层默认用 `ralph` hat（2026-01-26）
+- 你已确认：第一版不新增 `decider` hat，决策类 job（queue 派发、gate 超时自决等）默认以 `hat_id="ralph"` 执行。
+- 这不等于“Rust orchestrator 内置调用 LLM SDK”，仍然是通过 headless CLI agent invocation 完成。
+- prompt 需要区分：
+  - `ralph(work)`：现有 Hatless Ralph 协调/规划
+  - `ralph(decision)`：决策专用 prompt（只读、强结构化输出 `<event ...>`）
+
+### human async chat 使用 `ThreadId` 路由（2026-01-26）
+- 你确认：human async chat 的路由主键使用 `ThreadId`（长生命周期），而不是直接绑定实例 ID。
+- `@writer#2` 之类只作为 UI 层便捷别名，实际会解析到某个 thread owner（或提示选择/创建 thread）。
+- 好处：
+  - 实例消亡/重启/owner 迁移不会导致对话丢失
+  - human async loop 更贴近“工单/会话”而不是“进程”
+
+### `audience_override.instances` 默认 best-effort（2026-01-26）
+- 你确认：点名实例（例如 `audience_override.instances=["writer#2"]`）默认是 **best-effort**。
+- 指定实例不存在时，不视为失败：
+  - 按 `missing_instance_policy` 处理（spawn/queue/escalate/drop）
+- 如果某次需要“必须送达”，事件可显式声明 `audience_override.require_delivery=true`，送不到就 `escalate`。
+
+### hooks 失败后的自愈策略（2026-01-26）
+- 你确认：`on_acquire/on_release` hook 失败后，默认让 LLM 先判断并尽量自我修复，而不是立刻失败。
+- 推荐机制：
+  - 先发布 `workspace.hook_failed`（带阶段/attempt/退出码/输出）
+  - 再启动 `ralph(decision)` 做恢复决策（retry/repair_then_retry/escalate/abort），Supervisor 机械执行
+  - bounded 重试：默认建议 `max_attempts=3`（含首次），超过就 abort 当前 job（不阻断其他 hats）
+
+### workspace 决策的关键矛盾与解法（2026-01-25）
+- 矛盾：hat 在执行前不知道 CLI 会改哪些文件、改多少，无法先验决定“patch vs worktree”。
+- 解法方向（更新后更贴合你的偏好）：**LLM 预判为主 + orchestrator 观测兜底**
+  - 任务前：LLM 做 preflight 难度评估，决定本次 job 是 `patch/shared` 还是 `worktree`
+  - 执行后：orchestrator 用 `git diff / git status` 做客观观测
+    - 用于生成 patch/commit 工件、汇总 UI、以及驱动合并/校验流程
+    - 不把“submodules 要不要 init”内置进 orchestrator（交给 worktree hooks）
+
+### 用户对 worktree 性能/子模块的担忧与策略（2026-01-25）
+- 担忧：`git worktree` 创建如果伴随 `submodules` 初始化，可能非常慢，且可能受网络问题影响。
+- 你的偏好：
+  - 任务前让 **LLM 预判任务难度**，决定是否需要 worktree。
+  - 选择 **B：每个 job 一个“临时 worktree”**（用完合并/校验后清理）。
+  - 不是任何任务都能创建 worktree：需要在 **hat 设计/配置**里授予该 hat “可创建 worktree”的能力；然后由 LLM 决定本次是否启用。
+  - worktree 任务完成后的 **合并与校验** 可以定义专门的 hat 来负责（例如 Integrator/Verifier）。
+
+### “引用不存在实例”的处理思路（2026-01-26）
+- 你指出的现象：并行 + 实例可结束 + human async loop 下，事件可能指向“不存在的实例”（例如 `writer#2`）。
+- 推荐解法（已写入 spec）：
+  - 不用一个全局 A/B/C 写死。
+  - 把“目标引用”拆成两类：
+    - 短生命周期：`HatInstanceId`（适合 cancel/kill 等控制类）
+    - 长生命周期：`ThreadId/WorkItemId`（适合 human async chat 与跨 job 讨论）
+  - 对缺失实例的处理，按消息类型给默认策略，并把路由决策写入事件日志，保证 replay 可复现。
