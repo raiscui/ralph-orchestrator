@@ -150,3 +150,46 @@
   - `10` hooks 语义补充“自愈回路”
   - `13` 将 hooks 失败策略标记为已决定
   - `6.1` YAML 示例补充 `repair_commands` 与 `retry`（max_attempts/backoff）
+
+## 2026-01-26 20:04:23 +0800｜/opsx:new：准备创建 OpenSpec change scaffold
+
+- 已确认 `openspec` CLI 可用：`/Users/cuiluming/n/bin/openspec`。
+- 已确认当前 `openspec/changes/` 目录仅有 `archive/`，暂无活跃 change。
+- 下一步：等你确认本次 change 的名称/描述后，我会创建 `openspec/changes/<name>/`，并只输出首个可写工件的模板（不生成任何工件内容）。
+
+## 2026-01-26 20:22:10 +0800｜/opsx:new：已创建 change scaffold，并输出首个工件说明
+
+- 已执行：`openspec new change "parallel-hat-instances"`（schema: `spec-driven`）
+  - 生成目录：`openspec/changes/parallel-hat-instances/`
+- 工件状态：`openspec status --change "parallel-hat-instances"` → `0/4`
+  - `proposal` ready
+  - `design` blocked by `proposal`
+  - `specs` blocked by `proposal`
+  - `tasks` blocked by `design, specs`
+- 已输出首个工件 `proposal` 的 instructions/template（未写入任何内容）：
+  - 命令：`openspec instructions proposal --change "parallel-hat-instances"`
+  - 目标文件：`openspec/changes/parallel-hat-instances/proposal.md`
+
+## 2026-01-26 20:31:13 +0800｜/opsx:continue：创建 proposal.md
+
+- 创建工件：`proposal`（schema：`spec-driven`）
+  - 输出：`openspec/changes/parallel-hat-instances/proposal.md`
+- 工件状态更新：`0/4` → `1/4`
+- 解锁：`design`、`specs`
+
+## 2026-01-26 20:41:09 +0800｜/opsx:continue：创建 design.md
+
+- 创建工件：`design`（schema：`spec-driven`）
+  - 输出：`openspec/changes/parallel-hat-instances/design.md`
+- 工件状态更新：`1/4` → `2/4`
+- 当前阻塞：`tasks` 仍 blocked by `specs`
+
+## 2026-01-26 23:23:21 +0800｜/opsx:ff：补齐 specs + tasks，进入 apply-ready
+
+- 创建工件：`specs`（schema：`spec-driven`）
+  - 输出：`openspec/changes/parallel-hat-instances/specs/parallel-hat-instances/spec.md`
+- 创建工件：`tasks`（schema：`spec-driven`）
+  - 输出：`openspec/changes/parallel-hat-instances/tasks.md`
+- 最终状态：`4/4 artifacts complete`（All artifacts complete）
+
+- 校验：`openspec validate parallel-hat-instances --type change` → valid（2026-01-26 23:25:29 +0800）

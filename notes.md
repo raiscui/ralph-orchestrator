@@ -211,3 +211,27 @@
     - 短生命周期：`HatInstanceId`（适合 cancel/kill 等控制类）
     - 长生命周期：`ThreadId/WorkItemId`（适合 human async chat 与跨 job 讨论）
   - 对缺失实例的处理，按消息类型给默认策略，并把路由决策写入事件日志，保证 replay 可复现。
+
+### /opsx:new 起步检查（2026-01-26）
+- 我已确认本机 `openspec` CLI 可用：`/Users/cuiluming/n/bin/openspec`。
+- 当前仓库 `openspec/changes/` 目录只有 `archive/`，尚无活跃 change。
+- 后续创建 change 时，以本仓库的实际子命令为准（预计是 `openspec change new "<name>"`），避免照抄旧文档导致命令不匹配。
+
+### /opsx:new：spec-driven schema 的工件序列（2026-01-26）
+- 本仓库 `openspec/config.yaml` 的默认 schema：`spec-driven`
+- `openspec status --change "parallel-hat-instances"` 显示的工件依赖关系：
+  - `proposal` → 解锁 `design` 与 `specs`
+  - `design` + `specs` → 解锁 `tasks`
+- 当前首个可写工件是 `proposal`，其模板由 `openspec instructions proposal --change "parallel-hat-instances"` 输出。
+
+### /opsx:continue：design 工件模板要点（2026-01-26）
+- `design` 工件（`openspec instructions design --json`）要求的核心段落：
+  - Context / Goals / Non-Goals / Decisions / Risks
+  - 并建议补充 Migration Plan 与 Open Questions（有助于后续实现前对齐）
+- `design` 的依赖：`proposal.md`（已完成，必须先读再写）
+
+### /opsx:ff：apply-ready 的定义与落点（2026-01-26）
+- 本次 schema 的 `applyRequires=["tasks"]`，因此只要 `tasks` 工件 done，就可以进入实现阶段。
+- 当前 change `parallel-hat-instances` 已满足：
+  - `proposal.md`、`design.md`、`specs/**/*.md`、`tasks.md` 全部 done
+- 进入实现时，应优先把 `spec.md` 的每条 Requirement/Scenario 映射为可验证的测试或 smoke fixture。

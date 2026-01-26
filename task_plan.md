@@ -89,3 +89,123 @@
   - 小改动：走 patch / 必要时文件锁
   - 大改动 + 反复迭代：走 git worktree 隔离
 - Supervisor/示例是“用户故事”，不是固定帽子角色；你希望评估现有 `ralph` 是否能承担 Supervisor 职责。
+
+## 2026-01-26 20:04:23 +0800｜/opsx:new：启动新的 OpenSpec change（仅 scaffold）
+
+### 我正在做什么 & 为什么
+- 我正在按实验性的“工件驱动”流程启动一个新 change。
+- 这样做是为了让后续的 requirements/design/tasks 等工件，都有明确依赖与完成状态。
+- 你可以用 `openspec status` 一眼看到“下一步该写哪个工件”。
+
+### 两个可选输入方式（你选其一就行）
+- 方向A（你给名称）：直接给我一个 kebab-case 的 change 名称，例如 `parallel-hat-instances`
+- 方向B（你给描述）：你用一句话描述要做什么，我来帮你提炼成 kebab-case 名称
+
+### 下一步动作（等你确认后我立刻执行）
+1. 创建 change 目录：运行 `openspec change new "<name>"`（以本仓库实际 CLI 为准）
+2. 查看工件状态：运行 `openspec status --change "<name>"`
+3. 输出首个可写工件模板：运行 `openspec instructions <first-artifact-id> --change "<name>"`
+4. 停止，不创建任何工件内容，等待你决定是否继续
+
+### 现状快照
+- 当前 `openspec/changes/` 下只有 `archive/`，还没有活跃的 change（2026-01-26 20:04:23 +0800）
+
+## 2026-01-26 20:19:37 +0800｜/opsx:new：已确认 change 名称，准备创建 scaffold
+
+### 你刚确认的输入
+- change 名称：`parallel-hat-instances`（kebab-case 合法）
+- workflow/schema：你未指定，因此我会使用默认 schema（不传 `--schema`）
+
+### 我接下来要做什么 & 为什么
+- 我会先检查 `openspec change` 的实际子命令用法。
+- 这样做是为了避免把旧文档命令照抄到当前版本，导致创建失败或生成在错误位置。
+- 然后我会按顺序执行：
+  1. 创建 change scaffold（仅目录与空模板，不写任何工件内容）
+  2. 查看 `openspec status`，找出第一个状态为 “ready” 的工件
+  3. 输出该工件的 `openspec instructions` 模板与上下文
+  4. 立刻停止，等待你决定是否继续写第一个工件
+
+### 执行结果（2026-01-26 20:22:10 +0800）
+- 已创建 change scaffold：
+  - `openspec/changes/parallel-hat-instances/`
+  - schema：`spec-driven`（默认）
+- 当前工件状态（`openspec status --change "parallel-hat-instances"`）：
+  - `proposal`：ready
+  - `design`：blocked by `proposal`
+  - `specs`：blocked by `proposal`
+  - `tasks`：blocked by `design, specs`
+- 已拉取首个可写工件 `proposal` 的模板与说明：
+  - `openspec instructions proposal --change "parallel-hat-instances"`
+  - 目标输出文件：`openspec/changes/parallel-hat-instances/proposal.md`
+
+### 现在我会停在这里
+- 我不会替你写任何工件内容。
+- 下一步如果你要继续：你可以直接说“继续”，或运行 `/opsx:continue`，我会帮你起草 `proposal.md`。
+
+## 2026-01-26 20:31:13 +0800｜/opsx:continue：已创建 proposal 工件（只创建一个）
+
+### 我正在做什么 & 为什么
+- 我正在严格按 OpenSpec 的 `status → instructions → 写入工件 → 复查 status` 流程推进。
+- 这样做能把依赖关系锁死，减少“跳步写错工件”导致的返工。
+- 同时遵守“一次 invocation 只创建一个工件”，让每一步都可回滚、可 review。
+
+### 已完成动作（摘要）
+- 选择 change：当前只有一个活跃 change，因此继续 `parallel-hat-instances`
+- 读取状态（JSON）：确认首个 ready 工件为 `proposal`
+- 读取 instructions（JSON）：拿到模板、输出路径与 unlocks
+- 写入工件文件：`openspec/changes/parallel-hat-instances/proposal.md`
+- 复查状态：进度已从 `0/4` 变为 `1/4`
+
+### 当前状态（给你一眼扫清）
+- schema：`spec-driven`
+- progress：`1/4 artifacts complete`
+- 已完成：`proposal`
+- 已解锁（ready）：`design`、`specs`
+- 仍阻塞：`tasks`（blocked by `design, specs`）
+
+## 2026-01-26 20:39:43 +0800｜/opsx:continue：准备创建 design 工件（只创建一个）
+
+### 我正在做什么 & 为什么
+- 我正在继续同一个 change：`parallel-hat-instances`。
+- 当前 `design` 与 `specs` 都处于 ready。
+- 我本次只会创建 **第一个 ready** 的工件：`design`。
+- 这样做能保持工件顺序与依赖关系可控，也符合“一次 invocation 只创建一个工件”的规则。
+
+### 下一步动作（马上执行）
+1. 读取 `openspec instructions design --json`，拿到模板与输出路径
+2. 读取依赖工件 `proposal.md` 作为上下文
+3. 写入 `openspec/changes/parallel-hat-instances/design.md`
+4. `openspec status` 复查进度，并停止
+
+### 执行结果（2026-01-26 20:41:09 +0800）
+- 已创建工件：`design`
+  - 文件：`openspec/changes/parallel-hat-instances/design.md`
+- 复查状态：`2/4 artifacts complete`
+  - 已完成：`proposal`、`design`
+  - 待完成：`specs`
+  - `tasks`：blocked by `specs`
+- 本次严格只创建一个工件，按流程停止在这里。
+
+## 2026-01-26 23:23:21 +0800｜/opsx:ff：已快进补齐全部工件（apply-ready）
+
+### 我正在做什么 & 为什么
+- 我正在把 change 推进到“可开始实现”的状态（apply-ready）。
+- 这样做的意义是：requirements/specs/design/tasks 都齐了，后续实现可以严格按 tasks 逐项推进，并用测试做 backpressure。
+
+### 已完成动作（按依赖顺序）
+- 生成 `specs` 工件：
+  - 新增：`openspec/changes/parallel-hat-instances/specs/parallel-hat-instances/spec.md`
+  - 以 proposal 里的 capability 为唯一来源：`parallel-hat-instances`
+- 生成 `tasks` 工件：
+  - 新增：`openspec/changes/parallel-hat-instances/tasks.md`
+
+### 当前状态（最终）
+- schema：`spec-driven`
+- progress：`4/4 artifacts complete`（All artifacts complete）
+- applyRequires：`tasks`（已完成）
+
+### 下一步建议
+- 如果你要进入实现：我建议直接运行 `/opsx:apply`，从 `tasks.md` 的 1.1 开始按依赖推进。
+
+### 校验结果
+- `openspec validate parallel-hat-instances --type change` 已通过（2026-01-26 23:25:29 +0800）
