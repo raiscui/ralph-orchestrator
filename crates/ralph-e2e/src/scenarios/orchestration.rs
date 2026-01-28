@@ -730,14 +730,17 @@ mod tests {
             EventRecord {
                 topic: "phase.init".to_string(),
                 payload: "Starting".to_string(),
+                source_instance: None,
             },
             EventRecord {
                 topic: "phase.process".to_string(),
                 payload: "Processing".to_string(),
+                source_instance: None,
             },
             EventRecord {
                 topic: "phase.complete".to_string(),
                 payload: "Done".to_string(),
+                source_instance: None,
             },
         ];
         let assertion = scenario.events_progressed(&result);
@@ -751,6 +754,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "single.event".to_string(),
             payload: "Only one".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.events_progressed(&result);
         assert!(!assertion.passed, "Should fail when only one event emitted");

@@ -527,3 +527,80 @@ fn test_long_output_scroll_rendering() {
         assert_snapshot!("long_output_scrolled", harness.render_full());
     });
 }
+
+// ============================================================================
+// Parallel Supervisor TUI (layout smoke)
+// ============================================================================
+
+#[test]
+fn test_parallel_full_layout_renders_instances_output_and_gates() {
+    use ralph_core::{HatJobOutputChunk, OutputStream};
+    use ralph_proto::{GateKind, GateRequest, HatInstanceId, HatInstanceState, TOPIC_GATE_REQUEST};
+    use ralph_tui::state::TuiUpdate;
+
+    let mut harness = TuiTestHarness::new_parallel().with_terminal_size(100, 20);
+
+    let instance_id = HatInstanceId::from("writer#1");
+    harness.apply_parallel_update(TuiUpdate::ParallelRegisterInstance {
+        instance_id: instance_id.clone(),
+        state: HatInstanceState::Created,
+    });
+    harness.apply_parallel_update(TuiUpdate::ParallelOutputChunk(HatJobOutputChunk {
+        job_id: 1,
+        instance_id: instance_id.clone(),
+        stream: OutputStream::Stdout,
+        line: "hello from writer".to_string(),
+    }));
+
+    // 快照稳定性：避免 Instances 列表显示随时间变化的 "0s/1s"。
+    {
+        let mut state = harness.state().lock().unwrap();
+        if let Some(inst) = state.parallel.instances.get_mut(&instance_id) {
+            inst.last_output_at = None;
+        }
+    }
+
+    // 注入一个 gate.request（timeout_seconds=None → 状态为 open，不依赖时间）
+    let request = GateRequest {
+        gate_id: "g1".to_string(),
+        thread_id: None,
+        requested_by: instance_id.clone(),
+        kind: GateKind::Consult,
+        timeout_seconds: None,
+        prompt: "need decision".to_string(),
+        proposed_default: None,
+    };
+    let payload = serde_json::to_string(&request).unwrap();
+    harness.apply_parallel_update(TuiUpdate::ParallelEvent(ralph_proto::Event::new(
+        TOPIC_GATE_REQUEST,
+        payload,
+    )));
+
+    let ui = harness.render_full();
+    assert!(
+        ui.contains("Instances"),
+        "should render Instances pane, got:\n{ui}"
+    );
+    assert!(
+        ui.contains("Output"),
+        "should render Output pane, got:\n{ui}"
+    );
+    assert!(
+        ui.contains("Chat / Gates"),
+        "should render Chat/Gates pane, got:\n{ui}"
+    );
+    assert!(
+        ui.contains("writer#1"),
+        "should show instance id, got:\n{ui}"
+    );
+    assert!(
+        ui.contains("hello from writer"),
+        "should show output line, got:\n{ui}"
+    );
+    assert!(
+        ui.contains("[consult]"),
+        "should show gate kind, got:\n{ui}"
+    );
+    assert!(ui.contains("g1"), "should show gate id, got:\n{ui}");
+    assert!(ui.contains("open"), "should show gate status, got:\n{ui}");
+}

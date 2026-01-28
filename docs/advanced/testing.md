@@ -103,6 +103,7 @@ End-to-end tests validate against real AI backends.
 | 5 | Hat Collections | Workflows, routing |
 | 6 | Memory | Add, search, inject |
 | 7 | Error Handling | Timeout, limits |
+| 8 | Parallel Runtime | Parallel hat instances (experimental) |
 
 ### Running E2E Tests
 
@@ -119,6 +120,20 @@ cargo run -p ralph-e2e -- claude --skip-analysis
 # Debug mode (keep workspaces)
 cargo run -p ralph-e2e -- claude --keep-workspace --verbose
 ```
+
+### Parallel Hat Instances (experimental)
+
+并行模式的 E2E 场景会启动多个 **headless** 后端进程（多实例并发）。
+因此它更接近真实用户环境，也更容易暴露认证/限流/网络问题。
+
+```bash
+# 只跑并行实例场景（推荐配合 keep-workspace 方便排障）
+cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --keep-workspace --verbose
+```
+
+排障建议：
+- 先看 `.e2e-tests/` 下对应 workspace 的 `.ralph/diagnostics/` 目录（E2E 默认开启 `RALPH_DIAGNOSTICS=1`）
+- 再看 `.e2e-tests/` 下对应 workspace 的 `.ralph/events-*.jsonl`（确认事件路由与 `<event ...>` 解析是否正常）
 
 ### E2E Reports
 
@@ -188,8 +203,15 @@ tmux capture-pane -t ralph-test -p -e > tui-capture.txt
 ### Prerequisites
 
 ```bash
-brew install charmbracelet/tap/freeze  # Screenshot tool
-brew install tmux                       # Live capture
+# Screenshot tool (Freeze)
+brew install charmbracelet/tap/freeze
+
+# 如果你的网络/代理环境导致 brew tap 失败，可用 Go 安装：
+# GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn \
+#   go install github.com/charmbracelet/freeze@latest
+
+# Live capture
+brew install tmux
 ```
 
 ## Linting

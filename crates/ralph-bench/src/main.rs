@@ -459,8 +459,11 @@ async fn run_task_loop(
 
         // Execute the prompt (capture output but don't print to stdout)
         // Get per-adapter timeout from config
-        let timeout_secs = config.adapter_settings(&config.cli.backend).timeout;
-        let timeout = Some(Duration::from_secs(timeout_secs));
+        let adapter_settings = config.adapter_settings(&config.cli.backend);
+        let timeout =
+            (adapter_settings.timeout > 0).then(|| Duration::from_secs(adapter_settings.timeout));
+        let output_stale_timeout = (adapter_settings.output_stale_timeout_secs > 0)
+            .then(|| Duration::from_secs(adapter_settings.output_stale_timeout_secs));
 
         // Execute with optional UX capture
         let result = if should_capture_ux {
@@ -468,7 +471,7 @@ async fn run_task_loop(
             let mut output_buf = Vec::new();
             let mut capture = CliCapture::new(&mut output_buf, true);
             let result = executor
-                .execute(&prompt, &mut capture, timeout, false)
+                .execute(&prompt, &mut capture, timeout, output_stale_timeout, false)
                 .await?;
 
             // Extract and record UX events
@@ -481,7 +484,13 @@ async fn run_task_loop(
         } else {
             let mut output_buf = Vec::new();
             executor
-                .execute(&prompt, &mut output_buf, timeout, false)
+                .execute(
+                    &prompt,
+                    &mut output_buf,
+                    timeout,
+                    output_stale_timeout,
+                    false,
+                )
                 .await?
         };
 

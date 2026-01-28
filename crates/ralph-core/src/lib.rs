@@ -23,6 +23,7 @@ mod instructions;
 mod memory;
 pub mod memory_parser;
 mod memory_store;
+mod parallel;
 mod session_player;
 mod session_recorder;
 mod summary_writer;
@@ -36,8 +37,10 @@ pub mod workspace;
 
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
-    CliConfig, CoreConfig, EventLoopConfig, EventMetadata, HatBackend, HatConfig, InjectMode,
-    MemoriesConfig, MemoriesFilter, RalphConfig,
+    CliConfig, CoreConfig, EventLoopConfig, EventMetadata, GateConfig, HatBackend, HatConfig,
+    HatWorkspaceConfig, InjectMode, MemoriesConfig, MemoriesFilter, ParallelConfig, PermissionMode,
+    PermissionsConfig, RalphConfig, WorkspaceHooksConfig, WorkspaceRuntimeConfig,
+    WorkspaceStrategy,
 };
 pub use diagnostics::DiagnosticsCollector;
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
@@ -50,6 +53,11 @@ pub use instructions::InstructionBuilder;
 pub use memory::{Memory, MemoryType};
 pub use memory_store::{
     DEFAULT_MEMORIES_PATH, MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget,
+};
+pub use parallel::{
+    HatInstanceCommand, HatInstanceEvent, HatInstanceHandle, HatJob, HatJobExecutor,
+    HatJobOutputChunk, HatJobResult, JobBackend, OutputStream, ParallelRunResult,
+    ParallelSupervisor, TopicContractStore,
 };
 pub use session_player::{PlayerConfig, ReplayMode, SessionPlayer, TimestampedRecord};
 pub use session_recorder::{Record, SessionRecorder};

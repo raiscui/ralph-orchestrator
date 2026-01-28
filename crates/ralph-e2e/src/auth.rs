@@ -191,6 +191,7 @@ impl AuthChecker {
         match backend {
             Backend::Claude => Self::check_claude_auth().await,
             Backend::Kiro => Self::check_kiro_auth().await,
+            Backend::Codex => Self::check_codex_auth().await,
             Backend::OpenCode => Self::check_opencode_auth().await,
         }
     }
@@ -214,6 +215,20 @@ impl AuthChecker {
     async fn check_kiro_auth() -> bool {
         // Similar to Claude
         let output = Command::new(Backend::Kiro.command())
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await;
+
+        matches!(output, Ok(o) if o.status.success())
+    }
+
+    /// Codex-specific authentication check.
+    async fn check_codex_auth() -> bool {
+        // Codex CLI stores auth via local configuration / environment variables.
+        // 对 E2E 而言，最小可行检查是：`codex --version` 能正常返回。
+        let output = Command::new(Backend::Codex.command())
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -310,12 +325,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_all_returns_three_backends() {
+    async fn test_check_all_returns_four_backends() {
         let checker = AuthChecker::new();
         let results = checker.check_all().await;
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 4);
         assert!(results.iter().any(|r| r.backend == Backend::Claude));
         assert!(results.iter().any(|r| r.backend == Backend::Kiro));
+        assert!(results.iter().any(|r| r.backend == Backend::Codex));
         assert!(results.iter().any(|r| r.backend == Backend::OpenCode));
     }
 

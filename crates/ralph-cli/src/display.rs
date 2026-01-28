@@ -365,6 +365,7 @@ mod tests {
             topic: "task.start".to_string(),
             triggered: None,
             payload,
+            source_instance: None,
             blocked_count: None,
         };
 
@@ -381,6 +382,7 @@ mod tests {
             topic: "task.start".to_string(),
             triggered: None,
             payload: "ok".to_string(),
+            source_instance: None,
             blocked_count: None,
         };
 

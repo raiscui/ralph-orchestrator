@@ -50,7 +50,7 @@ cargo run -p ralph-e2e -- claude --skip-analysis
 
 ## Test Scenarios
 
-Scenarios are organized into 7 tiers:
+Scenarios are organized into 8 tiers:
 
 ### Tier 1: Connectivity
 Basic backend availability tests.
@@ -95,6 +95,10 @@ Graceful failure modes.
 - `MaxIterationsScenario` - Max iterations limit
 - `AuthFailureScenario` - Invalid credentials handling
 - `BackendUnavailableScenario` - Missing CLI handling
+
+### Tier 8: Parallel Runtime (experimental)
+Validates the **parallel hat instances** runtime against real backends.
+- `ParallelHatInstancesScenario` - Fanout routing + multi-instance attributed output
 
 ## Reports
 

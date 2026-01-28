@@ -4,9 +4,11 @@
 //! formatted output from the Ralph orchestrator, with iteration navigation,
 //! scroll, and search functionality.
 
+use crate::chat::{ChatSubmit, parse_chat_submit};
+use crate::external_event_writer::ExternalEventWriter;
 use crate::input::{Action, map_key};
-use crate::state::TuiState;
-use crate::widgets::{content::ContentPane, footer, header, help};
+use crate::state::{GateStatus, ParallelFocus, TuiMode, TuiState, TuiUpdate};
+use crate::widgets::{content::ContentPane, footer, header, help, instances};
 use anyhow::Result;
 use crossterm::{
     cursor::Show,
@@ -18,14 +20,20 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
+use ralph_core::truncate_with_ellipsis;
+use ralph_proto::{GateResolve, GateResolvedBy, TOPIC_GATE_RESOLVE};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
 };
 use scopeguard::defer;
 use std::io;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::{Duration, interval};
 use tracing::info;
@@ -37,40 +45,53 @@ pub fn dispatch_action(action: Action, state: &mut TuiState, viewport_height: us
     match action {
         Action::Quit => return true,
         Action::ScrollDown => {
-            if let Some(buffer) = state.current_iteration_mut() {
+            if let Some(buffer) = state.current_output_buffer_mut() {
                 buffer.scroll_down(viewport_height);
             }
         }
         Action::ScrollUp => {
-            if let Some(buffer) = state.current_iteration_mut() {
+            if let Some(buffer) = state.current_output_buffer_mut() {
                 buffer.scroll_up();
             }
         }
         Action::ScrollTop => {
-            if let Some(buffer) = state.current_iteration_mut() {
+            if let Some(buffer) = state.current_output_buffer_mut() {
                 buffer.scroll_top();
             }
         }
         Action::ScrollBottom => {
-            if let Some(buffer) = state.current_iteration_mut() {
+            if let Some(buffer) = state.current_output_buffer_mut() {
                 buffer.scroll_bottom(viewport_height);
             }
         }
-        Action::NextIteration => {
-            state.navigate_next();
-        }
-        Action::PrevIteration => {
-            state.navigate_prev();
-        }
+        Action::NextIteration => match state.mode {
+            TuiMode::Serial => state.navigate_next(),
+            TuiMode::Parallel => {
+                if state.parallel.focus == ParallelFocus::Output {
+                    state.parallel.select_next_job();
+                }
+            }
+        },
+        Action::PrevIteration => match state.mode {
+            TuiMode::Serial => state.navigate_prev(),
+            TuiMode::Parallel => {
+                if state.parallel.focus == ParallelFocus::Output {
+                    state.parallel.select_prev_job();
+                }
+            }
+        },
         Action::ShowHelp => {
             state.show_help = true;
         }
         Action::DismissHelp => {
             state.show_help = false;
+            state.search_state.search_mode = false;
+            state.search_query.clear();
             state.clear_search();
         }
         Action::StartSearch => {
             state.search_state.search_mode = true;
+            state.search_query.clear();
         }
         Action::SearchNext => {
             state.next_match();
@@ -93,6 +114,9 @@ pub struct App {
     /// In raw terminal mode, SIGINT is not generated, so TUI must signal
     /// the main orchestration loop through this channel.
     interrupt_tx: Option<watch::Sender<bool>>,
+
+    /// 并行模式：UI 更新通道（observer → channel → reducer）。
+    update_rx: Option<mpsc::UnboundedReceiver<TuiUpdate>>,
 }
 
 impl App {
@@ -101,11 +125,13 @@ impl App {
         state: Arc<Mutex<TuiState>>,
         terminated_rx: watch::Receiver<bool>,
         interrupt_tx: Option<watch::Sender<bool>>,
+        update_rx: Option<mpsc::UnboundedReceiver<TuiUpdate>>,
     ) -> Self {
         Self {
             state,
             terminated_rx,
             interrupt_tx,
+            update_rx,
         }
     }
 
@@ -134,6 +160,9 @@ impl App {
         // Track viewport height for scroll calculations
         let mut viewport_height: usize = 24; // Default, updated on render
 
+        // 并行模式的 state 更新通道（由 App 消费）
+        let mut update_rx = self.update_rx.take();
+
         loop {
             // Use biased select to prioritize input over render ticks
             tokio::select! {
@@ -161,7 +190,7 @@ impl App {
                                     match mouse.kind {
                                         MouseEventKind::ScrollUp => {
                                             let mut state = self.state.lock().unwrap();
-                                            if let Some(buffer) = state.current_iteration_mut() {
+                                            if let Some(buffer) = state.current_output_buffer_mut() {
                                                 for _ in 0..3 {
                                                     buffer.scroll_up();
                                                 }
@@ -169,7 +198,7 @@ impl App {
                                         }
                                         MouseEventKind::ScrollDown => {
                                             let mut state = self.state.lock().unwrap();
-                                            if let Some(buffer) = state.current_iteration_mut() {
+                                            if let Some(buffer) = state.current_output_buffer_mut() {
                                                 for _ in 0..3 {
                                                     buffer.scroll_down(viewport_height);
                                                 }
@@ -188,11 +217,168 @@ impl App {
                                         }
                                     }
 
-                                    // Map key to action and dispatch
-                                    let action = map_key(key);
+                                    // 串行/并行：按 mode 分流输入处理
                                     let mut state = self.state.lock().unwrap();
-                                    if dispatch_action(action, &mut state, viewport_height) {
-                                        break;
+
+                                    // 搜索输入模式（串行/并行共用）。
+                                    if state.search_state.search_mode {
+                                        match key.code {
+                                            KeyCode::Esc => {
+                                                state.search_state.search_mode = false;
+                                                state.search_query.clear();
+                                                state.clear_search();
+                                            }
+                                            KeyCode::Backspace => {
+                                                state.search_query.pop();
+                                            }
+                                            KeyCode::Enter => {
+                                                let query = state.search_query.trim().to_string();
+                                                state.search_state.search_mode = false;
+                                                state.search_query.clear();
+
+                                                if query.is_empty() {
+                                                    state.clear_search();
+                                                } else {
+                                                    state.search(&query);
+                                                }
+                                            }
+                                            KeyCode::Char(c) => {
+                                                state.search_query.push(c);
+                                            }
+                                            _ => {}
+                                        }
+                                        continue;
+                                    }
+
+                                    match state.mode {
+                                        TuiMode::Serial => {
+                                            let action = map_key(key);
+                                            if dispatch_action(action, &mut state, viewport_height) {
+                                                break;
+                                            }
+                                        }
+                                        TuiMode::Parallel => {
+                                            // 3.x：并行模式的输入映射（焦点/导航/滚动/搜索）。
+                                            // 5.x/6.x：chat/gate 交互（写外部事件 + 展示 gate 列表）。
+
+                                            // Focus switching first (Tab / BackTab)
+                                            if key.code == KeyCode::Tab {
+                                                state.parallel.focus_next();
+                                                continue;
+                                            }
+                                            if key.code == KeyCode::BackTab {
+                                                state.parallel.focus_prev();
+                                                continue;
+                                            }
+
+                                            // Global keys（注意：Chat 焦点下字符应当进入输入框，不应触发 quit/help）
+                                            let focus = state.parallel.focus;
+                                            if focus != ParallelFocus::Chat {
+                                                if key.code == KeyCode::Char('q') {
+                                                    break;
+                                                }
+                                                if key.code == KeyCode::Char('?') {
+                                                    state.show_help = true;
+                                                    continue;
+                                                }
+                                            }
+
+                                            match focus {
+                                                ParallelFocus::Instances => match key.code {
+                                                    KeyCode::Up | KeyCode::Char('k') => {
+                                                        state.parallel.select_prev_instance();
+                                                    }
+                                                    KeyCode::Down | KeyCode::Char('j') => {
+                                                        state.parallel.select_next_instance();
+                                                    }
+                                                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                                                        state.parallel.focus = ParallelFocus::Output;
+                                                    }
+                                                    _ => {}
+                                                },
+                                                ParallelFocus::Output => {
+                                                    let action = map_key(key);
+                                                    if dispatch_action(action, &mut state, viewport_height) {
+                                                        break;
+                                                    }
+                                                }
+                                                ParallelFocus::Chat => {
+                                                    match key.code {
+                                                        KeyCode::Esc => {
+                                                            state.parallel.chat_input.clear();
+                                                        }
+                                                        KeyCode::Backspace => {
+                                                            state.parallel.chat_input.pop();
+                                                        }
+                                                        KeyCode::Enter => {
+                                                            let raw = state.parallel.chat_input.trim().to_string();
+                                                            state.parallel.chat_input.clear();
+                                                            if raw.is_empty() {
+                                                                continue;
+                                                            }
+
+                                                            match parse_chat_submit(&raw) {
+                                                                Ok(ChatSubmit::HumanMessage { target_instance, payload }) => {
+                                                                    let writer = ExternalEventWriter::new();
+                                                                    match writer.append("human.message", payload, target_instance) {
+                                                                        Ok(()) => {
+                                                                            state.parallel.chat_status = Some(format!(
+                                                                                "sent human.message -> {}",
+                                                                                writer.path().display()
+                                                                            ));
+                                                                        }
+                                                                        Err(e) => {
+                                                                            state.parallel.chat_status = Some(format!("send failed: {e:#}"));
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Ok(ChatSubmit::GateResolve { gate_id, decision }) => {
+                                                                    let requested_by = state
+                                                                        .parallel
+                                                                        .gates
+                                                                        .get(&gate_id)
+                                                                        .map(|g| g.request.requested_by.clone());
+
+                                                                    let resolve = GateResolve {
+                                                                        gate_id,
+                                                                        resolved_by: GateResolvedBy::Human,
+                                                                        decision,
+                                                                        requested_by,
+                                                                    };
+
+                                                                    match serde_json::to_string(&resolve) {
+                                                                        Ok(payload) => {
+                                                                            let writer = ExternalEventWriter::new();
+                                                                            match writer.append(TOPIC_GATE_RESOLVE, payload, None) {
+                                                                                Ok(()) => {
+                                                                                    state.parallel.chat_status = Some(format!(
+                                                                                        "sent gate.resolve -> {}",
+                                                                                        writer.path().display()
+                                                                                    ));
+                                                                                }
+                                                                                Err(e) => {
+                                                                                    state.parallel.chat_status = Some(format!("send failed: {e:#}"));
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        Err(e) => {
+                                                                            state.parallel.chat_status = Some(format!("serialize failed: {e}"));
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    state.parallel.chat_status = Some(format!("parse error: {e}"));
+                                                                }
+                                                            }
+                                                        }
+                                                        KeyCode::Char(c) => {
+                                                            state.parallel.chat_input.push(c);
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 // Ignore other events (FocusGained, FocusLost, Paste, Resize, key releases)
@@ -224,16 +410,28 @@ impl App {
                         .split(frame_area);
 
                     let content_area = chunks[1];
+                    // viewport_height 代表“当前可滚动输出视图”的高度（串行=content， 并行=output inner）
+                    // 注意：并行模式下 output 还有边框与底部 chat panel，因此需要做一次保守估计。
                     viewport_height = content_area.height as usize;
 
                     let mut state = self.state.lock().unwrap();
 
-                    // Autoscroll: if user hasn't scrolled away, keep them at the bottom
-                    // as new content arrives. This mimics standard terminal behavior.
-                    if let Some(buffer) = state.current_iteration_mut()
+                    // Autoscroll（串行/并行）：如果用户没离开底部，就跟随输出
+                    let effective_viewport_height = match state.mode {
+                        TuiMode::Serial => content_area.height as usize,
+                        TuiMode::Parallel => {
+                            // content = main + bottom(7)
+                            // output inner = main - borders(2)
+                            let main_height = content_area.height.saturating_sub(7);
+                            main_height.saturating_sub(2) as usize
+                        }
+                    };
+                    if let Some(buffer) = state.current_output_buffer_mut()
                         && buffer.following_bottom
                     {
-                        let max_scroll = buffer.line_count().saturating_sub(viewport_height);
+                        let max_scroll = buffer
+                            .line_count()
+                            .saturating_sub(effective_viewport_height);
                         buffer.scroll_offset = max_scroll;
                     }
 
@@ -242,13 +440,234 @@ impl App {
                         // Render header
                         f.render_widget(header::render(&state, chunks[0].width), chunks[0]);
 
-                        // Render content using ContentPane
-                        if let Some(buffer) = state.current_iteration() {
-                            let mut content_widget = ContentPane::new(buffer);
-                            if let Some(query) = &state.search_state.query {
-                                content_widget = content_widget.with_search(query);
+                        match state.mode {
+                            TuiMode::Serial => {
+                                // Render content using ContentPane
+                                if let Some(buffer) = state.current_iteration() {
+                                    let mut content_widget = ContentPane::new(buffer);
+                                    if let Some(query) = &state.search_state.query {
+                                        content_widget = content_widget.with_search(query);
+                                    }
+                                    f.render_widget(content_widget, content_area);
+                                }
                             }
-                            f.render_widget(content_widget, content_area);
+                            TuiMode::Parallel => {
+                                // 布局：上（实例列表 + 输出） / 下（chat + gate）
+                                let vertical = Layout::default()
+                                    .direction(Direction::Vertical)
+                                    .constraints([
+                                        Constraint::Min(0),     // main
+                                        Constraint::Length(7),  // bottom panel（后续可做自适应）
+                                    ])
+                                    .split(content_area);
+
+                                let main_area = vertical[0];
+                                let bottom_area = vertical[1];
+
+                                let horizontal = Layout::default()
+                                    .direction(Direction::Horizontal)
+                                    .constraints([
+                                        Constraint::Length(30), // instances
+                                        Constraint::Min(0),     // output
+                                    ])
+                                    .split(main_area);
+
+                                let instances_area = horizontal[0];
+                                let output_area = horizontal[1];
+
+                                // 左：实例列表
+                                f.render_widget(instances::render(&state.parallel), instances_area);
+
+                                // 右：输出（选中实例的当前 job）
+                                let output_focused = state.parallel.focus == crate::state::ParallelFocus::Output;
+                                let output_border_style = if output_focused {
+                                    Style::default().fg(Color::Cyan)
+                                } else {
+                                    Style::default()
+                                };
+
+                                let title = if let Some(id) = state.parallel.selected_instance_id() {
+                                    if let Some(instance) = state.parallel.selected_instance() {
+                                        let state_label = instance.state.to_string();
+                                        let total = instance.jobs.len();
+                                        if total > 0 {
+                                            let current = instance.current_job.saturating_add(1);
+                                            format!("Output ({id}) [{state_label}] [job {current}/{total}]")
+                                        } else {
+                                            format!("Output ({id}) [{state_label}]")
+                                        }
+                                    } else {
+                                        format!("Output ({id})")
+                                    }
+                                } else {
+                                    "Output".to_string()
+                                };
+                                let block = Block::default()
+                                    .title(title)
+                                    .borders(Borders::ALL)
+                                    .border_style(output_border_style);
+                                let inner = block.inner(output_area);
+                                f.render_widget(block, output_area);
+
+                                // 更新可滚动视图高度（给鼠标滚动/键盘滚动用）
+                                viewport_height = inner.height as usize;
+
+                                if let Some(instance) = state.parallel.selected_instance()
+                                    && let Some(buffer) = instance.current_job_buffer()
+                                {
+                                    let mut content_widget = ContentPane::new(buffer);
+                                    if let Some(query) = &state.search_state.query {
+                                        content_widget = content_widget.with_search(query);
+                                    }
+                                    f.render_widget(content_widget, inner);
+                                } else {
+                                    let empty = Paragraph::new(Line::from(vec![
+                                        Span::raw(" "),
+                                        Span::styled("No instance selected", Style::default().fg(Color::DarkGray)),
+                                    ]));
+                                    f.render_widget(empty, inner);
+                                }
+
+                                // 下：chat + gate（human async chat + gate 面板）
+                                let bottom_focused = state.parallel.focus == crate::state::ParallelFocus::Chat;
+                                let bottom_border_style = if bottom_focused {
+                                    Style::default().fg(Color::Cyan)
+                                } else {
+                                    Style::default()
+                                };
+                                let bottom_block = Block::default()
+                                    .title("Chat / Gates")
+                                    .borders(Borders::ALL)
+                                    .border_style(bottom_border_style);
+                                let bottom_inner = bottom_block.inner(bottom_area);
+                                f.render_widget(bottom_block, bottom_area);
+
+                                if bottom_inner.width > 0 && bottom_inner.height > 0 {
+                                    // 上：输入框 / 中：状态提示 / 下：gate 列表
+                                    let inner_chunks = Layout::default()
+                                        .direction(Direction::Vertical)
+                                        .constraints([
+                                            Constraint::Length(1), // input
+                                            Constraint::Length(1), // status
+                                            Constraint::Min(0),    // gates
+                                        ])
+                                        .split(bottom_inner);
+
+                                    let input_area = inner_chunks[0];
+                                    let status_area = inner_chunks[1];
+                                    let gates_area = inner_chunks[2];
+
+                                    // 1) chat 输入行
+                                    let prompt_style = if bottom_focused {
+                                        Style::default().fg(Color::Cyan)
+                                    } else {
+                                        Style::default().fg(Color::DarkGray)
+                                    };
+
+                                    let input_text = if state.parallel.chat_input.is_empty() {
+                                        Span::styled(
+                                            "Type: @instance msg | !approve/!deny/!resolve ...",
+                                            Style::default().fg(Color::DarkGray),
+                                        )
+                                    } else {
+                                        Span::raw(state.parallel.chat_input.clone())
+                                    };
+
+                                    let input_line = Line::from(vec![
+                                        Span::raw(" "),
+                                        Span::styled(">", prompt_style),
+                                        Span::raw(" "),
+                                        input_text,
+                                    ]);
+                                    f.render_widget(Paragraph::new(input_line), input_area);
+
+                                    // 2) 状态提示
+                                let status = state
+                                    .parallel
+                                    .chat_status
+                                    .as_deref()
+                                    .unwrap_or(if bottom_focused {
+                                        "Enter=send  Esc=clear  Tab=switch"
+                                    } else {
+                                        "Tab to focus chat"
+                                    });
+                                    let status_line = Line::from(vec![
+                                        Span::raw(" "),
+                                        Span::styled(status.to_string(), Style::default().fg(Color::DarkGray)),
+                                    ]);
+                                    f.render_widget(Paragraph::new(status_line), status_area);
+
+                                    // 3) gate 列表（最新在上）
+                                    let mut gate_lines: Vec<Line> = Vec::new();
+                                    let max_lines = gates_area.height as usize;
+
+                                    for gate_id in state.parallel.gate_order.iter().rev() {
+                                        if gate_lines.len() >= max_lines {
+                                            break;
+                                        }
+
+                                        let Some(g) = state.parallel.gates.get(gate_id) else {
+                                            continue;
+                                        };
+
+                                        let kind = match g.request.kind {
+                                            ralph_proto::GateKind::Consult => "consult",
+                                            ralph_proto::GateKind::Approval => "approval",
+                                        };
+
+                                        let now = std::time::Instant::now();
+                                        let (status_text, status_style) = match g.status_at(now) {
+                                            GateStatus::Resolved => (
+                                                "resolved".to_string(),
+                                                Style::default().fg(Color::Green),
+                                            ),
+                                            GateStatus::Timeout => (
+                                                "timeout".to_string(),
+                                                Style::default().fg(Color::Yellow),
+                                            ),
+                                            GateStatus::Waiting { remaining_seconds } => (
+                                                format!("T-{remaining_seconds}s"),
+                                                Style::default().fg(Color::Cyan),
+                                            ),
+                                            GateStatus::Open => (
+                                                "open".to_string(),
+                                                Style::default().fg(Color::Cyan),
+                                            ),
+                                        };
+
+                                        let prompt = truncate_with_ellipsis(&g.request.prompt, 48);
+
+                                        gate_lines.push(Line::from(vec![
+                                            Span::raw(" "),
+                                            Span::styled(format!("[{kind}]"), Style::default().fg(Color::Magenta)),
+                                            Span::raw(" "),
+                                            Span::styled(
+                                                gate_id.clone(),
+                                                Style::default()
+                                                    .add_modifier(ratatui::style::Modifier::BOLD),
+                                            ),
+                                            Span::raw(" "),
+                                            Span::styled(status_text, status_style),
+                                            Span::raw(" "),
+                                            Span::styled(
+                                                g.request.requested_by.to_string(),
+                                                Style::default().fg(Color::DarkGray),
+                                            ),
+                                            Span::raw(" "),
+                                            Span::raw(prompt),
+                                        ]));
+                                    }
+
+                                    if gate_lines.is_empty() {
+                                        gate_lines.push(Line::from(vec![
+                                            Span::raw(" "),
+                                            Span::styled("No gates", Style::default().fg(Color::DarkGray)),
+                                        ]));
+                                    }
+
+                                    f.render_widget(Paragraph::new(gate_lines), gates_area);
+                                }
+                            }
                         }
 
                         // Render footer
@@ -259,6 +678,20 @@ impl App {
                             help::render(f, f.area());
                         }
                     })?;
+                }
+
+                // Priority 2.5: Apply updates from parallel runner (observer → channel)
+                maybe_update = async {
+                    if let Some(rx) = update_rx.as_mut() {
+                        rx.recv().await
+                    } else {
+                        std::future::pending::<Option<TuiUpdate>>().await
+                    }
+                } => {
+                    if let Some(update) = maybe_update {
+                        let mut state = self.state.lock().unwrap();
+                        state.apply_update(update);
+                    }
                 }
 
                 // Priority 3: Handle termination signal

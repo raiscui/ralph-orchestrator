@@ -1801,6 +1801,7 @@ name = "ralph-cli"
 version = "2.2.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "crossterm 0.28.1",
@@ -1851,6 +1852,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "nix 0.29.0",
  "regex",
  "serde",
  "serde_json",
@@ -1875,6 +1877,7 @@ name = "ralph-tui"
 version = "2.2.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm 0.28.1",
  "futures",
  "insta",
@@ -1885,6 +1888,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "unicode-segmentation",

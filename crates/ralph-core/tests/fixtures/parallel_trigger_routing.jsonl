@@ -1,0 +1,5 @@
+{"ts": 1000, "event": "ux.terminal.write", "data": {"bytes": "U3RhcnRpbmcgUmFscGggb3JjaGVzdHJhdGlvbiBsb29wLi4uCltzdXBlcnZpc29yXSBpbnN0YW5jZXM6IHdyaXRlciMxLCB0ZXN0ZXIjMSwgcmFscGgjMQoKPGV2ZW50IHRvcGljPSJidWlsZC50YXNrIj4KVGFzazogcGFyYWxsZWwgdHJpZ2dlciByb3V0aW5nIHNtb2tlCjwvZXZlbnQ+Cg==", "stdout": true, "offset_ms": 0}}
+{"ts": 2000, "event": "ux.terminal.write", "data": {"bytes": "W3dyaXRlciMxOm91dF0gd3JpdGVyOiB3b3JraW5nCjxldmVudCB0b3BpYz0iYnVpbGQuZG9uZSI+CnN0YXR1czogb2sKPC9ldmVudD4K", "stdout": true, "offset_ms": 1000}}
+{"ts": 3000, "event": "ux.terminal.write", "data": {"bytes": "W3Rlc3RlciMxOm91dF0gdGVzdGVyOiBvawo8ZXZlbnQgdG9waWM9InRlc3QuZG9uZSI+CnN0YXR1czogb2sKPC9ldmVudD4K", "stdout": true, "offset_ms": 2000}}
+{"ts": 4000, "event": "ux.terminal.write", "data": {"bytes": "PGV2ZW50IHRvcGljPSJyb3V0aW5nLmVzY2FsYXRlIj4KaW52YWxpZCB0YXJnZXQ6IGhhdCAiZ2hvc3RfaGF0IiBpcyBub3Qgc3Vic2NyaWJlZCB0byB0b3BpYyAiYnVpbGQudGFzayIKPC9ldmVudD4K", "stdout": true, "offset_ms": 3000}}
+{"ts": 5000, "event": "ux.terminal.write", "data": {"bytes": "TE9PUF9DT01QTEVURQo=", "stdout": true, "offset_ms": 4000}}

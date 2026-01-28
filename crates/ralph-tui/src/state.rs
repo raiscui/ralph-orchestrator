@@ -1,8 +1,44 @@
 //! State management for the TUI.
 
-use ralph_proto::{Event, HatId};
+use ralph_core::HatJobOutputChunk;
+use ralph_proto::{Event, HatId, HatInstanceId, HatInstanceState};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+// ============================================================================
+// 并行模式（Supervisor TUI）state
+// ============================================================================
+
+mod parallel;
+pub use parallel::{GateStatus, ParallelFocus, ParallelTuiState};
+
+/// TUI 运行模式：串行（按 iteration）/ 并行（按 instance/job）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiMode {
+    Serial,
+    Parallel,
+}
+
+/// TUI 的状态更新事件（用于 observer → channel → reducer）。
+#[derive(Debug, Clone)]
+pub enum TuiUpdate {
+    /// 并行：注册初始实例（Created）。
+    ParallelRegisterInstance {
+        instance_id: HatInstanceId,
+        state: HatInstanceState,
+    },
+    /// 并行：实例状态变更（Running/Idle/Done/...）。
+    ParallelInstanceState {
+        instance_id: HatInstanceId,
+        state: HatInstanceState,
+    },
+    /// 并行：输出流式 chunk（按行）。
+    ParallelOutputChunk(HatJobOutputChunk),
+    /// 并行：控制面事件（gate.* / human.message 等）。
+    ParallelEvent(Event),
+    /// 并行：UI 内部提示（例如写事件文件失败）。
+    ParallelStatus(String),
+}
 
 // ============================================================================
 // TaskSummary - Summary of a single task for TUI display
@@ -95,6 +131,9 @@ impl SearchState {
 
 /// Observable state derived from loop events.
 pub struct TuiState {
+    /// 当前 TUI 模式（串行/并行）。
+    pub mode: TuiMode,
+
     /// Which hat will process next event (ID + display name).
     pub pending_hat: Option<(HatId, String)>,
     /// Current iteration number (0-indexed, display as +1).
@@ -160,12 +199,19 @@ pub struct TuiState {
     pub task_counts: TaskCounts,
     /// Currently active task (if any) for display in TUI widgets.
     pub active_task: Option<TaskSummary>,
+
+    // ========================================================================
+    // Parallel Mode State
+    // ========================================================================
+    /// 并行模式（Supervisor TUI）的状态（默认空）。
+    pub parallel: ParallelTuiState,
 }
 
 impl TuiState {
     /// Creates empty state. Timer starts immediately at creation.
     pub fn new() -> Self {
         Self {
+            mode: TuiMode::Serial,
             pending_hat: None,
             iteration: 0,
             prev_iteration: 0,
@@ -193,13 +239,23 @@ impl TuiState {
             // Task tracking state
             task_counts: TaskCounts::default(),
             active_task: None,
+            // Parallel mode
+            parallel: ParallelTuiState::default(),
         }
+    }
+
+    /// 创建并行模式的初始 state（Supervisor TUI）。
+    pub fn new_parallel() -> Self {
+        let mut state = Self::new();
+        state.mode = TuiMode::Parallel;
+        state
     }
 
     /// Creates state with a custom hat map for dynamic topic-to-hat resolution.
     /// Timer starts immediately at creation.
     pub fn with_hat_map(hat_map: HashMap<String, (HatId, String)>) -> Self {
         Self {
+            mode: TuiMode::Serial,
             pending_hat: None,
             iteration: 0,
             prev_iteration: 0,
@@ -227,11 +283,19 @@ impl TuiState {
             // Task tracking state
             task_counts: TaskCounts::default(),
             active_task: None,
+            // Parallel mode
+            parallel: ParallelTuiState::default(),
         }
     }
 
     /// Updates state based on event topic.
     pub fn update(&mut self, event: &Event) {
+        // 串行模式下：按 EventBus 事件更新 header/计时等信息。
+        // 并行模式下：事件不走这里（用 apply_update + ParallelEvent）。
+        if self.mode == TuiMode::Parallel {
+            return;
+        }
+
         let now = Instant::now();
         let topic = event.topic.as_str();
 
@@ -285,6 +349,35 @@ impl TuiState {
             }
             _ => {
                 // Unknown topic - don't change pending_hat
+            }
+        }
+    }
+
+    /// 应用一个 UI 更新事件（observer → channel → reducer）。
+    ///
+    /// 说明：
+    /// - 串行模式继续沿用“直接锁 state 更新”的老路径（`Tui::observer()`）。
+    /// - 并行模式统一走该 reducer，避免多处并发写状态造成撕裂。
+    pub fn apply_update(&mut self, update: TuiUpdate) {
+        if self.mode != TuiMode::Parallel {
+            return;
+        }
+
+        match update {
+            TuiUpdate::ParallelRegisterInstance { instance_id, state } => {
+                self.parallel.register_instance(instance_id, state);
+            }
+            TuiUpdate::ParallelInstanceState { instance_id, state } => {
+                self.parallel.set_instance_state(instance_id, state);
+            }
+            TuiUpdate::ParallelOutputChunk(chunk) => {
+                self.parallel.append_output(&chunk);
+            }
+            TuiUpdate::ParallelEvent(event) => {
+                self.parallel.apply_event(&event);
+            }
+            TuiUpdate::ParallelStatus(msg) => {
+                self.parallel.chat_status = Some(msg);
             }
         }
     }
@@ -392,6 +485,31 @@ impl TuiState {
         self.iterations.get_mut(self.current_view)
     }
 
+    /// 返回“当前可滚动输出视图”的 buffer。
+    ///
+    /// - 串行模式：当前 iteration 的 buffer
+    /// - 并行模式：当前选中实例的当前 job buffer
+    pub fn current_output_buffer(&self) -> Option<&IterationBuffer> {
+        match self.mode {
+            TuiMode::Serial => self.current_iteration(),
+            TuiMode::Parallel => self
+                .parallel
+                .selected_instance()
+                .and_then(|i| i.current_job_buffer()),
+        }
+    }
+
+    /// 返回“当前可滚动输出视图”的可变 buffer。
+    pub fn current_output_buffer_mut(&mut self) -> Option<&mut IterationBuffer> {
+        match self.mode {
+            TuiMode::Serial => self.current_iteration_mut(),
+            TuiMode::Parallel => self
+                .parallel
+                .selected_instance_mut()
+                .and_then(|i| i.current_job_buffer_mut()),
+        }
+    }
+
     /// Returns a shared handle to the current iteration's lines buffer.
     ///
     /// This allows stream handlers to write directly to the buffer,
@@ -459,36 +577,35 @@ impl TuiState {
         self.search_state.matches.clear();
         self.search_state.current_match = 0;
 
-        // Check if we have an iteration to search
-        if self.iterations.get(self.current_view).is_none() {
-            return;
-        }
-
         let query_lower = query.to_lowercase();
 
         // Collect matches first (avoid borrow conflicts)
-        let matches: Vec<(usize, usize)> = self
-            .iterations
-            .get(self.current_view)
-            .and_then(|buffer| {
-                let lines = buffer.lines.lock().ok()?;
-                let mut found = Vec::new();
-                for (line_idx, line) in lines.iter().enumerate() {
-                    // Get the text content of the line
-                    let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                    let line_lower = line_text.to_lowercase();
+        let matches: Vec<(usize, usize)> = match self.mode {
+            TuiMode::Serial => self.iterations.get(self.current_view),
+            TuiMode::Parallel => self
+                .parallel
+                .selected_instance()
+                .and_then(|i| i.current_job_buffer()),
+        }
+        .and_then(|buffer| {
+            let lines = buffer.lines.lock().ok()?;
+            let mut found = Vec::new();
+            for (line_idx, line) in lines.iter().enumerate() {
+                // Get the text content of the line
+                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let line_lower = line_text.to_lowercase();
 
-                    // Find all occurrences in this line
-                    let mut search_start = 0;
-                    while let Some(pos) = line_lower[search_start..].find(&query_lower) {
-                        let char_offset = search_start + pos;
-                        found.push((line_idx, char_offset));
-                        search_start = char_offset + query_lower.len();
-                    }
+                // Find all occurrences in this line
+                let mut search_start = 0;
+                while let Some(pos) = line_lower[search_start..].find(&query_lower) {
+                    let char_offset = search_start + pos;
+                    found.push((line_idx, char_offset));
+                    search_start = char_offset + query_lower.len();
                 }
-                Some(found)
-            })
-            .unwrap_or_default();
+            }
+            Some(found)
+        })
+        .unwrap_or_default();
 
         self.search_state.matches = matches;
 
@@ -539,7 +656,7 @@ impl TuiState {
         // Adjust scroll to show the match line
         // Use a default viewport height for calculation (will be overridden by actual render)
         let viewport_height = 20;
-        if let Some(buffer) = self.current_iteration_mut() {
+        if let Some(buffer) = self.current_output_buffer_mut() {
             // If the match line is above the current view, scroll up to it
             if line_idx < buffer.scroll_offset {
                 buffer.scroll_offset = line_idx;
@@ -571,6 +688,7 @@ use std::sync::{Arc, Mutex};
 /// The `lines` field is wrapped in `Arc<Mutex<>>` to allow sharing
 /// with stream handlers during execution, enabling real-time streaming
 /// to the TUI instead of batch transfer after execution completes.
+#[derive(Debug)]
 pub struct IterationBuffer {
     /// Iteration number (1-indexed for display)
     pub number: u32,
@@ -608,6 +726,35 @@ impl IterationBuffer {
         if let Ok(mut lines) = self.lines.lock() {
             lines.push(line);
         }
+    }
+
+    /// 追加一行，并在超过上限时丢弃最旧的行（近似 ring buffer）。
+    ///
+    /// 说明：
+    /// - 该策略用于“长跑并行输出”，避免内存无限增长。
+    /// - 丢弃旧行时，需要同步调整 scroll_offset，避免越界。
+    pub fn append_line_capped(&mut self, line: Line<'static>, max_lines: usize) {
+        if max_lines == 0 {
+            return;
+        }
+
+        let Ok(mut lines) = self.lines.lock() else {
+            return;
+        };
+
+        lines.push(line);
+        if lines.len() <= max_lines {
+            return;
+        }
+
+        let overflow = lines.len().saturating_sub(max_lines);
+        if overflow == 0 {
+            return;
+        }
+
+        // 移除最旧的 overflow 行
+        lines.drain(0..overflow);
+        self.scroll_offset = self.scroll_offset.saturating_sub(overflow);
     }
 
     /// Returns the total number of lines in the buffer.

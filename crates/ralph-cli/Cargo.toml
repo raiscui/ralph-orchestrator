@@ -25,6 +25,7 @@ ralph-adapters.workspace = true
 ralph-tui.workspace = true
 
 tokio.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 reqwest.workspace = true

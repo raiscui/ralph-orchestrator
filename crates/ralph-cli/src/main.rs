@@ -16,6 +16,7 @@ mod display;
 mod init;
 mod loop_runner;
 mod memory;
+mod parallel_runner;
 mod presets;
 mod sop_runner;
 mod task_cli;
@@ -339,6 +340,12 @@ struct RunArgs {
     /// Record session to JSONL file for replay testing
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
+
+    /// (Parallel mode) Only show streaming output from these instances (repeatable).
+    ///
+    /// Example: `--instance writer#1 --instance tester#1`
+    #[arg(long, value_name = "HAT#KEY", action = clap::ArgAction::Append)]
+    instance: Vec<String>,
 }
 
 /// Arguments for the resume subcommand.
@@ -374,6 +381,10 @@ struct ResumeArgs {
     /// Record session to JSONL file for replay testing
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
+
+    /// (Parallel mode) Only show streaming output from these instances (repeatable).
+    #[arg(long, value_name = "HAT#KEY", action = clap::ArgAction::Append)]
+    instance: Vec<String>,
 }
 
 /// Arguments for the events subcommand.
@@ -437,6 +448,12 @@ struct EmitArgs {
     /// Path to events file (defaults to .ralph/events.jsonl)
     #[arg(long, default_value = ".ralph/events.jsonl")]
     pub file: PathBuf,
+
+    /// Optional target instance for direct delivery (parallel mode).
+    ///
+    /// Example: `--target-instance writer#1`
+    #[arg(long, value_name = "HAT#KEY")]
+    pub target_instance: Option<String>,
 }
 
 /// Arguments for the plan subcommand.
@@ -600,6 +617,7 @@ async fn main() -> Result<()> {
                 verbose: false,
                 quiet: false,
                 record_session: None,
+                instance: Vec::new(),
             };
             run_command(cli.config, cli.verbose, cli.color, args).await
         }
@@ -798,15 +816,28 @@ async fn run_command(
     // TUI is enabled by default (unless --no-tui or --autonomous is specified)
     let enable_tui = !args.no_tui && !args.autonomous;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
-    let reason = loop_runner::run_loop_impl(
-        config,
-        color_mode,
-        resume,
-        enable_tui,
-        verbosity,
-        args.record_session,
-    )
-    .await?;
+    let reason = if config.parallel.enabled {
+        parallel_runner::run_parallel_loop_impl(
+            config,
+            color_mode,
+            resume,
+            enable_tui,
+            verbosity,
+            args.record_session,
+            args.instance.clone(),
+        )
+        .await?
+    } else {
+        loop_runner::run_loop_impl(
+            config,
+            color_mode,
+            resume,
+            enable_tui,
+            verbosity,
+            args.record_session,
+        )
+        .await?
+    };
     let exit_code = reason.exit_code();
 
     // Use explicit exit for non-zero codes to ensure proper exit status
@@ -921,15 +952,28 @@ async fn resume_command(
     // TUI is enabled by default (unless --no-tui or --autonomous is specified)
     let enable_tui = !args.no_tui && !args.autonomous;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
-    let reason = loop_runner::run_loop_impl(
-        config,
-        color_mode,
-        true,
-        enable_tui,
-        verbosity,
-        args.record_session,
-    )
-    .await?;
+    let reason = if config.parallel.enabled {
+        parallel_runner::run_parallel_loop_impl(
+            config,
+            color_mode,
+            true,
+            enable_tui,
+            verbosity,
+            args.record_session,
+            args.instance.clone(),
+        )
+        .await?
+    } else {
+        loop_runner::run_loop_impl(
+            config,
+            color_mode,
+            true,
+            enable_tui,
+            verbosity,
+            args.record_session,
+        )
+        .await?
+    };
     let exit_code = reason.exit_code();
 
     if exit_code != 0 {
@@ -1228,7 +1272,8 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
         } else {
             serde_json::Value::String(payload)
         },
-        "ts": ts
+        "ts": ts,
+        "target_instance": args.target_instance
     });
 
     // Read events path from marker file, fall back to CLI arg if marker doesn't exist

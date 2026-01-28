@@ -41,5 +41,8 @@ regex.workspace = true
 # Async trait support
 async-trait.workspace = true
 
+# Unix signal handling (hard kill process group on timeout)
+nix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

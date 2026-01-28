@@ -469,8 +469,11 @@ pub async fn run_loop_impl(
 
         // Execute the prompt (interactive or autonomous mode)
         // Get per-adapter timeout from config
-        let timeout_secs = config.adapter_settings(&config.cli.backend).timeout;
-        let timeout = Some(Duration::from_secs(timeout_secs));
+        let adapter_settings = config.adapter_settings(&config.cli.backend);
+        let timeout =
+            (adapter_settings.timeout > 0).then(|| Duration::from_secs(adapter_settings.timeout));
+        let output_stale_timeout = (adapter_settings.output_stale_timeout_secs > 0)
+            .then(|| Duration::from_secs(adapter_settings.output_stale_timeout_secs));
 
         // For TUI mode, get the shared lines buffer for this iteration.
         // The buffer is owned by TuiState's IterationBuffer, so writes from
@@ -510,7 +513,13 @@ pub async fn run_loop_impl(
             } else {
                 let executor = CliExecutor::new(backend.clone());
                 let result = executor
-                    .execute(&prompt, stdout(), timeout, verbosity == Verbosity::Verbose)
+                    .execute(
+                        &prompt,
+                        stdout(),
+                        timeout,
+                        output_stale_timeout,
+                        verbosity == Verbosity::Verbose,
+                    )
                     .await?;
                 Ok(ExecutionOutcome {
                     output: result.output,
@@ -856,7 +865,9 @@ fn get_last_commit_info() -> Option<String> {
 /// 5. Default PROMPT.md
 ///
 /// Note: CLI overrides are already applied to config before this function is called.
-fn resolve_prompt_content(event_loop_config: &ralph_core::EventLoopConfig) -> Result<String> {
+pub(crate) fn resolve_prompt_content(
+    event_loop_config: &ralph_core::EventLoopConfig,
+) -> Result<String> {
     debug!(
         inline_prompt = ?event_loop_config.prompt.as_ref().map(|s| format!("{}...", &s[..s.len().min(50)])),
         prompt_file = %event_loop_config.prompt_file,

@@ -38,6 +38,26 @@ fn test_complex_session_fixture_exists() {
     );
 }
 
+#[test]
+fn test_parallel_trigger_routing_fixture_exists() {
+    let fixture = fixtures_dir().join("parallel_trigger_routing.jsonl");
+    assert!(
+        fixture.exists(),
+        "Parallel trigger routing fixture should exist at {:?}",
+        fixture
+    );
+}
+
+#[test]
+fn test_parallel_supervisor_tui_gate_chat_fixture_exists() {
+    let fixture = fixtures_dir().join("parallel_supervisor_tui_gate_chat.jsonl");
+    assert!(
+        fixture.exists(),
+        "Parallel supervisor TUI gate/chat fixture should exist at {:?}",
+        fixture
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Acceptance Criteria #7: Integration Test Validates Full Replay Flow
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +139,92 @@ fn test_full_replay_flow_with_complex_session() {
         result.output_bytes() > 500,
         "Complex session should have substantial output, got {} bytes",
         result.output_bytes()
+    );
+}
+
+#[test]
+fn test_full_replay_flow_with_parallel_trigger_routing_fixture() {
+    use ralph_core::testing::ReplayBackend;
+
+    let fixture = fixtures_dir().join("parallel_trigger_routing.jsonl");
+
+    let config = SmokeTestConfig::new(&fixture);
+    let result = SmokeRunner::run(&config).expect("Should run fixture successfully");
+
+    assert!(
+        result.completed_successfully(),
+        "Parallel trigger routing session should complete successfully"
+    );
+    assert_eq!(
+        *result.termination_reason(),
+        TerminationReason::Completed,
+        "Should terminate with Completed (LOOP_COMPLETE detected)"
+    );
+
+    // Fixture contains: build.task, build.done, test.done, routing.escalate
+    assert!(
+        result.event_count() >= 4,
+        "Should parse at least 4 events from fixture, got {}",
+        result.event_count()
+    );
+
+    // 额外校验：fixture 里确实包含“多实例输出归因前缀”，避免只测到 event parser 而没覆盖并行日志形态。
+    let mut backend = ReplayBackend::from_file(&fixture).expect("Should load replay fixture");
+    let output = String::from_utf8(backend.collect_all()).expect("Fixture output must be UTF-8");
+    assert!(
+        output.contains("[writer#1:out]"),
+        "Fixture should contain writer#1 attribution prefix"
+    );
+    assert!(
+        output.contains("[tester#1:out]"),
+        "Fixture should contain tester#1 attribution prefix"
+    );
+    assert!(
+        output.contains("routing.escalate"),
+        "Fixture should contain routing.escalate event"
+    );
+}
+
+#[test]
+fn test_full_replay_flow_with_parallel_supervisor_tui_gate_chat_fixture() {
+    use ralph_core::testing::ReplayBackend;
+
+    let fixture = fixtures_dir().join("parallel_supervisor_tui_gate_chat.jsonl");
+
+    let config = SmokeTestConfig::new(&fixture);
+    let result = SmokeRunner::run(&config).expect("Should run fixture successfully");
+
+    assert!(
+        result.completed_successfully(),
+        "Parallel supervisor TUI gate/chat session should complete successfully"
+    );
+    assert_eq!(
+        *result.termination_reason(),
+        TerminationReason::Completed,
+        "Should terminate with Completed (LOOP_COMPLETE detected)"
+    );
+
+    // Fixture contains: build.task, gate.request, human.message, gate.resolve, build.done
+    assert!(
+        result.event_count() >= 5,
+        "Should parse at least 5 events from fixture, got {}",
+        result.event_count()
+    );
+
+    // 额外校验：fixture 文本里确实包含 gate.* / human.message，避免只测到 LOOP_COMPLETE。
+    let mut backend = ReplayBackend::from_file(&fixture).expect("Should load replay fixture");
+    let output = String::from_utf8(backend.collect_all()).expect("Fixture output must be UTF-8");
+    assert!(
+        output.contains("gate.request"),
+        "Fixture should contain gate.request event"
+    );
+    assert!(
+        output.contains("gate.resolve"),
+        "Fixture should contain gate.resolve event"
+    );
+    assert!(
+        output.contains("human.message"),
+        "Fixture should contain human.message event"
     );
 }
 

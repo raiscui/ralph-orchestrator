@@ -92,6 +92,18 @@ pub struct Event {
     )]
     pub payload: Option<String>,
     pub ts: String,
+
+    /// Optional target instance for direct delivery (parallel mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_instance: Option<String>,
+
+    /// Optional per-event workspace strategy override (parallel mode).
+    ///
+    /// 说明：
+    /// - 值为 snake_case：shared / patch / worktree
+    /// - 该字段是“提示执行环境”，最终仍需 capability/permission gate 判定
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_strategy: Option<String>,
 }
 
 /// Reads new events from `.ralph/events.jsonl` since last read.

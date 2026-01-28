@@ -840,8 +840,12 @@ fn test_default_publishes_injects_when_no_events() {
             publishes: vec!["task.done".to_string()],
             instructions: "Test hat".to_string(),
             backend: None,
+            job_timeout_secs: None,
             default_publishes: Some("task.done".to_string()),
             max_activations: None,
+            instances: 1,
+            capabilities: Vec::new(),
+            workspace: crate::config::HatWorkspaceConfig::default(),
         },
     );
     config.hats = hats;
@@ -888,8 +892,12 @@ fn test_default_publishes_not_injected_when_events_written() {
             publishes: vec!["task.done".to_string()],
             instructions: "Test hat".to_string(),
             backend: None,
+            job_timeout_secs: None,
             default_publishes: Some("task.done".to_string()),
             max_activations: None,
+            instances: 1,
+            capabilities: Vec::new(),
+            workspace: crate::config::HatWorkspaceConfig::default(),
         },
     );
     config.hats = hats;
@@ -938,8 +946,12 @@ fn test_default_publishes_not_injected_when_not_configured() {
             publishes: vec!["task.done".to_string()],
             instructions: "Test hat".to_string(),
             backend: None,
+            job_timeout_secs: None,
             default_publishes: None, // No default configured
             max_activations: None,
+            instances: 1,
+            capabilities: Vec::new(),
+            workspace: crate::config::HatWorkspaceConfig::default(),
         },
     );
     config.hats = hats;

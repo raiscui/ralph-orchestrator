@@ -300,8 +300,20 @@ hats:
         println!("================================\n");
 
         // Assert reasonable performance (sanity check)
+        //
+        // 说明：
+        // - 该测试更像“性能烟雾测试”，但 `cargo test` 默认是 debug profile。
+        // - 在 debug + CI 负载波动下，用固定的 10_000 ns/op 作为硬门槛会有一定概率变得不稳定。
+        // - 因此这里区分 debug/release：
+        //   - debug：放宽阈值，避免偶发机器负载导致的 flaky fail
+        //   - release：保持更严格阈值，确保真实运行性能不意外退化
+        let limit_ns: u128 = if cfg!(debug_assertions) {
+            50_000
+        } else {
+            10_000
+        };
         assert!(
-            ns_per_op < 10_000,
+            ns_per_op < limit_ns,
             "Performance degraded: {} ns/op",
             ns_per_op
         );

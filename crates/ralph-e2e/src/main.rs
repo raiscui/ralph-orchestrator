@@ -54,6 +54,8 @@ use ralph_e2e::{
     MemoryRapidWriteScenario,
     MemorySearchScenario,
     MultiIterScenario,
+    // Tier 8: Parallel Runtime
+    ParallelHatInstancesScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
     RunConfig,
@@ -81,6 +83,8 @@ pub enum Backend {
     Claude,
     /// Test Kiro backend only
     Kiro,
+    /// Test Codex backend only
+    Codex,
     /// Test OpenCode backend only
     Opencode,
 }
@@ -91,6 +95,7 @@ impl std::fmt::Display for Backend {
             Backend::All => write!(f, "all"),
             Backend::Claude => write!(f, "claude"),
             Backend::Kiro => write!(f, "kiro"),
+            Backend::Codex => write!(f, "codex"),
             Backend::Opencode => write!(f, "opencode"),
         }
     }
@@ -103,6 +108,7 @@ impl Backend {
             Backend::All => None,
             Backend::Claude => Some(LibBackend::Claude),
             Backend::Kiro => Some(LibBackend::Kiro),
+            Backend::Codex => Some(LibBackend::Codex),
             Backend::Opencode => Some(LibBackend::OpenCode),
         }
     }
@@ -208,6 +214,8 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(MaxIterationsScenario::new()),
         Box::new(AuthFailureScenario::new()),
         Box::new(BackendUnavailableScenario::new()),
+        // Tier 8: Parallel Runtime (experimental)
+        Box::new(ParallelHatInstancesScenario::new()),
     ]
 }
 

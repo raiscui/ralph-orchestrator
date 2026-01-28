@@ -424,6 +424,7 @@ mod tests {
             events: vec![EventRecord {
                 topic: "test.event".to_string(),
                 payload: "Test payload data".to_string(),
+                source_instance: None,
             }],
             iterations: 1,
             termination_reason: Some("LOOP_COMPLETE".to_string()),
@@ -442,6 +443,7 @@ mod tests {
             events: vec![EventRecord {
                 topic: "build.done".to_string(),
                 payload: "tests: pass, lint: pass".to_string(),
+                source_instance: None,
             }],
             iterations: 1,
             termination_reason: Some("LOOP_COMPLETE".to_string()),
@@ -599,6 +601,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "build.done".to_string(),
             payload: "all tests passed".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.build_done_has_evidence(&result);
         assert!(assertion.passed, "Should pass with 'tests' keyword");
@@ -611,6 +614,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "build.done".to_string(),
             payload: "lint clean".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.build_done_has_evidence(&result);
         assert!(assertion.passed, "Should pass with 'lint' keyword");
@@ -623,6 +627,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "build.done".to_string(),
             payload: "completed successfully".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.build_done_has_evidence(&result);
         assert!(
@@ -650,6 +655,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "other.event".to_string(),
             payload: "tests: pass".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.build_done_has_evidence(&result);
         assert!(

@@ -183,6 +183,12 @@ cargo run -p ralph-e2e -- claude --skip-analysis
 
 # Debug mode (keep workspaces)
 cargo run -p ralph-e2e -- claude --keep-workspace --verbose
+
+# Parallel Runtime (Tier 8) - currently Codex-only
+cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --keep-workspace --verbose
+
+# Convenience script for the parallel scenario
+bash scripts/run-parallel-hat-instances-codex.sh
 ```
 
 ### Test Tiers
@@ -196,6 +202,7 @@ cargo run -p ralph-e2e -- claude --keep-workspace --verbose
 | 5 | Hat Collections | Hat workflows, event routing |
 | 6 | Memory System | Add, search, injection, persistence |
 | 7 | Error Handling | Timeout, max iterations, auth failures |
+| 8 | Parallel Runtime | parallel-hat-instances |
 
 ### Reports
 

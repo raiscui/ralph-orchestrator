@@ -93,7 +93,7 @@ pub struct ExecutionResult {
     /// Content of scratchpad after execution, if present.
     pub scratchpad: Option<String>,
 
-    /// Events parsed from the execution output.
+    /// Events parsed from JSONL logs (primary source for assertions).
     pub events: Vec<EventRecord>,
 
     /// Number of iterations completed.
@@ -114,6 +114,14 @@ pub struct EventRecord {
 
     /// Event payload content.
     pub payload: String,
+
+    /// Event source instance id (parallel mode), e.g. "writer#1".
+    ///
+    /// 说明：
+    /// - 该字段来自 `.ralph/events.jsonl` 的 `source_instance`（可选）。
+    /// - 串行/历史事件可能没有该字段，因此保持可选。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_instance: Option<String>,
 }
 
 /// Errors that can occur during Ralph execution.
@@ -229,7 +237,7 @@ impl RalphExecutor {
         timeout: Duration,
     ) -> Result<ExecutionResult, ExecutorError> {
         use std::process::Stdio;
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::process::Command;
         use tokio::time::Instant;
 
@@ -264,6 +272,18 @@ impl RalphExecutor {
             // Use Haiku for faster, cheaper E2E tests
             .env("CLAUDE_MODEL", "haiku");
 
+        // Unix: make Ralph the leader of a new process group.
+        //
+        // Why:
+        // - Ralph 会在运行期继续 spawn backend 子进程（claude/codex/…）。
+        // - E2E 超时/卡死时必须能“一刀切”杀掉整组，避免子进程残留污染下一次测试。
+        // - 只有在新进程组里，`kill(-pgid, SIGTERM)` 才可靠。
+        //
+        // 备注：
+        // - 本仓库禁止使用 `unsafe`，因此这里使用标准库提供的安全 API。
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         // Handle prompt
         match &config.prompt {
             PromptSource::File(path) => {
@@ -287,60 +307,121 @@ impl RalphExecutor {
             stdin.shutdown().await.ok();
         }
 
-        // Wait with timeout - we need to handle the timeout separately
-        // because wait_with_output consumes the child
-        let wait_result =
-            tokio::time::timeout(timeout, async { child.wait_with_output().await }).await;
+        // Capture stdout/stderr concurrently so we can:
+        // - preserve partial output on timeout (useful for debugging)
+        // - avoid `wait_with_output()` which consumes the child and prevents killing on timeout
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut stdout) = stdout_handle {
+                let _ = stdout.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut stderr) = stderr_handle {
+                let _ = stderr.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+
+        let mut timed_out = false;
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            Ok(Err(e)) => return Err(ExecutorError::SpawnError(e)),
+            Err(_) => {
+                timed_out = true;
+                // 强制终止整个进程组，避免 backend 子进程残留（硬门槛）。
+                self.terminate_process_group(&mut child, "e2e timeout")
+                    .await
+            }
+        };
 
         let duration = start.elapsed();
 
-        match wait_result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout_bytes = stdout_task.await.unwrap_or_default();
+        let stderr_bytes = stderr_task.await.unwrap_or_default();
 
-                // Read scratchpad if it exists
-                let scratchpad = self.read_scratchpad().await;
+        let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+        let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
-                // Read events from JSONL file (primary source)
-                let events = self.read_events_from_jsonl().await;
+        // Read scratchpad if it exists
+        let scratchpad = self.read_scratchpad().await;
 
-                // Count iterations from output
-                let iterations = self.count_iterations(&stdout);
+        // Read events from JSONL file (primary source)
+        let events = self.read_events_from_jsonl().await;
 
-                // Detect termination reason
-                let termination_reason = self.detect_termination_reason(&stdout);
+        // Count iterations from output
+        let iterations = self.count_iterations(&stdout);
 
-                Ok(ExecutionResult {
-                    exit_code: output.status.code(),
-                    stdout,
-                    stderr,
-                    duration,
-                    scratchpad,
-                    events,
-                    iterations,
-                    termination_reason,
-                    timed_out: false,
-                })
-            }
-            Ok(Err(e)) => Err(ExecutorError::SpawnError(e)),
-            Err(_) => {
-                // Timeout occurred - the child is already consumed by wait_with_output
-                // The process may still be running, but we can't kill it directly
-                // Return a timeout result indicating what happened
-                Ok(ExecutionResult {
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration,
-                    scratchpad: self.read_scratchpad().await,
-                    events: vec![],
-                    iterations: 0,
-                    termination_reason: Some("TIMEOUT".to_string()),
-                    timed_out: true,
-                })
+        // Detect termination reason
+        let termination_reason = if timed_out {
+            Some("TIMEOUT".to_string())
+        } else {
+            self.detect_termination_reason(&stdout)
+        };
+
+        Ok(ExecutionResult {
+            exit_code: status.and_then(|s| s.code()),
+            stdout,
+            stderr,
+            duration,
+            scratchpad,
+            events,
+            iterations,
+            termination_reason,
+            timed_out,
+        })
+    }
+
+    /// 终止 `ralph run` 的进程组（Unix）或单进程（非 Unix）。
+    ///
+    /// 说明：
+    /// - Ralph 会成为进程组 leader，并在组内继续 spawn backend 子进程。
+    /// - E2E timeout 时必须强杀整个进程组，避免后台残留影响下一次测试。
+    async fn terminate_process_group(
+        &self,
+        child: &mut tokio::process::Child,
+        _reason: &str,
+    ) -> Option<std::process::ExitStatus> {
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::{Pid, getpgid};
+            use std::time::Duration;
+
+            if let Some(pid_u32) = child.id() {
+                // 优先通过 OS 查询 pgid（更可靠），失败再回退到 pid。
+                #[allow(clippy::cast_possible_wrap)]
+                let pid = pid_u32 as i32;
+                let pgid = getpgid(Some(Pid::from_raw(pid)))
+                    .map(|p| p.as_raw())
+                    .unwrap_or(pid);
+
+                let _ = kill(Pid::from_raw(-pgid), Signal::SIGTERM);
+
+                // grace period
+                let wait_res = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+                match wait_res {
+                    Ok(Ok(status)) => return Some(status),
+                    _ => {
+                        let _ = kill(Pid::from_raw(-pgid), Signal::SIGKILL);
+                        return tokio::time::timeout(Duration::from_secs(5), child.wait())
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok());
+                    }
+                }
             }
         }
+
+        // Non-unix or missing pid: best-effort kill the child process.
+        let _ = child.start_kill();
+        child.wait().await.ok()
     }
 
     /// Reads the scratchpad file from the workspace.
@@ -351,42 +432,57 @@ impl RalphExecutor {
 
     /// Reads events from .ralph/events.jsonl file.
     ///
-    /// Ralph writes events to JSONL format since commit dfb8f8de.
-    /// Each line is a JSON object with "topic" and "payload" fields.
+    /// 说明：
+    /// - `.ralph/events.jsonl`：Ralph 自己写入的“调试事件日志”（包含内部事件）
+    /// - `.ralph/current-events` 指向的文件：`ralph emit` 追加的“外部事件输入”（可能为空）
+    ///
+    /// E2E 断言主要依赖 `.ralph/events.jsonl`，但这里也会 best-effort 合并外部事件文件，
+    /// 方便需要 `ralph emit` 的场景（以及排障时的完整性）。
     async fn read_events_from_jsonl(&self) -> Vec<EventRecord> {
-        // Find the current events file (uses marker file for timestamped paths)
+        let debug_events_path = self.workspace.join(".ralph/events.jsonl");
         let events_marker = self.workspace.join(".ralph").join("current-events");
-        let fallback_path = self.workspace.join(".ralph/events.jsonl");
 
-        let events_path = match tokio::fs::read_to_string(&events_marker).await {
-            Ok(path) => {
-                let marker_path = self.workspace.join(path.trim());
-                // Fall back to events.jsonl if marker-pointed file doesn't exist
-                if tokio::fs::metadata(&marker_path).await.is_ok() {
-                    marker_path
-                } else {
-                    fallback_path.clone()
-                }
+        let mut paths = vec![debug_events_path.clone()];
+        if let Ok(rel_path) = tokio::fs::read_to_string(&events_marker).await {
+            let marker_path = self.workspace.join(rel_path.trim());
+            if marker_path != debug_events_path && tokio::fs::metadata(&marker_path).await.is_ok() {
+                paths.push(marker_path);
             }
-            Err(_) => fallback_path.clone(), // marker file missing
-        };
+        }
 
         let mut events = Vec::new();
-        if let Ok(content) = tokio::fs::read_to_string(&events_path).await {
-            for line in content.lines().filter(|l| !l.trim().is_empty()) {
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(line)
-                    && let (Some(topic), Some(payload)) = (
-                        event.get("topic").and_then(|v| v.as_str()),
-                        event.get("payload").and_then(|v| v.as_str()),
-                    )
-                {
+        for path in paths {
+            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                for line in content.lines().filter(|l| !l.trim().is_empty()) {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    let Some(topic) = value.get("topic").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+
+                    let payload = match value.get("payload") {
+                        Some(serde_json::Value::String(s)) => s.clone(),
+                        Some(serde_json::Value::Null) | None => String::new(),
+                        Some(other) => {
+                            serde_json::to_string(other).unwrap_or_else(|_| other.to_string())
+                        }
+                    };
+
+                    let source_instance = value
+                        .get("source_instance")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
                     events.push(EventRecord {
                         topic: topic.to_string(),
-                        payload: payload.to_string(),
+                        payload,
+                        source_instance,
                     });
                 }
             }
         }
+
         events
     }
 
@@ -608,6 +704,7 @@ mod tests {
             events: vec![EventRecord {
                 topic: "build.done".to_string(),
                 payload: "success".to_string(),
+                source_instance: None,
             }],
             iterations: 2,
             termination_reason: Some("LOOP_COMPLETE".to_string()),

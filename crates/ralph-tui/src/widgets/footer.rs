@@ -24,6 +24,19 @@ impl Widget for Footer<'_> {
         let inner_area = block.inner(area);
         block.render(area, buf);
 
+        // Search input mode: show prompt even if query is empty.
+        if self.state.search_state.search_mode {
+            let line = Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!("/{}", self.state.search_query),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]);
+            Paragraph::new(line).render(inner_area, buf);
+            return;
+        }
+
         // If search state has an active query, render search display
         if let Some(query) = &self.state.search_state.query {
             let match_info = if self.state.search_state.matches.is_empty() {
@@ -43,21 +56,6 @@ impl Widget for Footer<'_> {
                     Style::default().fg(Color::Yellow),
                 ),
                 Span::styled(match_info, Style::default().fg(Color::Cyan)),
-            ]);
-
-            Paragraph::new(line).render(inner_area, buf);
-            return;
-        }
-
-        // Show search input prompt (legacy fallback for when search_query is used)
-        if !self.state.search_query.is_empty() {
-            let prompt = if self.state.search_forward { "/" } else { "?" };
-            let line = Line::from(vec![
-                Span::raw(" "),
-                Span::styled(
-                    format!("{}{}", prompt, self.state.search_query),
-                    Style::default().fg(Color::Yellow),
-                ),
             ]);
 
             Paragraph::new(line).render(inner_area, buf);

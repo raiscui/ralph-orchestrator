@@ -39,6 +39,115 @@ impl std::fmt::Display for HatId {
     }
 }
 
+// ============================================================================
+// HatInstanceId
+// ============================================================================
+//
+// 说明：
+// - HatId 表示“帽子类型”（planner/builder/tester 等）
+// - HatInstanceId 表示“运行时实例”（例如 writer#1 / writer#explore-a）
+// - 该类型会用于事件路由、日志归因、以及 Supervisor UI 的展示
+//
+// 格式建议：{hat_id}#{instance_key}
+//   - hat_id：对应 HatId（例如 writer）
+//   - instance_key：数字或语义化字符串（例如 1 / explore-a）
+//
+// 注意：这里不强制校验格式（为了兼容历史/外部输入），
+//       但提供便捷的 from_parts 与 split_* 方法。
+
+/// Unique identifier for a hat instance.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HatInstanceId(String);
+
+impl HatInstanceId {
+    /// Creates a new instance ID from a raw string.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Creates a new instance ID from `{hat_id}#{instance_key}` parts.
+    pub fn from_parts(hat_id: impl AsRef<str>, instance_key: impl AsRef<str>) -> Self {
+        Self(format!("{}#{}", hat_id.as_ref(), instance_key.as_ref()))
+    }
+
+    /// Returns the ID as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the hat id part before `#` if present.
+    pub fn split_hat_id(&self) -> Option<&str> {
+        self.0.split_once('#').map(|(hat_id, _)| hat_id)
+    }
+
+    /// Returns the instance key part after `#` if present.
+    pub fn split_instance_key(&self) -> Option<&str> {
+        self.0.split_once('#').map(|(_, key)| key)
+    }
+}
+
+impl From<&str> for HatInstanceId {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for HatInstanceId {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl std::fmt::Display for HatInstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ============================================================================
+// HatInstanceState
+// ============================================================================
+//
+// 说明：
+// - 这是“实例生命周期”的最小枚举，便于日志/事件/展示统一口径。
+// - 状态机实现细节放在 ralph-core（运行时），这里仅定义协议层类型。
+
+/// Lifecycle state for a hat instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HatInstanceState {
+    /// 已创建，但尚未开始执行 job。
+    #[default]
+    Created,
+    /// 正在执行 job（外部 headless CLI 进程运行中）。
+    Running,
+    /// 空闲（当前没有 job，但实例仍存活，可继续接收事件）。
+    Idle,
+    /// 已完成（不再接收新任务，等待回收/归档）。
+    Done,
+    /// 执行失败（可被 Supervisor 决策是否重试/降级/终止）。
+    Failed,
+}
+
+impl HatInstanceState {
+    /// 返回稳定的字符串表示，便于日志输出与 UI 展示。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Running => "running",
+            Self::Idle => "idle",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for HatInstanceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// A hat (persona) that defines agent behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hat {

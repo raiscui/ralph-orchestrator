@@ -34,8 +34,11 @@
    - 每个 job = 一次 headless CLI invocation（你选择的 A）
    - HatInstance 是 tokio actor：负责调度/状态机，不是 LLM 本体
 3. 事件语义
-   - topic 的投递语义必须显式声明：`queue | fanout`（你选择的 C）
-   - `fanout`/`queue` 支持**实例级（HatInstanceId）受众限制**（你选择的 2）
+   - 默认按 `hats.*.triggers` 路由（并行模式下对齐顺序模式 `EventBus` 的直觉）：
+     - `topic -> hats`：fanout 给所有订阅该 topic 的 hats
+     - `hat -> instance`：对每个 hat 只选择 **1 个实例**执行（idle-first）
+   - `parallel.topic_contracts` 是**可选覆盖层**：匹配时可显式声明 `queue | fanout`、audience、queue_selection 等
+   - `fanout`/`queue` 仍支持**实例级（HatInstanceId）受众限制**（例如 `event.target_instance` / audience_override）
 4. UI 与交互
    - Supervisor TUI：实例列表 + 实例详情 + human async chat
    - human chat 不阻塞任何 hat（异步 gate）
@@ -63,7 +66,26 @@
 - **Supervisor**：Rust orchestrator 的并发调度能力 + 上层 TUI（不是固定 hat）。
 - **Capability**：hat 设计者授予“可做什么”（静态 allowlist）。
 - **Permission**：运行时“是否允许做”（动态策略，默认 allow，可切 ask/deny）。
-- **TopicContract**：topic 的显式投递合约（queue/fanout + 受众 selector）。
+- **TopicContract**：topic 的显式投递合约（queue/fanout + 受众 selector），作为**可选覆盖层**（未配置/未命中时走 triggers 默认路由）。
+
+### 3.1 并行路由默认语义（parallel.enabled=true）
+
+当开启并行运行时（`parallel.enabled=true`）时，当前实现的默认行为是：
+
+- **默认路由（triggers）**
+  - `topic -> hats`：fanout 给所有订阅该 topic 的 hats（对齐顺序模式 `EventBus`）
+  - `hat -> instance`：对每个 hat 只选择 **1 个实例**执行（idle-first + 稳定排序）
+- **自动扩缩容（autoscale）**
+  - 触发条件：该 hat 的实例全部处于忙（Running），且全局并发未达上限
+  - 动作：动态创建新实例并投递（实例 key 单调递增且不复用）
+  - 默认值：`max_running_jobs=4`，`dynamic_idle_ttl_secs=30`（dynamic 实例空闲 30 秒自动回收）
+- **workspace override（Event 字段）**
+  - Event 可显式声明 `workspace_strategy=shared|patch|worktree`
+  - 合并规则（同一 job 合并多个事件时）：`worktree > patch > shared`
+- **严格 target 校验**
+  - `event.target` / `event.target_instance` 必须是订阅者（并且 target_instance 必须存在）
+  - 校验失败：拒绝投递并发出 `routing.escalate`（可观测信号）
+  - 控制面 topic（默认 `gate.*`）允许特例绕过（避免控制信号被拓扑阻断）
 
 ---
 
@@ -399,24 +421,38 @@ hats:
             backoff_seconds: [0, 2]
 ```
 
-### 6.2 TopicContracts（显式 queue/fanout + 受众）
+### 6.2 TopicContracts（可选覆盖层：显式 queue/fanout + 受众）
 
 ```yaml
-event_loop:
+parallel:
+  enabled: true
+
+  # Optional safety rails（默认值如下）
+  autoscale:
+    max_running_jobs: 4
+    dynamic_idle_ttl_secs: 30
+
+  # Optional override（匹配时优先生效；未命中则走 triggers 默认路由）
   topic_contracts:
-    build.task:
+    "build.task":
       delivery: queue
       queue_selection: llm
       audience:
         hats: ["writer"]
 
-    build.done:
+    "build.done":
       delivery: fanout
       audience:
         hats: ["reviewer", "tester"]
 ```
 
-> 事件级“实例限制”通过 Event 的 `audience_override.instances` 表达（需要新增字段/类型）。
+> 事件级“实例限制”可通过 `<event ... audience_instances="writer#1,writer#2" require_delivery="true">` 表达（并行模式会解析为 `audience_override`）。
+>
+> 并行模式当前还支持 per-event workspace override：
+>
+> ```text
+> <event topic="build.task" workspace_strategy="worktree">...</event>
+> ```
 
 ---
 
@@ -593,9 +629,16 @@ event_loop:
 
 ---
 
-## 8. Supervisor TUI（高层交互草案）
+## 8. Supervisor TUI（已实现）
 
-> 这里先定义“你要看到什么”，实现上可以复用/改造现有 `ralph-tui` 的 buffer/搜索/滚动逻辑。
+> 这里定义“你要看到什么”，并给出实现落点。
+
+**实现状态：已落地（并行 Supervisor TUI + human async chat + gate 面板）。**
+
+- 并行 runner 入口：`crates/ralph-cli/src/parallel_runner.rs`
+- 并行 TUI 状态与 reducer：`crates/ralph-tui/src/state/parallel.rs`
+- 并行 TUI 交互与键位：`crates/ralph-tui/src/app.rs`
+- 外部事件落盘（human.message / gate.resolve）：`crates/ralph-tui/src/external_event_writer.rs`
 
 布局建议：
 
@@ -605,12 +648,21 @@ event_loop:
   - 显示待处理的 gates（consult/approval，支持超时倒计时）
   - 支持把 human 回复定向到某个 instance（例如 `@writer#2`）
 
-键位建议（仅草案）：
+键位（现状实现）：
 
-- `Tab`：列表/详情/chat 聚焦切换
-- `Enter`：进入实例详情
-- `/`：搜索（沿用现有）
-- `a`：打开 gate 面板（consult/approval；当策略为 ask 时会更常用）
+- `Tab` / `Shift+Tab`：Instances / Output / Chat 三 pane 焦点循环
+- Instances：
+  - `j/k` 或 `↑/↓`：切换选中实例
+  - `Enter` / `→` / `l`：进入 Output（查看选中实例输出）
+- Output：
+  - 滚动/跳转/搜索与串行模式一致（`j/k`、`g/G`、`/`）
+  - `h/l` 或 `←/→`：切换该实例的 job 历史
+- Chat：
+  - `Enter`：提交输入并写外部事件（`human.message` / `gate.resolve`）
+  - `Esc`：清空输入框
+  - 支持 `@writer#2 hello`、`!approve <gate_id>`、`!deny <gate_id>`、`!resolve <gate_id> <text>`
+
+> 说明：gate 面板在并行模式下默认常驻显示，不需要额外的 “打开 gate 面板” 键位。
 
 ### 8.1 “复用现有 TUI” 的具体落点
 

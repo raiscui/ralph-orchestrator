@@ -1,7 +1,7 @@
 //! CLI executor for running prompts through backends.
 //!
 //! Executes prompts via CLI tools with real-time streaming output.
-//! Supports optional execution timeout with graceful SIGTERM termination.
+//! Supports optional execution timeout (stall watchdog) with graceful SIGTERM termination.
 
 use crate::cli_backend::CliBackend;
 #[cfg(test)]
@@ -12,10 +12,17 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use std::io::Write;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
+
+#[derive(Debug, Clone, Copy)]
+enum StreamKind {
+    Stdout,
+    Stderr,
+}
 
 /// Result of a CLI execution.
 #[derive(Debug)]
@@ -27,6 +34,11 @@ pub struct ExecutionResult {
     /// The exit code.
     pub exit_code: Option<i32>,
     /// Whether the execution was terminated due to timeout.
+    ///
+    /// 说明：
+    /// - “超时”这里指的是“检测超时”（stall watchdog）：
+    ///   - 到检测窗口不会立刻终止进程；
+    ///   - 只有当输出在 `output_stale_timeout` 内没有变化，才会判定超时并终止。
     pub timed_out: bool,
 }
 
@@ -45,8 +57,13 @@ impl CliExecutor {
     /// Executes a prompt and streams output to the provided writer.
     ///
     /// Output is streamed line-by-line to the writer while being accumulated
-    /// for the return value. If `timeout` is provided and the execution exceeds
-    /// it, the process receives SIGTERM and the result indicates timeout.
+    /// for the return value.
+    ///
+    /// Timeout 语义：
+    /// - `timeout` 是“检测窗口”（check interval），不是硬超时。
+    /// - 当检测窗口到期时：
+    ///   - 若 `output_stale_timeout` 存在且输出已停滞超过该阈值：判定超时并终止
+    ///   - 否则判定通过，并把检测窗口重新从当前时刻开始计时
     ///
     /// When `verbose` is true, stderr output is also written to the output writer
     /// with a `[stderr]` prefix. When false, stderr is captured but not displayed.
@@ -55,6 +72,7 @@ impl CliExecutor {
         prompt: &str,
         mut output_writer: W,
         timeout: Option<Duration>,
+        output_stale_timeout: Option<Duration>,
         verbose: bool,
     ) -> std::io::Result<ExecutionResult> {
         // Note: _temp_file is kept alive for the duration of this function scope.
@@ -92,97 +110,158 @@ impl CliExecutor {
             drop(stdin); // Close stdin to signal EOF
         }
 
+        let mut output = String::new();
         let mut timed_out = false;
+        let mut last_output_changed_at = Instant::now();
 
-        // Take both stdout and stderr handles upfront to read concurrently
-        // This prevents deadlock when stderr fills its buffer before stdout produces output
+        // 并发读取 stdout/stderr，避免 pipe buffer deadlock，并提供“检测超时”所需的进展信号。
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
-        // Wrap the streaming in a timeout if configured
-        // Read stdout and stderr CONCURRENTLY to avoid pipe buffer deadlock
-        let stream_result = async {
-            // Create futures for reading both streams
-            let stdout_future = async {
-                let mut lines_out = Vec::new();
-                if let Some(stdout) = stdout_handle {
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    while let Some(line) = lines.next_line().await? {
-                        lines_out.push(line);
-                    }
-                }
-                Ok::<_, std::io::Error>(lines_out)
-            };
+        let (line_tx, mut line_rx) = mpsc::channel::<(StreamKind, String)>(256);
 
-            let stderr_future = async {
-                let mut lines_out = Vec::new();
-                if let Some(stderr) = stderr_handle {
-                    let reader = BufReader::new(stderr);
-                    let mut lines = reader.lines();
-                    while let Some(line) = lines.next_line().await? {
-                        lines_out.push(line);
-                    }
-                }
-                Ok::<_, std::io::Error>(lines_out)
-            };
-
-            // Read both streams concurrently to prevent deadlock
-            let (stdout_lines, stderr_lines) = tokio::try_join!(stdout_future, stderr_future)?;
-
-            // Write stdout lines first (main output)
-            for line in &stdout_lines {
-                writeln!(output_writer, "{line}")?;
-            }
-
-            // Write stderr lines (prefixed) only in verbose mode
-            if verbose {
-                for line in &stderr_lines {
-                    writeln!(output_writer, "[stderr] {line}")?;
-                }
-            }
-
-            output_writer.flush()?;
-
-            // Build accumulated output (stdout first, then stderr)
-            let mut accumulated = String::new();
-            for line in stdout_lines {
-                accumulated.push_str(&line);
-                accumulated.push('\n');
-            }
-            for line in stderr_lines {
-                accumulated.push_str("[stderr] ");
-                accumulated.push_str(&line);
-                accumulated.push('\n');
-            }
-
-            Ok::<_, std::io::Error>(accumulated)
-        };
-
-        let accumulated_output = match timeout {
-            Some(duration) => {
-                debug!(timeout_secs = duration.as_secs(), "Executing with timeout");
-                match tokio::time::timeout(duration, stream_result).await {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        // Timeout elapsed - send SIGTERM to the child process
-                        warn!(
-                            timeout_secs = duration.as_secs(),
-                            "Execution timeout reached, sending SIGTERM"
-                        );
-                        timed_out = true;
-                        Self::terminate_child(&mut child)?;
-                        String::new() // Return empty output on timeout
+        // stdout
+        let stdout_tx = line_tx.clone();
+        let stdout_task = tokio::spawn(async move {
+            if let Some(stdout) = stdout_handle {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Some(line) = lines.next_line().await? {
+                    if stdout_tx.send((StreamKind::Stdout, line)).await.is_err() {
+                        break;
                     }
                 }
             }
-            None => stream_result.await?,
-        };
+            Ok::<(), std::io::Error>(())
+        });
+
+        // stderr
+        let stderr_tx = line_tx.clone();
+        let stderr_task = tokio::spawn(async move {
+            if let Some(stderr) = stderr_handle {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Some(line) = lines.next_line().await? {
+                    if stderr_tx.send((StreamKind::Stderr, line)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Ok::<(), std::io::Error>(())
+        });
+
+        // 释放主 sender，让 rx 能在两个 reader 结束后自然关闭
+        drop(line_tx);
+
+        // 收集输出，直到流结束 or 超时触发
+        match timeout.filter(|d| !d.is_zero()) {
+            Some(check_interval) => {
+                debug!(
+                    timeout_secs = check_interval.as_secs(),
+                    stale_timeout_secs = output_stale_timeout.map(|d| d.as_secs()),
+                    "Executing with watchdog timeout"
+                );
+
+                // “检测超时”语义：
+                // - check_interval 到期时不立刻 kill
+                // - 只有当输出停滞超过 `output_stale_timeout` 才判定 timed_out
+                // - 若输出仍在变化：判定通过，并把检测窗口从此刻重新计时
+                let mut next_check_deadline = tokio::time::Instant::now() + check_interval;
+                let sleep = tokio::time::sleep_until(next_check_deadline);
+                tokio::pin!(sleep);
+
+                loop {
+                    tokio::select! {
+                        // 检测窗口到期：根据“输出是否停滞”决定是否超时
+                        _ = &mut sleep => {
+                            match output_stale_timeout {
+                                Some(stale_timeout) => {
+                                    if last_output_changed_at.elapsed() >= stale_timeout {
+                                        warn!(
+                                            timeout_secs = check_interval.as_secs(),
+                                            stale_timeout_secs = stale_timeout.as_secs(),
+                                            "Watchdog timeout reached and output is stale; sending SIGTERM"
+                                        );
+                                        timed_out = true;
+                                        Self::terminate_child(&mut child)?;
+                                        break;
+                                    }
+
+                                    // 检测通过：检测窗口重新计时（从现在开始）
+                                    next_check_deadline = tokio::time::Instant::now() + check_interval;
+                                    sleep.as_mut().reset(next_check_deadline);
+                                }
+                                None => {
+                                    // 兜底：若未提供 stale 阈值，则退化为“硬超时”
+                                    warn!(
+                                        timeout_secs = check_interval.as_secs(),
+                                        "Watchdog timeout reached with no stale threshold; sending SIGTERM"
+                                    );
+                                    timed_out = true;
+                                    Self::terminate_child(&mut child)?;
+                                    break;
+                                }
+                            }
+                        }
+                        line = line_rx.recv() => {
+                            let Some((stream, line)) = line else {
+                                break;
+                            };
+
+                            last_output_changed_at = Instant::now();
+
+                            match stream {
+                                StreamKind::Stdout => {
+                                    writeln!(output_writer, "{line}")?;
+                                    output.push_str(&line);
+                                    output.push('\n');
+                                }
+                                StreamKind::Stderr => {
+                                    if verbose {
+                                        writeln!(output_writer, "[stderr] {line}")?;
+                                    }
+                                    output.push_str("[stderr] ");
+                                    output.push_str(&line);
+                                    output.push('\n');
+                                }
+                            }
+
+                            output_writer.flush()?;
+                        }
+                    }
+                }
+            }
+            None => {
+                while let Some((stream, line)) = line_rx.recv().await {
+                    match stream {
+                        StreamKind::Stdout => {
+                            writeln!(output_writer, "{line}")?;
+                            output.push_str(&line);
+                            output.push('\n');
+                        }
+                        StreamKind::Stderr => {
+                            if verbose {
+                                writeln!(output_writer, "[stderr] {line}")?;
+                            }
+                            output.push_str("[stderr] ");
+                            output.push_str(&line);
+                            output.push('\n');
+                        }
+                    }
+
+                    output_writer.flush()?;
+                }
+            }
+        }
 
         let status = child.wait().await?;
 
+        // 等待读取 task 收尾（best-effort）
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+
         Ok(ExecutionResult {
-            output: accumulated_output,
+            output,
             success: status.success() && !timed_out,
             exit_code: status.code(),
             timed_out,
@@ -226,7 +305,8 @@ impl CliExecutor {
         // Use a sink that discards output for non-streaming execution
         // verbose=false since output is being discarded anyway
         let sink = std::io::sink();
-        self.execute(prompt, sink, timeout, false).await
+        // 注意：capture 模式没有 stdout/stderr 进度展示，默认退化为“硬超时”更可预测。
+        self.execute(prompt, sink, timeout, None, false).await
     }
 }
 
@@ -249,7 +329,7 @@ mod tests {
         let mut output = Vec::new();
 
         let result = executor
-            .execute("hello world", &mut output, None, true)
+            .execute("hello world", &mut output, None, None, true)
             .await
             .unwrap();
 
@@ -309,10 +389,12 @@ mod tests {
 
         let executor = CliExecutor::new(backend);
 
-        // Execute with a 100ms timeout - should trigger timeout
-        let timeout = Some(Duration::from_millis(100));
+        // “检测超时”语义下：check_interval 到期时会先判断“输出是否停滞”。
+        // sleep 不产生任何输出，所以当 stale 阈值足够小，应该在第一次检查时触发超时。
+        let check_interval = Some(Duration::from_millis(100));
+        let stale_timeout = Some(Duration::from_millis(50));
         let result = executor
-            .execute_capture_with_timeout("", timeout)
+            .execute("", std::io::sink(), check_interval, stale_timeout, false)
             .await
             .unwrap();
 
@@ -321,6 +403,38 @@ mod tests {
             !result.success,
             "Timed out execution should not be successful"
         );
+    }
+
+    #[tokio::test]
+    async fn test_execute_watchdog_does_not_timeout_when_output_is_active() {
+        // 使用 sh 产生持续输出，验证“检测窗口到期时，只要输出在 stale 阈值内有变化，就不会超时”
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "for i in 1 2 3 4 5; do echo tick-$i; sleep 0.05; done".to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
+        };
+
+        let executor = CliExecutor::new(backend);
+
+        // 让检测窗口至少触发 1-2 次，同时保证输出频率足够高（< stale 阈值）
+        let check_interval = Some(Duration::from_millis(100));
+        let stale_timeout = Some(Duration::from_millis(150));
+        let result = executor
+            .execute("", std::io::sink(), check_interval, stale_timeout, false)
+            .await
+            .unwrap();
+
+        assert!(
+            !result.timed_out,
+            "Active output should prevent watchdog timeout"
+        );
+        assert!(result.success, "Process should complete successfully");
+        assert!(result.output.contains("tick-1"));
     }
 
     #[tokio::test]

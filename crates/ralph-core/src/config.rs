@@ -3,7 +3,8 @@
 //! This module supports both v1.x flat configuration format and v2.0 nested format.
 //! Users can switch from Python v1.x to Rust v2.0 with zero config changes.
 
-use ralph_proto::Topic;
+pub use ralph_proto::WorkspaceStrategy;
+use ralph_proto::{Topic, TopicContract};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -39,6 +40,12 @@ pub struct RalphConfig {
     /// If a hat uses custom events, define them here for proper behavior injection.
     #[serde(default)]
     pub events: HashMap<String, EventMetadata>,
+
+    /// Parallel hat instance runtime configuration.
+    ///
+    /// 默认关闭（保持现有“单执行者串行”行为）。
+    #[serde(default)]
+    pub parallel: ParallelConfig,
 
     // ─────────────────────────────────────────────────────────────────────────
     // V1 COMPATIBILITY FIELDS (flat format)
@@ -123,6 +130,136 @@ pub struct RalphConfig {
     pub tasks: TasksConfig,
 }
 
+// ============================================================================
+// Parallel Hat Instances (experimental)
+// ============================================================================
+
+fn default_gate_timeout_secs() -> u64 {
+    60
+}
+
+fn default_worktree_base_dir() -> String {
+    ".ralph/worktrees".to_string()
+}
+
+/// Permission mode for orchestrator-managed actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// 允许直接执行（默认）。
+    #[default]
+    Allow,
+    /// 需要 human gate 确认（异步）。
+    Ask,
+    /// 禁止执行。
+    Deny,
+}
+
+/// Permission policy configuration (high-risk actions).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PermissionsConfig {
+    /// 创建/切换到 worktree 的权限。
+    #[serde(default)]
+    pub worktree: PermissionMode,
+
+    /// 执行 workspace hooks（on_acquire/on_release）的权限。
+    #[serde(default)]
+    pub hooks: PermissionMode,
+}
+
+/// Human gate configuration defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateConfig {
+    /// 默认超时秒数（0 表示不超时）。
+    #[serde(default = "default_gate_timeout_secs")]
+    pub default_timeout_secs: u64,
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_secs: default_gate_timeout_secs(),
+        }
+    }
+}
+
+/// Workspace runtime configuration for parallel mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRuntimeConfig {
+    /// worktree 的落盘目录（相对仓库根目录）。
+    #[serde(default = "default_worktree_base_dir")]
+    pub worktree_base_dir: String,
+}
+
+impl Default for WorkspaceRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            worktree_base_dir: default_worktree_base_dir(),
+        }
+    }
+}
+
+fn default_parallel_max_running_jobs() -> usize {
+    4
+}
+
+fn default_parallel_dynamic_idle_ttl_secs() -> u64 {
+    30
+}
+
+/// Autoscale configuration for parallel mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParallelAutoscaleConfig {
+    /// 全局并发上限：限制同时 Running 的 job 数量（安全刹车）。
+    #[serde(default = "default_parallel_max_running_jobs")]
+    pub max_running_jobs: usize,
+
+    /// 动态实例 idle 超过该秒数后自动回收。
+    #[serde(default = "default_parallel_dynamic_idle_ttl_secs")]
+    pub dynamic_idle_ttl_secs: u64,
+}
+
+impl Default for ParallelAutoscaleConfig {
+    fn default() -> Self {
+        Self {
+            max_running_jobs: default_parallel_max_running_jobs(),
+            dynamic_idle_ttl_secs: default_parallel_dynamic_idle_ttl_secs(),
+        }
+    }
+}
+
+/// Parallel runtime configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ParallelConfig {
+    /// 是否启用并行 HatInstance 运行时。
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Autoscale（默认开启，含全局 cap 与 idle 回收）。
+    #[serde(default)]
+    pub autoscale: ParallelAutoscaleConfig,
+
+    /// Topic contracts（按 topic pattern 匹配）。
+    ///
+    /// 说明：
+    /// - key 支持 `*` 通配符分段匹配（例如 `build.*`）
+    /// - value 定义 delivery/queue_selection/missing_policy 等路由语义
+    #[serde(default)]
+    pub topic_contracts: HashMap<String, TopicContract>,
+
+    /// Human gate 默认配置。
+    #[serde(default)]
+    pub gate: GateConfig,
+
+    /// Workspace 运行时配置。
+    #[serde(default)]
+    pub workspace: WorkspaceRuntimeConfig,
+
+    /// 权限策略（高风险操作）。
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -136,6 +273,7 @@ impl Default for RalphConfig {
             core: CoreConfig::default(),
             hats: HashMap::new(),
             events: HashMap::new(),
+            parallel: ParallelConfig::default(),
             // V1 compatibility fields
             agent: None,
             agent_priority: vec![],
@@ -191,9 +329,24 @@ pub struct AdaptersConfig {
 /// Per-adapter settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterSettings {
-    /// CLI execution timeout in seconds.
+    /// 执行超时“检测窗口”（秒）。
+    ///
+    /// 说明：
+    /// - 这是“检测超时”，不是“硬超时”：
+    ///   - 当窗口到期时，并不会立刻终止进程；
+    ///   - 会再判断输出是否在 `output_stale_timeout_secs` 内持续变化：
+    ///     - 若输出已停滞超过阈值：判定超时并终止
+    ///     - 若输出仍在变化：判定通过，并把检测窗口重新计时
+    /// - 这么做的目的：允许长任务持续运行，只要它确实在产出进展信号，同时避免无人值守卡死。
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+
+    /// 输出停滞阈值（秒）。
+    ///
+    /// 当 `timeout` 的检测窗口到期时，如果 stdout/stderr 输出在该阈值内没有任何变化，
+    /// 则判定进程已“卡住”，会被终止。
+    #[serde(default = "default_output_stale_timeout_secs")]
+    pub output_stale_timeout_secs: u64,
 
     /// Include in auto-detection.
     #[serde(default = "default_true")]
@@ -205,13 +358,18 @@ pub struct AdapterSettings {
 }
 
 fn default_timeout() -> u64 {
-    300 // 5 minutes
+    3600 // 1 hour
+}
+
+fn default_output_stale_timeout_secs() -> u64 {
+    1800 // 30 minutes
 }
 
 impl Default for AdapterSettings {
     fn default() -> Self {
         Self {
             timeout: default_timeout(),
+            output_stale_timeout_secs: default_output_stale_timeout_secs(),
             enabled: true,
             tool_permissions: None,
         }
@@ -417,9 +575,12 @@ impl RalphConfig {
             }
         }
 
-        // Check for ambiguous routing: each trigger topic must map to exactly one hat
-        // Per spec: "Every trigger maps to exactly one hat | No ambiguous routing"
-        if !self.hats.is_empty() {
+        // Check for ambiguous routing: each trigger topic must map to exactly one hat.
+        //
+        // 说明：
+        // - 串行 hats（默认）下：同一 trigger 只能由一个 hat 处理，否则 orchestrator 无法确定路由。
+        // - 并行模式（parallel.enabled=true）下：允许多个 hat 共享同一 trigger（例如 build.task fanout）。
+        if !self.parallel.enabled && !self.hats.is_empty() {
             let mut trigger_to_hat: HashMap<&str, &str> = HashMap::new();
             for (hat_id, hat_config) in &self.hats {
                 for trigger in &hat_config.triggers {
@@ -462,6 +623,14 @@ impl RalphConfig {
             "kiro" => &self.adapters.kiro,
             "codex" => &self.adapters.codex,
             "amp" => &self.adapters.amp,
+            // 特殊规则：当 cli.backend=custom 时，按实际 command 推导 timeout profile。
+            //
+            // 目前我们只做最小映射：command=codex -> adapters.codex。
+            // 其余 command 仍回退 claude（保持历史行为，避免误判未知命令）。
+            "custom" => match self.cli.command.as_deref() {
+                Some("codex") => &self.adapters.codex,
+                _ => &self.adapters.claude,
+            },
             _ => &self.adapters.claude, // Default fallback
         }
     }
@@ -962,6 +1131,34 @@ impl HatBackend {
     }
 }
 
+fn default_hat_instances() -> usize {
+    1
+}
+
+/// Workspace hooks configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkspaceHooksConfig {
+    /// Acquire hook（例如：submodules 初始化、依赖预热）。
+    #[serde(default)]
+    pub on_acquire: Option<String>,
+
+    /// Release hook（例如：清理临时文件、汇总结果）。
+    #[serde(default)]
+    pub on_release: Option<String>,
+}
+
+/// Workspace configuration for a hat.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HatWorkspaceConfig {
+    /// 默认 workspace 策略。
+    #[serde(default)]
+    pub strategy: WorkspaceStrategy,
+
+    /// 可选 hooks（on_acquire/on_release）。
+    #[serde(default)]
+    pub hooks: WorkspaceHooksConfig,
+}
+
 /// Configuration for a single hat.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HatConfig {
@@ -989,6 +1186,15 @@ pub struct HatConfig {
     #[serde(default)]
     pub backend: Option<HatBackend>,
 
+    /// 单次 headless job 的超时（秒），仅在并行模式下生效。
+    ///
+    /// 语义：
+    /// - 未设置：继承 `adapters.<backend>.timeout`（backend 按 hat.backend 或 cli.backend 推导）
+    /// - 设为 `0`：显式禁用 job timeout（None）
+    /// - 设为 `>0`：使用该秒数
+    #[serde(default)]
+    pub job_timeout_secs: Option<u64>,
+
     /// Default event to publish if hat forgets to write an event.
     #[serde(default)]
     pub default_publishes: Option<String>,
@@ -998,6 +1204,18 @@ pub struct HatConfig {
     /// When the limit is exceeded, the orchestrator publishes `<hat_id>.exhausted`
     /// instead of activating the hat again.
     pub max_activations: Option<u32>,
+
+    /// 同一种 hat 的实例数（并行模式下生效）。
+    #[serde(default = "default_hat_instances")]
+    pub instances: usize,
+
+    /// 能力白名单（并行模式下用于 workspace/权限校验）。
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+
+    /// Workspace 策略与 hooks（并行模式下用于 job 隔离与自愈）。
+    #[serde(default)]
+    pub workspace: HatWorkspaceConfig,
 }
 
 impl HatConfig {
@@ -1211,6 +1429,29 @@ adapters:
     }
 
     #[test]
+    fn test_adapter_settings_custom_command_codex_maps_to_codex() {
+        // 当 cli.backend=custom 且 command=codex 时，应当使用 adapters.codex 的 timeout 配置。
+        let yaml = r#"
+cli:
+  backend: "custom"
+  command: "codex"
+  prompt_mode: "arg"
+adapters:
+  claude:
+    timeout: 111
+    output_stale_timeout_secs: 11
+  codex:
+    timeout: 222
+    output_stale_timeout_secs: 22
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let settings = config.adapter_settings(&config.cli.backend);
+        assert_eq!(settings.timeout, 222);
+        assert_eq!(settings.output_stale_timeout_secs, 22);
+    }
+
+    #[test]
     fn test_unknown_fields_ignored() {
         // Unknown fields should be silently ignored (forward compatibility)
         let yaml = r#"
@@ -1247,6 +1488,32 @@ hats:
             matches!(&err, ConfigError::AmbiguousRouting { trigger, .. } if trigger == "build.done"),
             "Expected AmbiguousRouting error for 'build.done', got: {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn test_ambiguous_routing_allowed_in_parallel_mode() {
+        // 并行模式下允许多个 hat 共享同一 trigger（例如 fanout）。
+        let yaml = r#"
+parallel:
+  enabled: true
+hats:
+  writer:
+    name: "Writer"
+    description: "Writes code"
+    triggers: ["build.task"]
+  tester:
+    name: "Tester"
+    description: "Runs tests"
+    triggers: ["build.task"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "Expected ambiguous triggers to be allowed in parallel mode, got: {:?}",
+            result.unwrap_err()
         );
     }
 

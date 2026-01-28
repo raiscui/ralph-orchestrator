@@ -16,6 +16,25 @@
 - **并行不可落地**：没有多执行器/多实例的生命周期与资源隔离模型，无法把“并行”做成一等能力。
 - **可靠性护栏必须保留**：Ralph 的核心价值在于可回放（replay）、可观测（events/diagnostics）、以及用 backpressure 拒绝低质量工作流。
 
+### 现有执行路径入口点（需要替换/扩展）
+
+> 目标：把“并行 HatInstance”尽量收敛成一层独立运行时（runtime），避免把 orchestrator 变成平台。
+
+- **CLI 主循环是“单执行者串行”**：
+  - `crates/ralph-cli/src/loop_runner.rs` 的 `run_loop_impl` 每轮只执行一个 prompt（单 backend / 单 executor）。
+- **multi-hat 现状是“单帽子协调器”**：
+  - `crates/ralph-core/src/event_loop/mod.rs` 的 `EventLoop::next_hat` 在 multi-hat 场景固定返回 `ralph`。
+  - `EventLoop::build_prompt` 在 multi-hat 场景会收集所有 hat 的 pending events，让 `HatlessRalph` 生成一个“总 prompt”。
+- **EventBus 路由粒度仍是 HatId**：
+  - `crates/ralph-proto/src/event_bus.rs` 只维护 `HatId -> pending events`，无法表达 `HatInstanceId` 的 inbox/outbox。
+- **执行器默认走 PTY**：
+  - `crates/ralph-adapters` 当前主要依赖 `PtyExecutor` 获取流式输出；并行 headless 需要一个“多进程 + pipes”runner。
+
+> 最小改动策略（保持 orchestrator thin）：
+>
+> - 在 `ralph-core` 引入并行运行时（HatInstance actor + Router + Gate + Workspace），让它对上只暴露少量 API。
+> - `ralph-cli` 仅负责：初始化配置、选择运行模式（旧串行 / 新并行）、展示聚合输出与把 human 输入转成事件。
+
 ### 约束与干系人
 
 - 约束：

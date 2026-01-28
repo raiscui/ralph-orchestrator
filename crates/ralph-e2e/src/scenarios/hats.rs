@@ -1153,10 +1153,12 @@ mod tests {
                 EventRecord {
                     topic: "build.task".to_string(),
                     payload: "Task: Create function".to_string(),
+                    source_instance: None,
                 },
                 EventRecord {
                     topic: "build.done".to_string(),
                     payload: "tests: pass".to_string(),
+                    source_instance: None,
                 },
             ],
             iterations: 2,
@@ -1239,6 +1241,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "other.event".to_string(),
             payload: "not build".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.build_event_emitted(&result);
         assert!(!assertion.passed, "Should fail when no build events");
@@ -1302,14 +1305,17 @@ mod tests {
             EventRecord {
                 topic: "plan.request".to_string(),
                 payload: "req".to_string(),
+                source_instance: None,
             },
             EventRecord {
                 topic: "build.task".to_string(),
                 payload: "task".to_string(),
+                source_instance: None,
             },
             EventRecord {
                 topic: "build.done".to_string(),
                 payload: "done".to_string(),
+                source_instance: None,
             },
         ];
         let assertion = scenario.workflow_progressed(&result);
@@ -1323,6 +1329,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "unrelated.event".to_string(),
             payload: "x".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.workflow_progressed(&result);
         assert!(!assertion.passed, "Should fail with no workflow events");
@@ -1461,6 +1468,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "test.done".to_string(),
             payload: "passed".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.correct_hat_responded(&result);
         assert!(assertion.passed, "Should pass when tester responds");
@@ -1474,6 +1482,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "test.done".to_string(),
             payload: "ok".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.wrong_hat_not_triggered(&result);
         assert!(assertion.passed, "Should pass when deployer not triggered");
@@ -1487,6 +1496,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "deploy.done".to_string(),
             payload: "deployed".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.wrong_hat_not_triggered(&result);
         assert!(
@@ -1565,6 +1575,7 @@ mod tests {
         result.events = vec![EventRecord {
             topic: "special.done".to_string(),
             payload: "complete".to_string(),
+            source_instance: None,
         }];
         let assertion = scenario.hat_executed(&result);
         assert!(assertion.passed, "Should pass when specialist hat executes");

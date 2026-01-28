@@ -284,6 +284,76 @@ With hats, Ralph publishes a starting event, which triggers the matching hat. Th
 
 > **Tip:** Use `ralph init --preset <name>` to get pre-configured hat workflows. See [Presets](#presets) for ready-made patterns like TDD, spec-driven development, and more.
 
+### Experimental: Parallel Hat Instances (Headless)
+
+Ralph also supports an **experimental** parallel runtime that can run multiple hats (and multiple instances of the same hat) concurrently as **headless CLI invocations**.
+
+**Core routing semantics (when enabled):**
+- Default routing is based on `hats.*.triggers`:
+  - `topic -> hats`: fanout to **all** hats that subscribe to the topic (like sequential `EventBus`)
+  - `hat -> instance`: for each hat, queue to exactly **one** instance (idle-first)
+- `parallel.topic_contracts` is **optional** and acts as an override layer:
+  - If a contract matches `event.topic`, it controls delivery/audience/queue selection
+  - Otherwise, triggers-based routing applies
+
+**Safety rails (defaults):**
+- Global running-jobs cap: `parallel.autoscale.max_running_jobs = 4`
+- Dynamic instances idle TTL: `parallel.autoscale.dynamic_idle_ttl_secs = 30`
+- Strict targeting:
+  - `event.target` / `event.target_instance` must be a subscriber (and instance must exist)
+  - Otherwise the event is rejected and `routing.escalate` is emitted
+
+The UI currently runs in **log-only mode** (no parallel TUI yet). Output is attributed per instance (e.g. `[writer#1:out] ...`).
+
+Minimal example:
+
+```yaml
+parallel:
+  enabled: true
+
+  # Optional safety rails (defaults shown)
+  autoscale:
+    max_running_jobs: 4
+    dynamic_idle_ttl_secs: 30
+
+  gate:
+    default_timeout_secs: 60
+
+  workspace:
+    worktree_base_dir: ".ralph/worktrees"
+
+  permissions:
+    worktree: ask
+    hooks: ask
+
+hats:
+  writer:
+    name: "Writer"
+    description: "Writes code changes."
+    triggers: ["build.task"]
+    instances: 2
+    capabilities: ["workspace.worktree", "workspace.hooks"]
+    workspace:
+      strategy: worktree
+      hooks:
+        on_acquire: "git submodule update --init --recursive"
+        on_release: "cargo test"
+
+  tester:
+    name: "Tester"
+    description: "Runs tests and reports results."
+    triggers: ["build.task"]
+    instances: 1
+```
+
+> If you need explicit delivery/audience rules, add `parallel.topic_contracts` (optional). Matching contracts take precedence over triggers.
+
+**Human async input (minimal):**
+- Send an external event while `ralph run` is running:
+  - `ralph emit --target-instance writer#1 "human.directive" "please re-run tests"`
+- Permission prompts use the gate protocol (`gate.request` / `gate.resolve`), and can be answered via:
+  - `ralph emit --target-instance writer#1 -j "gate.resolve" "{\"gate_id\":\"...\",\"decision\":true}"`
+
 ### Full Configuration Reference
 
 ```yaml

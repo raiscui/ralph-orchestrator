@@ -4,12 +4,12 @@
 //! enabling deterministic snapshot testing of state transitions.
 
 use ralph_proto::Event;
-use ralph_tui::state::TuiState;
-use ralph_tui::widgets::{content::ContentPane, footer, header};
+use ralph_tui::state::{TuiMode, TuiState, TuiUpdate};
+use ralph_tui::widgets::{content::ContentPane, footer, header, instances};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -33,6 +33,17 @@ impl TuiTestHarness {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(TuiState::new())),
+            events: Vec::new(),
+            event_cursor: 0,
+            terminal_width: 100,
+            terminal_height: 30,
+        }
+    }
+
+    /// Creates a new harness for parallel mode (Supervisor TUI).
+    pub fn new_parallel() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(TuiState::new_parallel())),
             events: Vec::new(),
             event_cursor: 0,
             terminal_width: 100,
@@ -208,6 +219,13 @@ impl TuiTestHarness {
         &self.state
     }
 
+    /// Applies a parallel-mode update (observer → channel → reducer).
+    ///
+    /// 注意：该方法只在 `TuiState::new_parallel()` 创建的 harness 上有意义。
+    pub fn apply_parallel_update(&mut self, update: TuiUpdate) {
+        self.state.lock().unwrap().apply_update(update);
+    }
+
     /// Get configured terminal width.
     #[allow(dead_code)]
     pub fn width(&self) -> u16 {
@@ -276,10 +294,153 @@ impl TuiTestHarness {
                 // Render header
                 f.render_widget(header::render(&state, chunks[0].width), chunks[0]);
 
-                // Render content (if we have iterations)
-                if let Some(buffer) = state.current_iteration() {
-                    let content = ContentPane::new(buffer);
-                    f.render_widget(content, chunks[1]);
+                // Render content (serial vs parallel)
+                match state.mode {
+                    TuiMode::Serial => {
+                        if let Some(buffer) = state.current_iteration() {
+                            let content = ContentPane::new(buffer);
+                            f.render_widget(content, chunks[1]);
+                        }
+                    }
+                    TuiMode::Parallel => {
+                        let content_area = chunks[1];
+
+                        // 布局：上（实例列表 + 输出） / 下（chat + gate）
+                        let vertical = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([
+                                Constraint::Min(0),    // main
+                                Constraint::Length(7), // bottom panel
+                            ])
+                            .split(content_area);
+
+                        let main_area = vertical[0];
+                        let bottom_area = vertical[1];
+
+                        let horizontal = Layout::default()
+                            .direction(Direction::Horizontal)
+                            .constraints([
+                                Constraint::Length(30), // instances
+                                Constraint::Min(0),     // output
+                            ])
+                            .split(main_area);
+
+                        // 左：实例列表
+                        f.render_widget(instances::render(&state.parallel), horizontal[0]);
+
+                        // 右：输出（选中实例的当前 job）
+                        let output_area = horizontal[1];
+                        let block = ratatui::widgets::Block::default()
+                            .title("Output")
+                            .borders(ratatui::widgets::Borders::ALL);
+                        let inner = block.inner(output_area);
+                        f.render_widget(block, output_area);
+
+                        if let Some(instance) = state.parallel.selected_instance()
+                            && let Some(buffer) = instance.current_job_buffer()
+                        {
+                            let mut content_widget = ContentPane::new(buffer);
+                            if let Some(query) = &state.search_state.query {
+                                content_widget = content_widget.with_search(query);
+                            }
+                            f.render_widget(content_widget, inner);
+                        }
+
+                        // 下：chat/gates（尽量贴近真实渲染，便于回归）
+                        let bottom_block = ratatui::widgets::Block::default()
+                            .title("Chat / Gates")
+                            .borders(ratatui::widgets::Borders::ALL);
+                        let bottom_inner = bottom_block.inner(bottom_area);
+                        f.render_widget(bottom_block, bottom_area);
+
+                        if bottom_inner.width > 0 && bottom_inner.height > 0 {
+                            let inner_chunks = Layout::default()
+                                .direction(Direction::Vertical)
+                                .constraints([
+                                    Constraint::Length(1), // input
+                                    Constraint::Length(1), // status
+                                    Constraint::Min(0),    // gates
+                                ])
+                                .split(bottom_inner);
+
+                            let input_area = inner_chunks[0];
+                            let status_area = inner_chunks[1];
+                            let gates_area = inner_chunks[2];
+
+                            // 输入行（快照用：不渲染颜色，只验证文字/布局）
+                            let input_text = if state.parallel.chat_input.is_empty() {
+                                Span::raw("Type: @instance msg | !approve/!deny/!resolve ...")
+                            } else {
+                                Span::raw(state.parallel.chat_input.clone())
+                            };
+                            let input_line =
+                                Line::from(vec![Span::raw(" "), Span::raw("> "), input_text]);
+                            f.render_widget(
+                                ratatui::widgets::Paragraph::new(input_line),
+                                input_area,
+                            );
+
+                            // 状态行
+                            let status = state
+                                .parallel
+                                .chat_status
+                                .clone()
+                                .unwrap_or_else(|| "ready".to_string());
+                            let status_line = Line::from(vec![Span::raw(" "), Span::raw(status)]);
+                            f.render_widget(
+                                ratatui::widgets::Paragraph::new(status_line),
+                                status_area,
+                            );
+
+                            // gate 列表（最多渲染可见高度）
+                            let mut gate_lines: Vec<Line> = Vec::new();
+                            let max_lines = gates_area.height as usize;
+                            for gate_id in state.parallel.gate_order.iter().rev() {
+                                if gate_lines.len() >= max_lines {
+                                    break;
+                                }
+                                let Some(g) = state.parallel.gates.get(gate_id) else {
+                                    continue;
+                                };
+
+                                let kind = match g.request.kind {
+                                    ralph_proto::GateKind::Consult => "consult",
+                                    ralph_proto::GateKind::Approval => "approval",
+                                };
+
+                                let status = match g.status_at(std::time::Instant::now()) {
+                                    ralph_tui::state::GateStatus::Resolved => {
+                                        "resolved".to_string()
+                                    }
+                                    ralph_tui::state::GateStatus::Timeout => "timeout".to_string(),
+                                    ralph_tui::state::GateStatus::Waiting { remaining_seconds } => {
+                                        format!("T-{remaining_seconds}s")
+                                    }
+                                    ralph_tui::state::GateStatus::Open => "open".to_string(),
+                                };
+
+                                gate_lines.push(Line::from(vec![
+                                    Span::raw(" "),
+                                    Span::raw(format!("[{kind}] ")),
+                                    Span::raw(gate_id),
+                                    Span::raw(" "),
+                                    Span::raw(status),
+                                    Span::raw(" "),
+                                    Span::raw(g.request.requested_by.to_string()),
+                                ]));
+                            }
+
+                            if gate_lines.is_empty() {
+                                gate_lines
+                                    .push(Line::from(vec![Span::raw(" "), Span::raw("No gates")]));
+                            }
+
+                            f.render_widget(
+                                ratatui::widgets::Paragraph::new(gate_lines),
+                                gates_area,
+                            );
+                        }
+                    }
                 }
 
                 // Render footer

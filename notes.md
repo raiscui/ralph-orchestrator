@@ -78,6 +78,13 @@
   - 例如它提出“需要开一个探索性 writer#2”、“需要升级到 worktree”、“需要 human 批准”
   - 真正的并发与隔离仍由 Orchestrator 执行（避免把并发复杂度塞给 LLM）
 
+## 补充：TUI 视觉回归工具（freeze）的安装坑（2026-01-28）
+
+- `docs/advanced/testing.md` 与 `.claude/skills/tui-validate/SKILL.md` 推荐 `brew install charmbracelet/tap/freeze`。
+- 但如果你的 shell 环境里设置了 `http_proxy/all_proxy` 指向本机代理（例如 `127.0.0.1:7897`），并且当前代理未启动，brew 的 `git clone` 会直接失败。
+- 一个可行的替代方案是用 Go 安装（更容易走 Go proxy）：
+  - `GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn go install github.com/charmbracelet/freeze@latest`
+
 ### 事件投递语义的决定（2026-01-25）
 - 你选择：**C（必须显式声明）** —— topic/事件必须明确是 `queue` 还是 `fanout`。
 - 你补充：对 fanout（广播）语义，希望能“针对某一事件，指定/限制哪些 hat 可以拿走”。
@@ -235,3 +242,284 @@
 - 当前 change `parallel-hat-instances` 已满足：
   - `proposal.md`、`design.md`、`specs/**/*.md`、`tasks.md` 全部 done
 - 进入实现时，应优先把 `spec.md` 的每条 Requirement/Scenario 映射为可验证的测试或 smoke fixture。
+
+## 2026-01-27 03:10:00 +0800｜E2E 测试流程调研：ralph-e2e + parallel 模式
+
+### 现有 E2E Harness（`crates/ralph-e2e`）
+- 入口命令：
+  - `cargo run -p ralph-e2e -- --list`：列出所有场景（按 Tier 分组）
+  - `cargo run -p ralph-e2e -- claude|kiro|opencode`：跑某个后端全套场景
+  - `cargo run -p ralph-e2e -- claude --filter <pattern>`：只跑匹配 pattern 的场景（适合回归某个功能点）
+  - `--keep-workspace`：保留 `.e2e-tests/<scenario>/` 方便排障
+  - `--skip-analysis`：跳过 meta-Ralph 分析，加速
+- `RalphExecutor` 默认会：
+  - 强制开启 `RALPH_DIAGNOSTICS=1`，让每次 E2E 都自动产出诊断日志
+  - 设置 `RALPH_WORKSPACE_ROOT=<workspace>`，避免路径解析错误
+  - 目前还会设置 `CLAUDE_MODEL=haiku`（降低成本/加速）
+
+### parallel 模式关键点（影响 E2E 设计）
+- 开关：`parallel.enabled: true`
+- 硬门槛：`parallel.topic_contracts` 必须显式配置，且必须能解析 `task.start`/`task.resume`（Supervisor 启动时会校验）
+- 并行 runner 目前是“日志输出模式”（无 parallel TUI）：
+  - 启动会打印 `[supervisor] instances ...`
+  - 每行输出会带归因：`[writer#1:out] ...` / `[writer#1:err] ...`
+  - 状态变更会打印：`[writer#1:state] running|idle|failed|done`
+
+### E2E 场景设计原则（针对并行）
+- 不走 human gate：E2E 无法交互回答 gate，因此场景配置要避免触发 `gate.request`
+- 通过 topic_contracts 控制“谁收到什么事件”：
+  - `task.*` 建议只投递给 `ralph#1`，避免所有实例在启动时被无意义唤醒
+  - `build.task` 用 `fanout + audience.hats` 同时投递给 `writer`/`tester`（以及 writer 的多实例）
+  - `build.done` / `test.done` 回送给 `ralph#1`，让 `ralph#1` 观察结果后输出 `LOOP_COMPLETE`
+
+## 2026-01-27 11:08:00 +0800｜并行 E2E 流程收敛：只跑 Codex + 强制退出 + 事件归因
+
+### 关键结论
+- `ParallelHatInstancesScenario` 目前 **只支持 Codex**：文档里用 `-- claude` 会导致场景被过滤掉（跑空）。
+- E2E harness 需要解析 `.ralph/events*.jsonl` 的 `source_instance`：
+  - 并行模式下这是“事件归因”的关键字段（谁发的 build.done/test.done）。
+  - 没有它，report/断言只能做 topic 级别判断，很难定位卡在哪个实例。
+- E2E 超时必须能“杀干净”：
+  - `ralph run` 会 spawn 多个 backend 子进程。
+  - 只 kill 父进程会留下残留，影响下一次 E2E（端口/认证/进程数/资源）。
+  - 因此 timeout 时要 kill **进程组**，并且 pgid 必须以 OS 查询为准（`getpgid`），避免误杀/漏杀。
+
+### 已做的落地（对应代码点）
+- `crates/ralph-e2e/src/executor.rs`：
+  - 解析事件时把 `source_instance` 写入 `EventRecord`（可选字段）。
+  - 超时强杀：先查 `getpgid(pid)`，再 `SIGTERM -> grace -> SIGKILL` 杀整组。
+- `crates/ralph-cli/src/display.rs`：
+  - 更新单测里构造的 `EventRecord`，补齐 `source_instance: None`，避免编译失败。
+- 文档：
+  - `specs/parallel-hat-instances/e2e.md`、`docs/advanced/testing.md`：并行场景命令改为 `-- codex`，并补充 `source_instance` 作为排障信号。
+
+## 2026-01-27 20:40:00 +0800｜四文件摘要（用于决定是否提取 skill）
+- 任务目标（task_plan.md）：
+  - 为 `parallel-hat-instances` 补齐可执行的 E2E 测试流程与可靠性护栏。
+  - 收尾包含：只跑 Codex、timeout 强制退出、events 解析 `source_instance` 等。
+- 关键决定（task_plan.md）：
+  - E2E 超时必须“杀干净”，避免后台残留子进程影响下一轮。
+  - E2E 需要解析 `source_instance`，把“实例归因”从日志前缀升级为结构化字段。
+- 关键发现（notes.md）：
+  - `ParallelHatInstancesScenario` 当前只支持 `codex`（用 `-- claude` 会跑空场景）。
+  - 并行模式下排障核心信号之一是 `events.jsonl` 的 `source_instance`。
+- 实际变更（WORKLOG.md）：
+  - 新增并行 Tier 8 E2E 场景与配套文档。
+  - 强化 `RalphExecutor`：timeout 时按进程组强杀，并解析 `source_instance`。
+- 错误与根因（ERRORFIX.md，如有）：
+  - 进程组强杀最初尝试 `pre_exec`，但仓库 `forbid(unsafe_code)` 导致不可用，需改用安全 API。
+  - Mermaid `graph` label 因括号等字符触发 Parse error，需要改为带引号的 label。
+- 可复用点候选（1-3 条）：
+  1. Rust E2E/集成测试中，为防止 timeout 后残留子进程：用“独立进程组 + SIGTERM→SIGKILL”实现硬退出（避免 `unsafe pre_exec`）。
+  2. Mermaid flowchart 节点 label 触发 Parse error 时，优先改为带引号的安全写法：`Node["text (x)"]`。
+- 是否提取/更新 skill：是（理由：两条都属于不明显且已验证的踩坑点，能直接复用到后续类似工作）。
+
+## 2026-01-27 13:01:41 +0800｜parallel-hat-instances E2E（Codex）二次排障补记
+
+### 现象
+- E2E 能看到实例启动与输出归因前缀（writer#1/writer#2/tester#1）。
+- 但 `.ralph/events.jsonl` 长时间只有 `build.task`，没有 `build.done/test.done`，导致场景断言失败。
+
+### 根因定位（关键证据）
+- 在并行模式下，custom hat 的 prompt 之前会被 InstructionBuilder 的“重型模板”包裹：
+  - 模板包含 `### 2. VERIFY`：强制要求“跑 tests/验证”。
+  - writer/tester 在收到 `build.task` 后，会优先去 `ls`、找 Cargo.toml、尝试 `cargo test`，导致迟迟不发 `<event topic=\"build.done\">`/`<event topic=\"test.done\">`。
+- 这对 E2E 来说是“反向 backpressure”：
+  - 我们只想验证“事件解析 + fanout + 归因 + 落盘”，不应该让模型去做昂贵且不确定的测试工作。
+
+### 修复要点
+- 并行模式 prompt 组装：
+  - 当 hat 在配置里显式提供了 `instructions` 时，优先直接使用原文，不再套 InstructionBuilder 模板。
+  - 这样 writer/tester 会按 E2E 指令立刻发事件，避免被 VERIFY 段落带偏。
+- E2E 场景指令强化：
+  - writer/tester instructions 增补 “IMPORTANT (E2E harness)：禁止跑 tests/命令/改文件，必须立即输出事件”。
+- 最终验证：
+  - `bash scripts/run-parallel-hat-instances-codex.sh` 通过，`events.jsonl` 中可见 `build.done/test.done` 且带 `source_instance`。
+
+## 2026-01-27 14:25:14 +0800｜job-level timeout + completion drain（并行模式补记）
+
+### 新增能力：job-level timeout（支持 per-hat override）
+- 配置入口：`hats.<hat>.job_timeout_secs`
+  - 未设置：继承 `adapters.<backend>.timeout`
+  - `0`：禁用 timeout（None）
+  - `>0`：使用该秒数
+- 解析与注入位置：
+  - `ParallelSupervisor` 在 spawn 实例时计算每个 hat 的 timeout，并注入到 HatInstance actor
+  - HatInstance 在构造 `HatJob` 时写入 `HatJob.timeout`
+  - CLI executor 使用 `HatJob.timeout` 做 tokio 级别的超时终止
+
+### 新增护栏：completion promise 改为“软退出信号”
+- 关键点：不能在检测到 completion promise 时立刻 break
+  - 否则同一轮输出里解析到的事件可能还没来得及路由，下游实例就永远收不到
+- 当前策略：
+  - 先路由事件，再进入 drain 窗口（min 0.5s / max 60s）
+  - drain 期间等待并行实例把最后一波事件产出并落盘
+
+### E2E 经验：尽量不要把“等待/观察”交给模型
+- 现象：让 ralph#1 “等到看到 build.done/test.done 再 LOOP_COMPLETE”在真实后端上容易漂移，导致跑到 max_runtime
+- 调整方向：
+  - ralph prompt 只做两件事：发 `build.task` + 输出 `LOOP_COMPLETE`
+  - 由 Supervisor 的 completion drain 负责收尾，让 E2E 更机械、更稳定
+
+## 2026-01-27 16:05:00 +0800｜topic_contracts（TopicContract）路由逻辑速记（对照代码）
+
+### 1) topic pattern 的匹配规则（glob，但很“窄”）
+- 入口实现：`crates/ralph-proto/src/topic.rs` 的 `Topic::matches_str`
+- 规则要点：
+  - `"*"` 是全局通配：匹配所有 topic（无视段数）
+  - `*` 只匹配“一个 segment”（用 `.` 分段），不支持子串通配
+    - ✅ `"task.*"` 匹配 `"task.start"`
+    - ❌ `"task.*"` 不匹配 `"task.start.now"`（段数不一致）
+
+### 2) 一个 topic 会命中哪个 contract（“最具体的”优先）
+- 构建与排序：`crates/ralph-core/src/parallel/router.rs` 的 `TopicContractStore::new`
+- 排序规则（更具体 = 更靠前）：
+  1. 非 `"*"` 优先于 `"*"`（全局兜底永远最后）
+  2. `*` 越少越具体（例如 `"task.*"` 比 `"*.*"` 更具体）
+  3. 同样 `*` 数量下，pattern 越长越具体
+- 解析：`TopicContractStore::resolve` 会按排序后的顺序，找第一个 `pattern.matches_str(topic)` 的 contract
+
+### 3) TopicContract 自己定义了什么
+- 定义在 `crates/ralph-proto/src/routing.rs`：
+  - `delivery`: `queue`（选一个） / `fanout`（投递给所有）
+  - `audience`: 这个 topic 的“基准受众”（instances / instance_prefixes / hats）
+  - `queue_selection`: queue 多候选时如何选（`llm` / `deterministic`）
+  - `missing_instance_policy`: 指向的实例不存在时怎么处理（spawn / queue / escalate / drop）
+
+### 4) 并行 Supervisor 里，topic_contracts 真正怎么参与路由
+- 核心入口：`crates/ralph-core/src/parallel/supervisor/routing.rs` 的 `ParallelSupervisor::route_event`
+- 关键流程（按执行顺序）：
+  1. **特殊 topic 不走业务路由**
+     - `dispatch.decision`：只用于记录 queue 派发决策（replay/观测），不会投递给业务 hat
+     - `gate.request`/`gate.resolve`：先更新本地 gate 状态机，`gate.resolve` 可能会改写成 `target_instance` 直达回送
+  2. **`target_instance` 的优先级最高**
+     - 如果实例存在：直接投递，不受 TopicContract 影响
+     - 如果实例不存在：按 `missing_instance_policy=spawn` 可先创建再投递，否则走 escalation
+  3. **解析 contract**
+     - `self.resolve_contract(event.topic)` -> `TopicContractStore::resolve`
+  4. **计算 base audience（来自 TopicContract.audience）**
+     - `instances`：显式列出
+     - `hats`：展开成当前已创建的实例集合（`instances_by_hat`）
+     - `instance_prefixes`：只匹配“当前已存在实例”（注意：不会凭空生成未来实例）
+     - 如果 base audience 为空：直接 `bail!`（避免“隐式 broadcast/隐式 none”）
+  5. **应用 event 级别的收缩/覆盖**
+     - `event.target`：进一步把 base audience 过滤成“只投递给某个 hat 的实例”
+     - `event.audience_override.instances`：计算交集 `TopicContract.audience ∩ override.instances`
+       - override 不能“扩权”，指向不在 contract audience 的实例会被记为 `missing_outside_base`
+       - `require_delivery=true` 时，任何 missing 都会触发 escalation（不允许静默 reroute）
+  6. **缺失实例策略（missing_instance_policy）**
+     - `spawn`：尝试创建缺失实例，再投递
+     - `queue`：如果 override 指向的实例缺失且最终收件人为空，会回退到 base_existing（best-effort）
+     - `escalate`：直接 escalation，并停止投递
+     - `drop`：忽略缺失实例（best-effort 下继续投递已有 recipients）
+  7. **delivery 语义**
+     - `fanout`：给每个 recipient 投递一份（clone）
+     - `queue`：必须选一个实例
+       - `llm`：起一个 `ralph#decider-*` job 让模型选；失败则 fallback 到 deterministic
+        - `deterministic`：优先选 Idle/Created（least-busy），同忙闲等级内 round-robin
+        - 无论哪种，都强制写入 `dispatch.decision` 事件，保证 replay 不重算
+
+## 2026-01-27 19:00:33 +0800｜Explore：parallel-trigger-routing（默认 triggers fanout + per-hat queue + autoscale + workspace override）
+
+### 现状冲突点（直接引用）
+- README 明确写了并行模式必须显式 contracts：
+  - "Parallel mode requires **explicit topic routing contracts** (`parallel.topic_contracts`). There is no implicit broadcast."
+  - 位置：`README.md` 的 "Experimental: Parallel Hat Instances (Headless)"
+- 并行 Supervisor 也把它做成硬校验：
+  - "parallel.enabled=true 但 parallel.topic_contracts 为空：并行模式要求每个 topic 都能解析到显式 TopicContract..."
+  - 位置：`crates/ralph-core/src/parallel/supervisor.rs`
+
+### 我们拍板的新语义（用于新 change）
+- 默认路由语义（并行）：
+  - topic → hats：按 `hats.*.triggers` 订阅关系 **fanout 到所有订阅 hats**
+  - hat → instance：每个 hat **只选 1 个实例执行**（instance-level queue），不对该 hat 的所有实例 fanout
+- TopicContract 定位：可选 override
+  - 有匹配 TopicContract：按 contract 路由
+  - 无匹配/为空：回退到 triggers 默认路由
+- 自动扩缩容（默认开）：
+  - 空闲实例优先；全忙则动态创建实例
+  - 全局并发上限默认 4（安全刹车）
+  - 动态实例 idle 30s 自动回收
+  - 实例 key 单调递增且永不复用（方案 A）
+- 严格校验：
+  - `event.target` / `event.target_instance` 必须订阅该 topic，否则 warn + escalate，禁止投递
+  - 允许少数控制面 topic 做特例（避免打断 gate/控制信号）
+- workspace override：
+  - 走 Event 显式字段
+  - 合并多个 events 成同一 job 时：`worktree > patch > shared`
+
+### OpenSpec 工件输出
+- 新 change：`openspec/changes/parallel-trigger-routing/`
+  - `proposal.md`：WHY / WHAT / BREAKING / impact
+  - `design.md`：两层路由语义 + autoscale/cap/idle reaper + workspace override 的设计
+  - `specs/parallel-trigger-routing/spec.md`：可测试的 MUST + scenarios
+  - `tasks.md`：实现拆解清单（含 docs + tests + E2E/fixtures）
+
+## 2026-01-28 02:18:46 +0800｜新 OpenSpec：parallel-supervisor-tui（并行 Supervisor TUI + chat/gate）
+
+### 触发原因（用户需求）
+- 用户明确要求：把并行模式的 Supervisor TUI 真正做出来，并且 **连同 human async chat + gate 面板一起做**。
+- 现状：并行 runner 仍提示 “no TUI”，只能看 stdout 日志；与 `specs/parallel-hat-instances.spec.md` 8.x 的草案不一致。
+
+### 产物位置
+- change 目录：`openspec/changes/parallel-supervisor-tui/`
+  - `proposal.md`：WHY/WHAT/Capabilities/Impact
+  - `design.md`：复用 `ralph-tui` 的并行模式设计（instance→jobs→buffer + observer→channel→reducer + 外部事件落盘）
+  - specs：
+    - `openspec/changes/parallel-supervisor-tui/specs/parallel-supervisor-tui/spec.md`
+    - `openspec/changes/parallel-supervisor-tui/specs/supervisor-human-chat-gate/spec.md`
+  - `tasks.md`：实现拆解清单（CLI 接入、TUI state、实例列表/详情、job 分段、chat、gate、验证）
+
+### 关键决策（摘要）
+- 不新建 TUI crate：在 `crates/ralph-tui` 内新增并行模式（避免两套 TUI 分裂）。
+- 并行内容维度：instance→jobs→buffer（对齐 spec 8.1 的心智）。
+- human 输入落盘：直接追加到 `.ralph/current-events` 指向的 JSONL（等价 `ralph emit`，避免 spawn 子进程）。
+- chat topic 固化为 `human.message`，定向消息用 `target_instance`，payload 为原始文本。
+
+## 2026-01-28 02:11:10 +0800｜核对：Supervisor TUI 是否已落地（parallel-hat-instances）
+
+### 规格里写了什么
+- `specs/parallel-hat-instances.spec.md:632`：`## 8. Supervisor TUI（高层交互草案）`
+  - 布局：左侧 HatInstance 列表、右侧实例输出、下方 human async chat（含 gate）。
+- `specs/parallel-hat-instances.spec.md:662`：8.1 给了明确的“复用现有 TUI”落点
+  - 把 `IterationBuffer` 抽象为 `TextBuffer`
+  - 把 `iterations: Vec<IterationBuffer>` 替换为 `instances: HashMap<HatInstanceId, InstanceViewState>`，并在实例内维护 `jobs: Vec<TextBuffer>`
+
+### 代码里实际是什么
+- 并行模式入口直接声明“当前无 TUI”：
+  - `crates/ralph-cli/src/parallel_runner.rs:311`：`warn!("Parallel mode currently runs without TUI (log output only)")`
+- 当前 `ralph-tui` 仍是“按 iteration”管理 buffer（未按 spec 8.1 改成 instance/job 维度）：
+  - `crates/ralph-tui/src/state.rs:129`：`pub iterations: Vec<IterationBuffer>`
+- 并行模式目前的最小可用“展示”是 stdout 日志：
+  - `crates/ralph-cli/src/parallel_runner.rs:351`：打印 `[supervisor] instances (initial=created):`
+  - `crates/ralph-cli/src/parallel_runner.rs:380`：逐行输出带实例归因前缀（例如 `[writer#1:out] ...`）
+
+### 结论
+- Supervisor TUI 在 spec 里是“草案”，目前代码尚未落地；并行模式暂时只有日志输出（无列表/详情/chat 的 TUI）。
+
+## 2026-01-28 11:34:09 +0800｜更新：Supervisor TUI 已可启动（骨架完成），chat/gate 仍未闭环
+
+### 背景
+- 02:11 的结论是“并行模式只有日志输出，没有 TUI”。
+- 随着 `parallel-supervisor-tui` 的实现推进，这个结论已经 **过期**，需要被更新。
+
+### 代码现状（可定位）
+- 并行 runner 已启动并行 TUI：
+  - `crates/ralph-cli/src/parallel_runner.rs`：`Tui::new_parallel()`，并通过 `update_sender()` 推送 `TuiUpdate`
+- `ralph-tui` 已引入并行模式 state：
+  - `crates/ralph-tui/src/state.rs`：`TuiMode::Parallel` + `ParallelTuiState` + `apply_update(...)`
+  - `crates/ralph-tui/src/state/parallel.rs`：instance→jobs→buffer 的骨架（按 `job_id` 分段）
+- UI 渲染已具备三 pane 骨架：
+  - `crates/ralph-tui/src/app.rs`：左 instances 列表、右输出、下 chat/gates 占位
+  - 并行模式输入目前只保留最小闭环：`q` 退出、`?` help（Tab/滚动/搜索/编辑框尚未补齐）
+
+### OpenSpec（把 chat + gate 一起做的依据）
+- `openspec/changes/parallel-supervisor-tui/specs/supervisor-human-chat-gate/spec.md`
+  - 规定 `human.message` 写入外部事件流（可带 `target_instance`）
+  - 规定 gate 面板展示 `gate.request`，并能在 UI 内写入 `gate.resolve`
+
+### 仍未完成的关键点（对应 tasks）
+- 3.x：三 pane 焦点/导航 + 搜索/滚动复用
+- 5.x：chat 输入框编辑 + ExternalEventWriter（写 `.ralph/current-events`）
+- 6.x：gate reducer + 倒计时 + `!approve/!deny/!resolve` 落盘
+- 7.x：单测 / replay fixture / `/tui-validate` / 全量 `cargo fmt/clippy/test`

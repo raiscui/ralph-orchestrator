@@ -3,7 +3,7 @@
 //! Logs all events to `.ralph/events.jsonl` as specified in the event-loop spec.
 //! The observer pattern allows hooking into the event bus without modifying routing.
 
-use ralph_proto::{Event, HatId};
+use ralph_proto::{Event, HatId, QueueDecisionRecord, TOPIC_DISPATCH_DECISION};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -63,6 +63,14 @@ pub struct EventRecord {
     #[serde(default)]
     pub hat: String,
 
+    /// Hat instance that published this event (if available).
+    ///
+    /// 说明：
+    /// - 并行 HatInstance 模式下，这个字段用于把事件与具体实例关联起来。
+    /// - 串行/历史事件可能没有该字段，因此保持可选。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_instance: Option<String>,
+
     /// Event topic.
     pub topic: String,
 
@@ -84,6 +92,16 @@ impl EventRecord {
     /// Maximum payload length before truncation.
     const MAX_PAYLOAD_LEN: usize = 500;
 
+    /// 是否允许截断该 topic 的 payload。
+    ///
+    /// 说明：
+    /// - 大多数事件 payload 只是“人类可读摘要”，截断能显著降低 events.jsonl 体积。
+    /// - 但少数事件 payload 是“replay 需要的结构化数据”（例如 queue 决策记录），
+    ///   一旦截断就可能导致 JSON 不可解析，从而破坏回放确定性。
+    fn should_truncate_payload(topic: &str) -> bool {
+        topic != TOPIC_DISPATCH_DECISION
+    }
+
     /// Creates a new event record.
     pub fn new(
         iteration: u32,
@@ -91,7 +109,9 @@ impl EventRecord {
         event: &Event,
         triggered: Option<&HatId>,
     ) -> Self {
-        let payload = if event.payload.len() > Self::MAX_PAYLOAD_LEN {
+        let payload = if Self::should_truncate_payload(event.topic.as_str())
+            && event.payload.len() > Self::MAX_PAYLOAD_LEN
+        {
             // Find a valid UTF-8 char boundary at or before MAX_PAYLOAD_LEN.
             // We walk backwards from the limit until we find a char boundary.
             let mut truncate_at = Self::MAX_PAYLOAD_LEN;
@@ -111,6 +131,7 @@ impl EventRecord {
             ts: chrono::Utc::now().to_rfc3339(),
             iteration,
             hat: hat.into(),
+            source_instance: event.source_instance.as_ref().map(|id| id.to_string()),
             topic: event.topic.to_string(),
             triggered: triggered.map(|h| h.to_string()),
             payload,
@@ -188,6 +209,28 @@ impl EventLogger {
     ) -> std::io::Result<()> {
         let record = EventRecord::new(iteration, hat, event, triggered);
         self.log(&record)
+    }
+
+    /// 记录一次 queue 路由决策（用于 replay，不允许截断）。
+    ///
+    /// 说明：
+    /// - 这是一种“observer-only”记录事件：topic 固定为 `dispatch.decision`
+    /// - payload 为 `QueueDecisionRecord` 的 JSON 字符串
+    pub fn log_queue_decision(
+        &mut self,
+        iteration: u32,
+        hat: &str,
+        decision: &QueueDecisionRecord,
+    ) -> std::io::Result<()> {
+        let payload = serde_json::to_string(decision).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to serialize QueueDecisionRecord: {e}"),
+            )
+        })?;
+
+        let event = Event::new(TOPIC_DISPATCH_DECISION, payload);
+        self.log_event(iteration, hat, &event, None)
     }
 
     /// Returns the path to the log file.
@@ -277,6 +320,7 @@ impl EventHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ralph_proto::HatInstanceId;
     use tempfile::TempDir;
 
     fn make_event(topic: &str, payload: &str) -> Event {
@@ -531,5 +575,48 @@ mod tests {
         assert_eq!(records[2].topic, "loop.recovery");
         let parsed: serde_json::Value = serde_json::from_str(&records[2].payload).unwrap();
         assert_eq!(parsed["evidence"]["tests"], "pass");
+    }
+
+    #[test]
+    fn test_queue_decision_payload_is_not_truncated() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("events.jsonl");
+
+        let mut logger = EventLogger::new(&path);
+
+        // 构造一个足够长的候选集，确保序列化后的 JSON 明显超过截断阈值。
+        let candidates: Vec<HatInstanceId> = (0..200)
+            .map(|i| HatInstanceId::from(format!("writer#{i}")))
+            .collect();
+
+        let decision = QueueDecisionRecord::new(
+            "evt-1",
+            candidates.clone(),
+            candidates[0].clone(),
+            Some("prefer least-busy".to_string()),
+        );
+
+        logger
+            .log_queue_decision(1, "router", &decision)
+            .expect("Should log queue decision record");
+
+        let history = EventHistory::new(&path);
+        let records = history.read_all().unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].topic, TOPIC_DISPATCH_DECISION);
+
+        // 不允许被 EventRecord 的默认截断逻辑砍掉。
+        assert!(
+            records[0].payload.len() > EventRecord::MAX_PAYLOAD_LEN,
+            "Queue decision payload should not be truncated (len={})",
+            records[0].payload.len()
+        );
+
+        // payload 必须是可解析的 JSON（保证 replay 可读）。
+        let parsed: QueueDecisionRecord =
+            serde_json::from_str(&records[0].payload).expect("Payload should be valid JSON");
+        assert_eq!(parsed.chosen_instance, candidates[0]);
+        assert_eq!(parsed.candidates.len(), candidates.len());
     }
 }

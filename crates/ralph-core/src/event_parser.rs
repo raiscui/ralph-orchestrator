@@ -6,7 +6,7 @@
 //! <event topic="handoff" target="reviewer">payload</event>
 //! ```
 
-use ralph_proto::{Event, HatId};
+use ralph_proto::{AudienceOverride, Event, HatId, HatInstanceId, WorkspaceStrategy};
 
 /// Strips ANSI escape sequences from a string.
 ///
@@ -118,8 +118,13 @@ impl EventParser {
             let opening_tag = &after_start[..tag_end + 1];
 
             // Parse attributes from opening tag
+            let id = Self::extract_attr(opening_tag, "id");
             let topic = Self::extract_attr(opening_tag, "topic");
             let target = Self::extract_attr(opening_tag, "target");
+            let target_instance = Self::extract_attr(opening_tag, "target_instance");
+            let audience_instances = Self::extract_attr(opening_tag, "audience_instances");
+            let require_delivery = Self::extract_attr(opening_tag, "require_delivery");
+            let workspace_strategy = Self::extract_attr(opening_tag, "workspace_strategy");
 
             let Some(topic) = topic else {
                 remaining = &remaining[start_idx + tag_end + 1..];
@@ -141,8 +146,43 @@ impl EventParser {
                 event = event.with_source(source.clone());
             }
 
+            if let Some(id) = id {
+                event = event.with_id(id);
+            }
+
             if let Some(target) = target {
                 event = event.with_target(target);
+            }
+
+            if let Some(target_instance) = target_instance {
+                event = event.with_target_instance(target_instance);
+            }
+
+            if audience_instances.is_some() || require_delivery.is_some() {
+                let mut override_ = AudienceOverride::default();
+
+                if let Some(list) = audience_instances {
+                    // 逗号分隔：writer#1,writer#2
+                    override_.instances = list
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(HatInstanceId::new)
+                        .collect();
+                }
+
+                if let Some(flag) = require_delivery {
+                    override_.require_delivery = matches!(flag.as_str(), "true" | "1" | "yes");
+                }
+
+                event = event.with_audience_override(override_);
+            }
+
+            if let Some(strategy) = workspace_strategy
+                .as_deref()
+                .and_then(parse_workspace_strategy)
+            {
+                event = event.with_workspace_strategy(strategy);
             }
 
             events.push(event);
@@ -277,6 +317,15 @@ impl EventParser {
         // Add any remaining content after the last event
         result.push_str(remaining);
         result
+    }
+}
+
+fn parse_workspace_strategy(raw: &str) -> Option<WorkspaceStrategy> {
+    match raw.trim() {
+        "shared" => Some(WorkspaceStrategy::Shared),
+        "patch" => Some(WorkspaceStrategy::Patch),
+        "worktree" => Some(WorkspaceStrategy::Worktree),
+        _ => None,
     }
 }
 

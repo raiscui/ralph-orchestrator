@@ -1,0 +1,115 @@
+# Parallel Trigger Routing example
+#
+# 目标：
+# - 开启 parallel runtime（headless）
+# - 不写 parallel.topic_contracts，完全依赖 hats.*.triggers 做默认路由
+# - 用 spec.ready 的“多订阅者 fanout”展示：topic -> hats
+# - 用 spec_logger.instances=2 展示：hat -> instance（每个 hat 每次只投递到一个实例）
+
+cli:
+  # 建议用 auto：让 CLI 自己从可用的后端里选一个（也可用 `ralph run -b codex` 覆盖）
+  backend: "codex"
+
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  # 并行模式下：如果模型漂移不输出 completion promise，需要硬退出护栏
+  max_iterations: 12
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+
+  # 安全刹车（默认值同 README）
+  autoscale:
+    max_running_jobs: 4
+    dynamic_idle_ttl_secs: 30
+
+  # 本示例不使用 worktree/hooks，直接 allow，避免出现等待 human 的 gate.request
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  spec_writer:
+    name: "📋 Spec Writer"
+    description: "Writes a small spec and emits spec.ready."
+    triggers: ["spec.start", "spec.rejected"]
+    publishes: ["spec.ready"]
+    instances: 1
+    instructions: |
+      You are the Spec Writer.
+
+      IMPORTANT (Demo rules):
+      - Do NOT run tools or shell commands.
+      - Do NOT edit files.
+      - Never output LOOP_COMPLETE.
+
+      You will receive incoming events in a list like:
+      - spec.start: ...
+      - spec.rejected: ...
+
+      Behavior:
+      1) If you receive "spec.start":
+         - Write a short spec whose FIRST LINE is exactly: "version: 1"
+         - Do NOT include an "Acceptance Criteria" section
+         - Emit ONE event: <event topic="spec.ready">...</event>
+
+      2) If you receive "spec.rejected":
+         - Write a revised spec whose FIRST LINE is exactly: "version: 2"
+         - MUST include an "Acceptance Criteria" section
+         - Emit ONE event: <event topic="spec.ready">...</event>
+
+      Emit events using EXACTLY this format (no code fences):
+
+      <event topic="spec.ready">
+      ...spec text...
+      </event>
+
+  spec_reviewer:
+    name: "🔎 Spec Reviewer"
+    description: "Rejects version 1 once, then approves version 2."
+    triggers: ["spec.ready"]
+    publishes: ["spec.rejected", "spec.approved"]
+    instances: 1
+    instructions: |
+      You are the Spec Reviewer.
+
+      IMPORTANT (Demo rules):
+      - Do NOT run tools or shell commands.
+      - Do NOT edit files.
+      - Never output LOOP_COMPLETE.
+
+      You will receive incoming events in a list like:
+      - spec.ready: <spec text...>
+
+      Rules (deterministic):
+      - If the spec text contains the line "version: 1", REJECT it.
+      - Otherwise (e.g. "version: 2"), APPROVE it.
+
+      Emit EXACTLY ONE event per input, using ONE of these formats:
+
+      <event topic="spec.rejected">
+      reason: missing acceptance criteria
+      </event>
+
+      <event topic="spec.approved">
+      status: ok
+      </event>
+
+  spec_logger:
+    name: "🧾 Spec Logger"
+    description: "Logs spec events to demonstrate hat-level fanout and instance-level queue."
+    triggers: ["spec.ready", "spec.rejected"]
+    publishes: []
+    instances: 2
+    instructions: |
+      You are the Spec Logger.
+
+      IMPORTANT (Demo rules):
+      - Do NOT run tools or shell commands.
+      - Do NOT edit files.
+      - Do NOT emit any events.
+      - Never output LOOP_COMPLETE.
+
+      For each incoming event, print exactly ONE line:
+      logger: <topic> (payload_len=<number>)

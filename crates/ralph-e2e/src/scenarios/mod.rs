@@ -49,6 +49,7 @@ mod hats;
 mod incremental;
 mod memory;
 mod orchestration;
+mod parallel;
 mod tasks;
 
 pub use capabilities::{StreamingScenario, ToolUseScenario};
@@ -68,6 +69,7 @@ pub use memory::{
     MemoryRapidWriteScenario, MemorySearchScenario,
 };
 pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
+pub use parallel::ParallelHatInstancesScenario;
 pub use tasks::{TaskAddScenario, TaskCloseScenario, TaskCompletionScenario, TaskReadyScenario};
 
 use crate::Backend;
@@ -394,6 +396,7 @@ mod tests {
             events: vec![EventRecord {
                 topic: "build.done".to_string(),
                 payload: "tests: pass".to_string(),
+                source_instance: None,
             }],
             iterations: 1,
             termination_reason: Some("LOOP_COMPLETE".to_string()),
