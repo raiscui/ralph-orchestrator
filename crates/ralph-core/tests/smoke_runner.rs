@@ -58,6 +58,16 @@ fn test_parallel_supervisor_tui_gate_chat_fixture_exists() {
     );
 }
 
+#[test]
+fn test_parallel_workflow_semantics_fixture_exists() {
+    let fixture = fixtures_dir().join("parallel_workflow_semantics.jsonl");
+    assert!(
+        fixture.exists(),
+        "Parallel workflow semantics fixture should exist at {:?}",
+        fixture
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Acceptance Criteria #7: Integration Test Validates Full Replay Flow
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +235,53 @@ fn test_full_replay_flow_with_parallel_supervisor_tui_gate_chat_fixture() {
     assert!(
         output.contains("human.message"),
         "Fixture should contain human.message event"
+    );
+}
+
+#[test]
+fn test_full_replay_flow_with_parallel_workflow_semantics_fixture() {
+    use ralph_core::testing::ReplayBackend;
+
+    let fixture = fixtures_dir().join("parallel_workflow_semantics.jsonl");
+
+    let config = SmokeTestConfig::new(&fixture);
+    let result = SmokeRunner::run(&config).expect("Should run fixture successfully");
+
+    assert!(
+        result.completed_successfully(),
+        "Parallel workflow semantics session should complete successfully"
+    );
+    assert_eq!(
+        *result.termination_reason(),
+        TerminationReason::Completed,
+        "Should terminate with Completed (LOOP_COMPLETE detected)"
+    );
+
+    // Fixture contains: unknown.topic, fix.applied
+    assert!(
+        result.event_count() >= 2,
+        "Should parse at least 2 events from fixture, got {}",
+        result.event_count()
+    );
+
+    // 额外校验：链式 fallback（经理兜底）+ completion candidate → ralph#1 输出 LOOP_COMPLETE
+    let mut backend = ReplayBackend::from_file(&fixture).expect("Should load replay fixture");
+    let output = String::from_utf8(backend.collect_all()).expect("Fixture output must be UTF-8");
+    assert!(
+        output.contains("[manager#1:out] manager: unknown.topic"),
+        "Fixture should show wildcard manager handling unknown.topic"
+    );
+    assert!(
+        output.contains("fix.applied"),
+        "Fixture should contain fix.applied completion candidate event"
+    );
+    assert!(
+        output.contains("[ralph#1:out]"),
+        "Fixture should contain ralph#1 attribution prefix"
+    );
+    assert!(
+        output.contains("LOOP_COMPLETE"),
+        "Fixture should terminate via completion promise"
     );
 }
 

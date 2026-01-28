@@ -85,6 +85,29 @@
 - 一个可行的替代方案是用 Go 安装（更容易走 Go proxy）：
   - `GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn go install github.com/charmbracelet/freeze@latest`
 
+## 补充：delta specs 已同步到主规格（2026-01-28）
+
+- 之前 `openspec/specs/` 为空，会导致“实现已经落地，但主规格缺失”的长期文档漂移风险。
+- 现在已把相关 changes 的 delta specs 同步到主规格目录（后续新增 scenario 可做增量 merge）：
+  - `openspec/specs/parallel-hat-instances/spec.md`
+  - `openspec/specs/parallel-trigger-routing/spec.md`
+  - `openspec/specs/parallel-supervisor-tui/spec.md`
+  - `openspec/specs/supervisor-human-chat-gate/spec.md`
+
+## 补充：spec 之间的语义对齐（2026-01-28）
+
+### 为什么需要对齐
+- `parallel-trigger-routing` 是“默认路由语义”，而 `parallel-hat-instances` 引入了更通用的 `TopicContract/queue_selection` 模型。
+- 如果把两份 spec 当成“同一层级的强约束”，会出现表述冲突（例如是否必须配置 TopicContract、实例选择是否只能 deterministic）。
+
+### 对齐后的约定（主规格）
+- 系统 **总是 resolve 一个 TopicContract**，只是来源不同：
+  - 配置命中（`parallel.topic_contracts`）→ 用配置的
+  - 配置未命中 → 用 triggers 派生的默认 TopicContract（hat-level fanout + instance-level queue）
+- 实例选择规则：
+  - deterministic（默认）→ idle-first + deterministic tie-break
+  - llm（可选）→ 允许非确定选择，但必须落盘候选集+选择结果以支持 replay
+
 ### 事件投递语义的决定（2026-01-25）
 - 你选择：**C（必须显式声明）** —— topic/事件必须明确是 `queue` 还是 `fanout`。
 - 你补充：对 fanout（广播）语义，希望能“针对某一事件，指定/限制哪些 hat 可以拿走”。
@@ -523,3 +546,118 @@
 - 5.x：chat 输入框编辑 + ExternalEventWriter（写 `.ralph/current-events`）
 - 6.x：gate reducer + 倒计时 + `!approve/!deny/!resolve` 落盘
 - 7.x：单测 / replay fixture / `/tui-validate` / 全量 `cargo fmt/clippy/test`
+
+## 2026-01-28 20:50:27 +0800｜parallel-workflow-semantics：关键语义锚点（并行模式）
+
+### 语义锚点（给团队统一口径）
+- runtime 第一条事件永远是 `task.start`（fresh）/`task.resume`（resume），并且在并行模式下强制只投递给 `ralph#1`（避免顶层 prompt 污染其他 hats）。
+- `event_loop.starting_event`：可选的 workflow entry topic（协调后发出），不是 runtime 的第一条事件。
+- `event_loop.complete_publishes`：该 workflow 的“完成候选事件 topic”（唯一、可选）。
+  - 当 `ralph#1` 观察到该 topic 时，决定是否输出 `event_loop.completion_promise`（例如 `LOOP_COMPLETE`）结束；也可以选择继续派发下一轮事件。
+- orphan 定义：只有“在 hats 配置里完全找不到任何订阅者（specific + wildcard 都没有）”才算真 orphan，才升级给 `ralph#1`。
+
+### 对应实现落点（便于快速定位）
+- 配置字段：`crates/ralph-core/src/config.rs`（`EventLoopConfig.complete_publishes` + validate）
+- 并行启动控制面：`crates/ralph-core/src/parallel/supervisor.rs`（`task.start/task.resume` 强制 target_instance=ralph#1）
+- 并行路由链式 fallback：`crates/ralph-core/src/parallel/supervisor/routing.rs`
+- 并行 ralph#1 prompt 注入：`crates/ralph-core/src/parallel/supervisor.rs`（生成 instructions）+ `crates/ralph-core/src/parallel/instance.rs`（优先使用注入指令）
+- replay smoke fixture：`crates/ralph-core/tests/fixtures/parallel_workflow_semantics.jsonl`
+
+## 2026-01-28 21:56:16 +0800｜E2E：并行事件解析的关键约束（只 parse stdout）
+
+### 现象（为什么需要这个约束）
+- 在 Codex CLI 下，stderr 往往会回显 user prompt / 后端日志。
+- 这些回显文本里可能包含 `<event ...>`（来自 prompt 示例或指令片段），如果被 EventParser 当成输出解析，会导致重复路由/假阳性事件，进而让 E2E 事件统计波动。
+
+### 实现落点（可定位）
+- `crates/ralph-cli/src/parallel_runner.rs`
+  - `CliHatJobExecutor::handle_output_line`：stdout 进入 `HatJobResult.output`（用于 EventParser），stderr 仅用于流式可观测输出，不参与解析。
+
+## 2026-01-28 23:24:49 +0800｜E2E：parallel-hat-instances prompt 变体两次回归（鲁棒性）
+
+### 目的
+- 你要求“多跑两次 E2E，并且让 prompt 内容稍微变化”，用来验证：
+  - 即使 prompt 里出现“伪 event 示例块”或 fenced code block，系统也不会把它误当成真实输出事件。
+  - 并行路由/事件解析/归因输出在真实后端（Codex）下依然稳定。
+
+### 执行方式
+- 使用 `crates/ralph-e2e/src/scenarios/parallel.rs` 里内置的环境变量开关：
+  - `RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant1`
+  - `RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2`
+
+### 结果
+- variant1 ✅（耗时约 114.8s）：`parallel-hat-instances` 通过
+- variant2 ✅（耗时约 91.7s）：`parallel-hat-instances` 通过
+
+### 命令（复现）
+```bash
+RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant1 cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --verbose
+RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --verbose
+```
+
+## 2026-01-28 23:42:01 +0800｜示例对齐：parallel-trigger-routing 不再靠 prompt 写死闭环
+
+### 改动思路
+- “prompt 只承载目标”，不要把“控制面 entry/exit 语义”藏在 prompt 里。
+- 示例应当优先演示官方语义：`starting_event`（协调后入口）与 `complete_publishes`（完成候选）。
+
+### 落点
+- `examples/parallel-trigger-routing/ralph.yml`：
+  - 加入 `starting_event=spec.start`，`complete_publishes=spec.approved`
+  - 加入 `event_loop.prompt: | ...`（内联示例目标 prompt，避免依赖额外 prompt 文件）
+- `examples/parallel-trigger-routing/README.md`：更新 Run/Notes（不再要求 `-P prompt.md`）
+
+## 2026-01-29 00:17 +0800｜文档：parallel-trigger-routing README 中文化
+
+### 处理原则
+- 仅翻译说明文字。
+- 所有命令、topic 名称、配置字段 key（例如 `parallel.enabled`、`parallel.topic_contracts`、`hats.*.triggers`）保持不变。
+
+### 验证
+- `cargo test -q` ✅
+
+## 2026-01-29 02:30 +0800｜四文件摘要（用于决定是否提取 skill）
+
+### 任务目标（task_plan.md）
+- 让 `examples/parallel-trigger-routing` 不再“靠 prompt 写死闭环”，而是用 `event_loop.starting_event` / `event_loop.complete_publishes` 固化官方语义。
+- 增加中文 parallel E2E 场景，并做两次 prompt 变体回归，验证稳定性与鲁棒性。
+
+### 关键决定（task_plan.md）
+- 示例入口/出口语义写在 config：`starting_event`（协调后 workflow entry）+ `complete_publishes`（completion candidate）。
+- 目标 prompt 内联到 `event_loop.prompt`（避免依赖额外 prompt 文件导致的“是不是必须靠 prompt 才能闭环”的困惑）。
+- 新增独立中文 E2E 场景（保留英文场景），并用 prompt 变体验证“伪 `<event>`/代码块”不应被误解析。
+
+### 关键发现（notes.md）
+- 并行模式下的“官方语义锚点”需要被写死在主规格与协调者指令里：
+  - runtime 第一条事件永远是 `task.start/task.resume`，并强制只投递给 `ralph#1`（避免 prompt pollution）。
+  - `starting_event` 是“协调后 workflow entry event”，不是 runtime 第一条事件。
+  - `complete_publishes` 是“workflow completion candidate topic”，由 `ralph#1` 决定是否输出 `completion_promise`。
+  - orphan 边界：只有“完全无人订阅（specific+widlcard 都无）”才升级给 `ralph#1`。
+- E2E 稳定性关键约束：只从 stdout 解析 `<event ...>`，stderr 仅用于可观测输出，避免 Codex/后端回显导致假事件。
+
+### 实际变更（WORKLOG.md）
+- 示例：`examples/parallel-trigger-routing/ralph.yml` 与 `README.md` 已对齐“entry/exit 靠 config”。
+- E2E：新增中文场景 `parallel-hat-instances-zh`，并做两次变体回归。
+- 稳定性修复：E2E workspace 在复跑时先清理旧目录，避免 `.ralph/events.jsonl` 累积污染断言。
+- OpenSpec：`parallel-workflow-semantics` 已归档并同步 delta specs → `openspec/specs/`。
+
+### 错误与根因（ERRORFIX.md，如有）
+- 并行 E2E 事件统计波动：stderr 回显包含 `<event ...>`，被误判为真实事件。
+- E2E 复跑污染：`--keep-workspace` 后复跑复用旧目录，导致 `.ralph/events.jsonl` 累积。
+- OpenSpec `archive` 校验失败：Requirement 首句缺少 MUST/SHALL（validator 的硬规则）。
+
+### 可复用点候选（1-3 条）
+1. 事件解析：不要从 stderr 解析 `<event>`（只 parse stdout），否则会出现“伪事件/重复路由/计数波动”。
+2. E2E 复跑隔离：workspace 若可能复用（尤其 `--keep-workspace`），必须在新 run 前清理旧目录，避免事件日志叠加污染。
+3. OpenSpec 写作/归档：`### Requirement:` 的首句必须带 MUST/SHALL，否则 `openspec archive` 会被 validator 卡住。
+
+### 是否需要固化到 docs/specs
+- 是（已固化）：
+  - 主规格：`openspec/specs/parallel-hat-instances/spec.md`、`openspec/specs/parallel-trigger-routing/spec.md`
+  - 用户文档：`docs/` 下已补充 `starting_event/complete_publishes` 的解释与示例
+
+### 是否提取/更新 skill
+- 是：建议新增 2-3 个项目级 `self-learning.*` skill（放在 `.codex/skills/`），覆盖：
+  - OpenSpec validator 的 MUST/SHALL 首句规则
+  - 并行事件解析只 parse stdout（Codex/CLI stderr 回显导致假事件）
+  - E2E workspace 复跑污染（keep-workspace/旧目录残留导致断言误判）

@@ -504,10 +504,10 @@
 ### 文件
 - `examples/parallel-trigger-routing/README.md`
 - `examples/parallel-trigger-routing/ralph.yml`
-- `examples/parallel-trigger-routing/prompt.md`
+- 说明：示例目标 prompt 内联在 `examples/parallel-trigger-routing/ralph.yml` 的 `event_loop.prompt`
 
 ### 自检
-- `cargo run --bin ralph -- run -c examples/parallel-trigger-routing/ralph.yml -P examples/parallel-trigger-routing/prompt.md --dry-run --no-tui` ✅（仅解析配置，不调用外部模型）
+- `cargo run --bin ralph -- run -c examples/parallel-trigger-routing/ralph.yml --dry-run --no-tui` ✅（仅解析配置，不调用外部模型）
 
 ## 2026-01-28 02:11:10 +0800｜答复：parallel-hat-instances 的 Supervisor TUI 是否已实现？
 
@@ -607,4 +607,213 @@
 - 已归档到：`openspec/changes/archive/2026-01-28-parallel-supervisor-tui/`
 - `openspec list --json` 现在只剩两个 active changes：
   - `parallel-trigger-routing`
-  - `parallel-hat-instances`
+- `parallel-hat-instances`
+
+## 2026-01-28 15:03:49 +0800｜/opsx:sync：同步 delta specs → openspec/specs（all）
+
+### 我正在做什么 & 为什么
+
+- 我在把已完成 changes 的 delta specs，同步到仓库的主规格目录 `openspec/specs/`。
+- 这样做是为了让“规格”不再只停留在 change 目录里，避免实现落地后主规格缺失导致文档漂移。
+
+### 同步结果（新建主规格文件）
+
+- `openspec/specs/parallel-hat-instances/spec.md`
+  - 来源：`openspec/changes/parallel-hat-instances/specs/parallel-hat-instances/spec.md`
+- `openspec/specs/parallel-trigger-routing/spec.md`
+  - 来源：`openspec/changes/parallel-trigger-routing/specs/parallel-trigger-routing/spec.md`
+- `openspec/specs/parallel-supervisor-tui/spec.md`
+  - 来源：`openspec/changes/archive/2026-01-28-parallel-supervisor-tui/specs/parallel-supervisor-tui/spec.md`
+- `openspec/specs/supervisor-human-chat-gate/spec.md`
+  - 来源：`openspec/changes/archive/2026-01-28-parallel-supervisor-tui/specs/supervisor-human-chat-gate/spec.md`
+
+### 同步策略说明
+
+- 本次为“首次落地主规格”，因此以 **创建新 spec 文件**为主。
+- 每个主规格文件都保留了 `### Requirement:` / `#### Scenario:` 的结构，方便后续继续做增量 merge（新增 scenario 不需要复制整段）。
+
+## 2026-01-28 15:59:06 +0800｜规格一致性修复：对齐 parallel-trigger-routing vs parallel-hat-instances
+
+### 我正在做什么 & 为什么
+
+- 我在检查 `openspec/specs/parallel-trigger-routing/spec.md` 与 `openspec/specs/parallel-hat-instances/spec.md` 的重叠与潜在冲突点。
+- 这样做是因为：`parallel-trigger-routing` 是一份“默认路由语义”的观点集合，但部分表述在 `parallel-hat-instances` 引入更通用的 TopicContract/queue_selection 模型后，容易被误读成“互相矛盾”。
+
+### 发现的冲突点（摘录）
+
+- `parallel-hat-instances` 原表述偏“所有事件都必须有 TopicContract”（容易让人理解成必须配置）：
+  - `openspec/specs/parallel-hat-instances/spec.md`：`For any published event, the system MUST resolve an explicit TopicContract ...`
+- `parallel-trigger-routing` 原表述是“没 TopicContract 就走 triggers 默认路由”：
+  - `openspec/specs/parallel-trigger-routing/spec.md`：`If no explicit TopicContract applies ... compute recipient hats by matching hats.*.triggers ...`
+- `parallel-trigger-routing` 还写死了“实例选择必须 idle-first deterministic”，但 `parallel-hat-instances` 允许 `queue_selection=llm`：
+  - `openspec/specs/parallel-trigger-routing/spec.md`：`Instance selection is idle-first and deterministic`
+
+### 修复策略（对齐后的语义）
+
+- 统一成一个模型：**系统总是“resolve TopicContract”，只是不一定来自配置**：
+  - 配置命中 → 使用配置的 TopicContract
+  - 未命中 → 由 triggers 派生出“默认 TopicContract”（并作为 routing/logging 的明确对象）
+- “实例选择 idle-first deterministic”只作为默认 deterministic 策略：
+  - 当 `queue_selection=llm` 时允许非确定选择，但必须落盘候选集+选择结果以支持 replay。
+
+### 实际修改（主规格文件已更新）
+
+- `openspec/specs/parallel-hat-instances/spec.md`：
+  - 明确 TopicContract 的来源：`configured parallel.topic_contracts` 或 `trigger-derived defaults`
+  - 收敛 fanout 表述：改为“fanout 到 TopicContract 选择的所有 recipients”
+- `openspec/specs/parallel-trigger-routing/spec.md`：
+  - 增加 `## Relationship`，明确它是默认路由细化，并依赖 `parallel-hat-instances` 的核心模型
+  - 把 “no explicit TopicContract” 改成 “no configured TopicContract matches”，并明确会派生默认 TopicContract
+  - 把实例选择规则改为“默认 deterministic（idle-first）”，并对 `queue_selection=llm` 加入 replay 约束
+
+## 2026-01-28 16:05:45 +0800｜OpenSpec：归档完成的 changes（parallel-hat-instances / parallel-trigger-routing）
+
+### 我正在做什么 & 为什么
+
+- 我在把已经完成的 OpenSpec changes 归档到 `openspec/changes/archive/`。
+- 这样做是为了让 `openspec/changes/` 只保留“仍在进行”的变更，避免后续误改/误读。
+
+### 归档结果
+
+- `parallel-hat-instances` → `openspec/changes/archive/2026-01-28-parallel-hat-instances/`
+- `parallel-trigger-routing` → `openspec/changes/archive/2026-01-28-parallel-trigger-routing/`
+- 复核：`openspec list --json` 现在返回空列表（无 active changes）。
+
+## 2026-01-28 20:50:27 +0800｜实现：parallel-workflow-semantics（并行工作流官方语义固化）
+
+### 我完成了什么
+- 新增 `event_loop.complete_publishes`（唯一、可选）并做非空校验与解析单测。
+- 并行模式下把 `task.start/task.resume` 作为控制面 topic，强制只路由到 `ralph#1`，避免 wildcard hat 截获顶层 prompt（prompt pollution）。
+- 触发路由的 fallback 语义收敛为链式：specific > wildcard > 真 orphan→`ralph#1`（经理兜底时不再额外打扰老板）。
+- 并行 `ralph#1` 注入更“强约束、可预测”的协调语义指令（含 hats 拓扑表、starting_event/complete_publishes 的官方定义与动作约束）。
+- 修正文档里把 `starting_event` 误当作第一条事件的 Mermaid 图；补充一个 replay smoke fixture 覆盖 completion candidate → coordinator-controlled LOOP_COMPLETE。
+
+### 关键文件
+- `crates/ralph-core/src/config.rs`
+- `crates/ralph-core/src/parallel/supervisor.rs`
+- `crates/ralph-core/src/parallel/instance.rs`
+- `crates/ralph-core/src/parallel/supervisor/routing.rs`
+- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+- `docs/advanced/index.md`
+- `docs/advanced/architecture.md`
+- `docs/guide/configuration.md`
+- `crates/ralph-core/tests/fixtures/parallel_workflow_semantics.jsonl`
+- `crates/ralph-core/tests/smoke_runner.rs`
+
+### 验证
+- `cargo test -p ralph-core` ✅
+- `cargo test` ✅
+
+## 2026-01-28 21:56:16 +0800｜验证收尾：E2E parallel-hat-instances（Codex）通过
+
+### 我做了什么
+- 修正并行模式下的事件解析输入源：EventParser 只基于 stdout 解析 `<event ...>`，避免 stderr 的 prompt/log 回显被误判成“真实事件”。
+  - 代码位置：`crates/ralph-cli/src/parallel_runner.rs`
+
+### 验证
+- `bash scripts/run-parallel-hat-instances-codex.sh` ✅
+  - `Parallel events recorded`：`build.task: 3, build.done: 2, test.done: 1`
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+## 2026-01-28 23:24:49 +0800｜验证：parallel 语义口径核对 + E2E 变体两次回归（鲁棒性）
+
+### 我核对了什么（为什么示例需要 prompt，但不应该靠 prompt 写死闭环）
+- parallel runtime 仍然需要一个“目标 prompt”（作为 `task.start` payload）来表达用户要完成什么。
+- 但官方入口/终点语义应优先写在 config + coordinator 约束里：
+  - 示例将目标 prompt 内联在 `examples/parallel-trigger-routing/ralph.yml` 的 `event_loop.prompt`
+  - workflow entry/exit 用 `starting_event/complete_publishes` 表达
+
+### “官方语义”当前落点（权威原文/实现）
+- `docs/concepts/hats-and-events.md`：
+  - 明确：runtime 第一条事件是 `task.start/task.resume`
+  - 明确：`event_loop.starting_event` **不是**第一条事件，而是协调后 workflow entry event
+  - 明确：`event_loop.complete_publishes` 是 completion candidate（由 coordinator 决定是否 `LOOP_COMPLETE`）
+- `docs/guide/configuration.md`：配置项 reference 已包含 `starting_event`/`complete_publishes` 两字段及含义。
+- `crates/ralph-core/src/parallel/supervisor.rs`：并行 `ralph#1` 注入的 prompt 里写死 `KEY SEMANTICS (OFFICIAL)`，并在未配置 `starting_event` 时给出 entry candidates 兜底选择。
+
+### E2E：两次变体回归（满足“稍微有变的内容”）
+- ✅ `RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant1`（prompt 内含“伪 event 示例块”，不应被解析为真实事件）
+- ✅ `RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2`（prompt 内含 fenced code block 示例，不应被解析为真实事件）
+
+### 命令（复现）
+```bash
+RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant1 cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --verbose
+RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --verbose
+```
+
+## 2026-01-28 23:42:01 +0800｜对齐：parallel-trigger-routing example 使用官方 entry/exit 语义（starting_event / complete_publishes）
+
+### 我改了什么 & 为什么
+- 我把 `examples/parallel-trigger-routing` 从“靠 `prompt.md` 写死协调脚本闭环”改成“靠 config 固化 entry/exit 语义 + prompt 只描述目标”。
+- 这样做是为了和 `parallel-workflow-semantics` 的官方语义保持一致，避免示例反过来误导读者。
+
+### 关键改动点
+- `examples/parallel-trigger-routing/ralph.yml`：
+  - 新增 `event_loop.starting_event: "spec.start"`
+  - 新增 `event_loop.complete_publishes: "spec.approved"`
+- `examples/parallel-trigger-routing/ralph.yml`：
+  - 新增 `event_loop.prompt: | ...`，把示例的“目标 prompt”内联到配置里（避免依赖额外 prompt 文件）
+- `examples/parallel-trigger-routing/README.md`：
+  - 更新 Run/Notes：不再要求 `-P prompt.md`，并明确 entry/exit 语义来自 config
+
+### 验证（实际跑通一次）
+- `cargo run --bin ralph -- run -c examples/parallel-trigger-routing/ralph.yml --dry-run --no-tui` ✅
+  - 确认示例 prompt 使用 `event_loop.prompt`（inline text），不再依赖额外 prompt 文件。
+
+## 2026-01-29 00:17 +0800｜文档：parallel-trigger-routing README 中文化
+
+### 我改了什么
+- `examples/parallel-trigger-routing/README.md`：将说明文字改为中文，保留所有命令、topic、配置字段 key 不变，避免读者复制运行时出错。
+
+### 验证
+- `cargo test -q` ✅
+
+## 2026-01-29 01:55 +0800｜新增：中文 parallel E2E 场景 + 稳定性回归
+
+### 我改了什么
+- 新增中文并行 E2E 场景：`parallel-hat-instances-zh`（Tier 8，Codex）。
+  - 入口 prompt / hats 指令均为中文，topic/配置 key 保持英文不变（保证语义与断言稳定）。
+  - E2E 以 `--no-tui` 方式运行，避免 TUI 控制序列干扰 stdout/stderr 与事件解析。
+- 修复 E2E workspace 复跑污染：
+  - `WorkspaceManager::create_workspace()` 在创建前会清理旧目录，避免曾经 `--keep-workspace` 后再次运行导致历史 events.jsonl 混入、误判通过/失败。
+
+### 验证
+- `cargo test -q` ✅
+- 中文并行 E2E（两次 prompt 变体，验证鲁棒性）：
+  - ✅ `RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant1`（含“伪 `<event>` 示例块”）
+  - ✅ `RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2`（含 fenced code block 示例）
+
+### 命令（复现）
+```bash
+RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant1 cargo run -p ralph-e2e -- codex --filter parallel-hat-instances-zh --verbose --skip-analysis
+RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --filter parallel-hat-instances-zh --verbose --skip-analysis
+```
+
+## 2026-01-29 02:15 +0800｜归档：parallel-workflow-semantics（OpenSpec）并同步主规格
+
+### 我做了什么
+- 修复 `openspec archive` 校验失败：将 delta spec 中某条 Requirement 的首句改为包含 MUST（满足 OpenSpec validator 对 Requirement 的强约束）。
+- 执行 `openspec archive -y parallel-workflow-semantics`：
+  - 归档 change → `openspec/changes/archive/2026-01-28-parallel-workflow-semantics/`
+  - 自动将该 change 的 delta specs 合并到主规格目录 `openspec/specs/`：
+    - `openspec/specs/parallel-hat-instances/spec.md`（新增：`task.start/task.resume` 控制面语义、`starting_event` 官方定义、`complete_publishes`、以及“只有 ralph#1 能终止”）
+    - `openspec/specs/parallel-trigger-routing/spec.md`（修改：specific > wildcard > 真 orphan→`ralph#1`）
+
+### 验证
+- `openspec list --json`：`changes=[]`（无活跃 change）✅
+- `openspec archive` 自带 validate：已通过并完成 spec update ✅
+
+## 2026-01-29 02:35 +0800｜continuous-learning：沉淀可复用经验（skills + AGENTS + 归档历史文件）
+
+### 我做了什么
+- 在 `notes.md` 追加“本次会话的四文件摘要”，把可复用点候选明确列出来（用于后续检索与复盘）。
+- 更新项目 `AGENTS.md`：
+  - 补充 OpenSpec 的 validator 注意事项（Requirement 首句 MUST/SHALL）。
+  - 补充 Parallel E2E 的稳定性约束（`--no-tui`、只 parse stdout、keep-workspace 复跑隔离）。
+- 新增 3 个项目级 self-learning skills（放在 `.codex/skills/`）：
+  - `self-learning.openspec-requirement-first-sentence-must-shall`
+  - `self-learning.ralph-parallel-event-parser-stdout-only`
+  - `self-learning.ralph-e2e-workspace-reuse-contamination`
+- 将本次检索过的历史文件归档到根目录 `archive/`，降低根目录噪音：
+  - `archive/task_plan_2026-01-28_2325.md`

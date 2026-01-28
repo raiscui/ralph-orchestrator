@@ -349,18 +349,19 @@ name: "My Workflow"
 description: "Custom workflow for my team"
 
 event_loop:
-  starting_event: "task.start"
+  starting_event: "work.start"
+  complete_publishes: "work.done"
   completion_promise: "LOOP_COMPLETE"
 
 hats:
   first_hat:
-    triggers: ["task.start"]
+    triggers: ["work.start"]
     publishes: ["step.done"]
     instructions: "..."
 
   second_hat:
     triggers: ["step.done"]
-    publishes: ["LOOP_COMPLETE"]
+    publishes: ["work.done"]
     instructions: "..."
 ```
 

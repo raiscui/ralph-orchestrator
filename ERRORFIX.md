@@ -234,3 +234,91 @@
 
 ### 验证
 - `cargo run -p ralph-e2e -- codex --filter parallel-trigger-routing --keep-workspace --verbose` ✅
+
+## 2026-01-28 20:50:27 +0800｜parallel-workflow-semantics：并行启动/收敛语义不一致导致“看起来靠 prompt.md 才能闭环”
+
+### 现象
+- 团队使用 parallel 模式时，`starting_event` / `task.start` / “什么时候结束” / orphan 兜底边界在实现、文档、示例里存在语义分裂。
+- 直观表现是：示例里出现 `examples/parallel-trigger-routing/prompt.md` 后，容易让人误以为“没有 prompt.md 并行就无法正常闭环”。
+
+### 根因
+- 并行模式下 `ralph#1`（协调者）的默认指令过弱：没有把 `starting_event` / `complete_publishes` 的官方语义写死，导致 demo prompt 看起来像“必需品”。
+- triggers 默认路由的 fallback/orphan 语义边界不够“链式”：在存在 wildcard 订阅者时仍会额外打扰 `ralph#1`（老板兜底语义不成立）。
+
+### 修复
+- 引入/固化 `event_loop.complete_publishes`（唯一、可选）作为 workflow completion candidate topic，并做非空校验与单测。
+- 并行启动：`task.start/task.resume` 作为控制面 topic，强制 `target_instance=ralph#1`（避免 prompt pollution）。
+- 路由语义：收敛为 specific > wildcard > 真 orphan→`ralph#1`，并补充单测。
+- prompt 语义：在并行模式为 `ralph#1` 注入更强约束的协调指令（含 hats 拓扑表与动作约束），让“闭环”更多依赖 config+官方语义，而不是 demo prompt。
+- 示例：`examples/parallel-trigger-routing` 将目标 prompt 内联到 `event_loop.prompt`，并用 `starting_event/complete_publishes` 表达 entry/exit（避免示例依赖额外 `prompt.md` 文件）。
+- 文档：修正把 `starting_event` 当作第一条事件的 Mermaid 图；新增 replay smoke fixture 覆盖“completion candidate → coordinator 输出 LOOP_COMPLETE”。
+
+### 验证
+- `cargo test -p ralph-core` ✅
+- `cargo test` ✅
+
+## 2026-01-28 21:56:16 +0800｜E2E 回归：parallel-hat-instances 事件统计异常（stderr 回显被误判为事件）
+
+### 现象
+- 运行 `bash scripts/run-parallel-hat-instances-codex.sh` 时，`Parallel events recorded` 断言曾出现失败：
+  - 期望：`events.jsonl contains >=2 build.task, >=2 build.done, >=1 test.done`
+  - 实际（失败现场之一）：`build.task: 13, build.done: 0, test.done: 0`
+
+### 根因
+- `crates/ralph-cli/src/parallel_runner.rs` 的 `CliHatJobExecutor::handle_output_line` 会把 **stderr** 也拼进 `HatJobResult.output`。
+- 但在 Codex CLI 下，stderr 往往包含“后端回显的 user prompt / 内部日志”。
+  - 这些回显文本里可能出现 `<event ...>`（来自 prompt 示例或指令片段），从而被 EventParser 误判为“已发出的真实事件”。
+- 结果就是：
+  - `build.task` 等 topic 被重复解析/重复落盘（数量异常偏大）
+  - `build.done/test.done` 的统计被污染，导致 E2E 断言失败或波动
+
+### 修复
+- 只让 stdout 进入 `HatJobResult.output`（用于 EventParser）。
+- stderr 仍然流式输出给 Supervisor（可观测性保留），但不再参与事件解析。
+  - 修改位置：`crates/ralph-cli/src/parallel_runner.rs`
+
+### 验证
+- `bash scripts/run-parallel-hat-instances-codex.sh` ✅
+  - `Parallel events recorded`：`build.task: 3, build.done: 2, test.done: 1`
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+## 2026-01-29 01:58 +0800｜E2E：workspace 复跑污染导致断言误判（尤其在 --keep-workspace 后）
+
+### 现象
+- 先运行一次 `ralph-e2e ... --keep-workspace` 保留工作区后，再次运行同一个 scenario：
+  - `.e2e-tests/<scenario-id>/.ralph/events.jsonl` 会把两次运行的事件都堆在一起。
+  - 结果是：事件计数类断言可能“虚假通过/虚假失败”，排查时也会被历史输出污染。
+
+### 根因
+- `WorkspaceManager::create_workspace()` 只做 `create_dir_all`，不会清理已存在的 workspace 目录。
+- 当 workspace 目录已存在时（例如上次用了 `--keep-workspace`），新一轮测试会在旧目录上继续写入 `.ralph/events.jsonl`。
+
+### 修复
+- `crates/ralph-e2e/src/workspace.rs`：
+  - 在 `create_workspace()` 里，如果 workspace 目录已存在，则先 `remove_dir_all` 再重新创建。
+  - 语义：E2E 每次运行都从“干净工作区”开始，保证隔离与可重复。
+
+### 验证
+- `cargo test -p ralph-e2e workspace` ✅
+- `cargo test` ✅
+
+## 2026-01-29 02:15 +0800｜OpenSpec：archive 校验失败（Requirement 首句缺少 MUST/SHALL）
+
+### 现象
+- 执行 `openspec archive -y parallel-workflow-semantics` 时失败：
+  - `Validation errors in change delta specs:`
+  - `✗ ADDED "task.start and task.resume are control-plane topics routed to ralph#1" must contain SHALL or MUST`
+
+### 根因
+- OpenSpec validator 对 `### Requirement:` 段落的校验比较“强约束”：
+  - 要求该 Requirement 的首句（紧跟标题的第一句话）必须包含 `MUST` 或 `SHALL`。
+- 该 Requirement 的第一句原本是描述性陈述（没有 MUST/SHALL），因此触发校验错误。
+
+### 修复
+- 文件：`openspec/changes/parallel-workflow-semantics/specs/parallel-hat-instances/spec.md`
+- 将第一句改为：
+  - `In parallel mode, task.start and task.resume MUST be treated as control-plane topics.`
+
+### 验证
+- 再次执行 `openspec archive -y parallel-workflow-semantics`：归档成功，并完成 spec update ✅

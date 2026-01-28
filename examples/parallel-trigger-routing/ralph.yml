@@ -11,7 +11,16 @@ cli:
   backend: "codex"
 
 event_loop:
+  # 说明：示例 prompt 只承载“目标”，不承载“控制面语义”。
+  # - 控制面 handshake：永远是 task.start/task.resume
+  # - 工作流 entry/exit：由 starting_event / complete_publishes 固化
+  prompt: |
+    运行 `examples/parallel-trigger-routing` 这个 Demo，并完整跑通一次闭环。
   completion_promise: "LOOP_COMPLETE"
+  # workflow entry event（协调后发出），不是 runtime 第一条事件（第一条永远是 task.start/task.resume）
+  starting_event: "spec.start"
+  # workflow completion candidate（出现该事件后，由 ralph#1 决定是否输出 LOOP_COMPLETE 结束）
+  complete_publishes: "spec.approved"
   # 并行模式下：如果模型漂移不输出 completion promise，需要硬退出护栏
   max_iterations: 12
   max_runtime_seconds: 300
@@ -31,85 +40,85 @@ parallel:
 
 hats:
   spec_writer:
-    name: "📋 Spec Writer"
-    description: "Writes a small spec and emits spec.ready."
+    name: "📋 规格撰写者"
+    description: "撰写一个小规格，并发出 spec.ready。"
     triggers: ["spec.start", "spec.rejected"]
     publishes: ["spec.ready"]
     instances: 1
     instructions: |
-      You are the Spec Writer.
+      你是“规格撰写者”（Spec Writer）。
 
-      IMPORTANT (Demo rules):
-      - Do NOT run tools or shell commands.
-      - Do NOT edit files.
-      - Never output LOOP_COMPLETE.
+      重要（演示规则）：
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 永远不要输出 LOOP_COMPLETE。
 
-      You will receive incoming events in a list like:
+      你会收到类似这样的输入事件列表：
       - spec.start: ...
       - spec.rejected: ...
 
-      Behavior:
-      1) If you receive "spec.start":
-         - Write a short spec whose FIRST LINE is exactly: "version: 1"
-         - Do NOT include an "Acceptance Criteria" section
-         - Emit ONE event: <event topic="spec.ready">...</event>
+      行为规则：
+      1) 当你收到 "spec.start"：
+         - 写一份简短规格，其第一行必须严格等于："version: 1"
+         - 不要包含“验收标准（Acceptance Criteria）”章节
+         - 只发出一个事件：<event topic="spec.ready">...</event>
 
-      2) If you receive "spec.rejected":
-         - Write a revised spec whose FIRST LINE is exactly: "version: 2"
-         - MUST include an "Acceptance Criteria" section
-         - Emit ONE event: <event topic="spec.ready">...</event>
+      2) 当你收到 "spec.rejected"：
+         - 写一份修订版规格，其第一行必须严格等于："version: 2"
+         - 必须包含“验收标准（Acceptance Criteria）”章节
+         - 只发出一个事件：<event topic="spec.ready">...</event>
 
-      Emit events using EXACTLY this format (no code fences):
+      发事件必须使用如下格式（不要使用代码块）：
 
       <event topic="spec.ready">
-      ...spec text...
+      ...规格内容...
       </event>
 
   spec_reviewer:
-    name: "🔎 Spec Reviewer"
-    description: "Rejects version 1 once, then approves version 2."
+    name: "🔎 规格审阅者"
+    description: "先拒绝一次 version: 1，然后批准 version: 2。"
     triggers: ["spec.ready"]
     publishes: ["spec.rejected", "spec.approved"]
     instances: 1
     instructions: |
-      You are the Spec Reviewer.
+      你是“规格审阅者”（Spec Reviewer）。
 
-      IMPORTANT (Demo rules):
-      - Do NOT run tools or shell commands.
-      - Do NOT edit files.
-      - Never output LOOP_COMPLETE.
+      重要（演示规则）：
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 永远不要输出 LOOP_COMPLETE。
 
-      You will receive incoming events in a list like:
+      你会收到类似这样的输入事件列表：
       - spec.ready: <spec text...>
 
-      Rules (deterministic):
-      - If the spec text contains the line "version: 1", REJECT it.
-      - Otherwise (e.g. "version: 2"), APPROVE it.
+      规则（确定性）：
+      - 如果规格文本包含这一行："version: 1"，就拒绝（REJECT）。
+      - 否则（例如包含 "version: 2"），就批准（APPROVE）。
 
-      Emit EXACTLY ONE event per input, using ONE of these formats:
+      每次输入你只能发出一个事件，且必须使用如下两种格式之一：
 
       <event topic="spec.rejected">
-      reason: missing acceptance criteria
+      原因: 缺少验收标准
       </event>
 
       <event topic="spec.approved">
-      status: ok
+      状态: ok
       </event>
 
   spec_logger:
-    name: "🧾 Spec Logger"
-    description: "Logs spec events to demonstrate hat-level fanout and instance-level queue."
+    name: "🧾 规格记录员"
+    description: "记录 spec 相关事件，用于展示 hat-level fanout 与 instance-level queue。"
     triggers: ["spec.ready", "spec.rejected"]
     publishes: []
     instances: 2
     instructions: |
-      You are the Spec Logger.
+      你是“规格记录员”（Spec Logger）。
 
-      IMPORTANT (Demo rules):
-      - Do NOT run tools or shell commands.
-      - Do NOT edit files.
-      - Do NOT emit any events.
-      - Never output LOOP_COMPLETE.
+      重要（演示规则）：
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要发出任何事件。
+      - 永远不要输出 LOOP_COMPLETE。
 
-      For each incoming event, print exactly ONE line:
-      logger: <topic> (payload_len=<number>)
+      对每个输入事件，你都只输出一行：
+      日志: <topic> (payload_len=<number>)

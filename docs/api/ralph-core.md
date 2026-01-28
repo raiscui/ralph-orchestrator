@@ -41,13 +41,15 @@ pub struct Config {
 }
 
 pub struct EventLoopConfig {
+    pub prompt: Option<String>,
+    pub prompt_file: String,
     pub completion_promise: String,
-    pub max_iterations: usize,
+    pub max_iterations: u32,
     pub max_runtime_seconds: u64,
-    pub idle_timeout_secs: u64,
+    pub max_cost_usd: Option<f64>,
     pub starting_event: Option<String>,
-    pub checkpoint_interval: usize,
-    pub prompt_file: Option<String>,
+    pub complete_publishes: Option<String>,
+    pub max_consecutive_failures: u32,
 }
 
 pub struct CliConfig {
@@ -85,15 +87,16 @@ let result = event_loop.run().await?;
 
 1. Load configuration
 2. Initialize EventBus with hats
-3. Publish starting event (if configured)
-4. Loop:
+3. Publish `task.start` (or `task.resume` on resume)
+4. (Hat mode) Ralph coordinates and may publish `event_loop.starting_event`
+5. Loop:
    - Get next event
    - Find matching hat
    - Inject instructions
    - Execute backend
    - Parse output for events
    - Check for completion
-5. Return result
+6. Return result
 
 ### MemoryStore
 

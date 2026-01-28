@@ -102,7 +102,8 @@ cli:
 event_loop:
   completion_promise: "LOOP_COMPLETE"
   max_iterations: 100
-  starting_event: "task.start"
+  starting_event: "tdd.start"        # Workflow entry event after coordination
+  complete_publishes: "tdd.done"     # Optional completion candidate event
 
 # Hats are loaded from the preset
 ```

@@ -18,9 +18,10 @@ event_loop:
   completion_promise: "LOOP_COMPLETE"  # Output that signals completion
   max_iterations: 100                   # Maximum orchestration loops
   max_runtime_seconds: 14400            # 4 hours max runtime
-  idle_timeout_secs: 1800               # 30 min idle timeout
-  starting_event: "task.start"          # First event published (hat mode)
-  checkpoint_interval: 5                # Git checkpoint frequency
+  max_cost_usd: null                    # Optional: stop after spending this much
+  max_consecutive_failures: 5           # Stop after this many consecutive failures
+  starting_event: "tdd.start"           # Workflow entry event published after coordination (hat mode)
+  complete_publishes: "fix.applied"     # Optional: workflow completion candidate event topic
   prompt_file: "PROMPT.md"              # Default prompt file
 
 # CLI backend settings
@@ -74,9 +75,10 @@ Controls the orchestration loop behavior.
 | `completion_promise` | string | `"LOOP_COMPLETE"` | Output text that ends the loop |
 | `max_iterations` | integer | `100` | Maximum iterations before stopping |
 | `max_runtime_seconds` | integer | `14400` | Maximum runtime (4 hours) |
-| `idle_timeout_secs` | integer | `1800` | Idle timeout (30 minutes) |
-| `starting_event` | string | `null` | First event (enables hat mode) |
-| `checkpoint_interval` | integer | `5` | Git checkpoint frequency |
+| `max_cost_usd` | number | `null` | Stop after exceeding this cumulative cost |
+| `max_consecutive_failures` | integer | `5` | Stop after this many consecutive failures |
+| `starting_event` | string | `null` | Workflow entry event published after coordination (not the first event) |
+| `complete_publishes` | string | `null` | Workflow completion candidate event topic (observed by coordinator) |
 | `prompt_file` | string | `"PROMPT.md"` | Default prompt file |
 
 ### cli
@@ -173,12 +175,13 @@ cli:
 event_loop:
   completion_promise: "LOOP_COMPLETE"
   max_iterations: 100
-  starting_event: "task.start"
+  # Workflow entry event after Ralph coordinates (NOT the runtime's first event).
+  starting_event: "work.start"
 
 hats:
   planner:
     name: "Planner"
-    triggers: ["task.start"]
+    triggers: ["work.start"]
     publishes: ["plan.ready"]
     instructions: |
       Create an implementation plan.

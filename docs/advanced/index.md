@@ -48,11 +48,13 @@ Events are the nervous system of hat-based Ralph:
 
 ```mermaid
 flowchart LR
-    A[starting_event] --> B[EventBus]
-    B --> C[Hat Selection]
-    C --> D[Hat Execution]
-    D --> E[Event Emission]
-    E --> B
+    A["task.start / task.resume"] --> B["Coordinator (ralph#1)"]
+    B -->|publish workflow entry| C["EventBus / Router"]
+    C --> D["Hat Selection"]
+    D --> E["Hat Execution"]
+    E --> F["Event Emission"]
+    F --> C
+    B -->|outputs completion_promise| G["Done"]
 ```
 
 ### State Management

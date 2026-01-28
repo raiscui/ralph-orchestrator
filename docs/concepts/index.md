@@ -51,19 +51,20 @@ cli:
   backend: "claude"
 
 event_loop:
-  starting_event: "task.start"
+  starting_event: "work.start"       # Workflow entry event after coordination
+  complete_publishes: "work.done"    # Optional completion candidate event
   completion_promise: "LOOP_COMPLETE"
 
 hats:
   planner:
-    triggers: ["task.start"]
+    triggers: ["work.start"]
     publishes: ["plan.ready"]
     instructions: "Create a plan..."
 
   builder:
     triggers: ["plan.ready"]
-    publishes: ["build.done"]
-    instructions: "Implement the plan..."
+    publishes: ["work.done"]
+    instructions: "Implement the plan and signal completion..."
 ```
 
 Events flow between hats, each contributing to the task.

@@ -118,7 +118,7 @@ hats:
 ```yaml
 hats:
   worker:
-    triggers: ["task.start"]
+    triggers: ["work.start"]
     publishes: ["work.done", "work.blocked"]
     default_publishes: "work.done"  # If no explicit emit
 ```
@@ -127,11 +127,17 @@ hats:
 
 ### Starting Event
 
-The first event published when Ralph starts:
+Ralph always begins a run by publishing a control-plane start event:
+
+- Fresh run: `task.start`
+- Resume run: `task.resume`
+
+`event_loop.starting_event` is **not** the first event.
+It is the workflow entry event topic that Ralph publishes **after coordination** to kick off the hat workflow.
 
 ```yaml
 event_loop:
-  starting_event: "task.start"  # Triggers initial hat
+  starting_event: "work.start"  # Workflow entry event after coordination
 ```
 
 ### Completion Promise
@@ -141,16 +147,19 @@ The signal that ends the loop:
 ```yaml
 event_loop:
   completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "work.done"  # Optional: workflow completion candidate event topic
 ```
 
-A hat can output this directly, or emit a completion event:
+In parallel mode, only the coordinator (`ralph#1`) should output `completion_promise`.
+Worker hats should emit a completion event (often configured via `event_loop.complete_publishes`) and let the coordinator decide when to end.
 
 ```yaml
 hats:
-  coordinator:
-    triggers: ["all.done"]
+  worker:
+    triggers: ["work.start"]
+    publishes: ["work.done"]
     instructions: |
-      All work complete. Output: LOOP_COMPLETE
+      Do the work, then emit <event topic="work.done">...</event>
 ```
 
 ## Common Patterns

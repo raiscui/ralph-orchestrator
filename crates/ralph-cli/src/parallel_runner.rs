@@ -250,9 +250,14 @@ impl CliHatJobExecutor {
                 output.push('\n');
             }
             OutputStream::Stderr => {
-                output.push_str("[stderr] ");
-                output.push_str(&line);
-                output.push('\n');
+                // 重要：并行模式下，stderr 往往包含“后端自身的日志”（例如 Codex 会回显 user prompt、
+                // MCP 启动日志、warnings 等）。这些内容可能包含 `<event ...>` 字样（来自 prompt 本身），
+                // 如果把 stderr 拼进 `output`，会导致 EventParser 把“输入/日志”误判为“已发出事件”，
+                // 从而造成重复路由、假阳性 completion、E2E 波动等问题。
+                //
+                // 因此：
+                // - stderr 仍然会通过 `output_tx` 传给 Supervisor 做可观测输出（`[hat#n:err] ...`）
+                // - 但不会进入 `HatJobResult.output`，以保证 event parsing 只基于 stdout（模型最终输出）
             }
         }
     }

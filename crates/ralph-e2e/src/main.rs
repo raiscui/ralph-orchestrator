@@ -216,6 +216,7 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(BackendUnavailableScenario::new()),
         // Tier 8: Parallel Runtime (experimental)
         Box::new(ParallelHatInstancesScenario::new()),
+        Box::new(ParallelHatInstancesScenario::new_zh()),
     ]
 }
 

@@ -61,6 +61,12 @@ impl WorkspaceManager {
     pub fn create_workspace(&self, scenario_id: &str) -> io::Result<PathBuf> {
         let workspace_path = self.base_path.join(scenario_id);
 
+        // 重要：E2E 必须从“干净工作区”开始。
+        // - 即使上一次运行使用了 --keep-workspace，这次也应该清理旧目录，避免 fixture/log 污染导致误判。
+        if workspace_path.exists() {
+            fs::remove_dir_all(&workspace_path)?;
+        }
+
         // Create the workspace directory and .agent subdirectory
         fs::create_dir_all(workspace_path.join(".agent"))?;
 

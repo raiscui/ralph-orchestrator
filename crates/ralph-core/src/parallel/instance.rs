@@ -1012,9 +1012,15 @@ impl HatInstanceActor {
         };
 
         let hat_instructions = if is_ralph {
-            // Ralph 作为 fallback coordinator，先用最小指令；后续会对齐 HatlessRalph 的 prompt 结构。
-            "You are Ralph (coordinator). Handle orphaned events and decide next actions.\n"
-                .to_string()
+            // Ralph#1（并行协调者）：
+            // - 优先使用 Supervisor 生成的“强约束协调语义”指令（含 starting_event / complete_publishes）
+            // - 若未注入，则回退到最小兜底指令
+            if !self.hat.instructions.trim().is_empty() {
+                self.hat.instructions.clone()
+            } else {
+                "You are Ralph (coordinator). Handle orphaned events and decide next actions.\n"
+                    .to_string()
+            }
         } else if !self.hat.instructions.is_empty() {
             // 说明：
             // - 并行模式更偏“事件驱动的多角色协作”，hat 的 instructions 往往已经足够具体。

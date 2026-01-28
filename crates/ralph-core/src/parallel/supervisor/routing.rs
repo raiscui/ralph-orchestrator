@@ -374,12 +374,16 @@ impl ParallelSupervisor {
             }
         }
 
-        let mut chosen = if specific.is_empty() {
-            // 始终提供 Ralph fallback（即使 config 没写）
-            fallback.push(HatId::new("ralph"));
+        // 链式拓扑（老板兜底）语义：
+        // - 若存在 specific subscriber：只投递给 specific（不打扰 wildcard/老板）
+        // - 若无 specific 但存在 wildcard subscriber（例如经理）：只投递给 wildcard（不额外打扰老板）
+        // - 若完全无人订阅：才视为 orphan，升级给 ralph#1
+        let mut chosen = if !specific.is_empty() {
+            specific
+        } else if !fallback.is_empty() {
             fallback
         } else {
-            specific
+            vec![HatId::new("ralph")]
         };
 
         chosen.sort_by(|a, b| a.as_str().cmp(b.as_str()));

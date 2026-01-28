@@ -201,8 +201,13 @@ impl ParallelSupervisor {
         self.spawn_instances()?;
 
         // 初始事件：task.start / task.resume
+        //
+        // 说明：
+        // - 这两条属于控制面 handshake 事件，payload 是 top-level prompt。
+        // - 为了避免 wildcard hat 收到该 payload 造成“角色污染”，并行模式下强制投递给 ralph#1。
         let start_topic = if resume { "task.resume" } else { "task.start" };
-        let mut start_event = Event::new(start_topic, &self.prompt_prelude);
+        let mut start_event = Event::new(start_topic, &self.prompt_prelude)
+            .with_target_instance(HatInstanceId::from_parts("ralph", "1"));
         self.ensure_event_id(&mut start_event);
         self.route_event(start_event).await?;
 
@@ -517,7 +522,10 @@ impl ParallelSupervisor {
         }
 
         // 始终注册 Ralph fallback（即使 config 没写）
-        let ralph_hat = Hat::new("ralph", "Ralph").subscribe("*");
+        let ralph_hat = Hat::new("ralph", "Ralph")
+            .with_description("Parallel coordinator: handles true-orphan events and makes completion decisions")
+            .subscribe("*")
+            .with_instructions(self.build_ralph_coordinator_instructions());
         let ralph_id = HatId::new("ralph");
         let ralph_instance = HatInstanceId::from_parts("ralph", "1");
         let ralph_job_timeout = self.resolve_job_timeout(None);
@@ -547,6 +555,175 @@ impl ParallelSupervisor {
         self.next_instance_seq_by_hat.insert(HatId::new("ralph"), 2);
 
         Ok(())
+    }
+
+    fn build_ralph_coordinator_instructions(&self) -> String {
+        // =====================================================================
+        // Ralph#1（并行协调者）prompt：把“官方语义锚点”写死，减少 demo prompt 依赖
+        // =====================================================================
+        //
+        // 目标：
+        // - 让 parallel 模式的 Ralph#1 拥有接近 HatlessRalph 的“强约束、可预测协调语义”
+        // - 只把顶层 prompt 注入给 Ralph（避免 prompt pollution）
+        // - 明确 starting_event / complete_publishes 的语义与使用方式
+
+        let completion_promise = self.config.event_loop.completion_promise.as_str();
+
+        let starting_event = self.config.event_loop.starting_event.as_deref();
+        let complete_publishes = self.config.event_loop.complete_publishes.as_deref();
+
+        // 生成一个稳定的 hats 拓扑表（只包含用户配置 hats；不包含 ralph 自己）
+        let mut hats: Vec<_> = self.registry.all().collect();
+        hats.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+
+        // 入口 topic 候选（用于 starting_event 未配置时的兜底选择）
+        // 粗略规则：
+        // - 只考虑“精确 topic”（不含 `*` 的订阅）
+        // - 排除 task.start/task.resume（控制面 handshake）
+        // - 排除已被某个 hat publishes 的 topic（更像是链路中间态）
+        let mut published_exact: HashSet<String> = HashSet::new();
+        for hat in &hats {
+            for t in &hat.publishes {
+                let s = t.as_str();
+                if !s.contains('*') {
+                    published_exact.insert(s.to_string());
+                }
+            }
+        }
+
+        let mut entry_candidates: Vec<String> = Vec::new();
+        for hat in &hats {
+            for t in &hat.subscriptions {
+                let s = t.as_str();
+                if s.contains('*') {
+                    continue;
+                }
+                if matches!(s, "task.start" | "task.resume") {
+                    continue;
+                }
+                if published_exact.contains(s) {
+                    continue;
+                }
+                entry_candidates.push(s.to_string());
+            }
+        }
+        entry_candidates.sort();
+        entry_candidates.dedup();
+
+        let mut out = String::new();
+
+        out.push_str(
+            "You are Ralph (coordinator) running in PARALLEL mode as instance ralph#1.\n\n",
+        );
+
+        out.push_str("## ROLE\n");
+        out.push_str("- You MUST NOT implement code.\n");
+        out.push_str("- You MUST coordinate by emitting events.\n");
+        out.push_str("- You MUST keep output short and action-oriented.\n\n");
+
+        out.push_str("## KEY SEMANTICS (OFFICIAL)\n");
+        out.push_str("- Runtime handshake start topics are always: `task.start` (fresh) / `task.resume` (resume).\n");
+        out.push_str("- `event_loop.starting_event` is an OPTIONAL workflow entry event after coordination.\n");
+        out.push_str("- `event_loop.complete_publishes` is an OPTIONAL workflow completion candidate event topic.\n");
+        out.push_str(&format!(
+            "- The ONLY hard shutdown signal is the completion promise: `{completion_promise}`.\n\n"
+        ));
+
+        out.push_str("## EMIT EVENTS (NO CODE FENCES)\n");
+        out.push_str("Emit routing events using XML-style tags:\n\n");
+        out.push_str("<event topic=\"work.start\">payload</event>\n\n");
+        out.push_str("Optional (parallel): target a specific instance:\n\n");
+        out.push_str("<event topic=\"build.task\" target_instance=\"builder#1\">payload</event>\n\n");
+        out.push_str("After emitting an event, you MUST stop. The supervisor will route it and run the next job with fresh context.\n\n");
+
+        out.push_str("## CONFIG (THIS RUN)\n");
+        match starting_event {
+            Some(topic) => {
+                out.push_str(&format!("- starting_event: `{topic}`\n"));
+            }
+            None => {
+                out.push_str("- starting_event: (not set)\n");
+            }
+        }
+        match complete_publishes {
+            Some(topic) => {
+                out.push_str(&format!("- complete_publishes: `{topic}`\n"));
+            }
+            None => {
+                out.push_str("- complete_publishes: (not set)\n");
+            }
+        }
+        out.push('\n');
+
+        out.push_str("## HATS TOPOLOGY (CONFIGURED)\n");
+        if hats.is_empty() {
+            out.push_str("- (no custom hats configured)\n\n");
+        } else {
+            out.push_str("| hat_id | triggers | publishes | description |\n");
+            out.push_str("|--------|----------|-----------|-------------|\n");
+            for hat in &hats {
+                let triggers = hat
+                    .subscriptions
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let publishes = hat
+                    .publishes
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    hat.id.as_str(),
+                    triggers,
+                    publishes,
+                    hat.description.replace('\n', " ")
+                ));
+            }
+            out.push('\n');
+        }
+
+        out.push_str("## WHAT TO DO\n");
+        out.push_str("### If you receive `task.start` (fresh)\n");
+        if let Some(topic) = starting_event {
+            out.push_str(&format!(
+                "1) Do initial coordination quickly.\n2) Emit EXACTLY ONE workflow entry event with topic `{topic}`.\n3) Stop. Do NOT output the completion promise.\n\n"
+            ));
+        } else if !entry_candidates.is_empty() {
+            out.push_str("1) Do initial coordination quickly.\n");
+            out.push_str("2) Choose ONE workflow entry topic (prefer an external entrypoint topic).\n");
+            out.push_str("   Candidates (derived):\n");
+            for t in &entry_candidates {
+                out.push_str(&format!("   - `{t}`\n"));
+            }
+            out.push_str("3) Emit EXACTLY ONE workflow entry event.\n");
+            out.push_str("4) Stop. Do NOT output the completion promise.\n\n");
+        } else {
+            out.push_str("1) Do initial coordination quickly.\n");
+            out.push_str("2) Choose ONE workflow entry event topic from the hats table above.\n");
+            out.push_str("3) Emit EXACTLY ONE workflow entry event.\n");
+            out.push_str("4) Stop. Do NOT output the completion promise.\n\n");
+        }
+
+        out.push_str("### If you receive the completion candidate topic\n");
+        if let Some(topic) = complete_publishes {
+            out.push_str(&format!(
+                "When you observe an event with topic `{topic}`:\n- If the workflow is truly complete, output `{completion_promise}` on its own line and stop.\n- Otherwise, emit follow-up events and stop.\n\n"
+            ));
+        } else {
+            out.push_str(
+                "No completion candidate is configured.\n- You may still output the completion promise when the objective is complete.\n- Prefer emitting follow-up events when more work is needed.\n\n",
+            );
+        }
+
+        out.push_str("### If you receive any other event\n");
+        out.push_str("- Treat it as an orphan (no subscribers) or an explicitly targeted control-plane event.\n");
+        out.push_str("- Decide which hat should handle it next and emit ONE event to delegate.\n");
+        out.push_str("- Stop.\n");
+
+        out
     }
 
     async fn route_events_batch(&mut self, events: Vec<Event>) -> anyhow::Result<()> {

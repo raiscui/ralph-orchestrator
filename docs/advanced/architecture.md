@@ -149,17 +149,18 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[starting_event] --> B[EventBus]
-    B --> C{Match Hat?}
-    C -->|Yes| D[Inject Instructions]
-    D --> E[Execute Backend]
-    E --> F[Parse Output]
-    F --> G{Event Emitted?}
-    G -->|Yes| H[Route Event]
-    H --> B
-    G -->|No| I{LOOP_COMPLETE?}
-    I -->|Yes| J[Done]
-    I -->|No| B
+    A["task.start / task.resume"] --> B["Coordinator (ralph#1)"]
+    B -->|publish workflow entry| C[EventBus]
+    C --> D{Match Hat?}
+    D -->|Yes| E[Inject Instructions]
+    E --> F[Execute Backend]
+    F --> G[Parse Output]
+    G --> H{Event Emitted?}
+    H -->|Yes| I[Route Event]
+    I --> C
+    H -->|No| J{completion_promise?}
+    J -->|Yes| K[Done]
+    J -->|No| C
 ```
 
 ## State Management

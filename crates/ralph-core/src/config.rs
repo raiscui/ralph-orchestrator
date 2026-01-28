@@ -501,6 +501,16 @@ impl RalphConfig {
             });
         }
 
+        // Validate complete_publishes is non-empty when set
+        if let Some(ref topic) = self.event_loop.complete_publishes
+            && topic.trim().is_empty()
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "event_loop.complete_publishes".to_string(),
+                message: "must not be empty".to_string(),
+            });
+        }
+
         // Check custom backend has a command
         if self.cli.backend == "custom" && self.cli.command.as_ref().is_none_or(String::is_empty) {
             return Err(ConfigError::CustomBackendRequiresCommand);
@@ -704,6 +714,15 @@ pub struct EventLoopConfig {
     /// If not specified and hats are defined, Ralph will determine the appropriate
     /// event from the hat topology.
     pub starting_event: Option<String>,
+
+    /// Workflow completion candidate event topic.
+    ///
+    /// When set, the coordinator (ralph#1) can treat receiving this topic as a
+    /// signal that the workflow has reached a completion point, and may output
+    /// `completion_promise` to end the run.
+    ///
+    /// Example: `complete_publishes: "fix.applied"`
+    pub complete_publishes: Option<String>,
 }
 
 fn default_prompt_file() -> String {
@@ -738,6 +757,7 @@ impl Default for EventLoopConfig {
             max_consecutive_failures: default_max_failures(),
             starting_hat: None,
             starting_event: None,
+            complete_publishes: None,
         }
     }
 }
@@ -1261,6 +1281,9 @@ pub enum ConfigError {
         "Hat '{hat}' is missing required 'description' field - add a short description of the hat's purpose"
     )]
     MissingDescription { hat: String },
+
+    #[error("Invalid value for '{field}': {message}")]
+    InvalidValue { field: String, message: String },
 }
 
 #[cfg(test)]
@@ -1299,6 +1322,35 @@ hats:
 
         let hat = config.hats.get("implementer").unwrap();
         assert_eq!(hat.triggers.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_yaml_with_complete_publishes() {
+        let yaml = r#"
+event_loop:
+  prompt_file: "TASK.md"
+  completion_promise: "DONE"
+  complete_publishes: "fix.applied"
+cli:
+  backend: "claude"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.event_loop.complete_publishes.as_deref(),
+            Some("fix.applied")
+        );
+    }
+
+    #[test]
+    fn test_validate_complete_publishes_empty_string() {
+        let mut config = RalphConfig::default();
+        config.event_loop.complete_publishes = Some("   ".to_string());
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { field, .. }) if field == "event_loop.complete_publishes"
+        ));
     }
 
     #[test]

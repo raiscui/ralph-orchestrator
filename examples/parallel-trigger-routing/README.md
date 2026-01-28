@@ -1,51 +1,54 @@
-# Parallel Trigger Routing (App Example)
+# 并行触发路由（Parallel Trigger Routing，应用示例）
 
-This is a runnable, end-to-end example for **parallel-trigger-routing**.
+这是一个可运行的端到端示例：**parallel-trigger-routing**。
 
-It demonstrates the default routing semantics when `parallel.enabled: true` and **no** `parallel.topic_contracts` are configured:
+它用于演示在 `parallel.enabled: true` 且**没有**配置 `parallel.topic_contracts` 时的默认路由语义：
 
-- `topic -> hats`: fanout to **all** hats that subscribe to the topic (`hats.*.triggers`)
-- `hat -> instance`: for each hat, queue to **exactly one** instance (idle-first, round-robin)
+- `topic -> hats`：把事件扇出（fanout）给所有订阅该 topic 的 hat（`hats.*.triggers`）
+- `hat -> instance`：对每个 hat，把事件排队给且仅给一个实例（优先空闲实例，其次轮询）
 
-## What you should see
+## 你应该看到什么
 
-This example intentionally produces **two** `spec.ready` events:
+这个示例会刻意产生**两次** `spec.ready` 事件：
 
-1. `spec_writer` emits `spec.ready` with `version: 1`
-2. `spec_reviewer` rejects it (`spec.rejected`)
-3. `spec_writer` revises and emits `spec.ready` with `version: 2`
-4. `spec_reviewer` approves (`spec.approved`)
-5. Ralph receives `spec.approved` and outputs `LOOP_COMPLETE`
+1. `spec_writer` 发出 `spec.ready`，并带上 `version: 1`
+2. `spec_reviewer` 拒绝（`spec.rejected`）
+3. `spec_writer` 修订后再次发出 `spec.ready`，并带上 `version: 2`
+4. `spec_reviewer` 通过（`spec.approved`）
+5. Ralph 收到 `spec.approved` 后输出 `LOOP_COMPLETE`
 
-`spec.ready` is subscribed by **two hats** (`spec_reviewer` and `spec_logger`), so it should trigger both.
+`spec.ready` 同时被**两个 hat** 订阅（`spec_reviewer` 和 `spec_logger`），因此它应该会同时触发两者。
 
-`spec_logger` is configured with `instances: 2`, so the two `spec.ready` events should typically be handled by:
-- `spec_logger#1` (first `spec.ready`)
-- `spec_logger#2` (second `spec.ready`)
+`spec_logger` 配置为 `instances: 2`，所以两次 `spec.ready` 通常会分别由下面两个实例处理：
 
-## Run
+- `spec_logger#1`（第一次 `spec.ready`）
+- `spec_logger#2`（第二次 `spec.ready`）
 
-From the repo root:
+## 运行
+
+在仓库根目录执行：
 
 ```bash
-# Use config + prompt files directly
+# 只使用配置（目标 prompt 已通过 event_loop.prompt 内联）
 cargo run --bin ralph -- run \
   -c examples/parallel-trigger-routing/ralph.yml \
-  -P examples/parallel-trigger-routing/prompt.md \
   --no-tui
 ```
 
-Optional: override backend on the CLI (recommended if your default is not configured):
+可选：在 CLI 上覆盖 backend（如果你默认 backend 没配好，建议显式指定）：
 
 ```bash
 cargo run --bin ralph -- run \
   -c examples/parallel-trigger-routing/ralph.yml \
-  -P examples/parallel-trigger-routing/prompt.md \
   -b codex \
   --no-tui
 ```
 
-## Notes
+## 备注
 
-- This example is intentionally **trigger-driven** and does not use `parallel.topic_contracts`.
-- If you need explicit delivery/audience rules, add topic contracts and they will take precedence over triggers.
+- 这个示例是刻意做成"触发器驱动"（trigger-driven）的，不使用 `parallel.topic_contracts`。
+- 如果你需要更明确的投递/受众规则，可以添加 topic contracts；它们的优先级高于 triggers。
+- 这个示例把工作流的入口/出口语义写在配置里（这是官方并行语义）：
+  - `event_loop.starting_event: "spec.start"`
+  - `event_loop.complete_publishes: "spec.approved"`
+- 目标 prompt 内联在 `event_loop.prompt` 中，所以这个示例不依赖额外的 prompt 文件。

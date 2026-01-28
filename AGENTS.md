@@ -30,6 +30,11 @@
 - Work step-by-step: spec → dogfood spec → implement → dogfood implementation → done
 - The bar: A new team member should implement using only the spec and codebase
 
+## OpenSpec
+
+- OpenSpec changes live in `openspec/changes/<change-name>/` and are archived under `openspec/changes/archive/`.
+- Validator gotcha: for delta specs, each `### Requirement:` section should have a first sentence containing `MUST` or `SHALL` (otherwise `openspec archive` may fail validation).
+
 ## Tasks
 
 - Create code tasks in `tasks/` using `.code-task.md` extension
@@ -190,6 +195,12 @@ cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --keep-workspace
 # Convenience script for the parallel scenario
 bash scripts/run-parallel-hat-instances-codex.sh
 ```
+
+### Parallel E2E Notes
+
+- Prefer `--no-tui` for E2E runs/captures: ANSI control sequences can pollute output parsing and fixtures.
+- Event parsing: only parse `<event ...>` from worker **stdout**. stderr may contain backend echoes (including `<event>` examples) and will cause false positives.
+- `--keep-workspace` is for debugging artifacts. Re-running the same scenario is expected to start from a clean workspace to avoid `.ralph/events.jsonl` accumulation affecting assertions.
 
 ### Test Tiers
 

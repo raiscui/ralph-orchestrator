@@ -159,6 +159,36 @@ impl HatJobExecutor for TimeoutCaptureExecutor {
     }
 }
 
+#[derive(Debug, Clone)]
+struct StartEventCaptureExecutor {
+    seen: Arc<tokio::sync::Mutex<Vec<String>>>,
+    notify: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for StartEventCaptureExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<HatJobResult> {
+        {
+            let mut seen = self.seen.lock().await;
+            seen.push(job.instance_id.to_string());
+        }
+        self.notify.notify_waiters();
+
+        Ok(HatJobResult {
+            output: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
+        })
+    }
+}
+
 fn base_parallel_config() -> ParallelConfig {
     ParallelConfig {
         enabled: true,
@@ -348,6 +378,124 @@ async fn trigger_routing_delivers_to_single_instance_per_hat() {
         "Unexpected instance chosen: {:?}",
         seen
     );
+}
+
+#[tokio::test]
+async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = StartEventCaptureExecutor {
+        seen: Arc::clone(&seen),
+        notify: Arc::clone(&notify),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    // wildcard hat：如果 task.start 不是 target_instance 投递，就会收到 payload（prompt pollution 风险）
+    config.hats.insert(
+        "manager".to_string(),
+        hat_config("Manager", vec!["*"], 1),
+    );
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
+
+    let event = Event::new("task.start", "top-level prompt")
+        .with_id("e-task-start")
+        .with_target_instance(HatInstanceId::from_parts("ralph", "1"));
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    // 等待至少一个 job 执行开始（用 timeout 防止 test 卡死）
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for first job execution");
+
+    // 给调度一点缓冲时间，避免 race（如果错误投递给 manager，这里应该能观测到第二次 execute）
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let mut got = seen.lock().await.clone();
+    got.sort();
+
+    assert_eq!(got, vec!["ralph#1".to_string()]);
+}
+
+#[tokio::test]
+async fn wildcard_manager_receives_event_without_escalating_to_ralph() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = StartEventCaptureExecutor {
+        seen: Arc::clone(&seen),
+        notify: Arc::clone(&notify),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    // wildcard manager：应当吃掉默认 fallback，不再额外打扰 ralph#1
+    config.hats.insert(
+        "manager".to_string(),
+        hat_config("Manager", vec!["*"], 1),
+    );
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
+
+    let event = Event::new("unknown.topic", "hello").with_id("e-unknown");
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for job execution");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let mut got = seen.lock().await.clone();
+    got.sort();
+    assert_eq!(got, vec!["manager#1".to_string()]);
+}
+
+#[tokio::test]
+async fn true_orphan_escalates_to_ralph() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = StartEventCaptureExecutor {
+        seen: Arc::clone(&seen),
+        notify: Arc::clone(&notify),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
+
+    let event = Event::new("unknown.topic", "hello").with_id("e-orphan");
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for job execution");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let mut got = seen.lock().await.clone();
+    got.sort();
+    assert_eq!(got, vec!["ralph#1".to_string()]);
 }
 
 #[tokio::test]
