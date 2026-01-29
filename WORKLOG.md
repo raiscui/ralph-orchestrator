@@ -838,6 +838,7 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
 
 ### 验证
 - `cargo test` ✅
+
 - `cargo test -p ralph-core smoke_runner` ✅
 
 ## 2026-01-29 18:10 +0800｜合并：`ralph hats` CLI + 拓扑 diagrams（来自 commit `26f236...`）
@@ -946,7 +947,9 @@ cargo run -p ralph-e2e -- mock-cli --cassette cassettes/e2e/connect.jsonl
 ```
 
 ### 验证
-- `cargo test` ✅---
+- `cargo test` ✅
+
+---
 
 ## 2026-01-29 19:08 +0800｜合并：`for_marge` -> `main`（fast-forward）
 
@@ -954,6 +957,17 @@ cargo run -p ralph-e2e -- mock-cli --cassette cassettes/e2e/connect.jsonl
 - 为了避免 dirty working tree 影响合并，我先执行 `git stash push -u` 暂存了当时的工作区（包含未跟踪目录）。
 - 使用 `git merge --ff-only for_marge` 将 `main` 快进到 `for_marge`。
 - 执行 `git stash pop` 恢复本地改动；并处理了 `task_plan.md` / `notes.md` / `WORKLOG.md` 的日志文件冲突。
+
+### 验证
+- `cargo test` ✅
+
+## 2026-01-29 19:43 +0800｜合并：`for_marge` -> `main`（non-ff）
+
+### 我做了什么
+- 由于 `main` 与 `for_marge` 已分叉，本次使用 non-ff 合并并生成 merge commit：`f84c7ae`（Merge branch 'for_marge'）。
+- 合并过程中出现冲突并已解决：
+  - `ERRORFIX.md` / `WORKLOG.md` / `notes.md` / `task_plan.md`
+  - `crates/ralph-cli/src/parallel_runner.rs`（语义合并：stderr 折叠 + record-session stdout 录制同时保留）
 
 ### 验证
 - `cargo test` ✅

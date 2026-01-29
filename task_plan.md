@@ -561,10 +561,16 @@
   - [理由] 你明确说“再次合并”，且当前 `main` 与 `for_marge` 已分叉；用 merge commit 能最小化风险，也不会改写 `for_marge` 的历史（它还在另一个 worktree 里被 checkout）。
 
 ## 遇到错误
-- 暂无
+- [冲突] 本次 non-ff merge 过程中产生内容冲突（均为双边都修改了同名文件）：
+  - `ERRORFIX.md`
+  - `WORKLOG.md`
+  - `crates/ralph-cli/src/parallel_runner.rs`
+  - `notes.md`
+  - `task_plan.md`
+  - [决议] 统一策略：保留双方有效内容；代码冲突以“语义合并”为主（stderr 折叠 + cassette 录制同时成立），日志文件以“合并追加”为主（避免丢历史）。
 
 ## 状态
-** 目前在阶段1 ** - 确认分叉点与合并方式，然后执行 `git merge --no-edit for_marge`。
+**已完成** - 已完成 merge commit（`f84c7ae`），冲突已解决；`cargo test` 全绿。
 
 ## 日志
 ### 2026-01-29 19:30 +0800
@@ -572,6 +578,11 @@
   - `main` tip：`b9cd49a`
   - `for_marge` tip：`9312de4`（该分支目前在另一个 worktree：`/Users/cuiluming/local_doc/l_dev/my/rust/ralph-orchestrator-for_marge`）
 - [计划] 用 `--no-edit` 做 non-ff merge，避免交互式编辑器阻塞。
+
+### 2026-01-29 19:43 +0800
+- [执行] `git merge --no-edit for_marge`：触发 non-ff 合并并产生冲突。
+- [执行] 解决冲突后提交 merge commit：`f84c7ae`（Merge branch 'for_marge'）。
+- [验证] `cargo test` ✅
 
 ---
 
