@@ -54,3 +54,40 @@
 ### 2026-01-29 02:10
 - [计划] 使用 `openspec archive parallel-workflow-semantics` 归档该 change，并让 OpenSpec 将 delta specs 合并到 `openspec/specs/` 主规格中。
 - [计划] 归档后复核 `openspec/specs/parallel-hat-instances/spec.md` 与 `openspec/specs/parallel-trigger-routing/spec.md` 是否包含 starting_event / complete_publishes / orphan→ralph#1 等“官方语义锚点”。
+
+---
+
+# 任务计划: 理性合并 preset 配置更新（commit: 7a346bd）
+
+## 目标
+把 `7a346bd425cf2d7a45d086875eba413a21111744` 里的“preset 配置改良”合并到当前分支。
+只保留对工作流收敛、可执行性、测试时长预算有帮助的改动。
+
+## 阶段
+- [x] 阶段1: 审阅 commit 变更点与影响范围
+- [x] 阶段2: 应用改动（不创建新 commit，只落地文件差异）
+- [x] 阶段3: 运行 `cargo test` 做回放/单测验证
+- [x] 阶段4: 记录合并结论（notes/WORKLOG，必要时 ERRORFIX）
+
+## 关键问题
+1. 这次变更是否会影响事件语义（publish vs LOOP_COMPLETE）以及 preset 的“停机”条件？
+2. `tools/preset-test-tasks.yml` 的复杂度与 timeout 调整，是否会影响现有测试基准与期望？
+3. 是否存在与当前分支同文件改动的冲突，需要做“择优合并”而不是整块覆盖？
+
+## 做出的决定
+- [决定] 优先按“整 commit 差异”落地，再用测试做背压验证。
+  - [理由] 该 commit 只改 YAML 配置，风险可控；且改动方向统一（更务实、更易停机、时间预算更贴近真实）。
+- [决定] 不执行 `git cherry-pick` 产生新 commit，只应用变更到工作区。
+  - [理由] 遵循当前协作约定：除非明确要求，否则不自动创建提交。
+
+## 遇到错误
+- 暂无
+
+## 状态
+**已完成**：已把 `7a346bd` 的 preset 改良落地到工作区，并通过 `cargo test` 验证无回归。
+
+## 日志
+### 2026-01-29 12:35
+- [完成] 审阅 `7a346bd` 差异：确认主要价值点为“更务实的 review 收敛策略”和“更可靠的 LOOP_COMPLETE 停机语义”。
+- [完成] 应用 7 个 YAML 文件差异（使用 `git show | git apply`，未创建新 commit）。
+- [完成] `cargo test` 全通过。

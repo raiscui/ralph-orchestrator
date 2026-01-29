@@ -817,3 +817,24 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
   - `self-learning.ralph-e2e-workspace-reuse-contamination`
 - 将本次检索过的历史文件归档到根目录 `archive/`，降低根目录噪音：
   - `archive/task_plan_2026-01-28_2325.md`
+
+## 2026-01-29 12:35 +0800｜合并：preset 配置改良（来自 commit `7a346bd`）
+
+### 我做了什么
+- 把 `7a346bd425cf2d7a45d086875eba413a21111744` 的配置差异合并到当前分支（未创建新 commit）。
+- 落地的文件：
+  - `presets/api-design.yml`
+  - `presets/code-archaeology.yml`
+  - `presets/documentation-first.yml`
+  - `presets/mob-programming.yml`
+  - `presets/socratic-learning.yml`
+  - `presets/spec-driven.yml`
+  - `tools/preset-test-tasks.yml`
+
+### 关键变化（价值点）
+- Review 类 preset 更“务实”：只对关键问题要求 refinement/reject，并约束 1 次后“带注释通过”，避免无限循环。
+- 多 hat preset 更“可停机”：将部分“发布完成事件”的写法改为直接输出 `LOOP_COMPLETE`，更贴近控制面语义。
+- 测试任务时间预算更贴近真实观测：调整复杂度分级与 timeout（simple/medium/complex → 450/900/1200）。
+
+### 验证
+- `cargo test` ✅

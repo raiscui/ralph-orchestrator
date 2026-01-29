@@ -661,3 +661,47 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
   - OpenSpec validator 的 MUST/SHALL 首句规则
   - 并行事件解析只 parse stdout（Codex/CLI stderr 回显导致假事件）
   - E2E workspace 复跑污染（keep-workspace/旧目录残留导致断言误判）
+
+---
+
+## 2026-01-29 合并 `7a346bd`：preset 配置更新（价值评估）
+
+### 来源
+- `git show 7a346bd425cf2d7a45d086875eba413a21111744`
+  - 标题：Update preset configurations (#108)
+  - 影响文件：`presets/*`（6 个）+ `tools/preset-test-tasks.yml`
+
+### 变更摘要（按文件）
+- `presets/api-design.yml`
+  - 在 `critic` 阶段新增“务实/收敛”约束：只对关键问题要求 refinement。
+  - 明确 1 次 refinement 后应“带注释通过”，避免无限循环。
+- `presets/documentation-first.yml`
+  - 在 `reviewer` 阶段新增“务实/收敛”约束：只对根本性问题 reject。
+  - 明确 1 次 reject 后应“带注释通过”，避免无限循环。
+- `presets/spec-driven.yml`
+  - 在 `spec_reviewer` 阶段新增“务实/收敛”约束：只对根本性歧义/缺失关键需求 reject。
+  - 明确 1 次 reject 后应“带注释通过”，避免无限循环。
+- `presets/code-archaeology.yml`
+  - 更明确的结束条件：完成时用 `LOOP_COMPLETE` 退出。
+  - 对“只做理解/文档、不改代码”的情况给出明确落盘行为（写到指定输出文件后退出）。
+- `presets/mob-programming.yml`
+  - `navigator` 不再发布 `mob.complete`（只保留 `direction.set`）。
+  - 补充 completion criteria，并改为“任务完成就直接输出 `LOOP_COMPLETE`”。
+  - 这能降低“靠事件 topic 才能停机”的误用风险。
+- `presets/socratic-learning.yml`
+  - `questioner` 不再发布 `understanding.verified`（只保留 `question.asked`）。
+  - 将“完成条件”改为：2-3 轮问答后，整理最终理解到输出文件，然后输出 `LOOP_COMPLETE`。
+  - 删除 `answerer` 中“等 understanding.verified 再 LOOP_COMPLETE”的不可达指令（因为它并不会被该 topic 触发）。
+- `tools/preset-test-tasks.yml`
+  - 调整复杂度分级（例如 `socratic-learning`、`mob-programming`、`code-archaeology` 提升等级）。
+  - 调整 timeout（simple/medium/complex 变为 450/900/1200），并补充基于观测的解释。
+
+### 初步判断：哪些是“有价值内容”
+- “收敛性”改良：对 review 类 preset 加入“只拦关键问题 + 1 次后带注释通过”，能显著减少无意义迭代。
+- “可停机性”改良：将某些 preset 从“发布一个完成事件”改成“直接 LOOP_COMPLETE”，更贴近 Ralph 的控制面语义。
+- “时间预算”改良：timeout/复杂度更贴近实际迭代时长，减少误判超时。
+
+### 主要风险点（待用测试背压验证）
+- 事件 topic 调整是否影响下游 hat 触发链（例如移除 `mob.complete` / `understanding.verified`）。
+  - 初看：这些 topic 没有任何 hat 订阅，属于“名义上存在但实际上无用”的事件，移除更合理。
+- timeout 与复杂度等级调整，是否会影响某些基于固定值的断言/基准测试（需要跑 `cargo test` 验证）。
