@@ -47,6 +47,7 @@ nix.workspace = true
 
 # Ralph core (used by mock-cli to replay recorded JSONL cassettes)
 ralph-core.workspace = true
+ralph-proto.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -48,14 +48,19 @@ impl Record {
 
     /// Creates a record for a UX event.
     pub fn from_ux_event(ux_event: &UxEvent) -> Self {
-        // Extract the event type from the UxEvent's serde tag
-        let event_type = match ux_event {
-            UxEvent::TerminalWrite(_) => "ux.terminal.write",
-            UxEvent::TerminalResize(_) => "ux.terminal.resize",
-            UxEvent::TerminalColorMode(_) => "ux.terminal.color_mode",
-            UxEvent::TuiFrame(_) => "ux.tui.frame",
-        };
-        Self::new(event_type, ux_event)
+        // 注意：
+        // - JSONL 的 `event` 字段已经是类型判别符
+        // - 因此 `data` 里只需要写“对应的 payload”（TerminalWrite/Resize/...），
+        //   不要再把 `UxEvent { event, data }` 这种 tagged 结构嵌套一层
+        //
+        // 这样 SessionPlayer 可以用 `{ event: record.event, data: record.data }`
+        // 重新组装 tagged 格式做反序列化，且与既有 fixtures 格式保持一致。
+        match ux_event {
+            UxEvent::TerminalWrite(write) => Self::new("ux.terminal.write", write),
+            UxEvent::TerminalResize(resize) => Self::new("ux.terminal.resize", resize),
+            UxEvent::TerminalColorMode(mode) => Self::new("ux.terminal.color_mode", mode),
+            UxEvent::TuiFrame(frame) => Self::new("ux.tui.frame", frame),
+        }
     }
 
     /// Creates a metadata record for loop start.

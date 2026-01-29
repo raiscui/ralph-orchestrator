@@ -1008,6 +1008,7 @@ tests: pass, lint: pass, typecheck: pass
 | `ralph init` | Initialize configuration file |
 | `ralph clean` | Clean up `.agent/` directory |
 | `ralph emit` | Emit an event to the event log |
+| `ralph hats` | Inspect/validate hats and render topology diagrams |
 | `ralph tools` | Runtime tools for memories and tasks (agent-facing) |
 
 ### Global Options
@@ -1056,6 +1057,20 @@ tests: pass, lint: pass, typecheck: pass
 |--------|-------------|
 | `<INPUT>` | Optional description text or path to PDD plan file |
 | `-b, --backend <BACKEND>` | Backend to use (overrides config and auto-detection) |
+
+### `ralph hats` Subcommands
+
+```bash
+ralph hats list
+ralph hats show <HAT>
+ralph hats validate
+
+# Diagrams (Mermaid is deterministic and easy to render elsewhere)
+ralph hats graph --format mermaid
+
+# AI-generated diagram (requires a working backend)
+ralph hats graph --format unicode --backend kiro
+```
 
 ### `ralph tools` Subcommands
 

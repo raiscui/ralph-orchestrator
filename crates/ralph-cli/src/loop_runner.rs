@@ -13,7 +13,7 @@ use ralph_core::{
     EventLogger, EventLoop, EventParser, EventRecord, RalphConfig, Record, SessionRecorder,
     SummaryWriter, TerminationReason,
 };
-use ralph_proto::{Event, HatId};
+use ralph_proto::{Event, HatId, TerminalWrite, UxEvent};
 use ralph_tui::Tui;
 use std::fs::{self, File};
 use std::io::{BufWriter, IsTerminal, stdin, stdout};
@@ -116,7 +116,7 @@ pub async fn run_loop_impl(
 
     // Set up session recording if requested
     // This records all events to a JSONL file for replay testing
-    let _session_recorder: Option<Arc<SessionRecorder<BufWriter<File>>>> =
+    let session_recorder: Option<Arc<SessionRecorder<BufWriter<File>>>> =
         if let Some(record_path) = record_session {
             let file = File::create(&record_path).with_context(|| {
                 format!("Failed to create session recording file: {:?}", record_path)
@@ -276,6 +276,18 @@ pub async fn run_loop_impl(
     let handle_termination = |reason: &TerminationReason,
                               state: &ralph_core::LoopState,
                               scratchpad: &str| {
+        // best-effort：写入 termination 元信息，便于 cassette 诊断/回放
+        if let Some(recorder) = &session_recorder {
+            let reason_str = format!("{reason:?}");
+            recorder.record_meta(Record::meta_termination(
+                &reason_str,
+                state.iteration,
+                recorder.elapsed().as_secs_f64(),
+                recorder.ux_write_count(),
+            ));
+            let _ = recorder.flush();
+        }
+
         // Per spec: Write summary file on termination
         let summary_writer = SummaryWriter::default();
         let scratchpad_path = std::path::Path::new(scratchpad);
@@ -573,6 +585,23 @@ pub async fn run_loop_impl(
 
         let output = outcome.output;
         let success = outcome.success;
+
+        // best-effort：将本轮“用于事件解析”的输出写入 cassette（stdout-only）
+        if let Some(recorder) = &session_recorder {
+            if !output.is_empty() {
+                let offset_ms = recorder.elapsed().as_millis() as u64;
+                recorder.record_meta(Record::meta_iteration(
+                    iteration,
+                    offset_ms,
+                    hat_id.as_str(),
+                ));
+                recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(
+                    output.as_bytes(),
+                    true,
+                    offset_ms,
+                )));
+            }
+        }
 
         // Note: TUI lines are now written directly to IterationBuffer during streaming,
         // so no post-execution transfer is needed.

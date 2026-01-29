@@ -764,3 +764,64 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
   - 本次合并会把“缺 cassette”视为失败（用失败断言呈现），作为测试背压的一部分。
 - mock-cli 的命令执行：
   - 仅在显式 allowlist 下执行；并且直接 `Command::new(program).args(args)`，不走 shell，降低注入风险。
+
+---
+
+## 2026-01-29 修复 `--record-session`（串行 + 并行）与 parallel 回放分流
+
+### 现象
+- `ralph run --record-session x.jsonl`：
+  - 串行模式：只会记录 `bus.publish` / `_meta.loop_start`，没有 `ux.terminal.write`，cassette 无法回放。
+  - 并行模式：直接 warn “ignores --record-session (not wired yet)”。
+- mock-mode（`ralph-e2e --mock`）存在潜在致命点：
+  - custom backend 默认 `prompt_mode=arg` 会把 prompt 作为末尾 argv 传给 `ralph-e2e mock-cli`；
+  - clap 对“多余参数”会报 `unexpected argument`，导致后端立即失败。
+
+### 本质（根因）
+1) `SessionRecorder` 的 UX 记录格式与 `SessionPlayer` 的解析假设不一致：
+   - `SessionPlayer` 假设 JSONL 的 `data` 是 **TerminalWrite 本体**，并用 `{event: record.event, data: record.data}` 重新组装 tagged 结构。
+   - 但 `SessionRecorder::from_ux_event` 之前把整个 `UxEvent { event, data }` 再嵌套写进 `data`，导致“double-wrapped”。
+
+2) 并行 CLI runner 没把 record-session 贯穿到 Supervisor 的输出/事件流（未接线）。
+
+### 修复策略（择优）
+- 统一格式：让 `SessionRecorder` 写入 UX 记录时，`data` 只包含 payload（TerminalWrite/Resize/...），不再嵌套一层 tagged UxEvent。
+- 串行模式：每轮把“用于 event parsing 的输出文本”写为 `ux.terminal.write`（stdout-only）。
+- 并行模式：
+  - 监听 `HatJobOutputChunk`（stdout）写 `ux.terminal.write`；
+  - 监听 `ParallelSupervisor` 的 event_observer 写 `bus.publish`；
+  - 给 `TerminalWrite` 增加可选 `instance_id` 字段，并在并行录制时写入（writer#1/...）。
+- 回放分流：
+  - 并行 executor spawn backend 时注入 `RALPH_HAT_INSTANCE_ID`；
+  - `mock-cli` 若检测到该变量，则只回放 `TerminalWrite.instance_id == env` 的记录，避免多实例重复回放导致事件倍增。
+- mock-mode 可靠启动：
+  - `ralph-e2e` 在写入 workspace `ralph.yml` 时强制 `cli.prompt_mode: stdin`，避免把 prompt 作为 argv 传给 mock-cli。
+
+---
+
+## 2026-01-29 18:10 +0800｜理性合并：`ralph hats` CLI + 拓扑 diagrams（来自 commit `26f2364566fbe1d35880d889b836e5b55d343301`）
+
+### 来源
+- `git show 26f2364566fbe1d35880d889b836e5b55d343301 --stat`
+  - 标题：feat: Ralph hats CLI with topology visualization and AI-powered diagrams (#122)
+
+### 有价值内容（本次合并点）
+- 新增 `ralph hats` 命令空间：
+  - `list`/`show`：快速查看 hats 列表与单个 hat 的订阅/发布/指令细节。
+  - `validate`：在运行前做基础拓扑检查（starting_event 订阅者、孤儿事件、dead-end）。
+  - `graph`：输出拓扑图（Mermaid 稳定可用；ASCII/Unicode/Compact 可选依赖 AI backend）。
+- AI backend 自动选择能力：
+  - CLI 传 `--backend` 优先，其次读 `cli.backend`，否则走 auto-detect（claude/kiro/gemini/codex/amp/...）。
+- 体验改良：
+  - 引入 `indicatif` spinner，避免 `graph` 调用外部 backend 时“无响应感”。
+
+### 与本分支的差异点（需要注意）
+- 上游版本的 `ConfigSource` 包含 `Override`，但本分支没有：
+  - 本次在 hats CLI 内做了兼容：只处理 File/Builtin/Remote（Remote 对 hats 明确报错）。
+- 上游 main.rs 的 dispatch 结构与本分支不同：
+  - 本次只做最小接线：`Commands` 增加 `Hats`，并在主 match 中分发到 `hats::execute()`。
+- 上游 `list` 描述截断用了 `&str[..N]`（UTF-8 非 ASCII 会 panic）：
+  - 本次改为按 `chars()` 截断，避免中文/emoji 配置描述导致命令崩溃。
+
+### 验证
+- `cargo test` ✅（包含 replay smoke tests）

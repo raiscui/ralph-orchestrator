@@ -13,6 +13,7 @@
 //! - Work item tracking via `ralph task`
 
 mod display;
+mod hats;
 mod init;
 mod loop_runner;
 mod memory;
@@ -279,6 +280,9 @@ enum Commands {
 
     /// Ralph's runtime tools (agent-facing)
     Tools(tools::ToolsArgs),
+
+    /// Inspect/validate configured hats and render topology diagrams
+    Hats(hats::HatsArgs),
 }
 
 /// Arguments for the init subcommand.
@@ -629,6 +633,7 @@ async fn main() -> Result<()> {
         Some(Commands::CodeTask(args)) => code_task_command(cli.config, cli.color, args),
         Some(Commands::Task(args)) => code_task_command(cli.config, cli.color, args),
         Some(Commands::Tools(args)) => tools::execute(args, cli.color.should_use_colors()),
+        Some(Commands::Hats(args)) => hats::execute(&cli.config, args, cli.color.should_use_colors()),
         None => {
             // Default to run with TUI enabled (new default behavior)
             let args = RunArgs {

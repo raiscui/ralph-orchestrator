@@ -21,6 +21,7 @@
 //! ```
 
 use ralph_core::{PlayerConfig, SessionPlayer, TimestampedRecord};
+use ralph_proto::TerminalWrite;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::path::Path;
@@ -69,13 +70,20 @@ pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockC
         .map_err(|e| MockCliError::CassetteParse(e.to_string()))?;
 
     // 2) 配置回放速度
-    let config = if speed > 0.0 {
-        PlayerConfig::terminal().with_speed(speed)
-    } else {
-        // 尽量快：通过很大的 speed 来压缩 sleep
-        PlayerConfig::terminal().with_speed(1000.0)
-    };
+    let effective_speed = if speed > 0.0 { speed } else { 1000.0 };
+    let config = PlayerConfig::terminal().with_speed(effective_speed);
     player = player.with_config(config);
+
+    // 2.1) 并行模式分流：如果被当成 “hat instance backend” 调用，则按实例过滤输出
+    //
+    // 说明：
+    // - 并行模式下会同时 spawn 多个 backend 进程（writer#1/tester#1/...）
+    // - 若所有实例都回放同一份 cassette 的全部输出，会导致事件倍增与路由漂移
+    // - 因此：当环境变量存在时，只输出 `TerminalWrite.instance_id` 匹配的记录
+    let instance_filter = std::env::var("RALPH_HAT_INSTANCE_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     // 3) 回放前先提取命令（避免边回放边扫描）
     let commands = if allow.is_some() {
@@ -84,24 +92,71 @@ pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockC
         Vec::new()
     };
 
-    // 4) 收集并输出 terminal writes
-    let output = player
-        .collect_terminal_output()
-        .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
-
-    // 写 stdout（保留 ANSI 控制序列）
+    // 4) 回放 terminal writes（按 instance_id 过滤 + 近似 timing）
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    handle
-        .write_all(output.as_bytes())
-        .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
-    handle
-        .flush()
-        .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
+
+    replay_terminal_writes(
+        &player,
+        &mut handle,
+        effective_speed,
+        instance_filter.as_deref(),
+    )?;
 
     // 5) 如启用 allowlist，则执行白名单命令
     if let Some(whitelist) = allow {
         execute_whitelisted_commands(&commands, whitelist)?;
+    }
+
+    Ok(())
+}
+
+/// 回放 terminal writes（可选按 instance_id 过滤）。
+fn replay_terminal_writes<W: Write>(
+    player: &SessionPlayer,
+    mut writer: W,
+    speed: f32,
+    instance_filter: Option<&str>,
+) -> Result<(), MockCliError> {
+    let mut last_offset_ms: u64 = 0;
+
+    for record in player.terminal_writes() {
+        // 解析 TerminalWrite（record.data 即 TerminalWrite 的序列化结果）
+        let write: TerminalWrite =
+            serde_json::from_value(record.record.data.clone()).map_err(|e| {
+                MockCliError::CassetteParse(format!("invalid ux.terminal.write payload: {e}"))
+            })?;
+
+        // instance_id 过滤（并行模式回放分流）
+        if let Some(filter) = instance_filter {
+            if write.instance_id.as_deref() != Some(filter) {
+                continue;
+            }
+        }
+
+        // timing：只基于“被选中的记录”计算 delay（避免过滤后 still sleep 太久）
+        let delay_ms = record.offset_ms.saturating_sub(last_offset_ms);
+        last_offset_ms = record.offset_ms;
+
+        // speed 保护：PlayerConfig::with_speed 已做 clamp，这里再做一次兜底
+        let speed = speed.max(0.1);
+        if delay_ms > 0 {
+            let adjusted_delay = (delay_ms as f32 / speed) as u64;
+            if adjusted_delay > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(adjusted_delay));
+            }
+        }
+
+        // 输出 raw bytes（保留 ANSI 控制序列）
+        let bytes = write.decode_bytes().map_err(|e| {
+            MockCliError::ReplayError(format!("failed to decode base64 terminal bytes: {e}"))
+        })?;
+        writer
+            .write_all(&bytes)
+            .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
+        writer
+            .flush()
+            .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
     }
 
     Ok(())

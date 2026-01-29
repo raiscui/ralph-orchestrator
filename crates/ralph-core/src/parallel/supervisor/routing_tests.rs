@@ -396,10 +396,9 @@ async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
     config.parallel = base_parallel_config();
 
     // wildcard hat：如果 task.start 不是 target_instance 投递，就会收到 payload（prompt pollution 风险）
-    config.hats.insert(
-        "manager".to_string(),
-        hat_config("Manager", vec!["*"], 1),
-    );
+    config
+        .hats
+        .insert("manager".to_string(), hat_config("Manager", vec!["*"], 1));
 
     let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
 
@@ -442,10 +441,9 @@ async fn wildcard_manager_receives_event_without_escalating_to_ralph() {
     config.parallel = base_parallel_config();
 
     // wildcard manager：应当吃掉默认 fallback，不再额外打扰 ralph#1
-    config.hats.insert(
-        "manager".to_string(),
-        hat_config("Manager", vec!["*"], 1),
-    );
+    config
+        .hats
+        .insert("manager".to_string(), hat_config("Manager", vec!["*"], 1));
 
     let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
 

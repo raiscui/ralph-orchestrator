@@ -36,6 +36,7 @@ ralph-e2e --mock
     ├─ Writes ralph.yml with custom backend
     │  cli:
     │    backend: custom
+    │    prompt_mode: stdin
     │    command: ralph-e2e
     │    args: ["mock-cli", "--cassette", "path/to/cassette.jsonl"]
     │

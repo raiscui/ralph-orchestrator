@@ -523,7 +523,9 @@ impl ParallelSupervisor {
 
         // 始终注册 Ralph fallback（即使 config 没写）
         let ralph_hat = Hat::new("ralph", "Ralph")
-            .with_description("Parallel coordinator: handles true-orphan events and makes completion decisions")
+            .with_description(
+                "Parallel coordinator: handles true-orphan events and makes completion decisions",
+            )
             .subscribe("*")
             .with_instructions(self.build_ralph_coordinator_instructions());
         let ralph_id = HatId::new("ralph");
@@ -633,7 +635,9 @@ impl ParallelSupervisor {
         out.push_str("Emit routing events using XML-style tags:\n\n");
         out.push_str("<event topic=\"work.start\">payload</event>\n\n");
         out.push_str("Optional (parallel): target a specific instance:\n\n");
-        out.push_str("<event topic=\"build.task\" target_instance=\"builder#1\">payload</event>\n\n");
+        out.push_str(
+            "<event topic=\"build.task\" target_instance=\"builder#1\">payload</event>\n\n",
+        );
         out.push_str("After emitting an event, you MUST stop. The supervisor will route it and run the next job with fresh context.\n\n");
 
         out.push_str("## CONFIG (THIS RUN)\n");
@@ -693,7 +697,9 @@ impl ParallelSupervisor {
             ));
         } else if !entry_candidates.is_empty() {
             out.push_str("1) Do initial coordination quickly.\n");
-            out.push_str("2) Choose ONE workflow entry topic (prefer an external entrypoint topic).\n");
+            out.push_str(
+                "2) Choose ONE workflow entry topic (prefer an external entrypoint topic).\n",
+            );
             out.push_str("   Candidates (derived):\n");
             for t in &entry_candidates {
                 out.push_str(&format!("   - `{t}`\n"));

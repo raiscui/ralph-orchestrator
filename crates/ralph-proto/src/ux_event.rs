@@ -41,6 +41,15 @@ pub struct TerminalWrite {
 
     /// Milliseconds since session start.
     pub offset_ms: u64,
+
+    /// 可选：输出归因到具体 HatInstance（并行模式回放需要）。
+    ///
+    /// 说明：
+    /// - 串行模式下通常为 None
+    /// - 并行模式下建议为 Some("writer#1") 这类值
+    /// - 作为“UX 录制”的扩展字段，不影响旧 cassette 的解析
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 impl TerminalWrite {
@@ -51,7 +60,15 @@ impl TerminalWrite {
             bytes: base64::engine::general_purpose::STANDARD.encode(raw_bytes),
             stdout,
             offset_ms,
+            instance_id: None,
         }
+    }
+
+    /// 为 TerminalWrite 设置 instance_id（用于并行回放分流）。
+    #[must_use]
+    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+        self.instance_id = Some(instance_id.into());
+        self
     }
 
     /// Decodes the base64 bytes back to raw bytes.

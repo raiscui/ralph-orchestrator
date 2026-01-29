@@ -138,6 +138,58 @@
 
 # 任务计划: 理性合并 mock-e2e（commit: e91aadc）
 
+---
+
+# 任务计划: 修复 parallel 模式 `--record-session` + 确保 mock-mode 可用（cassette 回放）
+
+## 目标
+1) `ralph run` 在 **parallel 模式**下不再忽略 `--record-session`，能够产出可用的 JSONL cassette。
+
+2) `ralph-e2e --mock` 在并行场景下也能稳定运行（至少：custom backend 调用 `ralph-e2e mock-cli` 不会因为“额外 prompt 参数”而直接崩）。
+
+## 方案（给自己看的取舍）
+1) 不惜代价，最佳方案：
+- 录制格式做到“可回放、可分流、可复现并发”：给每条 `ux.terminal.write` 增加 `instance_id` 归因字段；
+- 并行执行时用环境变量把 `instance_id` 传递给 custom backend；
+- `mock-cli` 在回放时按 `instance_id` 过滤输出（每个 hat instance 只看自己的片段），避免“一份 cassette 被所有实例重复回放”导致事件倍增/漂移。
+
+2) 先能用，后面再优雅（如果遇到风险再退回）：
+- 并行模式只录制“聚合后的 stdout 文本”，不区分实例；
+- mock-mode 只保证能跑通，不保证并行行为完全等价（依赖场景断言用 `>=`，且 cassette 本身足够短）。
+
+## 阶段
+- [x] 阶段1: 写清规格（spec）+ 更新 task_plan 日志
+- [x] 阶段2: 串行 `--record-session` 补齐（至少写入 `ux.terminal.write`）
+- [x] 阶段3: 并行 `--record-session` 接线（stdout-only + bus.publish）
+- [x] 阶段4: mock-mode 兼容（custom backend 使用 stdin 传 prompt，mock-cli 忽略 stdin）
+- [x] 阶段5: `cargo test` 全量验证 + 记录结论（WORKLOG/ERRORFIX）
+
+## 关键问题
+1. `--record-session` 目前实际写入了什么？（预期：只写了 `bus.publish`，没有 `ux.terminal.write`，因此 cassette 不可用）
+2. 并行模式的录制“最小可用”是什么？（预期：至少 stdout 文本可回放；最好能按 instance_id 分流）
+3. mock-mode 为什么可能直接崩？（预期：custom backend 默认 `prompt_mode=arg`，会把 prompt 作为末尾参数传给 `ralph-e2e mock-cli`，clap 解析会报 unexpected argument）
+
+## 做出的决定
+- [决定] 优先走“最佳方案”（instance_id 归因 + mock-cli 过滤）。
+  - [理由] 这是最少的额外复杂度，却能直接消除并行回放的核心特殊情况（多实例重复回放导致事件倍增）。
+- [决定] 录制时仍遵循并行模式的安全语义：只录 stdout 用于 event parsing，不录 stderr（避免 `<event ...>` 假事件）。
+  - [理由] 这是已验证的稳定性护栏（parallel stdout-only parsing）。
+
+## 遇到错误
+- 暂无（本段在实现过程中更新）
+
+## 状态
+**已完成**：parallel 模式不再忽略 `--record-session`；cassette 录制/回放格式与 `SessionPlayer`/fixtures 对齐；并行回放支持按 instance_id 分流。
+
+## 日志
+### 2026-01-29 16:15 +0800
+- [完成] 新增规格：`specs/parallel-record-session.spec.md`
+- [完成] 修复 `SessionRecorder` UX 记录格式（避免 double-wrapped），与 `SessionPlayer`/fixtures 对齐。
+- [完成] 串行 loop：每轮写入 `ux.terminal.write`，结束写 `_meta.termination`（best-effort）。
+- [完成] 并行 loop：接线 record-session（stdout chunk → ux write；supervisor event → bus publish），并写入 `TerminalWrite.instance_id`。
+- [完成] mock-mode：workspace `ralph.yml` 强制 `cli.prompt_mode: stdin`；mock-cli 支持按 `RALPH_HAT_INSTANCE_ID` 分流回放。
+- [验证] `cargo test` ✅
+
 ## 目标
 合并 `e91aadc437615dbd211e5c651c7f899dea9ce590` 中“cost-free E2E（mock cassette replay）”的核心价值：
 - 让 `ralph-e2e` 支持 `--mock`：用预录 JSONL cassette 回放代替真实 AI 后端调用（零成本、确定性）。
@@ -182,3 +234,61 @@
 
 ### 2026-01-29 14:25
 - [完成] 代码提交：`feat(e2e): add mock mode cassette replay (from e91aadc)`（commit: `40c18ae`）。
+
+---
+
+# 任务计划: 理性合并 `ralph hats` CLI + 拓扑 diagrams（commit: 26f2364566fbe1d35880d889b836e5b55d343301）
+
+## 目标
+把 `26f2364566fbe1d35880d889b836e5b55d343301` 里“hats CLI + 拓扑可视化/校验”的核心价值合并到当前分支：
+
+1) 当前分支也能使用 `ralph hats ...` 命令做配置检查与拓扑展示（便于在运行前发现问题）。
+
+2) 当前分支也能输出可复用的 “diagrams” 文本（至少 Mermaid），为后续在 TUI 内展示做铺垫。
+
+## 方案（给自己看的取舍）
+1) 不惜代价，最佳方案：
+- 把“拓扑构建/校验/渲染（mermaid + 纯本地 ascii/unicode）”抽到 `ralph-core`，CLI 与 TUI 复用同一套逻辑；
+- AI 生成图仅作为可选增强（不作为默认/唯一路径）。
+- 优点：可测试、确定性强、TUI 复用成本低；缺点：需要更多重构与边界设计。
+
+2) 先能用，后面再优雅（本次默认）：
+- 以最小改动把 `ralph hats` 子命令接入 `ralph-cli`；
+- `ralph hats graph --format mermaid` 保证稳定可用；unicode/ascii/compact 先按 upstream “可用优先”的策略实现（必要时依赖 AI backend）。
+- 优点：落地快、风险小；缺点：后续 TUI 复用可能需要再做一次抽取整理。
+
+## 阶段
+- [x] 阶段1: 审阅 commit 差异与本分支差异点
+- [x] 阶段2: 移植 hats CLI（list/show/validate/graph）
+- [x] 阶段3: 处理依赖与兼容（ConfigSource/indicatif 等）
+- [x] 阶段4: `cargo test` 全量验证（含回放 smoke tests）
+- [x] 阶段5: 汇总记录（notes/WORKLOG；必要时 ERRORFIX）
+
+## 关键问题
+1. `26f236...` 依赖的 `ConfigSource::Override` 在本分支是否存在？（预期：不存在，需要在 hats CLI 内做兼容适配）
+2. diagram 输出的“最低可用闭环”是什么？（预期：Mermaid 必须稳定；ASCII/Unicode 可以先作为增强）
+3. 后续 TUI 展示更偏向哪种输出？（预期：优先 Mermaid/纯文本，避免强依赖外部 backend）
+
+## 做出的决定
+- [决定] 默认先落地“先能用”方案：先把 `ralph hats` 命令与 Mermaid 图输出合并进来，并保持代码结构可在后续抽到 `ralph-core/ralph-tui` 复用。
+  - [理由] 先把价值闭环跑通（CLI 可用 + 图可输出），再做抽象化能避免过度设计与返工。
+
+## 遇到错误
+- 暂无（实现过程中更新）
+
+## 状态
+**已完成**：`ralph hats` 命令已接入当前分支；已支持 `list/show/validate/graph`，并确保 `graph --format mermaid` 稳定输出；`cargo test` 全通过。
+
+## 日志
+### 2026-01-29 18:00 +0800
+- [计划] 开始审阅 `26f236...`（新增 `crates/ralph-cli/src/hats.rs` + `indicatif` 依赖 + main.rs 接线），并“理性移植”到当前分支。
+
+### 2026-01-29 18:10 +0800
+- [完成] 新增 `crates/ralph-cli/src/hats.rs`，落地 `ralph hats list/show/validate/graph`。
+- [完成] `crates/ralph-cli/src/main.rs` 接线新子命令 `Hats`（clap 子命令可见）。
+- [完成] 依赖补齐：workspace 增加 `indicatif`（进度 spinner），`ralph-cli` 引入 workspace 依赖。
+- [改良] `hats list` 的描述截断改为 UTF-8 安全（避免中文/emoji 下 `[..]` 切片 panic）。
+- [改良] `validate` 增加 dead-end hats 的 warning 输出（更可解释）。
+- [完成] 文档同步：README / 架构文档补充 `ralph hats` 命令说明（避免实现与文档漂移）。
+- [验证] `cargo test` ✅
+- [验证] `cargo test -p ralph-core smoke_runner` ✅

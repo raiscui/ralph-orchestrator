@@ -838,6 +838,82 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
 
 ### 验证
 - `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-01-29 18:10 +0800｜合并：`ralph hats` CLI + 拓扑 diagrams（来自 commit `26f236...`）
+
+### 我做了什么
+- 新增 `crates/ralph-cli/src/hats.rs`，实现 `ralph hats` 命令空间：
+  - `list`：列出 hats（名称 + 简要描述）。
+  - `show <name>`：输出单个 hat 的订阅/发布/指令详情。
+  - `validate`：基础拓扑校验（starting_event 订阅者、孤儿事件、dead-end）。
+  - `graph`：输出拓扑图（`--format mermaid` 稳定可用；其他格式可选依赖 AI backend）。
+- `crates/ralph-cli/src/main.rs` 增加 `Commands::Hats` 并完成分发接线。
+- 依赖补齐：workspace 增加 `indicatif`，用于 `graph` 调用外部 backend 时的 spinner。
+- 额外改良：修复上游 `hats list` 的 UTF-8 截断潜在 panic（改为按 `chars()` 截断）。
+- 文档同步：`README.md` 与 `docs/advanced/architecture.md` 补充 `ralph hats` 命令说明。
+
+### 用法速记
+```bash
+# 使用当前目录 ralph.yml（默认）
+cargo run --bin ralph -- hats list
+cargo run --bin ralph -- hats validate
+cargo run --bin ralph -- hats graph --format mermaid
+
+# 指定 builtin preset
+cargo run --bin ralph -- -c builtin:confession-loop hats graph --format mermaid
+
+# 查看单个 hat（name 或 id）
+cargo run --bin ralph -- hats show Builder
+```
+
+### 验证
+- `cargo test` ✅
+
+## 2026-01-29 16:15 +0800｜修复：`--record-session` 在 parallel 模式可用 + cassette 回放更稳
+
+### 我做了什么
+- 串行 `ralph run --record-session`：
+  - 每轮把“用于 event parsing 的输出文本”写入 `ux.terminal.write`（stdout-only）。
+  - 结束时补写 `_meta.termination`（best-effort）。
+- 并行 `ralph run --record-session`：
+  - 不再忽略 record-session；记录：
+    - `bus.publish`（通过 ParallelSupervisor 的 event observer）
+    - `ux.terminal.write`（通过 HatJobOutputChunk 的 stdout）
+  - `TerminalWrite` 增加可选 `instance_id`，并行录制会写入（例如 `writer#1`）。
+- mock-mode 可靠性：
+  - `ralph-e2e --mock` 写入 workspace `ralph.yml` 时强制 `cli.prompt_mode: stdin`，避免 mock-cli 因多余 argv 直接失败。
+  - 并行执行时，executor 注入 `RALPH_HAT_INSTANCE_ID` / `RALPH_HAT_ID`；
+    `mock-cli` 检测到 `RALPH_HAT_INSTANCE_ID` 后按 `instance_id` 过滤回放输出，避免多实例重复回放导致事件倍增。
+- 修复 `SessionRecorder` 的 UX 记录格式：
+  - 让 JSONL 的 `data` 只包含 payload（TerminalWrite/Resize/...），不再把 tagged `UxEvent` 再嵌套一层，和 `SessionPlayer`/fixtures 对齐。
+
+### 快速自测（无需真实后端）
+```bash
+cat > /tmp/ralph-parallel-test.yml <<'YML'
+cli:
+  backend: custom
+  command: python3
+  args:
+    - -c
+    - "print('LOOP_COMPLETE')"
+
+parallel:
+  enabled: true
+
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 3
+YML
+
+cargo run --bin ralph -- run -c /tmp/ralph-parallel-test.yml --no-tui \
+  --record-session /tmp/ralph-parallel-test.jsonl -p "test prompt"
+
+head -n 5 /tmp/ralph-parallel-test.jsonl
+```
+
+### 验证
+- `cargo test` ✅
 
 ## 2026-01-29 13:10 +0800｜合并：避免 npx 进程组下 TUI 卡死（来自 commit `685526d`）
 

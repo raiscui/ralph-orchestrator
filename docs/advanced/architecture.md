@@ -100,6 +100,7 @@ Binary entry point and CLI parsing.
 - `ralph init` — Initialize config
 - `ralph plan` — PDD planning
 - `ralph task` — Task generation
+- `ralph hats` — Validate/visualize hat topology
 - `ralph events` — View history
 - `ralph tools` — Memory/task management
 
