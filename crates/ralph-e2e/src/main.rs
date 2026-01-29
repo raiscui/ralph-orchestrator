@@ -22,7 +22,7 @@
 //! ralph-e2e --list
 //! ```
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use ralph_e2e::{
     AuthChecker,
@@ -53,6 +53,8 @@ use ralph_e2e::{
     MemoryPersistenceScenario,
     MemoryRapidWriteScenario,
     MemorySearchScenario,
+    MockCliError,
+    MockConfig,
     MultiIterScenario,
     // Tier 8: Parallel Runtime
     ParallelHatInstancesScenario,
@@ -71,6 +73,7 @@ use ralph_e2e::{
     WorkspaceManager,
     create_incremental_progress_callback,
     resolve_ralph_binary,
+    run_mock_cli,
 };
 
 /// Backend selection for E2E tests.
@@ -122,6 +125,41 @@ impl Backend {
 #[command(name = "ralph-e2e")]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
+    /// 子命令（用于 mock-cli 回放等“被 Ralph 当成后端调用”的模式）。
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    /// E2E 测试运行参数（默认路径）。
+    #[command(flatten)]
+    pub test_opts: TestOpts,
+}
+
+/// `ralph-e2e` 的子命令集合。
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Mock CLI 适配器：回放 cassette，作为自定义 backend 被 `ralph run` 调用。
+    MockCli {
+        /// 要回放的 cassette 文件路径（JSONL）
+        #[arg(long)]
+        cassette: std::path::PathBuf,
+
+        /// 回放速度倍率（0.0=尽可能快；1.0=实时；10.0=10x）
+        #[arg(long, default_value = "0.0")]
+        speed: f32,
+
+        /// 允许执行的命令前缀白名单（逗号分隔）
+        ///
+        /// 说明：
+        /// - 仅当 cassette 中包含 `bus.*` 事件里提取出的“可执行命令”时才会用到
+        /// - 可用环境变量 `RALPH_MOCK_ALLOW` 覆盖（用于 CI 注入）
+        #[arg(long)]
+        allow: Option<String>,
+    },
+}
+
+/// E2E 测试运行参数。
+#[derive(Parser, Debug)]
+pub struct TestOpts {
     /// Backend to test
     #[arg(value_enum, default_value_t = Backend::All)]
     pub backend: Backend,
@@ -153,6 +191,22 @@ pub struct Cli {
     /// Skip meta-Ralph analysis (faster, raw results only)
     #[arg(long)]
     pub skip_analysis: bool,
+
+    /// mock-mode：用 cassette 回放代替真实后端（零成本、确定性）
+    #[arg(long)]
+    pub mock: bool,
+
+    /// mock-mode：回放速度倍率（0.0=尽可能快；10.0=10x）
+    #[arg(long, default_value = "0.0")]
+    pub mock_speed: f32,
+
+    /// mock-mode：cassette 目录（默认：`cassettes/e2e`，会相对 repo root 解析）
+    #[arg(long)]
+    pub cassette_dir: Option<std::path::PathBuf>,
+
+    /// mock-mode：允许执行的命令前缀白名单（逗号分隔）
+    #[arg(long)]
+    pub mock_allow: Option<String>,
 }
 
 /// Report output format.
@@ -223,7 +277,39 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
 fn main() {
     let cli = Cli::parse();
 
-    // Print header
+    // 子命令优先处理：mock-cli 会被 `ralph run` 当作 custom backend 调用。
+    if let Some(command) = cli.command {
+        match command {
+            Command::MockCli {
+                cassette,
+                speed,
+                allow,
+            } => {
+                let allow_from_env = std::env::var("RALPH_MOCK_ALLOW").ok();
+                // 环境变量优先（便于 CI 注入），否则使用 CLI 传入的 allow。
+                let allow_effective = allow_from_env.as_deref().or(allow.as_deref());
+
+                match run_mock_cli(&cassette, speed, allow_effective) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        // 参考 docs/mock-cli.md：为不同失败类型返回更可诊断的退出码。
+                        let code = match &e {
+                            MockCliError::CassetteOpen { .. } => 1,
+                            MockCliError::CassetteParse(_) => 2,
+                            MockCliError::ReplayError(_) => 3,
+                            MockCliError::CommandError(_) => 4,
+                        };
+
+                        eprintln!("{} {}", "Error:".red().bold(), e);
+                        std::process::exit(code);
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    // Print header for test runs
     println!(
         "\n{} {}",
         "🧪 E2E Test Harness".bold(),
@@ -231,10 +317,14 @@ fn main() {
     );
     println!("{}", "━".repeat(40).dimmed());
 
+    if cli.test_opts.mock {
+        println!("{}", "Mode: Mock (cassette replay)".dimmed());
+    }
+
     // Determine verbosity
-    let verbosity = if cli.quiet {
+    let verbosity = if cli.test_opts.quiet {
         Verbosity::Quiet
-    } else if cli.verbose {
+    } else if cli.test_opts.verbose {
         Verbosity::Verbose
     } else {
         Verbosity::Normal
@@ -243,17 +333,17 @@ fn main() {
     // Run the tests
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
-    if cli.list {
-        rt.block_on(list_scenarios(&cli, verbosity));
+    if cli.test_opts.list {
+        rt.block_on(list_scenarios(&cli.test_opts, verbosity));
         return;
     }
 
-    rt.block_on(run_tests(&cli, verbosity));
+    rt.block_on(run_tests(&cli.test_opts, verbosity));
 }
 
-async fn list_scenarios(cli: &Cli, verbosity: Verbosity) {
-    // Check backend availability
-    if verbosity != Verbosity::Quiet {
+async fn list_scenarios(opts: &TestOpts, verbosity: Verbosity) {
+    // Check backend availability（mock-mode 不需要真实后端）
+    if !opts.mock && verbosity != Verbosity::Quiet {
         println!("\n{}", "Checking backends...".dimmed());
         let checker = AuthChecker::new();
         let backends = checker.check_all().await;
@@ -279,7 +369,7 @@ async fn list_scenarios(cli: &Cli, verbosity: Verbosity) {
     let mut current_tier = String::new();
     for scenario in &scenarios {
         // Filter by backend if specified
-        if let Some(backend) = cli.backend.to_lib_backend()
+        if let Some(backend) = opts.backend.to_lib_backend()
             && !scenario.supported_backends().contains(&backend)
         {
             continue;
@@ -313,13 +403,13 @@ async fn list_scenarios(cli: &Cli, verbosity: Verbosity) {
     );
 }
 
-async fn run_tests(cli: &Cli, verbosity: Verbosity) {
-    // Check backend availability first
-    if verbosity != Verbosity::Quiet {
+async fn run_tests(opts: &TestOpts, verbosity: Verbosity) {
+    // Check backend availability first（mock-mode 不需要真实后端）
+    if !opts.mock && verbosity != Verbosity::Quiet {
         println!();
         let checker = AuthChecker::new();
 
-        if let Some(backend) = cli.backend.to_lib_backend() {
+        if let Some(backend) = opts.backend.to_lib_backend() {
             let info = checker.check(backend).await;
             let status = info.status_string();
             let status_fmt = if status.contains("Authenticated") {
@@ -359,14 +449,30 @@ async fn run_tests(cli: &Cli, verbosity: Verbosity) {
     let scenarios = get_all_scenarios();
 
     // Build run configuration
-    let mut config = RunConfig::new().keep_workspaces(cli.keep_workspace);
+    let mut config = RunConfig::new().keep_workspaces(opts.keep_workspace);
 
-    if let Some(filter) = &cli.filter {
+    if let Some(filter) = &opts.filter {
         config = config.with_filter(filter);
     }
 
-    if let Some(backend) = cli.backend.to_lib_backend() {
+    if let Some(backend) = opts.backend.to_lib_backend() {
         config = config.with_backend(backend);
+    }
+
+    // Configure mock mode if enabled
+    if opts.mock {
+        let mut mock_config = match &opts.cassette_dir {
+            Some(dir) => MockConfig::new(dir),
+            None => MockConfig::default(),
+        };
+
+        mock_config = mock_config.with_speed(opts.mock_speed);
+
+        if let Some(allow) = &opts.mock_allow {
+            mock_config = mock_config.with_allow_commands(allow);
+        }
+
+        config = config.with_mock(mock_config);
     }
 
     // Resolve the ralph binary to use (local build preferred over PATH)
@@ -410,7 +516,7 @@ async fn run_tests(cli: &Cli, verbosity: Verbosity) {
 
     // Write reports to disk
     let report_writer = ReportWriter::new(workspace_path);
-    match report_writer.write(&results, None, cli.report.to_lib_format()) {
+    match report_writer.write(&results, None, opts.report.to_lib_format()) {
         Ok(paths) => {
             if verbosity != Verbosity::Quiet {
                 for path in &paths {

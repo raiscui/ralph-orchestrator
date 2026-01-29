@@ -25,10 +25,11 @@
 
 use crate::Backend;
 use crate::executor::RalphExecutor;
+use crate::mock::{CassetteResolver, MockConfig, build_mock_cli_args};
 use crate::models::TestResult;
 use crate::scenarios::{ScenarioError, TestScenario};
 use crate::workspace::WorkspaceManager;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -62,6 +63,9 @@ pub struct RunConfig {
 
     /// Skip scenarios that require unavailable backends.
     pub skip_unavailable: bool,
+
+    /// Mock-mode 配置（启用后将用 cassette 回放代替真实后端调用）。
+    pub mock_config: Option<MockConfig>,
 }
 
 impl RunConfig {
@@ -85,6 +89,12 @@ impl RunConfig {
     /// Sets whether to keep workspaces.
     pub fn keep_workspaces(mut self, keep: bool) -> Self {
         self.keep_workspaces = keep;
+        self
+    }
+
+    /// 启用 mock-mode（通过回放 cassette 做“零成本、确定性”的 E2E）。
+    pub fn with_mock(mut self, config: MockConfig) -> Self {
+        self.mock_config = Some(config);
         self
     }
 }
@@ -298,6 +308,49 @@ impl TestRunner {
                     }
                 };
 
+                // mock-mode：在执行前把 workspace 里的 `ralph.yml` 改成 custom backend，
+                // 让 `ralph run` 启动我们自己的 `ralph-e2e mock-cli` 来回放 cassette。
+                if let Some(ref mock_config) = config.mock_config {
+                    if let Err(e) = self.configure_mock_mode(
+                        &workspace_path,
+                        scenario.id(),
+                        backend,
+                        mock_config,
+                    ) {
+                        // 在 mock-mode 下，缺 cassette 属于“硬失败”：
+                        // - 否则会出现“全部跳过但 exit 0”的假绿。
+                        let failed_result = TestResult {
+                            scenario_id: scenario_id.clone(),
+                            scenario_description: scenario.description().to_string(),
+                            backend: backend.to_string(),
+                            tier: tier.clone(),
+                            passed: false,
+                            assertions: vec![crate::models::Assertion {
+                                name: "Mock cassette".to_string(),
+                                passed: false,
+                                expected: "Cassette exists and mock backend is configured".to_string(),
+                                actual: format!("{e}"),
+                            }],
+                            duration: Duration::from_secs(0),
+                        };
+
+                        self.emit_progress(ProgressEvent::ScenarioCompleted {
+                            scenario_id: scenario_id.clone(),
+                            passed: false,
+                            duration: Duration::from_secs(0),
+                            result: failed_result.clone(),
+                        });
+
+                        results.push(failed_result);
+
+                        if !config.keep_workspaces {
+                            scenario.cleanup(&workspace_path).ok();
+                            self.workspace_mgr.cleanup(&scenario_id).ok();
+                        }
+                        continue;
+                    }
+                }
+
                 // Execute the scenario
                 let executor = match &self.ralph_binary {
                     Some(binary) => {
@@ -414,6 +467,92 @@ impl TestRunner {
         if let Some(callback) = &self.on_progress {
             callback(event);
         }
+    }
+
+    /// mock-mode：为某个 scenario 配置“回放 cassette 的自定义后端”。
+    ///
+    /// 核心思路：
+    /// - 读取 workspace 中已有的 `ralph.yml`（由 scenario.setup 生成）
+    /// - 仅覆盖 `cli.backend/cli.command/cli.args` 为 custom backend
+    /// - 让 `ralph run` 在执行期 spawn：`ralph-e2e mock-cli --cassette ...`
+    fn configure_mock_mode(
+        &self,
+        workspace_path: &Path,
+        scenario_id: &str,
+        backend: Backend,
+        mock_config: &MockConfig,
+    ) -> Result<(), RunnerError> {
+        use std::fs;
+
+        // 1) 解析 cassette 路径（优先 backend-specific，其次 generic fallback）
+        let cassette_dir = mock_config.resolve_cassette_dir();
+        let resolver = CassetteResolver::new(&cassette_dir);
+        let cassette_path = resolver.resolve(scenario_id, backend).map_err(|e| {
+            RunnerError::WorkspaceError(format!("Cassette resolution failed: {e}"))
+        })?;
+
+        // 2) 确定 mock-cli 的可执行文件路径（同当前运行的 ralph-e2e 二进制）
+        let mock_cli_binary = std::env::current_exe()
+            .map_err(|e| RunnerError::WorkspaceError(format!("Failed to get current exe: {e}")))?;
+
+        // 3) 生成 custom backend args（mock-cli 子命令 + cassette + allowlist 等）
+        let mock_args = build_mock_cli_args(&cassette_path, mock_config);
+
+        // 4) 读取并更新 ralph.yml（尽量保留原有配置，只改 cli 节点）
+        let ralph_yml_path = workspace_path.join("ralph.yml");
+        let existing_content = fs::read_to_string(&ralph_yml_path)
+            .unwrap_or_else(|_| String::from("# Default ralph config\n"));
+
+        let mut config: serde_yaml::Value = serde_yaml::from_str(&existing_content)
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+        // 顶层必须是 mapping；否则直接重建一个空 mapping，避免写回无效结构。
+        if !matches!(config, serde_yaml::Value::Mapping(_)) {
+            config = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        }
+
+        if let serde_yaml::Value::Mapping(ref mut top_map) = config {
+            let cli_key = serde_yaml::Value::String("cli".to_string());
+
+            // 取出/创建 cli mapping
+            let cli_value = top_map
+                .entry(cli_key)
+                .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+            if !matches!(cli_value, serde_yaml::Value::Mapping(_)) {
+                *cli_value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+            }
+
+            if let serde_yaml::Value::Mapping(cli_map) = cli_value {
+                cli_map.insert(
+                    serde_yaml::Value::String("backend".to_string()),
+                    serde_yaml::Value::String("custom".to_string()),
+                );
+                cli_map.insert(
+                    serde_yaml::Value::String("command".to_string()),
+                    serde_yaml::Value::String(mock_cli_binary.to_string_lossy().to_string()),
+                );
+                cli_map.insert(
+                    serde_yaml::Value::String("args".to_string()),
+                    serde_yaml::Value::Sequence(
+                        mock_args
+                            .iter()
+                            .map(|s| serde_yaml::Value::String(s.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+
+        // 5) 写回文件
+        let updated_content = serde_yaml::to_string(&config)
+            .map_err(|e| RunnerError::WorkspaceError(format!("YAML serialization failed: {e}")))?;
+
+        fs::write(&ralph_yml_path, updated_content).map_err(|e| {
+            RunnerError::WorkspaceError(format!("Failed to write ralph.yml: {e}"))
+        })?;
+
+        Ok(())
     }
 }
 

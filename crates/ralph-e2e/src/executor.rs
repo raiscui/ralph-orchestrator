@@ -148,6 +148,23 @@ pub enum ExecutorError {
     Timeout(Duration),
 }
 
+/// 从当前目录向上查找 workspace root（以 `Cargo.toml` 为锚点）。
+///
+/// 说明：
+/// - 这个函数用于 mock-mode 下解析 cassette 目录等“相对 repo root 的路径”。
+/// - 找不到时返回 `None`，上层再决定如何处理（比如退回到相对路径）。
+pub fn find_workspace_root() -> Option<PathBuf> {
+    let mut current = std::env::current_dir().ok()?;
+
+    loop {
+        if current.join("Cargo.toml").exists() {
+            return Some(current);
+        }
+
+        current = current.parent()?.to_path_buf();
+    }
+}
+
 /// Resolves the path to the ralph binary.
 ///
 /// Resolution order:
@@ -157,27 +174,18 @@ pub enum ExecutorError {
 ///
 /// This ensures e2e tests run against the locally built code, not a system-installed version.
 pub fn resolve_ralph_binary() -> PathBuf {
-    // Try to find the workspace root by looking for Cargo.toml
-    // Start from current directory and walk up
-    let mut current = std::env::current_dir().ok();
-
-    while let Some(dir) = current {
-        let cargo_toml = dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            // Check for release binary first (faster)
-            let release_binary = dir.join("target/release/ralph");
-            if release_binary.exists() {
-                return release_binary;
-            }
-
-            // Fall back to debug binary
-            let debug_binary = dir.join("target/debug/ralph");
-            if debug_binary.exists() {
-                return debug_binary;
-            }
+    if let Some(root) = find_workspace_root() {
+        // Check for release binary first (faster)
+        let release_binary = root.join("target/release/ralph");
+        if release_binary.exists() {
+            return release_binary;
         }
 
-        current = dir.parent().map(|p| p.to_path_buf());
+        // Fall back to debug binary
+        let debug_binary = root.join("target/debug/ralph");
+        if debug_binary.exists() {
+            return debug_binary;
+        }
     }
 
     // Fall back to PATH lookup

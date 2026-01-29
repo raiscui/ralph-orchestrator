@@ -39,6 +39,10 @@ env/
 *.orig
 .DS_Store
 
+# Node.js
+node_modules/
+package-lock.json
+
 # Ralph specific
 .ralph/
 .sop/
@@ -47,6 +51,20 @@ prompts/
 prompts/archive/
 ralph_*.log
 ralph_metrics_*.json
+
+# Ephemeral logs and debug output
+*.log
+test_output.txt
+schema_debug.txt
+pbcopy
+
+# Local configs
+.claude/settings.json
+.claude/*.local.md
+.kiro/
+
+# Playwright screenshots
+.playwright-mcp/
 
 # Test
 .coverage

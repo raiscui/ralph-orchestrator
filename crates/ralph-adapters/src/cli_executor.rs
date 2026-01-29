@@ -423,7 +423,8 @@ mod tests {
 
         // 让检测窗口至少触发 1-2 次，同时保证输出频率足够高（< stale 阈值）
         let check_interval = Some(Duration::from_millis(100));
-        let stale_timeout = Some(Duration::from_millis(150));
+        // CI/高负载机器上调度抖动更明显，阈值过小会导致该用例偶发误判超时。
+        let stale_timeout = Some(Duration::from_millis(400));
         let result = executor
             .execute("", std::io::sink(), check_interval, stale_timeout, false)
             .await

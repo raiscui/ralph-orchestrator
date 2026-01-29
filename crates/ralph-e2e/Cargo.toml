@@ -24,6 +24,7 @@ tokio.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 
 # Time/date
 chrono.workspace = true
@@ -43,6 +44,9 @@ async-trait.workspace = true
 
 # Unix signal handling (hard kill process group on timeout)
 nix.workspace = true
+
+# Ralph core (used by mock-cli to replay recorded JSONL cassettes)
+ralph-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
