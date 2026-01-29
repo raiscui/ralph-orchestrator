@@ -91,3 +91,45 @@
 - [完成] 审阅 `7a346bd` 差异：确认主要价值点为“更务实的 review 收敛策略”和“更可靠的 LOOP_COMPLETE 停机语义”。
 - [完成] 应用 7 个 YAML 文件差异（使用 `git show | git apply`，未创建新 commit）。
 - [完成] `cargo test` 全通过。
+
+---
+
+# 任务计划: 理性合并 TUI hang 修复（commit: 685526d）
+
+## 目标
+把 `685526d8b901a19f73774e7f2c80bb22494dd1c2` 中“避免在 `npx` 进程组下 TUI 卡死”的修复合并到当前分支。
+同时尽量不破坏“进程组用于清理子进程”的既有语义。
+
+## 方案（给自己看的取舍）
+1) 不惜代价，最佳方案：
+- 保持“自己成为进程组 leader”的能力，但在 TTY 场景下，必要时将新进程组设置回前台（需要 `tcsetpgrp`，并处理权限/失败分支）。
+2) 先能用，后面再优雅（本次选择）：
+- 按 upstream commit 的做法：当当前进程组就是前台 TTY 进程组时，跳过 `setpgid`，避免 TUI 输入被“踢出前台组”导致挂死。
+- 代价是：在某些 wrapper 场景下我们不再强制成为 group leader，但能换来“交互可用性”。
+
+## 阶段
+- [x] 阶段1: 审阅差异与现状（main.rs 的 process group 初始化逻辑）
+- [x] 阶段2: 落地代码改动（含必要的风格/日志改良）
+- [x] 阶段3: `cargo test` 全量验证
+- [x] 阶段4: 提交（带来源说明）+ 记录结论到 notes/WORKLOG
+
+## 关键问题
+1. 什么时候会出现 “npx process group” 触发的 TUI 卡死？（预期：我们调用 `setpgid` 把自己移出前台 TTY 组，导致输入不再送达）
+2. 跳过 `setpgid` 是否会导致 orphan 清理能力下降？（预期：是 trade-off，但在 wrapper 场景下优先保证交互）
+3. 是否需要额外日志/调试信息帮助以后定位（比如打印 pgrp/fg pgrp）？（预期：用 `debug!`，避免默认噪音）
+
+## 做出的决定
+- [决定] 采用 upstream 的“前台 TTY 组检测 + 安全跳过 setpgid”修复，并做少量 Rust 风格改良（inlined_format_args）。
+  - [理由] 这是最小化、可回归测试的修复；且能直接解决“交互挂死”这种硬故障。
+
+## 遇到错误
+- 暂无
+
+## 状态
+**已完成**：已将 `685526d` 的修复落地到 `crates/ralph-cli/src/main.rs`，并通过 `cargo test` 验证无回归。
+
+## 日志
+### 2026-01-29 13:10
+- [完成] 审阅 `685526d` 差异：确认这是“避免 npx/wrapper 场景下 TUI 输入挂死”的关键修复。
+- [完成] 落地 process group 初始化保护逻辑（检测前台 TTY 进程组，必要时跳过 `setpgid`），并按 Rust 风格改用 inlined_format_args。
+- [完成] `cargo test` 全通过。

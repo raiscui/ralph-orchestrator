@@ -705,3 +705,29 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
 - 事件 topic 调整是否影响下游 hat 触发链（例如移除 `mob.complete` / `understanding.verified`）。
   - 初看：这些 topic 没有任何 hat 订阅，属于“名义上存在但实际上无用”的事件，移除更合理。
 - timeout 与复杂度等级调整，是否会影响某些基于固定值的断言/基准测试（需要跑 `cargo test` 验证）。
+
+---
+
+## 2026-01-29 合并 `685526d`：避免 npx 进程组下 TUI 卡死（价值评估）
+
+### 来源
+- `git show 685526d8b901a19f73774e7f2c80bb22494dd1c2`
+  - 标题：fix(cli): avoid TUI hang under npx process group (#114)
+  - 影响文件：`crates/ralph-cli/src/main.rs`
+
+### 变更摘要
+- 目标问题：在某些 wrapper（典型是 `npx`）环境里，CLI 如果在启动时强行 `setpgid(pid, pid)`，
+  可能把自己移出“前台 TTY 进程组”，导致 TUI 键盘输入不再到达，从而表现为“界面卡死/无响应”。
+- 修复思路：初始化进程组时先判断：
+  - 如果已经是进程组 leader（`getpgrp() == pid`）：直接返回；
+  - 如果当前进程组就是前台 TTY 的进程组：跳过 `setpgid`，保持交互可用；
+  - 否则再尝试 `setpgid(pid, pid)`。
+
+### 本次落地的“有价值内容”
+- 这是一个“硬故障修复”：优先保证交互（TUI 输入）不挂死。
+- 改动范围小，只影响 Unix 下的进程组初始化逻辑，风险集中、易验证。
+
+### 主要 trade-off / 风险点
+- 在 wrapper 场景下我们可能不再强制成为 process group leader，
+  进而降低“通过 kill 整个进程组清理子进程”的确定性。
+  - 但相比“直接卡死不可用”，这个 trade-off 可接受（并且更符合“先能用”的工程优先级）。

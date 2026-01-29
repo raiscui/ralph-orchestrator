@@ -838,3 +838,13 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
 
 ### 验证
 - `cargo test` ✅
+
+## 2026-01-29 13:10 +0800｜合并：避免 npx 进程组下 TUI 卡死（来自 commit `685526d`）
+
+### 我做了什么
+- 合并 `685526d8b901a19f73774e7f2c80bb22494dd1c2` 的核心修复到 `crates/ralph-cli/src/main.rs`：
+  - 在 Unix 下初始化进程组时，先检测“当前进程组是否就是前台 TTY 进程组”。
+  - 如果是，则跳过 `setpgid`，避免把自己移出前台组导致 TUI 键盘输入失效/卡死。
+
+### 验证
+- `cargo test` ✅
