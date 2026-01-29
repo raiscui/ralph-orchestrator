@@ -174,12 +174,10 @@ done
 Ralph's `--record-session` produces JSONL with:
 
 ```jsonl
-{"type": "iteration_start", "iteration": 1, "timestamp": "..."}
-{"type": "hat_activated", "hat_id": "test_writer", "trigger": "task.start"}
-{"type": "cli_start", "backend": "kiro", "prompt_length": 1234}
-{"type": "cli_complete", "duration_ms": 45000, "output_length": 5678}
-{"type": "event_published", "topic": "test.written", "from_hat": "test_writer"}
-{"type": "iteration_end", "iteration": 1, "duration_ms": 46000}
+{"ts": 1737740400000, "event": "_meta.loop_start", "data": {"prompt_file": "PROMPT.md", "max_iterations": 50, "ux_mode": "cli"}}
+{"ts": 1737740400100, "event": "ux.terminal.write", "data": {"bytes": "UE9ORw==", "stdout": true, "offset_ms": 0}}
+{"ts": 1737740400200, "event": "bus.publish", "data": {"topic": "build.done", "payload": "tests: pass", "source": "builder"}}
+{"ts": 1737740400300, "event": "_meta.termination", "data": {"reason": "CompletionPromise", "iterations": 3, "elapsed_secs": 25.5, "ux_writes": 42}}
 ```
 
 ### Derived Metrics

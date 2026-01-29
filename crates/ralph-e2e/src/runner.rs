@@ -328,7 +328,8 @@ impl TestRunner {
                             assertions: vec![crate::models::Assertion {
                                 name: "Mock cassette".to_string(),
                                 passed: false,
-                                expected: "Cassette exists and mock backend is configured".to_string(),
+                                expected: "Cassette exists and mock backend is configured"
+                                    .to_string(),
                                 actual: format!("{e}"),
                             }],
                             duration: Duration::from_secs(0),
@@ -487,9 +488,9 @@ impl TestRunner {
         // 1) 解析 cassette 路径（优先 backend-specific，其次 generic fallback）
         let cassette_dir = mock_config.resolve_cassette_dir();
         let resolver = CassetteResolver::new(&cassette_dir);
-        let cassette_path = resolver.resolve(scenario_id, backend).map_err(|e| {
-            RunnerError::WorkspaceError(format!("Cassette resolution failed: {e}"))
-        })?;
+        let cassette_path = resolver
+            .resolve(scenario_id, backend)
+            .map_err(|e| RunnerError::WorkspaceError(format!("Cassette resolution failed: {e}")))?;
 
         // 2) 确定 mock-cli 的可执行文件路径（同当前运行的 ralph-e2e 二进制）
         let mock_cli_binary = std::env::current_exe()
@@ -528,6 +529,11 @@ impl TestRunner {
                     serde_yaml::Value::String("backend".to_string()),
                     serde_yaml::Value::String("custom".to_string()),
                 );
+                // 关键：mock-cli 不需要 prompt 参数；用 stdin 注入可避免 clap 收到“额外 argv”
+                cli_map.insert(
+                    serde_yaml::Value::String("prompt_mode".to_string()),
+                    serde_yaml::Value::String("stdin".to_string()),
+                );
                 cli_map.insert(
                     serde_yaml::Value::String("command".to_string()),
                     serde_yaml::Value::String(mock_cli_binary.to_string_lossy().to_string()),
@@ -548,9 +554,8 @@ impl TestRunner {
         let updated_content = serde_yaml::to_string(&config)
             .map_err(|e| RunnerError::WorkspaceError(format!("YAML serialization failed: {e}")))?;
 
-        fs::write(&ralph_yml_path, updated_content).map_err(|e| {
-            RunnerError::WorkspaceError(format!("Failed to write ralph.yml: {e}"))
-        })?;
+        fs::write(&ralph_yml_path, updated_content)
+            .map_err(|e| RunnerError::WorkspaceError(format!("Failed to write ralph.yml: {e}")))?;
 
         Ok(())
     }

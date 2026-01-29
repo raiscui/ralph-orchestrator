@@ -376,3 +376,41 @@
 - `cargo test -p ralph-tui` ✅
 - `cargo test` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-01-29 16:15 +0800｜record-session：parallel 忽略 + UX 记录格式不一致导致 cassette 不可回放
+
+### 现象
+- `ralph run --record-session xxx.jsonl`：
+  - 串行模式：基本只有 `bus.publish` / `_meta.loop_start`，缺少 `ux.terminal.write`，cassette 无法用于 mock-cli 回放。
+  - 并行模式：直接 warn “ignores --record-session (not wired yet)”。
+- 录制出来的 UX 记录存在结构异常（double-wrapped）：
+  - `data` 里又嵌套了一层 `{ event: "ux.terminal.write", data: {...} }`，与 fixtures/SessionPlayer 的解析假设不一致。
+
+### 根因
+1) `SessionRecorder::from_ux_event` 把整个 tagged `UxEvent` 再嵌套写进 `Record.data`。
+   - 但 `SessionPlayer::parse_ux_event` 假设 `Record.data` 只包含 payload（TerminalWrite/Resize/...），它会用
+     `{ event: record.event, data: record.data }` 重新组装 tagged 结构做反序列化。
+   - 两者不一致 → 回放/解析会失败或行为不稳定。
+
+2) `ralph-cli` 的 parallel runner 没有把 record-session 贯穿到 Supervisor 的输出/事件流。
+
+### 修复
+- `crates/ralph-core/src/session_recorder.rs`：
+  - `Record::from_ux_event` 改为只写 payload（TerminalWrite/Resize/...），不再嵌套 tagged UxEvent。
+- `crates/ralph-cli/src/loop_runner.rs`：
+  - 每轮把“用于 event parsing 的输出文本”写为 `ux.terminal.write`（stdout-only），并补写 `_meta.termination`（best-effort）。
+- `crates/ralph-cli/src/parallel_runner.rs`：
+  - 接线 record-session：
+    - stdout chunk → `ux.terminal.write`
+    - supervisor event → `bus.publish`
+  - 并行执行时注入 `RALPH_HAT_INSTANCE_ID` / `RALPH_HAT_ID`（用于回放分流）。
+- `crates/ralph-proto/src/ux_event.rs`：
+  - `TerminalWrite` 增加可选 `instance_id` 字段（并行录制归因）。
+
+### 验证
+- `cargo test` ✅
+- 手工最小回归（无需真实后端）：
+  - 并行模式下 `--record-session` 生成的 JSONL 包含：
+    - `_meta.loop_start`
+    - `bus.publish`
+    - `ux.terminal.write`（含 `instance_id: "ralph#1"`）

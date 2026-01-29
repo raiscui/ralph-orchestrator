@@ -9,9 +9,10 @@ use ralph_adapters::CliBackend;
 use ralph_core::{
     HatJob, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend, OutputStream,
 };
-use ralph_core::{ParallelSupervisor, RalphConfig, TerminationReason};
-use ralph_proto::{HatInstanceId, HatInstanceState};
+use ralph_core::{ParallelSupervisor, RalphConfig, Record, SessionRecorder, TerminationReason};
+use ralph_proto::{HatInstanceId, HatInstanceState, TerminalWrite, UxEvent};
 use ralph_tui::{Tui, TuiUpdate};
+use std::fs::File;
 use std::io::{IsTerminal, Write, stdin, stdout};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -53,6 +54,10 @@ impl HatJobExecutor for CliHatJobExecutor {
         command.args(&args);
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+
+        // 并行模式回放/诊断：把实例信息传给后端（custom backend 可用来做输出分流）
+        command.env("RALPH_HAT_INSTANCE_ID", job.instance_id.as_str());
+        command.env("RALPH_HAT_ID", job.hat_id.as_str());
 
         if let Some(workdir) = &job.workdir {
             command.current_dir(workdir);
@@ -322,9 +327,32 @@ pub async fn run_parallel_loop_impl(
 
     // TUI 需要 stdin/stdout 都是 TTY（crossterm 既要读键盘也要写屏幕）
     let enable_tui = enable_tui && stdin().is_terminal() && stdout().is_terminal();
-    if record_session.is_some() {
-        warn!("Parallel mode currently ignores --record-session (not wired yet)");
-    }
+    let session_recorder: Option<Arc<SessionRecorder<std::io::BufWriter<File>>>> =
+        if let Some(record_path) = record_session {
+            let file = File::create(&record_path).with_context(|| {
+                format!(
+                    "Failed to create session recording file (parallel): {:?}",
+                    record_path
+                )
+            })?;
+            let recorder = Arc::new(SessionRecorder::new(std::io::BufWriter::new(file)));
+
+            // 录制元信息：parallel 模式用更明确的 ux_mode，便于诊断
+            recorder.record_meta(Record::meta_loop_start(
+                &config.event_loop.prompt_file,
+                config.event_loop.max_iterations,
+                Some(if enable_tui {
+                    "parallel-tui"
+                } else {
+                    "parallel-cli"
+                }),
+            ));
+
+            debug!("Session recording enabled (parallel): {:?}", record_path);
+            Some(recorder)
+        } else {
+            None
+        };
 
     let use_colors = color_mode.should_use_colors();
 
@@ -408,12 +436,27 @@ pub async fn run_parallel_loop_impl(
         let update_tx = tui_update_tx.clone().expect("tui_update_tx must exist");
 
         let output_tx = update_tx.clone();
+        let recorder_for_output = session_recorder.clone();
         let observer: OutputObserver = Arc::new(move |chunk: &HatJobOutputChunk| {
             // 默认折叠/隐藏 stderr（减少噪音）。
             // 需要时用 `ralph run --show-stderr` 显式打开。
             if !show_stderr && matches!(chunk.stream, OutputStream::Stderr) {
                 return;
             }
+
+            // best-effort：把 stdout 写入 cassette（并行回放用）
+            if let Some(recorder) = &recorder_for_output {
+                if chunk.stream == OutputStream::Stdout {
+                    let offset_ms = recorder.elapsed().as_millis() as u64;
+                    let mut line = chunk.line.clone();
+                    line.push('\n');
+                    recorder.record_ux_event(&UxEvent::TerminalWrite(
+                        TerminalWrite::new(line.as_bytes(), true, offset_ms)
+                            .with_instance_id(chunk.instance_id.to_string()),
+                    ));
+                }
+            }
+
             let _ = output_tx.send(TuiUpdate::ParallelOutputChunk(chunk.clone()));
         });
 
@@ -426,7 +469,12 @@ pub async fn run_parallel_loop_impl(
         });
 
         let event_tx = update_tx;
+        let recorder_for_events = session_recorder.clone();
         let event_observer: EventObserver = Arc::new(move |event: &ralph_proto::Event| {
+            // best-effort：把 bus.publish 写入 cassette（便于诊断/提取命令）
+            if let Some(recorder) = &recorder_for_events {
+                recorder.record_bus_event(event);
+            }
             // 控制面事件（gate.* / human.message）才需要进 UI，减少噪音与开销
             let topic = event.topic.as_str();
             if topic.starts_with("gate.") || topic == "human.message" {
@@ -448,7 +496,21 @@ pub async fn run_parallel_loop_impl(
 
         // 输出观察者：按实例归因输出
         let stderr_hidden_hint_printed = Arc::new(AtomicBool::new(false));
+        let recorder_for_output = session_recorder.clone();
         let observer: OutputObserver = Arc::new(move |chunk: &HatJobOutputChunk| {
+            // best-effort：把 stdout 写入 cassette（并行回放用）
+            if let Some(recorder) = &recorder_for_output {
+                if chunk.stream == OutputStream::Stdout {
+                    let offset_ms = recorder.elapsed().as_millis() as u64;
+                    let mut line = chunk.line.clone();
+                    line.push('\n');
+                    recorder.record_ux_event(&UxEvent::TerminalWrite(
+                        TerminalWrite::new(line.as_bytes(), true, offset_ms)
+                            .with_instance_id(chunk.instance_id.to_string()),
+                    ));
+                }
+            }
+
             if matches!(verbosity, Verbosity::Quiet) {
                 return;
             }
@@ -503,7 +565,14 @@ pub async fn run_parallel_loop_impl(
             let _ = writeln!(out, "[{}:state] {}", instance_id, state);
         });
 
-        (observer, state_observer, None)
+        // 日志模式默认不展示事件；但若开启了 session recording，则仍记录 bus.publish
+        let event_observer: Option<EventObserver> = session_recorder.clone().map(|recorder| {
+            Arc::new(move |event: &ralph_proto::Event| {
+                recorder.record_bus_event(event);
+            }) as EventObserver
+        });
+
+        (observer, state_observer, event_observer)
     };
 
     // Spawn signal handlers AFTER TUI initialization to avoid deadlock
@@ -590,6 +659,18 @@ pub async fn run_parallel_loop_impl(
     // 自然结束：如果 TUI 开着，让用户按 q 退出（与串行模式对齐）
     if let Some(handle) = tui_handle.take() {
         let _ = handle.await;
+    }
+
+    // best-effort：写入 termination 元信息，便于 cassette 诊断/回放
+    if let Some(recorder) = &session_recorder {
+        let reason_str = format!("{reason:?}");
+        recorder.record_meta(Record::meta_termination(
+            &reason_str,
+            0, // 并行模式的 iteration 语义与串行不同，这里先写 0 做占位
+            recorder.elapsed().as_secs_f64(),
+            recorder.ux_write_count(),
+        ));
+        let _ = recorder.flush();
     }
 
     Ok(reason)
