@@ -11,9 +11,12 @@ use ralph_proto::{
     Event, GateRequest, GateResolve, GateTimeout, HatInstanceId, HatInstanceState,
     TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT,
 };
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 use std::time::Instant;
 use tracing::warn;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// 并行 TUI 的焦点区域（Tab 循环）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +27,419 @@ pub enum ParallelFocus {
     Output,
     /// 底部 human chat / gate 输入。
     Chat,
+}
+
+/// 输出视图的“屏幕坐标”（相对 Output inner area）。
+///
+/// 说明：
+/// - 这是第一版的最小模型：只关心屏幕上的 x/y，不尝试映射回逻辑文本坐标。
+/// - 优点：实现简单，天然适配软换行与宽字符渲染；可满足“鼠标拖拽框选/多行选择”的可视化需求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScreenPos {
+    pub x: u16,
+    pub y: u16,
+}
+
+/// 输出视图的选择区域（anchor→cursor 形成矩形区域）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenSelection {
+    pub anchor: ScreenPos,
+    pub cursor: ScreenPos,
+}
+
+impl ScreenSelection {
+    pub fn new(anchor: ScreenPos, cursor: ScreenPos) -> Self {
+        Self { anchor, cursor }
+    }
+
+    pub fn bounds(&self) -> (u16, u16, u16, u16) {
+        let min_x = self.anchor.x.min(self.cursor.x);
+        let max_x = self.anchor.x.max(self.cursor.x);
+        let min_y = self.anchor.y.min(self.cursor.y);
+        let max_y = self.anchor.y.max(self.cursor.y);
+        (min_x, max_x, min_y, max_y)
+    }
+}
+
+/// Chat 输入框的逻辑光标位置（按“行 + grapheme 列”计数）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextPos {
+    pub row: usize,
+    pub col: usize,
+}
+
+/// Chat 输入框的线性选择（anchor→cursor，end 为“光标位置”，按半开区间渲染）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSelection {
+    pub anchor: TextPos,
+    pub cursor: TextPos,
+}
+
+impl TextSelection {
+    pub fn new(anchor: TextPos, cursor: TextPos) -> Self {
+        Self { anchor, cursor }
+    }
+
+    pub fn normalized(&self) -> (TextPos, TextPos) {
+        if (self.anchor.row, self.anchor.col) <= (self.cursor.row, self.cursor.col) {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+}
+
+/// 并行模式 Chat 输入编辑器（最小多行编辑模型）。
+///
+/// 设计目标：
+/// - 多行输入（Shift+Enter 换行）
+/// - 光标上下左右移动
+/// - 线性选择（Shift+方向键 / 鼠标拖拽），并支持“输入替换所选内容”
+#[derive(Debug, Clone)]
+pub struct ChatEditorState {
+    pub lines: Vec<String>,
+    pub cursor: TextPos,
+    pub selection: Option<TextSelection>,
+    preferred_col: usize,
+}
+
+impl Default for ChatEditorState {
+    fn default() -> Self {
+        Self {
+            lines: vec![String::new()],
+            cursor: TextPos::default(),
+            selection: None,
+            preferred_col: 0,
+        }
+    }
+}
+
+impl ChatEditorState {
+    pub fn is_empty(&self) -> bool {
+        self.lines.len() == 1 && self.lines[0].is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.lines.push(String::new());
+        self.cursor = TextPos::default();
+        self.selection = None;
+        self.preferred_col = 0;
+    }
+
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection.map_or(false, |s| s.anchor != s.cursor)
+    }
+
+    fn line_grapheme_len(line: &str) -> usize {
+        UnicodeSegmentation::graphemes(line, true).count()
+    }
+
+    fn grapheme_col_to_byte_idx(line: &str, col: usize) -> usize {
+        if col == 0 {
+            return 0;
+        }
+        for (i, (byte_idx, _g)) in UnicodeSegmentation::grapheme_indices(line, true).enumerate() {
+            if i == col {
+                return byte_idx;
+            }
+        }
+        line.len()
+    }
+
+    fn clamp_cursor_in_bounds(&mut self) {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor.row = self.cursor.row.min(self.lines.len().saturating_sub(1));
+        let line_len = Self::line_grapheme_len(&self.lines[self.cursor.row]);
+        self.cursor.col = self.cursor.col.min(line_len);
+    }
+
+    fn delete_selection_if_any(&mut self) -> bool {
+        let Some(sel) = self.selection else {
+            return false;
+        };
+
+        let (start, end) = sel.normalized();
+        if start == end {
+            self.selection = None;
+            return false;
+        }
+
+        self.cursor = start;
+
+        if start.row == end.row {
+            let line = &mut self.lines[start.row];
+            let start_b = Self::grapheme_col_to_byte_idx(line, start.col);
+            let end_b = Self::grapheme_col_to_byte_idx(line, end.col);
+            if start_b <= end_b && end_b <= line.len() {
+                line.replace_range(start_b..end_b, "");
+            }
+        } else {
+            // 1) start 行：删除 start.col..end
+            let start_prefix = {
+                let line = &self.lines[start.row];
+                let start_b = Self::grapheme_col_to_byte_idx(line, start.col);
+                line[..start_b].to_string()
+            };
+
+            // 2) end 行：保留 0..end.col 之后的 suffix
+            let end_suffix = {
+                let line = &self.lines[end.row];
+                let end_b = Self::grapheme_col_to_byte_idx(line, end.col);
+                line[end_b..].to_string()
+            };
+
+            // 3) 合并为一行，并移除中间行
+            self.lines[start.row] = format!("{start_prefix}{end_suffix}");
+            let remove_count = end.row.saturating_sub(start.row);
+            for _ in 0..remove_count {
+                let idx = start.row + 1;
+                if idx < self.lines.len() {
+                    self.lines.remove(idx);
+                }
+            }
+        }
+
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+
+        self.selection = None;
+        self.preferred_col = self.cursor.col;
+        true
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.delete_selection_if_any();
+        self.clamp_cursor_in_bounds();
+
+        let line = &mut self.lines[self.cursor.row];
+        let byte_idx = Self::grapheme_col_to_byte_idx(line, self.cursor.col);
+        line.insert(byte_idx, c);
+        self.cursor.col = self.cursor.col.saturating_add(1);
+        self.preferred_col = self.cursor.col;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.delete_selection_if_any() {
+            return;
+        }
+        self.clamp_cursor_in_bounds();
+
+        if self.cursor.col > 0 {
+            let line = &mut self.lines[self.cursor.row];
+            let end_b = Self::grapheme_col_to_byte_idx(line, self.cursor.col);
+            let start_b = Self::grapheme_col_to_byte_idx(line, self.cursor.col.saturating_sub(1));
+            if start_b < end_b && end_b <= line.len() {
+                line.replace_range(start_b..end_b, "");
+                self.cursor.col = self.cursor.col.saturating_sub(1);
+                self.preferred_col = self.cursor.col;
+            }
+            return;
+        }
+
+        // 行首 backspace：把当前行合并到上一行
+        if self.cursor.row > 0 {
+            let current = self.lines.remove(self.cursor.row);
+            self.cursor.row = self.cursor.row.saturating_sub(1);
+            let prev_len = Self::line_grapheme_len(&self.lines[self.cursor.row]);
+            self.lines[self.cursor.row].push_str(&current);
+            self.cursor.col = prev_len;
+            self.preferred_col = self.cursor.col;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.delete_selection_if_any() {
+            return;
+        }
+        self.clamp_cursor_in_bounds();
+
+        let line_len = Self::line_grapheme_len(&self.lines[self.cursor.row]);
+        if self.cursor.col < line_len {
+            let line = &mut self.lines[self.cursor.row];
+            let start_b = Self::grapheme_col_to_byte_idx(line, self.cursor.col);
+            let end_b = Self::grapheme_col_to_byte_idx(line, self.cursor.col.saturating_add(1));
+            if start_b < end_b && end_b <= line.len() {
+                line.replace_range(start_b..end_b, "");
+            }
+            return;
+        }
+
+        // 行尾 delete：把下一行合并到当前行
+        let next_idx = self.cursor.row.saturating_add(1);
+        if next_idx < self.lines.len() {
+            let next = self.lines.remove(next_idx);
+            self.lines[self.cursor.row].push_str(&next);
+        }
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.delete_selection_if_any();
+        self.clamp_cursor_in_bounds();
+
+        let line = &mut self.lines[self.cursor.row];
+        let byte_idx = Self::grapheme_col_to_byte_idx(line, self.cursor.col);
+        let suffix = line[byte_idx..].to_string();
+        line.truncate(byte_idx);
+
+        let next_row = self.cursor.row.saturating_add(1);
+        self.lines.insert(next_row, suffix);
+        self.cursor.row = next_row;
+        self.cursor.col = 0;
+        self.preferred_col = 0;
+    }
+
+    pub fn move_left(&mut self, selecting: bool) {
+        self.clamp_cursor_in_bounds();
+        self.apply_selecting(selecting);
+
+        if self.cursor.col > 0 {
+            self.cursor.col = self.cursor.col.saturating_sub(1);
+        } else if self.cursor.row > 0 {
+            self.cursor.row = self.cursor.row.saturating_sub(1);
+            self.cursor.col = Self::line_grapheme_len(&self.lines[self.cursor.row]);
+        }
+
+        self.preferred_col = self.cursor.col;
+        self.apply_selection_cursor_if_needed(selecting);
+    }
+
+    pub fn move_right(&mut self, selecting: bool) {
+        self.clamp_cursor_in_bounds();
+        self.apply_selecting(selecting);
+
+        let line_len = Self::line_grapheme_len(&self.lines[self.cursor.row]);
+        if self.cursor.col < line_len {
+            self.cursor.col = self.cursor.col.saturating_add(1);
+        } else if self.cursor.row.saturating_add(1) < self.lines.len() {
+            self.cursor.row = self.cursor.row.saturating_add(1);
+            self.cursor.col = 0;
+        }
+
+        self.preferred_col = self.cursor.col;
+        self.apply_selection_cursor_if_needed(selecting);
+    }
+
+    pub fn move_up(&mut self, selecting: bool) {
+        self.clamp_cursor_in_bounds();
+        self.apply_selecting(selecting);
+
+        if self.cursor.row == 0 {
+            self.apply_selection_cursor_if_needed(selecting);
+            return;
+        }
+
+        self.cursor.row = self.cursor.row.saturating_sub(1);
+        let line_len = Self::line_grapheme_len(&self.lines[self.cursor.row]);
+        self.cursor.col = self.preferred_col.min(line_len);
+
+        self.apply_selection_cursor_if_needed(selecting);
+    }
+
+    pub fn move_down(&mut self, selecting: bool) {
+        self.clamp_cursor_in_bounds();
+        self.apply_selecting(selecting);
+
+        if self.cursor.row.saturating_add(1) >= self.lines.len() {
+            self.apply_selection_cursor_if_needed(selecting);
+            return;
+        }
+
+        self.cursor.row = self.cursor.row.saturating_add(1);
+        let line_len = Self::line_grapheme_len(&self.lines[self.cursor.row]);
+        self.cursor.col = self.preferred_col.min(line_len);
+
+        self.apply_selection_cursor_if_needed(selecting);
+    }
+
+    fn apply_selecting(&mut self, selecting: bool) {
+        if selecting {
+            if self.selection.is_none() {
+                self.selection = Some(TextSelection::new(self.cursor, self.cursor));
+            }
+        } else {
+            self.selection = None;
+        }
+    }
+
+    fn apply_selection_cursor_if_needed(&mut self, selecting: bool) {
+        if !selecting {
+            return;
+        }
+        if let Some(sel) = self.selection.as_mut() {
+            sel.cursor = self.cursor;
+            if sel.anchor == sel.cursor {
+                self.selection = None;
+            }
+        }
+    }
+
+    pub fn set_cursor(&mut self, pos: TextPos, selecting: bool) {
+        self.clamp_cursor_in_bounds();
+        self.apply_selecting(selecting);
+
+        self.cursor = pos;
+        self.clamp_cursor_in_bounds();
+        self.preferred_col = self.cursor.col;
+        self.apply_selection_cursor_if_needed(selecting);
+    }
+
+    pub fn set_mouse_selection(&mut self, anchor: TextPos, cursor: TextPos) {
+        self.cursor = cursor;
+        self.clamp_cursor_in_bounds();
+        self.preferred_col = self.cursor.col;
+        if anchor == self.cursor {
+            self.selection = None;
+        } else {
+            self.selection = Some(TextSelection::new(anchor, self.cursor));
+        }
+    }
+
+    /// 返回某一行上的选择范围（以 grapheme 列计数，end 为排他）。
+    pub fn selection_range_for_row(&self, row: usize) -> Option<(usize, usize)> {
+        let sel = self.selection?;
+        let (start, end) = sel.normalized();
+        if start == end {
+            return None;
+        }
+
+        if row < start.row || row > end.row {
+            return None;
+        }
+
+        let line_len = self
+            .lines
+            .get(row)
+            .map(|s| Self::line_grapheme_len(s))
+            .unwrap_or(0);
+
+        if start.row == end.row {
+            if row != start.row {
+                return None;
+            }
+            return Some((start.col.min(line_len), end.col.min(line_len)));
+        }
+
+        if row == start.row {
+            return Some((start.col.min(line_len), line_len));
+        }
+        if row == end.row {
+            return Some((0, end.col.min(line_len)));
+        }
+
+        Some((0, line_len))
+    }
 }
 
 /// 并行模式下的实例视图状态。
@@ -153,14 +569,23 @@ pub struct ParallelTuiState {
     pub instance_order: Vec<HatInstanceId>,
     pub selected_instance: usize,
 
-    /// human chat 输入框内容（单行）。
-    pub chat_input: String,
+    /// Output 视图的当前“光标”（用于 Shift+方向键选择的起点）。
+    pub output_cursor: ScreenPos,
+    /// Output 视图的选择区域（用于高亮显示）。
+    pub output_selection: Option<ScreenSelection>,
+    /// 鼠标是否正在 Output 视图内按下并拖拽（用于 Drag/Up 事件的选择更新）。
+    pub output_selecting: bool,
+
+    /// human chat 输入框内容（多行编辑器）。
+    pub chat_editor: ChatEditorState,
     /// 最近一次写入外部事件文件的结果提示（仅用于 UI 展示）。
     pub chat_status: Option<String>,
 
     /// open gates（按 gate_id 索引）。
     pub gates: HashMap<String, GateViewState>,
     pub gate_order: Vec<String>,
+    /// 当前选中的 gate（用于展示 gate 详情与快捷 actions）。
+    pub selected_gate: Option<String>,
 
     /// 输出 buffer 的最大行数（超过即丢弃最旧的行）。
     pub max_buffer_lines: usize,
@@ -173,16 +598,73 @@ impl Default for ParallelTuiState {
             instances: HashMap::new(),
             instance_order: Vec::new(),
             selected_instance: 0,
-            chat_input: String::new(),
+            output_cursor: ScreenPos::default(),
+            output_selection: None,
+            output_selecting: false,
+            chat_editor: ChatEditorState::default(),
             chat_status: None,
             gates: HashMap::new(),
             gate_order: Vec::new(),
+            selected_gate: None,
             max_buffer_lines: 5_000,
         }
     }
 }
 
 impl ParallelTuiState {
+    pub fn clear_output_selection(&mut self) {
+        self.output_selection = None;
+        self.output_selecting = false;
+    }
+
+    pub fn set_output_cursor(&mut self, pos: ScreenPos) {
+        self.output_cursor = pos;
+    }
+
+    pub fn start_output_selection(&mut self, pos: ScreenPos) {
+        self.output_cursor = pos;
+        self.output_selection = Some(ScreenSelection::new(pos, pos));
+        self.output_selecting = true;
+    }
+
+    pub fn update_output_selection_cursor(&mut self, pos: ScreenPos) {
+        self.output_cursor = pos;
+        if let Some(sel) = self.output_selection.as_mut() {
+            sel.cursor = pos;
+        }
+    }
+
+    pub fn finish_output_selection(&mut self) {
+        self.output_selecting = false;
+    }
+
+    pub fn extend_output_selection_by_delta(&mut self, dx: i16, dy: i16, max_x: u16, max_y: u16) {
+        if max_x == 0 || max_y == 0 {
+            return;
+        }
+
+        if self.output_selection.is_none() {
+            self.output_selection =
+                Some(ScreenSelection::new(self.output_cursor, self.output_cursor));
+        }
+
+        let Some(sel) = self.output_selection.as_mut() else {
+            return;
+        };
+
+        let next_x = i32::from(sel.cursor.x).saturating_add(i32::from(dx));
+        let next_y = i32::from(sel.cursor.y).saturating_add(i32::from(dy));
+
+        let clamped_x = next_x.clamp(0, i32::from(max_x.saturating_sub(1))) as u16;
+        let clamped_y = next_y.clamp(0, i32::from(max_y.saturating_sub(1))) as u16;
+
+        sel.cursor = ScreenPos {
+            x: clamped_x,
+            y: clamped_y,
+        };
+        self.output_cursor = sel.cursor;
+    }
+
     /// 消费并行 Supervisor 的事件（用于 gate 面板等“控制面 UI”）。
     ///
     /// 说明：
@@ -260,6 +742,7 @@ impl ParallelTuiState {
             return;
         }
         self.selected_instance = (self.selected_instance + 1) % self.instance_order.len();
+        self.clear_output_selection();
     }
 
     /// 选择上一个实例（循环）。
@@ -272,29 +755,50 @@ impl ParallelTuiState {
         } else {
             self.selected_instance -= 1;
         }
+        self.clear_output_selection();
+    }
+
+    /// 选择指定实例（按 HatInstanceId 精确匹配）。
+    ///
+    /// 返回值：
+    /// - `true`：找到了该实例并完成切换
+    /// - `false`：当前实例列表中不存在该 id（不做任何修改）
+    pub fn select_instance_by_id(&mut self, id: &HatInstanceId) -> bool {
+        let Some(idx) = self.instance_order.iter().position(|x| x == id) else {
+            return false;
+        };
+        self.selected_instance = idx;
+        self.clear_output_selection();
+        true
     }
 
     /// 选择下一个 job（饱和到末尾，不循环）。
     pub fn select_next_job(&mut self) {
-        let Some(instance) = self.selected_instance_mut() else {
-            return;
-        };
-        if instance.jobs.is_empty() {
-            return;
+        {
+            let Some(instance) = self.selected_instance_mut() else {
+                return;
+            };
+            if instance.jobs.is_empty() {
+                return;
+            }
+            let max = instance.jobs.len().saturating_sub(1);
+            instance.current_job = (instance.current_job + 1).min(max);
         }
-        let max = instance.jobs.len().saturating_sub(1);
-        instance.current_job = (instance.current_job + 1).min(max);
+        self.clear_output_selection();
     }
 
     /// 选择上一个 job（饱和到 0，不循环）。
     pub fn select_prev_job(&mut self) {
-        let Some(instance) = self.selected_instance_mut() else {
-            return;
-        };
-        if instance.jobs.is_empty() {
-            return;
+        {
+            let Some(instance) = self.selected_instance_mut() else {
+                return;
+            };
+            if instance.jobs.is_empty() {
+                return;
+            }
+            instance.current_job = instance.current_job.saturating_sub(1);
         }
-        instance.current_job = instance.current_job.saturating_sub(1);
+        self.clear_output_selection();
     }
 
     /// 注册一个实例（若已存在则只做 best-effort 更新）。
@@ -356,7 +860,16 @@ impl ParallelTuiState {
                 ralph_core::OutputStream::Stdout => "",
                 ralph_core::OutputStream::Stderr => "[stderr] ",
             };
-            let line = ratatui::text::Line::from(format!("{prefix}{}", chunk.line));
+            let content = format!("{prefix}{}", chunk.line);
+
+            // stderr 用灰色显示，避免和 stdout 混在一起时抢眼。
+            let line = match chunk.stream {
+                ralph_core::OutputStream::Stdout => Line::from(content),
+                ralph_core::OutputStream::Stderr => Line::from(vec![Span::styled(
+                    content,
+                    Style::default().fg(Color::DarkGray),
+                )]),
+            };
 
             job.buffer.append_line_capped(line, self.max_buffer_lines);
         }
@@ -461,5 +974,66 @@ mod tests {
         let resolve_payload = serde_json::to_string(&resolve).unwrap();
         state.apply_event(&Event::new(TOPIC_GATE_RESOLVE, resolve_payload));
         assert!(state.gates.get("g1").unwrap().resolved.is_some());
+    }
+
+    // =========================================================================
+    // Chat Editor: 基础编辑/多行/选择
+    // =========================================================================
+
+    #[test]
+    fn chat_editor_shift_enter_inserts_newline() {
+        let mut editor = ChatEditorState::default();
+        editor.insert_char('h');
+        editor.insert_char('i');
+        editor.insert_newline(); // Shift+Enter
+        editor.insert_char('w');
+        editor.insert_char('o');
+        editor.insert_char('w');
+
+        assert_eq!(editor.text(), "hi\nwow");
+        assert_eq!(editor.cursor.row, 1);
+        assert_eq!(editor.cursor.col, 3);
+    }
+
+    #[test]
+    fn chat_editor_arrow_movement_crosses_lines() {
+        let mut editor = ChatEditorState::default();
+        editor.insert_char('a');
+        editor.insert_char('b');
+        editor.insert_newline();
+        editor.insert_char('c');
+        editor.insert_char('d');
+
+        // cursor at end of "cd"
+        assert_eq!(editor.cursor, TextPos { row: 1, col: 2 });
+
+        editor.move_left(false);
+        editor.move_left(false);
+        assert_eq!(editor.cursor, TextPos { row: 1, col: 0 });
+
+        // 行首左移：跳到上一行行尾
+        editor.move_left(false);
+        assert_eq!(editor.cursor, TextPos { row: 0, col: 2 });
+    }
+
+    #[test]
+    fn chat_editor_selection_is_replaced_by_typing() {
+        let mut editor = ChatEditorState::default();
+        editor.insert_char('h');
+        editor.insert_char('e');
+        editor.insert_char('l');
+        editor.insert_char('l');
+        editor.insert_char('o');
+        assert_eq!(editor.text(), "hello");
+
+        // 选中 "hello"
+        editor.set_mouse_selection(TextPos { row: 0, col: 0 }, TextPos { row: 0, col: 5 });
+        assert!(editor.has_selection());
+
+        // 输入替换所选内容
+        editor.insert_char('X');
+        assert_eq!(editor.text(), "X");
+        assert_eq!(editor.cursor, TextPos { row: 0, col: 1 });
+        assert!(!editor.has_selection());
     }
 }

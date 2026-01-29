@@ -16,12 +16,14 @@ use std::io::{IsTerminal, Write, stdin, stdout};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 use tracing::{debug, warn};
 
+use crate::display::colors;
 use crate::process_management;
 use crate::{ColorMode, Verbosity};
 
@@ -312,6 +314,7 @@ pub async fn run_parallel_loop_impl(
     resume: bool,
     enable_tui: bool,
     verbosity: Verbosity,
+    show_stderr: bool,
     record_session: Option<PathBuf>,
     instance_filters: Vec<String>,
 ) -> Result<TerminationReason> {
@@ -323,7 +326,7 @@ pub async fn run_parallel_loop_impl(
         warn!("Parallel mode currently ignores --record-session (not wired yet)");
     }
 
-    let _use_colors = color_mode.should_use_colors();
+    let use_colors = color_mode.should_use_colors();
 
     // 复用现有的 prompt 解析规则（与串行保持一致）
     let prompt_content = crate::loop_runner::resolve_prompt_content(&config.event_loop)?;
@@ -406,6 +409,11 @@ pub async fn run_parallel_loop_impl(
 
         let output_tx = update_tx.clone();
         let observer: OutputObserver = Arc::new(move |chunk: &HatJobOutputChunk| {
+            // 默认折叠/隐藏 stderr（减少噪音）。
+            // 需要时用 `ralph run --show-stderr` 显式打开。
+            if !show_stderr && matches!(chunk.stream, OutputStream::Stderr) {
+                return;
+            }
             let _ = output_tx.send(TuiUpdate::ParallelOutputChunk(chunk.clone()));
         });
 
@@ -439,6 +447,7 @@ pub async fn run_parallel_loop_impl(
         }
 
         // 输出观察者：按实例归因输出
+        let stderr_hidden_hint_printed = Arc::new(AtomicBool::new(false));
         let observer: OutputObserver = Arc::new(move |chunk: &HatJobOutputChunk| {
             if matches!(verbosity, Verbosity::Quiet) {
                 return;
@@ -450,6 +459,20 @@ pub async fn run_parallel_loop_impl(
                 return;
             }
 
+            // 默认折叠/隐藏 stderr 行（减少噪音）。
+            // 需要时用 `ralph run --show-stderr` 显式打开。
+            if !show_stderr && matches!(chunk.stream, OutputStream::Stderr) {
+                // 仅在第一次“确实出现 stderr”时提醒一次，避免用户困惑但又不刷屏。
+                if !stderr_hidden_hint_printed.swap(true, Ordering::Relaxed) {
+                    let mut out = std::io::stdout().lock();
+                    let _ = writeln!(
+                        out,
+                        "[supervisor] stderr streaming lines are hidden by default; use `--show-stderr` to show them."
+                    );
+                }
+                return;
+            }
+
             // 使用 stdout 直接写，避免 tracing 与输出混用导致顺序错乱
             let mut out = std::io::stdout().lock();
 
@@ -458,11 +481,17 @@ pub async fn run_parallel_loop_impl(
                 OutputStream::Stderr => "err",
             };
 
-            let _ = writeln!(
-                out,
+            let line = format!(
                 "[{}:{}:job={}] {}",
                 chunk.instance_id, stream_tag, chunk.job_id, chunk.line
             );
+
+            // stderr 用灰色显示，提高可读性。
+            if use_colors && matches!(chunk.stream, OutputStream::Stderr) {
+                let _ = writeln!(out, "{}{}{}", colors::GRAY, line, colors::RESET);
+            } else {
+                let _ = writeln!(out, "{line}");
+            }
         });
 
         // 6.1：状态变更展示（日志模式）

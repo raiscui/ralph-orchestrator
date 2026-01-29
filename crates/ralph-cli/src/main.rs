@@ -369,6 +369,13 @@ struct RunArgs {
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
 
+    /// (Parallel mode) Show stderr (`:err:`) streaming lines (hidden by default).
+    ///
+    /// Why: In parallel mode, stderr is often backend/CLI logs and echoes,
+    /// which can drown out the actual stdout "work output".
+    #[arg(long)]
+    show_stderr: bool,
+
     /// (Parallel mode) Only show streaming output from these instances (repeatable).
     ///
     /// Example: `--instance writer#1 --instance tester#1`
@@ -409,6 +416,10 @@ struct ResumeArgs {
     /// Record session to JSONL file for replay testing
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
+
+    /// (Parallel mode) Show stderr (`:err:`) streaming lines (hidden by default).
+    #[arg(long)]
+    show_stderr: bool,
 
     /// (Parallel mode) Only show streaming output from these instances (repeatable).
     #[arg(long, value_name = "HAT#KEY", action = clap::ArgAction::Append)]
@@ -645,6 +656,7 @@ async fn main() -> Result<()> {
                 verbose: false,
                 quiet: false,
                 record_session: None,
+                show_stderr: false,
                 instance: Vec::new(),
             };
             run_command(cli.config, cli.verbose, cli.color, args).await
@@ -851,6 +863,7 @@ async fn run_command(
             resume,
             enable_tui,
             verbosity,
+            args.show_stderr,
             args.record_session,
             args.instance.clone(),
         )
@@ -987,6 +1000,7 @@ async fn resume_command(
             true,
             enable_tui,
             verbosity,
+            args.show_stderr,
             args.record_session,
             args.instance.clone(),
         )

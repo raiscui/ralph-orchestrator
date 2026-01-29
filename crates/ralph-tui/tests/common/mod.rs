@@ -310,7 +310,7 @@ impl TuiTestHarness {
                             .direction(Direction::Vertical)
                             .constraints([
                                 Constraint::Min(0),    // main
-                                Constraint::Length(7), // bottom panel
+                                Constraint::Length(9), // bottom panel（对齐真实渲染：3 行输入 + 1 行状态 + gate）
                             ])
                             .split(content_area);
 
@@ -357,7 +357,7 @@ impl TuiTestHarness {
                             let inner_chunks = Layout::default()
                                 .direction(Direction::Vertical)
                                 .constraints([
-                                    Constraint::Length(1), // input
+                                    Constraint::Length(3), // input（多行）
                                     Constraint::Length(1), // status
                                     Constraint::Min(0),    // gates
                                 ])
@@ -367,16 +367,51 @@ impl TuiTestHarness {
                             let status_area = inner_chunks[1];
                             let gates_area = inner_chunks[2];
 
-                            // 输入行（快照用：不渲染颜色，只验证文字/布局）
-                            let input_text = if state.parallel.chat_input.is_empty() {
-                                Span::raw("Type: @instance msg | !approve/!deny/!resolve ...")
+                            // 输入区（快照用：不渲染颜色，只验证文字/布局）
+                            //
+                            // 说明：
+                            // - 真实实现里输入框是 3 行（支持 Shift+Enter 换行）
+                            // - 提示符约定：首行用 ">"，后续行用 "|"，便于区分多行
+                            let bottom_focused =
+                                state.parallel.focus == ralph_tui::state::ParallelFocus::Chat;
+                            let editor = &state.parallel.chat_editor;
+                            let mut input_lines: Vec<Line> = Vec::new();
+
+                            if editor.is_empty() && !bottom_focused {
+                                input_lines.push(Line::from(vec![
+                                    Span::raw(" "),
+                                    Span::raw(">"),
+                                    Span::raw(" "),
+                                    Span::raw("Type: @instance msg | !approve/!deny/!resolve ..."),
+                                ]));
                             } else {
-                                Span::raw(state.parallel.chat_input.clone())
-                            };
-                            let input_line =
-                                Line::from(vec![Span::raw(" "), Span::raw("> "), input_text]);
+                                let total_lines = editor.lines.len().max(1);
+                                let viewport_rows = input_area.height as usize;
+                                for i in 0..viewport_rows {
+                                    if i >= total_lines {
+                                        input_lines.push(Line::from(""));
+                                        continue;
+                                    }
+
+                                    let prefix_symbol = if i == 0 { ">" } else { "|" };
+                                    let line_text =
+                                        editor.lines.get(i).map(|s| s.as_str()).unwrap_or("");
+                                    input_lines.push(Line::from(vec![
+                                        Span::raw(" "),
+                                        Span::raw(prefix_symbol),
+                                        Span::raw(" "),
+                                        Span::raw(line_text),
+                                    ]));
+                                }
+                            }
+
+                            // 填满剩余行，避免旧帧残影
+                            while input_lines.len() < input_area.height as usize {
+                                input_lines.push(Line::from(""));
+                            }
+
                             f.render_widget(
-                                ratatui::widgets::Paragraph::new(input_line),
+                                ratatui::widgets::Paragraph::new(input_lines),
                                 input_area,
                             );
 

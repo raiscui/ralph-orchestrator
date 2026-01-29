@@ -67,7 +67,7 @@ Ralph runs in a TUI by default showing:
 - Active hat (if using hat-based mode)
 - Recent agent output
 
-Press `q` to quit the TUI at any time.
+Press `q` to quit the TUI at any time (this stops the run and terminates any running worker processes).
 
 ## What Happens?
 

@@ -27,14 +27,21 @@ pub enum ChatSubmit {
 /// - `!deny <gate_id>` → gate.resolve(decision=false)
 /// - `!resolve <gate_id> <text...>` → gate.resolve(decision="<text...>")
 pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
+    let trimmed_all = input.trim();
+    if trimmed_all.is_empty() {
         return Err("empty input".to_string());
     }
 
+    // 仅解析第一行的控制前缀（!command / @instance）。
+    // 其余行原样保留在 payload 里（用于多行 human message / resolve 文本）。
+    let mut split = trimmed_all.splitn(2, '\n');
+    let first_line = split.next().unwrap_or("");
+    let rest = split.next().unwrap_or("");
+    let first_trimmed = first_line.trim();
+
     // 1) gate commands
-    if let Some(rest) = trimmed.strip_prefix('!') {
-        let mut parts = rest.split_whitespace();
+    if let Some(rest_first) = first_trimmed.strip_prefix('!') {
+        let mut parts = rest_first.split_whitespace();
         let cmd = parts
             .next()
             .ok_or_else(|| "missing command after '!'".to_string())?;
@@ -65,7 +72,13 @@ pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
 
                 // 注意：这里用 split_whitespace，会丢掉多余空格。
                 // 但对“人类输入事件”来说，语义优先，空格保真不是刚需。
-                let after = parts.collect::<Vec<_>>().join(" ");
+                let mut after = parts.collect::<Vec<_>>().join(" ");
+                if !rest.is_empty() {
+                    if !after.is_empty() {
+                        after.push('\n');
+                    }
+                    after.push_str(rest);
+                }
                 if after.trim().is_empty() {
                     return Err("usage: !resolve <gate_id> <text>".to_string());
                 }
@@ -82,37 +95,48 @@ pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
     }
 
     // 2) @instance prefix for directed messages
-    if let Some(rest) = trimmed.strip_prefix('@') {
+    if let Some(rest_first) = first_trimmed.strip_prefix('@') {
         let mut split_idx: Option<usize> = None;
-        for (i, ch) in rest.char_indices() {
+        for (i, ch) in rest_first.char_indices() {
             if ch.is_whitespace() {
                 split_idx = Some(i);
                 break;
             }
         }
 
-        let Some(i) = split_idx else {
-            return Err("usage: @<instance_id> <message>".to_string());
+        let (instance_id, msg_first) = if let Some(i) = split_idx {
+            rest_first.split_at(i)
+        } else {
+            (rest_first, "")
         };
-
-        let (instance_id, msg) = rest.split_at(i);
         let target = instance_id.trim();
-        let payload = msg.trim();
+        let msg_first = msg_first.trim();
 
-        if target.is_empty() || payload.is_empty() {
+        let mut payload = String::new();
+        if !msg_first.is_empty() {
+            payload.push_str(msg_first);
+        }
+        if !rest.is_empty() {
+            if !payload.is_empty() {
+                payload.push('\n');
+            }
+            payload.push_str(rest);
+        }
+
+        if target.is_empty() || payload.trim().is_empty() {
             return Err("usage: @<instance_id> <message>".to_string());
         }
 
         return Ok(ChatSubmit::HumanMessage {
             target_instance: Some(target.to_string()),
-            payload: payload.to_string(),
+            payload,
         });
     }
 
     // 3) default human message
     Ok(ChatSubmit::HumanMessage {
         target_instance: None,
-        payload: trimmed.to_string(),
+        payload: trimmed_all.to_string(),
     })
 }
 
@@ -148,6 +172,42 @@ mod tests {
     fn parse_directed_message_requires_payload() {
         let err = parse_chat_submit("@writer#2").unwrap_err();
         assert!(err.contains("usage: @<instance_id> <message>"));
+    }
+
+    #[test]
+    fn parse_default_message_multiline_keeps_newlines() {
+        let submit = parse_chat_submit("hello\nline2").unwrap();
+        assert_eq!(
+            submit,
+            ChatSubmit::HumanMessage {
+                target_instance: None,
+                payload: "hello\nline2".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_directed_message_multiline_keeps_newlines() {
+        let submit = parse_chat_submit("@writer#2 hello\nline2\nline3").unwrap();
+        assert_eq!(
+            submit,
+            ChatSubmit::HumanMessage {
+                target_instance: Some("writer#2".to_string()),
+                payload: "hello\nline2\nline3".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_directed_message_allows_payload_in_following_lines() {
+        let submit = parse_chat_submit("@writer#2\nline2").unwrap();
+        assert_eq!(
+            submit,
+            ChatSubmit::HumanMessage {
+                target_instance: Some("writer#2".to_string()),
+                payload: "line2".to_string()
+            }
+        );
     }
 
     #[test]

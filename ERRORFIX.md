@@ -322,3 +322,57 @@
 
 ### 验证
 - 再次执行 `openspec archive -y parallel-workflow-semantics`：归档成功，并完成 spec update ✅
+
+## 2026-01-29 14:38 +0800｜并行模式收尾 warning：Failed to send StateChanged to supervisor
+
+### 现象
+- 运行 `examples/parallel-trigger-routing`（或并行模式相关场景）自然结束后，stderr 出现多条 warning：
+  - `HatInstance actor exited with error ... Failed to send StateChanged to supervisor`
+- 同时 `--no-tui` 的 `[supervisor] final states` 可能残留 `running/idle`，看起来“不像真正收尾完成”。
+
+### 根因
+- `ParallelSupervisor::run` 在决定退出后会立刻 return，从而 drop 掉 `instance_rx`（Supervisor 接收端）。
+- HatInstance actor 在收尾阶段会 `set_state(Done)` 并发送 `StateChanged` 给 Supervisor：
+  - receiver 已被 drop ⇒ `send(StateChanged)` 失败 ⇒ `set_state` 返回 Err
+  - 外层把该 Err 记录为 warning：`HatInstance actor exited with error ...`
+
+### 修复
+- `crates/ralph-core/src/parallel/supervisor.rs`：
+  - shutdown（cancel + shutdown）后，增加一个短暂的 shutdown-drain 窗口：
+    - 继续 drain `StateChanged`，等待实例进入终态（Done/Failed）或超时
+    - 避免 Supervisor 先退出导致实例收尾发送失败
+    - 同时让 `final states` 更可信（尽量收敛到终态）
+  - 另外：外部事件文件 `.ralph/current-events` 的读取路径改为相对 `workspace_root` 解析，避免测试/隔离环境被 repo 根目录 `.ralph/` 污染。
+- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`：
+  - 新增回归测试：`supervisor_run_waits_for_instances_to_reach_terminal_state_on_shutdown`
+
+### 验证
+- `cargo test --package ralph-core --lib parallel::supervisor::routing_tests::supervisor_run_waits_for_instances_to_reach_terminal_state_on_shutdown -- --exact` ✅
+- `cargo test` ✅
+
+## 2026-01-29 16:03 +0800｜ralph-tui：测试仍引用 chat_input 导致编译失败 + warning 收敛
+
+### 现象
+- `cargo test` 编译失败（发生在 ralph-tui 的 integration snapshot 测试编译阶段）：
+  - `crates/ralph-tui/tests/common/mod.rs` 仍引用 `state.parallel.chat_input`，但实际 state 已迁移为 `chat_editor`。
+- 同时编译输出包含 warning（影响 CI 干净度）：
+  - `unused_assignments`（`grapheme_col_to_byte_idx` 里无意义赋值）
+  - `dead_code`（`ParallelLayoutSnapshot` 存在未读取字段）
+
+### 根因
+- 并行 TUI 的 Chat 输入模型从“单行字符串”升级为“多行编辑器状态”（`ChatEditorState`）。
+- 测试用的快照渲染器（`TuiTestHarness`）没有同步升级，仍按旧布局（1 行 input）与旧字段渲染。
+
+### 修复
+- `crates/ralph-tui/tests/common/mod.rs`：
+  - 使用 `state.parallel.chat_editor` 渲染输入区（3 行输入 + `>`/`|` 提示符）。
+  - bottom panel 高度对齐真实渲染（`9`）。
+- `crates/ralph-tui/src/state/parallel.rs`：
+  - 精简 `grapheme_col_to_byte_idx`，去掉无意义的 `idx` 初始赋值，消除 `unused_assignments`。
+- `crates/ralph-tui/src/app.rs`：
+  - 精简 `ParallelLayoutSnapshot` 字段，只保留 hit-test 需要的数据，消除 `dead_code`。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅

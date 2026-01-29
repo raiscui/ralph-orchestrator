@@ -217,10 +217,12 @@ impl ParallelSupervisor {
         // 外部事件输入（human / `ralph emit`）：
         // - 遵循现有约定：读取 `.ralph/current-events` 指向的 JSONL
         // - 若 marker 不存在，则回退到 `.ralph/events.jsonl`
-        let events_path = std::fs::read_to_string(".ralph/current-events")
+        let marker_path = self.config.core.resolve_path(".ralph/current-events");
+        let events_path_str = std::fs::read_to_string(&marker_path)
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| EventLogger::DEFAULT_PATH.to_string());
-        let mut external_event_reader = FileEventReader::new(&events_path);
+        let events_path = self.config.core.resolve_path(&events_path_str);
+        let mut external_event_reader = FileEventReader::new(events_path.clone());
 
         // tick 用于：poll 外部事件 + 检查 gate timeout（不要阻塞其他 HatInstance）
         let mut tick = tokio::time::interval(Duration::from_millis(200));
@@ -370,7 +372,11 @@ impl ParallelSupervisor {
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, path = %events_path, "Failed to read external events file");
+                            tracing::warn!(
+                                error = %e,
+                                path = ?events_path,
+                                "Failed to read external events file"
+                            );
                         }
                     }
 
@@ -398,6 +404,11 @@ impl ParallelSupervisor {
         // 关闭所有实例（best-effort）。
         // 说明：即便某些实例还在跑 job，也要先发 cancel，再发 shutdown。
         self.shutdown_instances().await;
+
+        // shutdown-drain：等待实例上报终态，避免 Supervisor 提前退出导致 instance 侧
+        // `StateChanged(Done)` 发送失败，从而产生收尾 warning（Failed to send StateChanged...）。
+        self.drain_shutdown(&mut output_rx, &mut instance_rx, &mut output_chunks)
+            .await;
 
         Ok(ParallelRunResult {
             termination,
@@ -523,7 +534,9 @@ impl ParallelSupervisor {
 
         // 始终注册 Ralph fallback（即使 config 没写）
         let ralph_hat = Hat::new("ralph", "Ralph")
-            .with_description("Parallel coordinator: handles true-orphan events and makes completion decisions")
+            .with_description(
+                "Parallel coordinator: handles true-orphan events and makes completion decisions",
+            )
             .subscribe("*")
             .with_instructions(self.build_ralph_coordinator_instructions());
         let ralph_id = HatId::new("ralph");
@@ -633,7 +646,9 @@ impl ParallelSupervisor {
         out.push_str("Emit routing events using XML-style tags:\n\n");
         out.push_str("<event topic=\"work.start\">payload</event>\n\n");
         out.push_str("Optional (parallel): target a specific instance:\n\n");
-        out.push_str("<event topic=\"build.task\" target_instance=\"builder#1\">payload</event>\n\n");
+        out.push_str(
+            "<event topic=\"build.task\" target_instance=\"builder#1\">payload</event>\n\n",
+        );
         out.push_str("After emitting an event, you MUST stop. The supervisor will route it and run the next job with fresh context.\n\n");
 
         out.push_str("## CONFIG (THIS RUN)\n");
@@ -693,7 +708,9 @@ impl ParallelSupervisor {
             ));
         } else if !entry_candidates.is_empty() {
             out.push_str("1) Do initial coordination quickly.\n");
-            out.push_str("2) Choose ONE workflow entry topic (prefer an external entrypoint topic).\n");
+            out.push_str(
+                "2) Choose ONE workflow entry topic (prefer an external entrypoint topic).\n",
+            );
             out.push_str("   Candidates (derived):\n");
             for t in &entry_candidates {
                 out.push_str(&format!("   - `{t}`\n"));
@@ -765,6 +782,81 @@ impl ParallelSupervisor {
                 .await;
             let _ = handle.cmd_tx.send(HatInstanceCommand::Shutdown).await;
         }
+    }
+
+    /// Supervisor 退出前的“收尾 drain”：
+    ///
+    /// 目标：
+    /// - 让各个 HatInstance 有机会把 `StateChanged(Done/Failed)` 发回 Supervisor；
+    /// - 避免 Supervisor 先 drop receiver，导致 instance 侧 send 失败并打出 warning；
+    /// - 同时让 `final states` 快照更可信（尽量收敛到终态）。
+    async fn drain_shutdown(
+        &mut self,
+        output_rx: &mut mpsc::Receiver<HatJobOutputChunk>,
+        instance_rx: &mut mpsc::Receiver<HatInstanceEvent>,
+        output_chunks: &mut usize,
+    ) {
+        // 经验值：Shutdown 是“控制面”信号，instance actor 应当能很快处理并退出。
+        // 这里给一个小窗口即可，避免无人值守时卡在收尾阶段。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut output_closed = false;
+        let mut instance_closed = false;
+
+        loop {
+            if self.all_instances_in_terminal_state() {
+                break;
+            }
+            if output_closed && instance_closed {
+                break;
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break,
+                chunk = output_rx.recv(), if !output_closed => {
+                    match chunk {
+                        Some(chunk) => {
+                            *output_chunks += 1;
+                            if let Some(observer) = &self.output_observer {
+                                observer(&chunk);
+                            }
+                        }
+                        None => output_closed = true,
+                    }
+                }
+                msg = instance_rx.recv(), if !instance_closed => {
+                    match msg {
+                        Some(msg) => match msg {
+                            HatInstanceEvent::StateChanged { instance_id, state } => {
+                                self.instance_states.insert(instance_id.clone(), state);
+                                if let Some(observer) = &self.instance_state_observer {
+                                    observer(&instance_id, state);
+                                }
+
+                                // 动态实例进入 Done 后会被移出“可投递 registry”。
+                                if state == HatInstanceState::Done
+                                    && self.dynamic_instances.contains(&instance_id)
+                                {
+                                    self.unregister_dynamic_instance(&instance_id);
+                                }
+                            }
+                            // 收尾阶段只关心状态收敛。JobCompleted/Published 等事件不再继续路由，
+                            // 避免“已决定退出却又被新事件拉起”。
+                            HatInstanceEvent::JobCompleted { .. } | HatInstanceEvent::Published { .. } => {}
+                        },
+                        None => instance_closed = true,
+                    }
+                }
+            }
+        }
+    }
+
+    fn all_instances_in_terminal_state(&self) -> bool {
+        self.instances.keys().all(|instance_id| {
+            matches!(
+                self.instance_states.get(instance_id),
+                Some(HatInstanceState::Done) | Some(HatInstanceState::Failed)
+            )
+        })
     }
 }
 

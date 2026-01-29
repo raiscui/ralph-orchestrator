@@ -18,11 +18,40 @@ use unicode_width::UnicodeWidthStr;
 ///
 /// The widget displays the visible lines from the buffer (respecting scroll offset)
 /// and optionally highlights search matches.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionBounds {
+    pub min_x: u16,
+    pub max_x: u16,
+    pub min_y: u16,
+    pub max_y: u16,
+}
+
+impl SelectionBounds {
+    pub fn from_points(start_x: u16, start_y: u16, end_x: u16, end_y: u16) -> Self {
+        let min_x = start_x.min(end_x);
+        let max_x = start_x.max(end_x);
+        let min_y = start_y.min(end_y);
+        let max_y = start_y.max(end_y);
+        Self {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        }
+    }
+
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
+    }
+}
+
 pub struct ContentPane<'a> {
     /// Reference to the iteration buffer to render
     buffer: &'a IterationBuffer,
     /// Optional search query for highlighting matches
     search_query: Option<&'a str>,
+    /// Optional selection bounds (relative to the widget area)
+    selection: Option<SelectionBounds>,
 }
 
 impl<'a> ContentPane<'a> {
@@ -31,6 +60,7 @@ impl<'a> ContentPane<'a> {
         Self {
             buffer,
             search_query: None,
+            selection: None,
         }
     }
 
@@ -39,6 +69,12 @@ impl<'a> ContentPane<'a> {
         if !query.is_empty() {
             self.search_query = Some(query);
         }
+        self
+    }
+
+    /// Sets the selection bounds to highlight.
+    pub fn with_selection(mut self, selection: SelectionBounds) -> Self {
+        self.selection = Some(selection);
         self
     }
 }
@@ -52,6 +88,7 @@ impl Widget for ContentPane<'_> {
         // Get visible lines from the buffer (now returns owned Vec due to interior mutability)
         let visible = self.buffer.visible_lines(area.height as usize);
 
+        let selection_bg = Color::Blue;
         let mut y = area.y;
         for line in &visible {
             if y >= area.y + area.height {
@@ -89,7 +126,16 @@ impl Widget for ContentPane<'_> {
                     // leave artifacts from the previous frame.
                     if x + width > area.x + area.width {
                         while x < area.x + area.width {
-                            buf[(x, y)].set_char(' ').set_style(Style::default());
+                            let rel_x = x.saturating_sub(area.x);
+                            let rel_y = y.saturating_sub(area.y);
+                            let selected =
+                                self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                            let style = if selected {
+                                Style::default().bg(selection_bg)
+                            } else {
+                                Style::default()
+                            };
+                            buf[(x, y)].set_char(' ').set_style(style);
                             x += 1;
                         }
 
@@ -103,12 +149,28 @@ impl Widget for ContentPane<'_> {
 
                     // Key: write by grapheme cluster and advance by display width, so we don't
                     // write ASCII into a CJK/emoji continuation cell and "swallow" the next char.
-                    buf[(x, y)].set_symbol(grapheme).set_style(span.style);
+                    let rel_x = x.saturating_sub(area.x);
+                    let rel_y = y.saturating_sub(area.y);
+                    let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                    let style = if selected {
+                        span.style.bg(selection_bg)
+                    } else {
+                        span.style
+                    };
+                    buf[(x, y)].set_symbol(grapheme).set_style(style);
 
                     let next_symbol = x + width;
                     x += 1;
                     while x < next_symbol {
-                        buf[(x, y)].reset();
+                        let rel_x = x.saturating_sub(area.x);
+                        let rel_y = y.saturating_sub(area.y);
+                        let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                        if selected {
+                            buf[(x, y)].reset();
+                            buf[(x, y)].set_style(Style::default().bg(selection_bg));
+                        } else {
+                            buf[(x, y)].reset();
+                        }
                         x += 1;
                     }
                 }
@@ -116,7 +178,15 @@ impl Widget for ContentPane<'_> {
 
             // Clear remaining cells on this row after the line content
             while x < area.x + area.width {
-                buf[(x, y)].set_char(' ').set_style(Style::default());
+                let rel_x = x.saturating_sub(area.x);
+                let rel_y = y.saturating_sub(area.y);
+                let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                let style = if selected {
+                    Style::default().bg(selection_bg)
+                } else {
+                    Style::default()
+                };
+                buf[(x, y)].set_char(' ').set_style(style);
                 x += 1;
             }
 
@@ -128,7 +198,15 @@ impl Widget for ContentPane<'_> {
         // when switching to an iteration with fewer lines
         while y < area.y + area.height {
             for x in area.x..area.x + area.width {
-                buf[(x, y)].set_char(' ').set_style(Style::default());
+                let rel_x = x.saturating_sub(area.x);
+                let rel_y = y.saturating_sub(area.y);
+                let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                let style = if selected {
+                    Style::default().bg(selection_bg)
+                } else {
+                    Style::default()
+                };
+                buf[(x, y)].set_char(' ').set_style(style);
             }
             y += 1;
         }
@@ -251,6 +329,29 @@ mod tests {
             || cell.fg == Color::Black
     }
 
+    fn has_selection_bg(
+        buffer: &IterationBuffer,
+        selection: SelectionBounds,
+        width: u16,
+        height: u16,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let widget = ContentPane::new(buffer).with_selection(selection);
+                f.render_widget(widget, f.area());
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let cell = &buf[(x, y)];
+        cell.bg == Color::Blue
+    }
+
     // =========================================================================
     // Acceptance Criteria 1: Renders Lines
     // =========================================================================
@@ -281,6 +382,30 @@ mod tests {
             lines[2].contains("third line"),
             "third line should be visible, got: {:?}",
             lines
+        );
+    }
+
+    // =========================================================================
+    // Selection: Highlights Selected Cells
+    // =========================================================================
+
+    #[test]
+    fn selection_highlights_cells_with_blue_background() {
+        let mut buffer = IterationBuffer::new(1);
+        buffer.append_line(Line::from("hello world"));
+
+        let selection = SelectionBounds::from_points(0, 0, 4, 0);
+        assert!(
+            has_selection_bg(&buffer, selection, 20, 2, 0, 0),
+            "selected cell should have blue background"
+        );
+        assert!(
+            has_selection_bg(&buffer, selection, 20, 2, 4, 0),
+            "end of selection should have blue background"
+        );
+        assert!(
+            !has_selection_bg(&buffer, selection, 20, 2, 6, 0),
+            "outside selection should not have blue background"
         );
     }
 

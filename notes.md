@@ -764,3 +764,87 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
   - 本次合并会把“缺 cassette”视为失败（用失败断言呈现），作为测试背压的一部分。
 - mock-cli 的命令执行：
   - 仅在显式 allowlist 下执行；并且直接 `Command::new(program).args(args)`，不走 shell，降低注入风险。
+
+---
+
+## 2026-01-29 14:28 +0800｜并行日志可读性：stderr 默认折叠 + 灰色
+- `ralph run/resume` 新增 `--show-stderr`（默认不显示 stderr 的 `:err:` 行）。
+- 目的：减少 Codex/后端把回显、日志写到 stderr 导致的“输出噪音”。
+- 视觉：stderr 行在日志模式用 ANSI 灰色；TUI 用 `Color::DarkGray`。
+
+## 2026-01-29 13:50 +0800｜并行退出收尾 warning：Failed to send StateChanged to supervisor
+
+### 现象（用户日志）
+- 运行 `examples/parallel-trigger-routing` 到结束后，出现多条 warning：
+  - `HatInstance actor exited with error ... Failed to send StateChanged to supervisor`
+
+### 根因（代码映射）
+- `HatInstanceActor::run` 退出时会 `set_state(HatInstanceState::Done)`，内部通过 channel 发 `StateChanged` 给 Supervisor：
+  - `crates/ralph-core/src/parallel/instance.rs:295`
+  - `crates/ralph-core/src/parallel/instance.rs:379`
+- 但 `ParallelSupervisor::run` 结束时会先 return（drop receiver），再触发实例收尾：
+  - receiver 被 drop 后，instance 侧 `send(StateChanged)` 失败，`set_state` 直接返回 Err，并被外层打成 warning：
+    - `crates/ralph-core/src/parallel/instance.rs:391`
+    - `crates/ralph-core/src/parallel/instance.rs:135`
+
+### 解决方向（根治）
+- Supervisor 在 shutdown 后继续 drain instance 事件，直到实例上报终态（Done/Failed）或超时。
+- 这样能同时满足：
+  - 1) 消除收尾 warning；
+  - 2) 让 `--no-tui` 的 `[supervisor] final states` 输出更可信（尽量收敛到终态）。
+
+## 2026-01-29 15:30 +0800｜解释：Parallel TUI chat 的“激发/触发”与“发给谁”
+
+### 1) chat 是怎么被“激发/触发”的？
+- 并行 TUI 的底部面板始终存在，名字叫 `Chat / Gates`。
+  - 但只有当焦点切到 Chat 时，键盘输入才会进入 chat 输入框。
+  - 焦点切换靠 `Tab / Shift+Tab` 在 `Instances / Output / Chat` 三个区域循环：
+    - `crates/ralph-tui/src/app.rs:264`
+    - `crates/ralph-tui/src/state/parallel.rs:235`
+- 当焦点在 `Chat` 且按下 `Enter` 时，TUI 会把当前输入框内容解析成一次“提交意图”，然后写入外部事件流：
+  - 解析：`crates/ralph-tui/src/chat.rs:29`
+  - 提交入口：`crates/ralph-tui/src/app.rs:305`
+
+### 2) TUI 发送 chat 时，实际做了什么？
+- TUI **不直接**把消息发给某个 worker 进程。
+  - 它做的是：把人类输入落盘成一行 JSONL 事件（topic=`human.message`）。
+  - 写入文件路径优先读 `.ralph/current-events` marker，否则回退 `.ralph/events.jsonl`：
+    - `crates/ralph-tui/src/external_event_writer.rs:20`
+- 对应 OpenSpec 的原文要求（用来对齐语义，而不是猜实现）：
+  - “chat 消息事件 MUST 使用 topic `human.message`，且 payload MUST 为原始消息文本。”
+    - `openspec/specs/supervisor-human-chat-gate/spec.md:56`
+
+### 3) Supervisor 是怎么“接住”这条 chat 的？
+- `ParallelSupervisor::run` 会按 tick 轮询外部事件文件（human/`ralph emit` 写入的 JSONL）。
+  - 它把 JSONL 行转成 `ralph_proto::Event`，再进入统一路由：
+    - `crates/ralph-core/src/parallel/supervisor.rs:217`
+
+### 4) “发给谁”到底由谁决定？
+结论先说清楚：**recipient 的决定发生在 Supervisor 的路由层，不在 TUI。**
+
+- 情况 A：你输入的是 `@writer#2 hello`（定向消息）
+  - TUI 解析后会写入 `human.message`，并设置 `target_instance=writer#2`：
+    - `crates/ralph-tui/src/chat.rs:23`
+    - `crates/ralph-tui/src/external_event_writer.rs:91`
+  - Supervisor 路由时，`target_instance` 的优先级最高：
+    - `crates/ralph-core/src/parallel/supervisor/routing.rs:165`
+  - 但会先做“严格校验”，避免绕过订阅拓扑乱投递：
+    - 目标实例必须存在；且目标实例所属 hat 必须订阅该 topic（例如 `human.message`）：
+      - `crates/ralph-core/src/parallel/supervisor/routing.rs:79`
+- 情况 B：你输入的是 `hello`（非定向消息）
+  - 事件里没有 `target_instance`。
+  - Supervisor 会走“TopicContract 覆盖优先；否则 trigger-driven 默认路由”的逻辑：
+    - `crates/ralph-core/src/parallel/supervisor/routing.rs:206`
+  - 如果没有任何 hat 订阅该 topic，会升级给兜底协调者 `ralph#1`（避免 silent drop）：
+    - `crates/ralph-core/src/parallel/supervisor/routing.rs:472`
+- 情况 C：你输入的是 `!approve/!deny/!resolve ...`（gate 回复）
+  - TUI 写入的是 `gate.resolve` 外部事件（注意：这里并不需要你手动写 `@instance`）。
+  - Supervisor 内置 gate 状态机会用 `gate_id -> requested_by` 找到“应该回送给谁”，并把 `event.target_instance` 设为请求者：
+    - `crates/ralph-core/src/parallel/supervisor/gate.rs:55`
+    - `crates/ralph-core/src/parallel/supervisor/routing.rs:38`
+
+### 5) 一个容易踩坑的点（解释你可能遇到的困惑）
+- TUI 里显示的 `sent human.message -> <path>`，只代表“写文件成功”。
+  - 它**不等价于**“某个实例已经消费/响应了”。
+  - 如果 `@writer#2` 写错了、或 writer hat 没订阅 `human.message`，路由层会拒绝并 `routing.escalate` 给 `ralph#1`：
+    - `crates/ralph-core/src/parallel/supervisor/routing.rs:1007`

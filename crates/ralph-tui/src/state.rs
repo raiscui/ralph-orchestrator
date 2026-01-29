@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 // ============================================================================
 
 mod parallel;
-pub use parallel::{GateStatus, ParallelFocus, ParallelTuiState};
+pub use parallel::{
+    ChatEditorState, GateStatus, ParallelFocus, ParallelTuiState, ScreenPos, ScreenSelection,
+    TextPos, TextSelection,
+};
 
 /// TUI 运行模式：串行（按 iteration）/ 并行（按 instance/job）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

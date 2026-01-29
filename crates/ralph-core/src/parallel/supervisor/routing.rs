@@ -397,9 +397,20 @@ impl ParallelSupervisor {
             return true;
         }
 
-        self.registry
-            .get(hat_id)
-            .is_some_and(|hat| hat.is_subscribed(topic))
+        let Some(hat) = self.registry.get(hat_id) else {
+            return false;
+        };
+
+        // 并行模式下：默认补齐 `human.message` 订阅，用于通过 strict target 校验。
+        //
+        // 重要：
+        // - 这里“只补齐订阅存在”，不改变 triggers-driven fanout 行为。
+        // - fanout/queue 仍由 `target_instance` / contracts / triggers 决定。
+        if topic.as_str() == "human.message" {
+            return true;
+        }
+
+        hat.is_subscribed(topic)
     }
 
     fn is_control_plane_topic(topic: &str) -> bool {

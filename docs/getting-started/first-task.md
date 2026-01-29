@@ -181,7 +181,7 @@ The TUI shows real-time progress. Key information:
 
 ### Stop Early
 
-Press `q` in the TUI to quit gracefully.
+Press `q` in the TUI to stop the run (this also terminates any running worker processes).
 
 ### Resume Interrupted Sessions
 

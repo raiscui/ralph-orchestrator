@@ -60,10 +60,39 @@ pub fn render(f: &mut Frame, area: Rect) {
             Span::raw("    Next/prev match"),
         ]),
         Line::from(""),
+        Line::from(Span::styled(
+            "Mouse (parallel):",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(vec![
+            Span::styled("  Click", Style::default().fg(Color::Cyan)),
+            Span::raw("  Select instance / gate / focus chat"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Click @chip", Style::default().fg(Color::Cyan)),
+            Span::raw("  Set default chat target"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Click !chip", Style::default().fg(Color::Cyan)),
+            Span::raw("  Prefill gate command (no send)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Wheel", Style::default().fg(Color::Cyan)),
+            Span::raw("  Scroll output"),
+        ]),
+        Line::from(""),
         Line::from(Span::styled("Other:", Style::default().fg(Color::Yellow))),
         Line::from(vec![
             Span::styled("  q", Style::default().fg(Color::Cyan)),
-            Span::raw("      Quit"),
+            Span::raw("      Quit (stops the run)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab", Style::default().fg(Color::Cyan)),
+            Span::raw("    Switch focus (parallel)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Shift+Enter", Style::default().fg(Color::Cyan)),
+            Span::raw("  Newline in chat (parallel)"),
         ]),
         Line::from(vec![
             Span::styled("  ?", Style::default().fg(Color::Cyan)),

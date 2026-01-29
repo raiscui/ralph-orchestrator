@@ -7,11 +7,13 @@
 use super::ParallelSupervisor;
 use crate::config::{HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig};
 use crate::event_logger::EventLogger;
-use crate::parallel::{HatJob, HatJobExecutor, HatJobOutputChunk, HatJobResult};
+use crate::parallel::{
+    HatInstanceCommand, HatInstanceHandle, HatJob, HatJobExecutor, HatJobOutputChunk, HatJobResult,
+};
 use anyhow::Context;
 use ralph_proto::{
-    AudienceOverride, AudienceSelector, Delivery, Event, HatInstanceId, MissingInstancePolicy,
-    QueueDecisionRecord, QueueSelection, TopicContract,
+    AudienceOverride, AudienceSelector, Delivery, Event, HatInstanceId, HatInstanceState,
+    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TopicContract,
 };
 use std::path::PathBuf;
 use std::sync::{
@@ -128,6 +130,59 @@ async fn wait_for_starts(executor: &BlockingExecutor, expected: usize) {
     })
     .await
     .expect("Timed out waiting for executor to observe job starts");
+}
+
+#[tokio::test]
+async fn supervisor_run_waits_for_instances_to_reach_terminal_state_on_shutdown() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    // 关键点：让 Supervisor.run 在隔离目录里找 `.ralph/current-events`，
+    // 避免读到 repo 根目录里开发过程留下的 `.ralph/events.jsonl`，导致测试污染/不稳定。
+    config.core = config.core.with_workspace_root(temp_dir.path());
+
+    // 最小可运行集合：
+    // - ralph#1：负责输出 completion promise（LOOP_COMPLETE）让 run 自然结束
+    // - logger#1：无任务也要能在 shutdown 后收敛到 Done（用于覆盖本次 bug）
+    config
+        .hats
+        .insert("ralph".to_string(), hat_config("Ralph", vec![], 1));
+    config
+        .hats
+        .insert("logger".to_string(), hat_config("Logger", vec![], 1));
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed");
+
+    // 写到临时文件，避免污染 repo 的 `.ralph/events.jsonl`
+    supervisor.event_logger = EventLogger::new(events_path);
+
+    let result = supervisor.run(false).await.expect("run should succeed");
+
+    let ralph = HatInstanceId::new("ralph#1");
+    let logger = HatInstanceId::new("logger#1");
+
+    // 断言：退出时应尽量收敛到终态（Done/Failed），避免残留 Idle/Running。
+    // 若不做 shutdown-drain，这里往往会看到 `Idle`，同时进程 stderr 会刷出
+    // “Failed to send StateChanged to supervisor” 的收尾 warning。
+    assert!(matches!(
+        result.instance_states.get(&ralph),
+        Some(HatInstanceState::Done) | Some(HatInstanceState::Failed)
+    ));
+    assert!(matches!(
+        result.instance_states.get(&logger),
+        Some(HatInstanceState::Done) | Some(HatInstanceState::Failed)
+    ));
 }
 
 #[derive(Debug, Clone)]
@@ -396,10 +451,9 @@ async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
     config.parallel = base_parallel_config();
 
     // wildcard hat：如果 task.start 不是 target_instance 投递，就会收到 payload（prompt pollution 风险）
-    config.hats.insert(
-        "manager".to_string(),
-        hat_config("Manager", vec!["*"], 1),
-    );
+    config
+        .hats
+        .insert("manager".to_string(), hat_config("Manager", vec!["*"], 1));
 
     let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
 
@@ -427,6 +481,56 @@ async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
 }
 
 #[tokio::test]
+async fn parallel_injects_human_message_subscription_for_strict_target_validation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    // 关键：writer 没有显式订阅 human.message（triggers 为空）。
+    // 但在 parallel.enabled=true 的运行时，应当视为已订阅，以通过 strict target 校验。
+    config
+        .hats
+        .insert("writer".to_string(), hat_config("Writer", vec![], 1));
+
+    // 这里不走 spawn_instances：直接插一个“测试 instance handle”，
+    // 用 channel 捕获 route_event 是否真的投递 Deliver 命令。
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let executor = TimeoutCaptureExecutor { seen };
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed");
+    supervisor.event_logger = EventLogger::new(events_path);
+
+    let instance_id = HatInstanceId::new("writer#1");
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<HatInstanceCommand>(8);
+    supervisor
+        .instances
+        .insert(instance_id.clone(), HatInstanceHandle { cmd_tx });
+
+    let event = Event::new("human.message", "hello")
+        .with_id("e-human")
+        .with_target_instance(instance_id);
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let cmd = tokio::time::timeout(Duration::from_millis(200), cmd_rx.recv())
+        .await
+        .expect("Timed out waiting for Deliver command")
+        .expect("Expected a HatInstanceCommand");
+
+    match cmd {
+        HatInstanceCommand::Deliver(e) => {
+            assert_eq!(e.topic.as_str(), "human.message");
+            assert_eq!(e.payload, "hello");
+        }
+        other => panic!("Expected Deliver, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn wildcard_manager_receives_event_without_escalating_to_ralph() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
@@ -442,10 +546,9 @@ async fn wildcard_manager_receives_event_without_escalating_to_ralph() {
     config.parallel = base_parallel_config();
 
     // wildcard manager：应当吃掉默认 fallback，不再额外打扰 ralph#1
-    config.hats.insert(
-        "manager".to_string(),
-        hat_config("Manager", vec!["*"], 1),
-    );
+    config
+        .hats
+        .insert("manager".to_string(), hat_config("Manager", vec!["*"], 1));
 
     let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
 
