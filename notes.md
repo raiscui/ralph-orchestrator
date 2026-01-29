@@ -731,3 +731,36 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
 - 在 wrapper 场景下我们可能不再强制成为 process group leader，
   进而降低“通过 kill 整个进程组清理子进程”的确定性。
   - 但相比“直接卡死不可用”，这个 trade-off 可接受（并且更符合“先能用”的工程优先级）。
+
+---
+
+## 2026-01-29 合并 `e91aadc`：mock adapter（cassette replay）的价值评估
+
+### 来源
+- `git show e91aadc437615dbd211e5c651c7f899dea9ce590`
+  - 标题：feat(e2e): add mock adapter for cost-free E2E testing
+  - 核心意图：让 `ralph-e2e` 能在不调用真实 AI 后端的情况下完成“全流程 E2E 回归”，从而零成本/确定性。
+
+### 与当前分支的差异点（需要注意）
+- 我们当前 `ralph-e2e` 已支持 `Codex` backend + `parallel-hat-instances-zh` 场景。
+  - 上游 commit 的 CLI/runner 写法较早期，需要“择优合并”以保留这些能力。
+- 我们当前 executor 已有“超时后 kill 整个进程组”的强化逻辑。
+  - 合并时应避免回退到旧的 `wait_with_output()` 写法。
+
+### 变更拆解（哪些是“有价值内容”）
+- ✅ 核心价值（必合并）
+  - `mock-cli` 子命令：回放 JSONL cassette（通过 `ralph_core::SessionPlayer`）输出到 stdout，让 Ralph 把它当作后端输出。
+  - `--mock` 模式：在 scenario workspace 内改写 `ralph.yml` 的 `cli.*` 为 custom backend（command 指向 `ralph-e2e`，args 指向 `mock-cli`），从而“整条 orchestration loop”走通，但无需真实后端。
+  - cassette 解析与解析策略：`<scenario>-<backend>.jsonl` 优先，回退 `<scenario>.jsonl`。
+- ✅ 配套资源（推荐合并）
+  - `cassettes/e2e/*`：提供最小可运行样例（connect/events/completion/...）。
+  - `docs/mock-cli.md`：用法说明（合并后需确保与实际 CLI 参数一致）。
+- ⚖️ 研发过程材料（本次先不合并）
+  - `specs/mock-adapter-e2e/*`、`tasks/*.code-task.md`：不影响功能闭环，可后续按需补齐。
+
+### 风险点与处理策略
+- mock-mode 下 cassette 缺失：
+  - 上游 runner 倾向把它当“跳过”，但这会造成“全跳过但 exit 0”的假绿。
+  - 本次合并会把“缺 cassette”视为失败（用失败断言呈现），作为测试背压的一部分。
+- mock-cli 的命令执行：
+  - 仅在显式 allowlist 下执行；并且直接 `Command::new(program).args(args)`，不走 shell，降低注入风险。

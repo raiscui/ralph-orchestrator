@@ -133,3 +133,52 @@
 - [完成] 审阅 `685526d` 差异：确认这是“避免 npx/wrapper 场景下 TUI 输入挂死”的关键修复。
 - [完成] 落地 process group 初始化保护逻辑（检测前台 TTY 进程组，必要时跳过 `setpgid`），并按 Rust 风格改用 inlined_format_args。
 - [完成] `cargo test` 全通过。
+
+---
+
+# 任务计划: 理性合并 mock-e2e（commit: e91aadc）
+
+## 目标
+合并 `e91aadc437615dbd211e5c651c7f899dea9ce590` 中“cost-free E2E（mock cassette replay）”的核心价值：
+- 让 `ralph-e2e` 支持 `--mock`：用预录 JSONL cassette 回放代替真实 AI 后端调用（零成本、确定性）。
+- 提供 `mock-cli` 子命令：作为 `custom backend` 被 `ralph run` 调用，回放 cassette 输出。
+
+## 方案（给自己看的取舍）
+1) 不惜代价，最佳方案：
+- 全量合并该 commit 的所有内容（包含 specs/mock-adapter-e2e、tasks、文档、cassettes、以及代码变更）。
+- 优点：上下游语义与资料最完整；缺点：引入内容较多，可能带来与当前分支差异的冲突处理成本。
+2) 先能用，后面再优雅（本次选择）：
+- 只合并“能跑起来且可验证”的最小闭环：
+  - `ralph-e2e` 的 mock-mode + `mock-cli`（代码）
+  - `cassettes/e2e/*`（最小可运行数据）
+  - `docs/mock-cli.md`（用法文档，必要时做小幅同步修正）
+- 暂不引入 specs/ 与 tasks/（它们更像是研发过程材料，不影响功能闭环）。
+
+## 阶段
+- [x] 阶段1: 审阅差异与本分支现状（尤其是我们已支持 Codex/parallel 场景）
+- [x] 阶段2: 落地 mock-mode 代码与资源（避免破坏现有 E2E 运行）
+- [x] 阶段3: `cargo test` 全量验证（必须通过）
+- [x] 阶段4: 提交（带来源说明）+ 记录结论到 notes/WORKLOG
+
+## 关键问题
+1. mock-mode 下，cassette 缺失应该如何处理？（本次：视为失败，避免“全跳过但 exit 0”的假绿）
+2. `mock-cli` 执行本地命令的白名单机制是否足够安全？（本次：默认最小 allowlist；且无 shell 解释执行）
+3. 文档是否与实际 CLI 参数一致？（本次：必要时同步修正文档，避免误导）
+
+## 做出的决定
+- [决定] 采用“先能用”方案：落地 mock-mode 核心闭环 + 最小 cassettes + 文档，并保留我们已有的 Codex/parallel 场景。
+  - [理由] 这是最小风险、最可验证的合并；同时也符合“改良胜过新增”的工程习惯（先把价值打通，再考虑补齐研发过程资料）。
+
+## 遇到错误
+- 暂无
+
+## 状态
+**已完成**：mock-mode 已落地、已通过 `cargo test`，并已提交（带来源说明）。
+
+## 日志
+### 2026-01-29 14:10
+- [完成] 选择“先能用”方案：只引入 mock-mode 闭环（代码+最小 cassettes+文档），不引入 specs/tasks。
+- [完成] `cargo test` 全通过（含 replay smoke tests 与 doctest）。
+
+### 2026-01-29 14:25
+- [完成] 代码提交：`feat(e2e): add mock mode cassette replay (from e91aadc)`（commit: `40c18ae`）。

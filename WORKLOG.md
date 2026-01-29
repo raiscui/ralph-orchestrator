@@ -848,3 +848,26 @@ RALPH_E2E_PARALLEL_PROMPT_VARIANT=variant2 cargo run -p ralph-e2e -- codex --fil
 
 ### 验证
 - `cargo test` ✅
+
+## 2026-01-29 14:10 +0800｜合并：mock-mode（cassette replay）零成本 E2E（来自 commit `e91aadc`）
+
+### 我做了什么
+- 合并 `e91aadc437615dbd211e5c651c7f899dea9ce590` 的核心价值到当前分支（采用“先能用”方案）：
+  - `ralph-e2e` 新增 `--mock`：用 cassette 回放代替真实后端调用（零成本、确定性）。
+  - `ralph-e2e` 新增 `mock-cli` 子命令：作为 `custom backend` 被 `ralph run` 调用，回放 `ux.terminal.write` 输出。
+  - 新增 `cassettes/e2e/*`：提供最小可运行样例 cassette（connect/events/completion/...）。
+  - 新增 `docs/mock-cli.md`：说明 mock-cli 与 mock-mode 的使用方式，并与实际参数同步。
+- 额外的小改良（为稳定性背压）：
+  - `crates/ralph-adapters/src/cli_executor.rs`：上调 watchdog 测试用的 `stale_timeout`，避免 CI 高负载时偶发误判超时导致测试抖动。
+
+### 使用方式（最常用）
+```bash
+# mock-mode：注意需要为“被选中的 scenario”准备 cassette，否则会失败（避免假绿）
+cargo run -p ralph-e2e -- --mock --filter connect
+
+# 直接回放 cassette（mock-cli）
+cargo run -p ralph-e2e -- mock-cli --cassette cassettes/e2e/connect.jsonl
+```
+
+### 验证
+- `cargo test` ✅
