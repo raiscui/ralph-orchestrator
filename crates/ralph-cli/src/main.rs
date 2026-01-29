@@ -34,7 +34,8 @@ use tracing::{info, warn};
 // Unix-specific process management for process group leadership
 #[cfg(unix)]
 mod process_management {
-    use nix::unistd::{Pid, setpgid};
+    use nix::unistd::{Pid, getpgrp, setpgid, tcgetpgrp};
+    use std::io::{IsTerminal, stdin, stdout};
     use tracing::debug;
 
     /// Sets up process group leadership.
@@ -43,19 +44,46 @@ mod process_management {
     /// CLI processes (Claude, Kiro, etc.) belong to this group. On termination,
     /// the entire process group receives the signal, preventing orphans."
     pub fn setup_process_group() {
-        // Make ourselves the process group leader
-        // This ensures our child processes are in our process group
         let pid = Pid::this();
+        let pgrp = getpgrp();
+
+        // 尽量让自己成为进程组 leader（用于后续对子进程做“整组清理”）。
+        // 但当我们被 wrapper（例如 `npx`）启动时，强行 setpgid 可能让我们脱离前台 TTY 进程组，
+        // 从而导致 TUI 键盘输入失效/卡死。因此这里做一次“是否前台组”的保护判断。
+        if pgrp == pid {
+            debug!("Already process group leader: PID {pid}");
+            return;
+        }
+
+        if is_foreground_tty_group(pgrp) {
+            debug!("Skipping setpgid: keeping foreground process group {pgrp}");
+            return;
+        }
+
         if let Err(e) = setpgid(pid, pid) {
             // EPERM is OK - we're already a process group leader (e.g., started from shell)
             if e != nix::errno::Errno::EPERM {
-                debug!(
-                    "Note: Could not set process group ({}), continuing anyway",
-                    e
-                );
+                debug!("Note: Could not set process group ({e}), continuing anyway");
             }
         }
-        debug!("Process group initialized: PID {}", pid);
+        debug!("Process group initialized: PID {pid}");
+    }
+
+    fn is_foreground_tty_group(current_pgrp: Pid) -> bool {
+        // 优先用 stdin 判断前台进程组；不行再回退到 stdout。
+        if stdin().is_terminal()
+            && let Ok(foreground_pgrp) = tcgetpgrp(stdin())
+        {
+            return foreground_pgrp == current_pgrp;
+        }
+
+        if stdout().is_terminal()
+            && let Ok(foreground_pgrp) = tcgetpgrp(stdout())
+        {
+            return foreground_pgrp == current_pgrp;
+        }
+
+        false
     }
 }
 
