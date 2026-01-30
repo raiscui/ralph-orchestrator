@@ -62,3 +62,40 @@
 - [完成] Big Headers/图片渲染与相关依赖已移除；Output 前缀列已移除（不再显示红色 `E`）。
 - [完成] 许可证已回退到 MIT，并同步更新 `Cargo.toml` / `LICENSE` / README / docs。
 - [验证] `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` / `cargo test -p ralph-core smoke_runner` / `cargo test -p ralph-core kiro` 全部通过。
+
+---
+
+# 任务计划：termimad 渲染的 H1 从居中改为左对齐
+
+## 目标
+
+- `termimad` 渲染 Markdown 时，H1（`# Title`）不再居中，改为靠左对齐。
+- 行为在两条渲染路径保持一致：
+  - stdout（Pretty 输出）
+  - TUI（转为 `ratatui::Line`）
+- 保证 `cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test` 全部通过。
+
+## 阶段
+
+- [x] 阶段1：定位 termimad 的 H1 对齐配置点
+- [x] 阶段2：实现自定义 `MadSkin`（只改 H1 对齐）
+- [x] 阶段3：补回归测试（验证 H1 不再被填充左侧空格）
+- [x] 阶段4：验证并提交变更
+
+## 状态
+
+**已完成**：
+已把 termimad 渲染的 H1 对齐从居中改为左对齐，并保证 stdout/TUI 两条渲染路径一致生效；同时补充了回归测试并完成全量验证。
+
+## 日志
+
+### 2026-01-30 22:17 +0800
+
+- [启动] 新需求：termimad 渲染的 H1 从“居中”改为“靠左对齐”。
+- [计划] 先调研 `MadSkin` / header style 的对齐 API，再统一封装一个 skin builder，最后补测试并提交。
+
+### 2026-01-30 22:22 +0800
+
+- [完成] 在 `default_markdown_skin()` 中把 `headers[0].align` 设置为 `Alignment::Left`，H1 不再居中。
+- [测试] 新增回归测试：`markdown_h1_is_left_aligned_in_rendered_mode`。
+- [验证] `cargo fmt --check` / `cargo clippy --all-targets --all-features -- -D warnings` / `cargo test` 全部通过。

@@ -56,3 +56,14 @@
   - 并行 Output 面板不再渲染左侧红色 `E` 前缀列（stderr 仅用灰色弱化区分）
 - 许可证结论：
   - 已把仓库许可证从 `GPL-3.0-or-later` 回退到 `MIT`
+
+## 2026-01-30 22:17 +0800｜termimad H1 对齐：默认居中 → 改为左对齐
+
+- `termimad` 的默认皮肤在 `impl Default for MadSkin` 里显式设置了：
+  - `skin.headers[0].align = Alignment::Center;`
+  - 这会导致 H1（`# Title`）被居中渲染，并在左侧填充空格。
+- `termimad` 已对外 re-export 了 `Alignment`：
+  - 可以直接使用 `termimad::Alignment::Left`，无需直接依赖 `minimad`。
+- 预期落点（本仓库）：
+  - `crates/ralph-adapters/src/stream_handler.rs`
+  - 将两处 `MadSkin::default()` 统一替换为“自定义 skin builder”，并只改 H1 的 `align`。

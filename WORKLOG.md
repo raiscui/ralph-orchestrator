@@ -113,6 +113,22 @@
 - `cargo test -p ralph-core smoke_runner` ✅
 - `cargo test -p ralph-core kiro` ✅
 
+## 2026-01-30 22:22 +0800｜termimad：H1 标题改为左对齐（取消居中）
+
+### 你要的效果
+- `termimad` 渲染 Markdown 时，H1（`# Title`）不再居中，改为靠左对齐。
+
+### 我做了什么
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - 新增 `default_markdown_skin()`：基于 `MadSkin::default()`，把 `headers[0].align` 从 `Center` 改为 `Left`。
+  - stdout（Pretty 输出）与 TUI（`ratatui::Line`）两条渲染路径统一使用该 skin，避免“一个左对齐一个仍居中”的分裂体验。
+  - 新增回归测试：`markdown_h1_is_left_aligned_in_rendered_mode`，防止未来升级 termimad 或重构时把 H1 又改回居中。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+
 ## 2026-01-30 13:34 +0800｜彻底回退 mdfried 相关功能：移除 Big Headers/图片渲染 + 移除左侧红色 E + 许可证回退 MIT
 
 ### 目标回顾

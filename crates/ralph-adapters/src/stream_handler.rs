@@ -15,7 +15,7 @@ use ratatui::{
 };
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use termimad::MadSkin;
+use termimad::{Alignment, MadSkin};
 
 /// Detects if text contains ANSI escape sequences.
 ///
@@ -56,6 +56,22 @@ fn terminal_wrap_width() -> u16 {
         .map(|(w, _)| w)
         .filter(|w| *w > 0)
         .unwrap_or(DEFAULT_MARKDOWN_WRAP_WIDTH)
+}
+
+fn default_markdown_skin() -> MadSkin {
+    // =========================================================================
+    // termimad 默认 skin 会把 H1（headers[0]）设置为居中：
+    // - `skin.headers[0].align = Alignment::Center`
+    //
+    // 在 Ralph 的输出场景里（日志/代码/事件流），H1 居中会带来两个实际问题：
+    // 1) 复制粘贴到文件后，标题左侧会多出空格，影响对齐与 diff 可读性；
+    // 2) 与其他行（列表、代码块、引用等）混排时，会产生“锯齿感”的视觉不一致。
+    //
+    // 因此我们把 H1 改为左对齐，而不改变 H2/H3... 的默认行为。
+    // =========================================================================
+    let mut skin = MadSkin::default();
+    skin.headers[0].align = Alignment::Left;
+    skin
 }
 
 /// Session completion result data.
@@ -132,7 +148,7 @@ impl PrettyStreamHandler {
         // termimad 会把 Markdown 渲染成带 ANSI 的终端文本（并在给定宽度下 hard-wrap）。
         // 对于非 TUI（stdout）场景，直接输出 ANSI 最简单，
         // 也避免了“ratatui::Line → ANSI”的二次转换带来的额外开销与差异。
-        let skin = MadSkin::default();
+        let skin = default_markdown_skin();
         let rendered = skin.text(&text, Some(wrap_width)).to_string();
 
         let _ = self.stdout.write_all(rendered.as_bytes());
@@ -347,7 +363,7 @@ fn render_markdown_to_lines(text: &str, wrap_width: u16) -> Option<Vec<Line<'sta
 
     // termimad 会把 Markdown 渲染成带 ANSI 的终端文本（并在给定宽度下 hard-wrap）。
     // 然后我们再把 ANSI 解析回 ratatui Lines，以便在 TUI 内渲染。
-    let skin = MadSkin::default();
+    let skin = default_markdown_skin();
     let rendered = skin.text(text, Some(wrap_width)).to_string();
 
     match rendered.as_str().into_text() {
@@ -1331,6 +1347,27 @@ mod tests {
                 has_header_content,
                 "Should have header content. Lines: {:?}",
                 lines
+            );
+        }
+
+        #[test]
+        fn markdown_h1_is_left_aligned_in_rendered_mode() {
+            // 目的：防止 termimad 默认 H1 居中（左侧填充空格）的行为回归。
+            //
+            // 说明：
+            // - 我们在 `default_markdown_skin()` 里把 `headers[0].align` 改为 `Left`，
+            //   以提升日志/代码输出的可读性和复制粘贴后的对齐体验。
+            let lines = render_text_to_lines("# Title\n", MarkdownRenderMode::Rendered, 20);
+
+            let title_line = lines
+                .iter()
+                .find(|l| l.to_string().contains("Title"))
+                .expect("Should render H1 content line");
+
+            let text = title_line.to_string();
+            assert!(
+                text.starts_with("Title"),
+                "H1 should be left aligned (no leading spaces). Got: {text:?}"
             );
         }
 
