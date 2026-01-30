@@ -1,8 +1,8 @@
 # WORKLOG
 
 > 说明：历史 WORKLOG 已按“超过 1000 行自动归档”的规则拆分为时间戳文件。
-> - `WORKLOG_2026-01-29_1908.md`
-> - `WORKLOG_2026-01-29_2022.md`
+> - `archive/WORKLOG_2026-01-29_1908.md`
+> - `archive/WORKLOG_2026-01-29_2022.md`
 
 ## 2026-01-30 01:16 +0800｜Tier8 E2E：覆盖 `parallel-trigger-routing` example（按 hat 统计 job_runs）+ completion 收敛护栏
 

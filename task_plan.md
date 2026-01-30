@@ -99,3 +99,34 @@
 - [完成] 在 `default_markdown_skin()` 中把 `headers[0].align` 设置为 `Alignment::Left`，H1 不再居中。
 - [测试] 新增回归测试：`markdown_h1_is_left_aligned_in_rendered_mode`。
 - [验证] `cargo fmt --check` / `cargo clippy --all-targets --all-features -- -D warnings` / `cargo test` 全部通过。
+
+---
+
+# 任务计划：continuous-learning（持续学习）+ 清理未跟踪文件残留
+
+## 目标
+
+- 产出“四文件摘要”，明确本次可复用点与是否需要提取/更新 skill。
+- 清理工作区：把本次会话产生的 `task_plan_*.md` / `notes_*.md` / `WORKLOG_*.md` 等历史版本归档到 `archive/`。
+- 删除明显无用的未跟踪残留（例如重复的 example 目录），让 `git status` 结果干净可控。
+- 必要时创建一次“chore/cleanup”提交，把归档动作固定在 git 历史里，避免下次继续积累噪音。
+
+## 阶段
+
+- [x] 阶段1：盘点 `git status`（确认只剩未跟踪文件）
+- [x] 阶段2：阅读四文件与历史版本（排除 `archive/**`）
+- [ ] 阶段3：输出“四文件摘要”并决定是否提取/更新 skill
+- [ ] 阶段4：归档/清理未跟踪文件（移动到 `archive/` / 删除多余目录）
+- [ ] 阶段5：复核 `git status` 并提交（如需要）
+
+## 状态
+
+**目前在阶段3**：
+我已通读当前四文件与全部历史版本（含两份超长归档文件）。
+接下来会先写入“四文件摘要”并决定是否提取新的 `self-learning.*` skill。
+
+## 日志
+
+### 2026-01-30 22:54 +0800
+
+- [启动] 进入 `continuous-learning`：先全量检索/阅读四文件与历史版本，再做摘要与归档，避免“凭记忆提交/误删”。

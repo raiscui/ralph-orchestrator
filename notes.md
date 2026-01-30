@@ -67,3 +67,20 @@
 - 预期落点（本仓库）：
   - `crates/ralph-adapters/src/stream_handler.rs`
   - 将两处 `MadSkin::default()` 统一替换为“自定义 skin builder”，并只改 H1 的 `align`。
+
+## 2026-01-30 22:54 +0800｜四文件摘要（用于决定是否提取 skill）
+- 任务目标（task_plan.md）：
+  - `termimad` 渲染 Markdown 时，H1（`# Title`）从“居中”改为“靠左对齐”，且 stdout/TUI 两条路径一致。
+- 关键决定（task_plan.md）：
+  - 不改上游 `termimad`，在本仓库统一封装 `default_markdown_skin()` 覆盖默认 H1 对齐。
+- 关键发现（notes.md）：
+  - `MadSkin::default()` 会把 `headers[0].align` 设为 `Alignment::Center`，因此 H1 左侧会被填充空格。
+- 实际变更（WORKLOG.md）：
+  - 在 `crates/ralph-adapters/src/stream_handler.rs` 增加 skin builder，并在 stdout/TUI 渲染链路统一使用；补回归测试锁定行为。
+- 错误与根因（ERRORFIX.md，如有）：
+  - 本次无新增错误；根因属于 `termimad` 默认样式选择（H1 居中）。
+- 可复用点候选（1-3 条）：
+  1. `termimad`：如果你需要标题不居中，优先用“自定义 MadSkin”覆写 `headers[0].align`，而不是在渲染后做字符串裁剪。
+  2. 渲染一致性：stdout 与 TUI 必须复用同一套 skin builder，避免“一个左对齐一个仍居中”的体验分裂。
+- 是否需要固化到 docs/specs：否（属于局部 UI 行为改良，已有回归测试锁定）。
+- 是否提取/更新 skill：是（提取 `self-learning.termimad-h1-left-align`，作为 termimad 的常见坑/默认行为备忘）。
