@@ -50,6 +50,7 @@ mod incremental;
 mod memory;
 mod orchestration;
 mod parallel;
+mod parallel_trigger_routing_example;
 mod tasks;
 
 pub use capabilities::{StreamingScenario, ToolUseScenario};
@@ -70,6 +71,7 @@ pub use memory::{
 };
 pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
 pub use parallel::ParallelHatInstancesScenario;
+pub use parallel_trigger_routing_example::ParallelTriggerRoutingExampleScenario;
 pub use tasks::{TaskAddScenario, TaskCloseScenario, TaskCompletionScenario, TaskReadyScenario};
 
 use crate::Backend;

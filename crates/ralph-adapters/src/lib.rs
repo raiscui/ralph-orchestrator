@@ -45,6 +45,6 @@ pub use pty_executor::{
 };
 pub use pty_handle::{ControlCommand, PtyHandle};
 pub use stream_handler::{
-    ConsoleStreamHandler, PrettyStreamHandler, QuietStreamHandler, SessionResult, StreamHandler,
-    TuiStreamHandler,
+    ConsoleStreamHandler, MarkdownRenderMode, PrettyStreamHandler, QuietStreamHandler,
+    SessionResult, StreamHandler, TuiStreamHandler, render_text_to_lines,
 };

@@ -8,6 +8,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
+use crate::theme::MUTED_FG;
+
 /// Renders help overlay centered on screen.
 pub fn render(f: &mut Frame, area: Rect) {
     let block = Block::default()
@@ -69,6 +71,10 @@ pub fn render(f: &mut Frame, area: Rect) {
             Span::raw("  Select instance / gate / focus chat"),
         ]),
         Line::from(vec![
+            Span::styled("  Drag", Style::default().fg(Color::Cyan)),
+            Span::raw("   Select output/chat text (auto-copies)"),
+        ]),
+        Line::from(vec![
             Span::styled("  Click @chip", Style::default().fg(Color::Cyan)),
             Span::raw("  Set default chat target"),
         ]),
@@ -87,12 +93,24 @@ pub fn render(f: &mut Frame, area: Rect) {
             Span::raw("      Quit (stops the run)"),
         ]),
         Line::from(vec![
+            Span::styled("  y", Style::default().fg(Color::Cyan)),
+            Span::raw("      Copy current selection (parallel)"),
+        ]),
+        Line::from(vec![
             Span::styled("  Tab", Style::default().fg(Color::Cyan)),
             Span::raw("    Switch focus (parallel)"),
         ]),
         Line::from(vec![
             Span::styled("  Shift+Enter", Style::default().fg(Color::Cyan)),
             Span::raw("  Newline in chat (parallel)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Alt+Enter", Style::default().fg(Color::Cyan)),
+            Span::raw("    Newline in chat (parallel)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+J", Style::default().fg(Color::Cyan)),
+            Span::raw("      Newline in chat (parallel)"),
         ]),
         Line::from(vec![
             Span::styled("  ?", Style::default().fg(Color::Cyan)),
@@ -105,7 +123,7 @@ pub fn render(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "Press Esc to dismiss",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(MUTED_FG),
         )),
     ];
 

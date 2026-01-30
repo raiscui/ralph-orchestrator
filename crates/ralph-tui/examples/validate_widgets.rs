@@ -5,7 +5,7 @@
 use ralph_core::{HatJobOutputChunk, OutputStream};
 use ralph_proto::{Event, HatId};
 use ralph_tui::TuiState;
-use ralph_tui::widgets::{content::ContentPane, instances};
+use ralph_tui::widgets::{instances, parallel_output::ParallelOutputPane};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -279,7 +279,7 @@ fn main() {
             if let Some(instance) = parallel_state.parallel.selected_instance()
                 && let Some(buffer) = instance.current_job_buffer()
             {
-                let content_widget = ContentPane::new(buffer);
+                let content_widget = ParallelOutputPane::new(buffer);
                 f.render_widget(content_widget, inner);
             }
 

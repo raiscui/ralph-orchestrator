@@ -1,7 +1,7 @@
 # Ralph Orchestrator
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75+-orange)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.86+-orange)](https://www.rust-lang.org/)
 [![Build](https://img.shields.io/github/actions/workflow/status/mikeyobrien/ralph-orchestrator/ci.yml?branch=main&label=CI)](https://github.com/mikeyobrien/ralph-orchestrator/actions)
 [![Coverage](https://img.shields.io/badge/coverage-65%25-yellowgreen)](coverage/index.html)
 [![Mentioned in Awesome Claude Code](https://awesome.re/mentioned-badge.svg)](https://github.com/hesreallyhim/awesome-claude-code)
@@ -1029,6 +1029,7 @@ tests: pass, lint: pass, typecheck: pass
 | `--completion-promise <TEXT>` | Override completion trigger |
 | `--dry-run` | Show what would execute |
 | `--no-tui` | Disable TUI mode (TUI is enabled by default) |
+| `--plain` | Disable Markdown rendering in output views (show raw text) |
 | `-a, --autonomous` | Force headless mode |
 | `--idle-timeout <SECS>` | TUI idle timeout (default: 30) |
 | `--record-session <FILE>` | Record session to JSONL |
@@ -1170,7 +1171,7 @@ See [AGENTS.md](AGENTS.md) for development philosophy and conventions.
 
 ## License
 
-MIT License — See [LICENSE](LICENSE) for details.
+Ralph Orchestrator is licensed under the MIT License — see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 

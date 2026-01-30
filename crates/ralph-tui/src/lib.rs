@@ -12,10 +12,12 @@ mod chat;
 mod external_event_writer;
 pub mod input;
 pub mod state;
+mod theme;
 pub mod widgets;
 
 use anyhow::Result;
 use app::App;
+use ralph_adapters::MarkdownRenderMode;
 use ralph_core::HatJobOutputChunk;
 use ralph_proto::{Event, HatId, HatInstanceId, HatInstanceState};
 use std::collections::HashMap;
@@ -64,6 +66,41 @@ impl Tui {
             update_rx: Some(rx),
             update_tx: Some(tx),
         }
+    }
+
+    /// 设置并行输出的 Markdown 渲染模式。
+    ///
+    /// 说明：
+    /// - 该接口由 `ralph-cli` 侧调用，用于让 `--plain` 之类的开关能“向下传递”到 TUI。
+    /// - 并行 Supervisor TUI 的输出视图会按该模式渲染：
+    ///   - stdout：Rendered 会 best-effort 渲染 Markdown；Plain 保留 Markdown 控制符原样可见（同时保留 ANSI 解析）
+    ///   - stderr：与 stdout 保持一致的渲染模式，但会弱化颜色避免抢眼
+    #[must_use]
+    pub fn with_parallel_output_render_mode(self, render_mode: MarkdownRenderMode) -> Self {
+        // 这里的职责很简单：把渲染模式写入 state，让并行输出视图能按模式渲染。
+        //
+        // 说明：
+        // - 默认是 Rendered（更易读）。
+        // - CLI 传入 `--plain` 时会设置为 Plain（方便排障/复制粘贴/对齐旧行为）。
+        if let Ok(mut state) = self.state.lock() {
+            state.parallel.output_render_mode = render_mode;
+        }
+        self
+    }
+
+    /// 旧接口/兼容接口：是否在并行 TUI 中启用 Markdown 渲染。
+    ///
+    /// 说明：
+    /// - `ralph-cli` 侧目前用一个 bool（`!plain`）表达渲染开关。
+    /// - 该接口等价于 `with_parallel_output_render_mode(...)` 的语义糖。
+    #[must_use]
+    pub fn with_parallel_markdown_rendering(self, enabled: bool) -> Self {
+        let render_mode = if enabled {
+            MarkdownRenderMode::Rendered
+        } else {
+            MarkdownRenderMode::Plain
+        };
+        self.with_parallel_output_render_mode(render_mode)
     }
 
     /// Sets the hat map for dynamic topic-to-hat resolution.

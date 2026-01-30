@@ -7,6 +7,7 @@ use ansi_to_tui::IntoText;
 use crossterm::{
     QueueableCommand,
     style::{self, Color},
+    terminal,
 };
 use ratatui::{
     style::{Color as RatatuiColor, Style},
@@ -25,6 +26,38 @@ pub(crate) fn contains_ansi(text: &str) -> bool {
     text.contains("\x1b[")
 }
 
+// ============================================================================
+// Markdown Rendering (termimad)
+//
+// 设计目标：
+// - Rendered 模式：尽可能把 Markdown 变成“带语义样式”的终端/TUI输出（隐藏控制符）。
+// - Plain 模式：禁用 Markdown 渲染（控制符原样可见），但依然需要保留 ANSI 解析能力，
+//   避免把 ESC 控制序列原样打印出来。
+// - 对于 TUI：我们希望在“给定宽度”下提前完成语义化换行（例如 blockquote 前缀需要出现在换行后每一行）。
+//   这样 ContentPane 的软换行就不会破坏语义前缀。
+// ============================================================================
+
+/// 当无法获取真实终端宽度时的 fallback（与历史默认行为一致，且可稳定用于测试）。
+const DEFAULT_MARKDOWN_WRAP_WIDTH: u16 = 80;
+
+#[inline]
+fn normalize_wrap_width(width: u16) -> u16 {
+    if width == 0 {
+        DEFAULT_MARKDOWN_WRAP_WIDTH
+    } else {
+        width
+    }
+}
+
+#[inline]
+fn terminal_wrap_width() -> u16 {
+    terminal::size()
+        .ok()
+        .map(|(w, _)| w)
+        .filter(|w| *w > 0)
+        .unwrap_or(DEFAULT_MARKDOWN_WRAP_WIDTH)
+}
+
 /// Session completion result data.
 #[derive(Debug, Clone)]
 pub struct SessionResult {
@@ -34,24 +67,46 @@ pub struct SessionResult {
     pub is_error: bool,
 }
 
+/// Markdown 渲染模式。
+///
+/// - `Rendered`：best-effort 渲染 Markdown（默认），并保留 ANSI 样式。
+/// - `Plain`：禁用 Markdown 渲染，按原始文本展示（但仍会解析 ANSI，避免输出 ESC 控制符）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkdownRenderMode {
+    Rendered,
+    Plain,
+}
+
+impl MarkdownRenderMode {
+    #[must_use]
+    pub const fn from_plain(plain: bool) -> Self {
+        if plain { Self::Plain } else { Self::Rendered }
+    }
+}
+
 /// Renders streaming output with colors and markdown.
 pub struct PrettyStreamHandler {
     stdout: io::Stdout,
     verbose: bool,
     /// Buffer for accumulating text before markdown rendering
     text_buffer: String,
-    /// Skin for markdown rendering
-    skin: MadSkin,
+    /// 输出渲染模式（默认渲染 Markdown；`--plain` 时禁用）。
+    render_mode: MarkdownRenderMode,
 }
 
 impl PrettyStreamHandler {
     /// Creates a new pretty handler.
     pub fn new(verbose: bool) -> Self {
+        Self::new_with_mode(verbose, MarkdownRenderMode::Rendered)
+    }
+
+    /// Creates a new pretty handler with explicit render mode.
+    pub fn new_with_mode(verbose: bool, render_mode: MarkdownRenderMode) -> Self {
         Self {
             stdout: io::stdout(),
             verbose,
             text_buffer: String::new(),
-            skin: MadSkin::default(),
+            render_mode,
         }
     }
 
@@ -60,11 +115,28 @@ impl PrettyStreamHandler {
         if self.text_buffer.is_empty() {
             return;
         }
-        // Render markdown to string, then write
-        let rendered = self.skin.term_text(&self.text_buffer);
-        let _ = self.stdout.write(rendered.to_string().as_bytes());
+
+        let text = std::mem::take(&mut self.text_buffer);
+
+        // 说明：
+        // - Plain：原样输出（Markdown 控制符可见）。
+        // - 含 ANSI：直接原样输出，避免二次渲染吞掉样式/控制码。
+        if self.render_mode == MarkdownRenderMode::Plain || contains_ansi(&text) {
+            let _ = self.stdout.write_all(text.as_bytes());
+            let _ = self.stdout.flush();
+            return;
+        }
+
+        let wrap_width = usize::from(terminal_wrap_width()).max(3);
+
+        // termimad 会把 Markdown 渲染成带 ANSI 的终端文本（并在给定宽度下 hard-wrap）。
+        // 对于非 TUI（stdout）场景，直接输出 ANSI 最简单，
+        // 也避免了“ratatui::Line → ANSI”的二次转换带来的额外开销与差异。
+        let skin = MadSkin::default();
+        let rendered = skin.text(&text, Some(wrap_width)).to_string();
+
+        let _ = self.stdout.write_all(rendered.as_bytes());
         let _ = self.stdout.flush();
-        self.text_buffer.clear();
     }
 }
 
@@ -242,36 +314,44 @@ impl StreamHandler for QuietStreamHandler {
     fn on_complete(&mut self, _: &SessionResult) {}
 }
 
-/// Converts text to styled ratatui Lines, handling both ANSI and markdown.
-///
-/// When text contains ANSI escape sequences (e.g., from CLI tools like Kiro),
-/// uses `ansi_to_tui` to preserve colors and formatting. Otherwise, uses
-/// `termimad` to parse markdown (matching non-TUI mode behavior), then
-/// converts the ANSI output via `ansi_to_tui`.
-///
-/// Using `termimad` ensures parity between TUI and non-TUI modes, as both
-/// use the same markdown processing engine with the same line-breaking rules.
-fn text_to_lines(text: &str) -> Vec<Line<'static>> {
-    if text.is_empty() {
-        return Vec::new();
+fn plain_text_to_lines(text: &str) -> Vec<Line<'static>> {
+    text.split('\n')
+        .map(|line| Line::from(line.to_string()))
+        .collect()
+}
+
+fn ansi_text_to_lines(text: &str) -> Vec<Line<'static>> {
+    match text.into_text() {
+        Ok(parsed_text) => parsed_text
+            .lines
+            .into_iter()
+            .map(|line| {
+                let owned_spans: Vec<Span<'static>> = line
+                    .spans
+                    .into_iter()
+                    .map(|span| Span::styled(span.content.into_owned(), span.style))
+                    .collect();
+                Line::from(owned_spans)
+            })
+            .collect(),
+        Err(_) => plain_text_to_lines(text),
     }
+}
 
-    // Convert text to ANSI-styled string
-    // - If already contains ANSI: use as-is
-    // - If plain/markdown: process through termimad (matches non-TUI behavior)
-    let ansi_text = if contains_ansi(text) {
-        text.to_string()
-    } else {
-        // Use termimad to process markdown - this matches PrettyStreamHandler behavior
-        // and ensures consistent line-breaking between TUI and non-TUI modes
-        let skin = MadSkin::default();
-        skin.term_text(text).to_string()
-    };
+fn render_markdown_to_lines_best_effort(text: &str, wrap_width: u16) -> Vec<Line<'static>> {
+    render_markdown_to_lines(text, wrap_width).unwrap_or_else(|| plain_text_to_lines(text))
+}
 
-    // Parse ANSI codes to ratatui Text
-    match ansi_text.as_str().into_text() {
-        Ok(parsed_text) => {
-            // Convert Text to owned Lines
+fn render_markdown_to_lines(text: &str, wrap_width: u16) -> Option<Vec<Line<'static>>> {
+    let wrap_width = usize::from(normalize_wrap_width(wrap_width)).max(3);
+
+    // termimad 会把 Markdown 渲染成带 ANSI 的终端文本（并在给定宽度下 hard-wrap）。
+    // 然后我们再把 ANSI 解析回 ratatui Lines，以便在 TUI 内渲染。
+    let skin = MadSkin::default();
+    let rendered = skin.text(text, Some(wrap_width)).to_string();
+
+    match rendered.as_str().into_text() {
+        Ok(parsed_text) => Some(
             parsed_text
                 .lines
                 .into_iter()
@@ -283,14 +363,39 @@ fn text_to_lines(text: &str) -> Vec<Line<'static>> {
                         .collect();
                     Line::from(owned_spans)
                 })
-                .collect()
-        }
-        Err(_) => {
-            // Fallback: split on newlines and treat as plain text
-            text.split('\n')
-                .map(|line| Line::from(line.to_string()))
-                .collect()
-        }
+                .collect(),
+        ),
+        Err(_) => None,
+    }
+}
+
+/// 把文本转换为带样式的 `ratatui` 行（`Line<'static>`），同时处理 ANSI 与 Markdown。
+///
+/// 说明：
+/// - 若文本本身包含 ANSI 转义序列（例如某些 CLI 工具的彩色输出），则直接走 ANSI → ratatui 的解析，
+///   以保留颜色/格式。
+/// - 否则：
+///   - `Rendered`：使用 `termimad` best-effort 渲染 Markdown，并按 `wrap_width` 做语义化换行。
+///   - `Plain`：保持原始文本（Markdown 控制符原样可见）。
+/// - 当 `termimad` 渲染结果无法解析为 ratatui 行时，必须安全降级为纯文本显示（不 panic、不丢内容）。
+pub fn render_text_to_lines(
+    text: &str,
+    mode: MarkdownRenderMode,
+    wrap_width: u16,
+) -> Vec<Line<'static>> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let wrap_width = normalize_wrap_width(wrap_width);
+
+    if contains_ansi(text) {
+        return ansi_text_to_lines(text);
+    }
+
+    match mode {
+        MarkdownRenderMode::Rendered => render_markdown_to_lines_best_effort(text, wrap_width),
+        MarkdownRenderMode::Plain => plain_text_to_lines(text),
     }
 }
 
@@ -323,6 +428,8 @@ pub struct TuiStreamHandler {
     blocks: Vec<ContentBlock>,
     /// Verbose mode (show tool results)
     verbose: bool,
+    /// 输出渲染模式（默认渲染 Markdown；`--plain` 时禁用）。
+    render_mode: MarkdownRenderMode,
     /// Collected output lines for rendering
     lines: Arc<Mutex<Vec<Line<'static>>>>,
 }
@@ -333,10 +440,16 @@ impl TuiStreamHandler {
     /// # Arguments
     /// * `verbose` - If true, shows tool results and session summary.
     pub fn new(verbose: bool) -> Self {
+        Self::new_with_mode(verbose, MarkdownRenderMode::Rendered)
+    }
+
+    /// Creates a new TUI handler with explicit render mode.
+    pub fn new_with_mode(verbose: bool, render_mode: MarkdownRenderMode) -> Self {
         Self {
             current_text_buffer: String::new(),
             blocks: Vec::new(),
             verbose,
+            render_mode,
             lines: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -345,10 +458,20 @@ impl TuiStreamHandler {
     ///
     /// Use this to share output lines with the TUI application.
     pub fn with_lines(verbose: bool, lines: Arc<Mutex<Vec<Line<'static>>>>) -> Self {
+        Self::with_lines_and_mode(verbose, lines, MarkdownRenderMode::Rendered)
+    }
+
+    /// Creates a TUI handler with shared lines storage and explicit render mode.
+    pub fn with_lines_and_mode(
+        verbose: bool,
+        lines: Arc<Mutex<Vec<Line<'static>>>>,
+        render_mode: MarkdownRenderMode,
+    ) -> Self {
         Self {
             current_text_buffer: String::new(),
             blocks: Vec::new(),
             verbose,
+            render_mode,
             lines,
         }
     }
@@ -382,12 +505,13 @@ impl TuiStreamHandler {
     /// interleaved ordering of text and non-text content.
     fn update_lines(&mut self) {
         let mut all_lines = Vec::new();
+        let wrap_width = terminal_wrap_width();
 
         // Render frozen blocks in chronological order
         for block in &self.blocks {
             match block {
                 ContentBlock::Text(text) => {
-                    all_lines.extend(text_to_lines(text));
+                    all_lines.extend(render_text_to_lines(text, self.render_mode, wrap_width));
                 }
                 ContentBlock::NonText(line) => {
                     all_lines.push(line.clone());
@@ -397,7 +521,11 @@ impl TuiStreamHandler {
 
         // Render current (unfrozen) text buffer for real-time updates
         if !self.current_text_buffer.is_empty() {
-            all_lines.extend(text_to_lines(&self.current_text_buffer));
+            all_lines.extend(render_text_to_lines(
+                &self.current_text_buffer,
+                self.render_mode,
+                wrap_width,
+            ));
         }
 
         // Note: Long lines are NOT truncated here. The TUI's ContentPane widget
@@ -1207,6 +1335,79 @@ mod tests {
         }
 
         #[test]
+        fn markdown_plain_mode_keeps_control_symbols_visible() {
+            // Given TuiStreamHandler in Plain mode
+            let mut handler = TuiStreamHandler::new_with_mode(false, MarkdownRenderMode::Plain);
+
+            // When markdown text is streamed
+            handler.on_text("## Section Title\n> quoted\n```rust\nlet x = 1;\n```\n");
+
+            // Then markdown control symbols remain visible (not rendered away)
+            let lines = collect_lines(&handler);
+            let text = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                text.contains("## Section Title"),
+                "Plain should keep header markers: {text}"
+            );
+            assert!(
+                text.contains("> quoted"),
+                "Plain should keep blockquote markers: {text}"
+            );
+            assert!(
+                text.contains("```"),
+                "Plain should keep fence markers: {text}"
+            );
+        }
+
+        #[test]
+        fn markdown_rendered_mode_hides_control_symbols_best_effort() {
+            // Given TuiStreamHandler in Rendered mode
+            let mut handler = TuiStreamHandler::new_with_mode(false, MarkdownRenderMode::Rendered);
+
+            // When markdown text is streamed
+            handler.on_text("## Section Title\n> quoted\n```rust\nlet x = 1;\n```\n");
+
+            // Then the content remains, but control symbols are not shown verbatim.
+            let lines = collect_lines(&handler);
+            let text = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                text.contains("Section Title"),
+                "Rendered should keep content: {text}"
+            );
+            assert!(
+                text.contains("quoted"),
+                "Rendered should keep content: {text}"
+            );
+            assert!(
+                text.contains("let x = 1;"),
+                "Rendered should keep content: {text}"
+            );
+
+            assert!(
+                !text.contains("## "),
+                "Rendered should hide header markers: {text}"
+            );
+            assert!(
+                !text.contains("> quoted"),
+                "Rendered should hide blockquote markers: {text}"
+            );
+            assert!(
+                !text.contains("```"),
+                "Rendered should hide fence markers: {text}"
+            );
+        }
+
+        #[test]
         fn markdown_streaming_continuity_handles_split_formatting() {
             // Given TuiStreamHandler
             let mut handler = TuiStreamHandler::new(false);
@@ -1320,16 +1521,102 @@ mod tests {
             handler.on_text("**unclosed bold");
             handler.flush_text_buffer();
 
-            // Then no panic occurs and text is present
+            // Then no panic occurs and text is not lost（安全降级）
             let lines = collect_lines(&handler);
-            // Should have some output (either the partial text or nothing)
-            // Main assertion is that we didn't panic
-            let _ = lines; // Use the variable to avoid warning
+            let text = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("unclosed bold"),
+                "Partial markdown should not lose content: {text}"
+            );
+        }
+
+        #[test]
+        fn markdown_unclosed_fenced_code_block_safely_degrades() {
+            // 这个用例对应 OpenSpec：
+            // - Requirement: 渲染失败必须安全降级
+            // - Scenario: 不完整 fenced code block 不导致崩溃
+            //
+            // 我们不强制要求“必须显示 ``` 控制符”，因为 Rendered 模式允许 best-effort 隐藏控制符。
+            // 但必须保证：不 panic，且 fenced code 的实际内容不丢失。
+
+            // Given TuiStreamHandler
+            let mut handler = TuiStreamHandler::new(false);
+
+            // When a fenced code block starts but never closes
+            handler.on_text("```rust\nlet x = 1;\n");
+            handler.flush_text_buffer();
+
+            // Then no panic occurs and the code content is still visible.
+            let lines = collect_lines(&handler);
+            let text = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("let x = 1;"),
+                "Unclosed fenced code block should keep content: {text}"
+            );
         }
 
         // =====================================================================
         // ANSI Color Preservation Tests
         // =====================================================================
+
+        #[test]
+        fn ansi_output_skips_markdown_parsing_and_preserves_styles() {
+            // 这个用例对应 OpenSpec：
+            // - Requirement: ANSI 输出优先保留样式
+            // - Scenario: 含 ANSI 的输出不做 Markdown 渲染
+            //
+            // 关键断言：
+            // 1) ANSI 的颜色样式被保留（这里用 Red）
+            // 2) 因为“检测到 ANSI → 跳过 Markdown 渲染”，所以 `**` 这类 Markdown 控制符必须原样可见，
+            //    且不应凭空出现“由 Markdown 渲染产生”的 BOLD 样式（除非 ANSI 自己声明了 bold）。
+
+            // Given TuiStreamHandler (Rendered mode by default)
+            let mut handler = TuiStreamHandler::new(false);
+
+            // When text contains ANSI *and* Markdown markers
+            handler.on_text("\x1b[31m**bold**\x1b[0m\n");
+
+            let lines = collect_lines(&handler);
+            let text = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                text.contains("**bold**"),
+                "ANSI path should not strip markdown markers: {text}"
+            );
+
+            let has_red = lines.iter().any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.style.fg == Some(Color::Red))
+            });
+            assert!(
+                has_red,
+                "ANSI red style should be preserved. Lines: {lines:?}"
+            );
+
+            let has_bold_modifier = lines.iter().any(|line| {
+                line.spans.iter().any(|span| {
+                    span.content.contains("bold")
+                        && span.style.add_modifier.contains(Modifier::BOLD)
+                })
+            });
+            assert!(
+                !has_bold_modifier,
+                "ANSI-only input should not gain markdown bold modifier. Lines: {lines:?}"
+            );
+        }
 
         #[test]
         fn ansi_green_text_produces_green_style() {

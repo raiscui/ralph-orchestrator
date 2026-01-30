@@ -5,13 +5,16 @@
 //! - 以 HatJob 作为次级维度：实例内按 job 分段保存输出，便于回看与搜索。
 //! - UI 只负责“展示 + 产生人类输入事件”，不把调度逻辑塞进 UI。
 
-use crate::state::IterationBuffer;
-use ralph_core::HatJobOutputChunk;
+#[path = "parallel/output.rs"]
+pub(crate) mod output;
+
+use crate::theme::MUTED_FG;
+use ralph_adapters::{MarkdownRenderMode, render_text_to_lines};
+use ralph_core::{HatJobOutputChunk, OutputStream};
 use ralph_proto::{
     Event, GateRequest, GateResolve, GateTimeout, HatInstanceId, HatInstanceState,
     TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT,
 };
-use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -136,7 +139,7 @@ impl ChatEditorState {
     }
 
     pub fn has_selection(&self) -> bool {
-        self.selection.map_or(false, |s| s.anchor != s.cursor)
+        self.selection.is_some_and(|s| s.anchor != s.cursor)
     }
 
     fn line_grapheme_len(line: &str) -> usize {
@@ -466,12 +469,12 @@ impl InstanceViewState {
     }
 
     /// 返回当前 job buffer（若不存在则 None）。
-    pub fn current_job_buffer(&self) -> Option<&IterationBuffer> {
+    pub fn current_job_buffer(&self) -> Option<&output::ParallelOutputBuffer> {
         self.jobs.get(self.current_job).map(|j| &j.buffer)
     }
 
     /// 返回可变的当前 job buffer（若不存在则 None）。
-    pub fn current_job_buffer_mut(&mut self) -> Option<&mut IterationBuffer> {
+    pub fn current_job_buffer_mut(&mut self) -> Option<&mut output::ParallelOutputBuffer> {
         self.jobs.get_mut(self.current_job).map(|j| &mut j.buffer)
     }
 }
@@ -481,17 +484,32 @@ impl InstanceViewState {
 pub struct JobViewState {
     /// 运行时 job id（来自并行运行时）。
     pub job_id: u64,
-    /// 输出 buffer（复用现有 IterationBuffer 的滚动/渲染能力）。
-    pub buffer: IterationBuffer,
+    /// 输出 buffer（独立的 Text/Image 滚动模型）。
+    pub buffer: output::ParallelOutputBuffer,
+    /// 保存该 job 的“原始输出行”（stdout/stderr，按收到顺序）。
+    ///
+    /// 说明：
+    /// - 并行模式的输出是“按行 chunk”推送的。
+    /// - 为了支持 fenced code block 等跨行 Markdown 语义，需要保留原始行并在追加时重新渲染。
+    /// - 这里做 best-effort：不追求极致增量渲染，但必须保证不崩溃、不丢内容。
+    raw_lines: Vec<JobOutputLine>,
     /// 该 job 首次出现输出的时间（best-effort）。
     pub first_output_at: Option<Instant>,
+}
+
+/// Job 输出的原始行（用于再次渲染）。
+#[derive(Debug, Clone)]
+struct JobOutputLine {
+    stream: OutputStream,
+    line: String,
 }
 
 impl JobViewState {
     pub fn new(job_id: u64, number: u32) -> Self {
         Self {
             job_id,
-            buffer: IterationBuffer::new(number),
+            buffer: output::ParallelOutputBuffer::new(number),
+            raw_lines: Vec::new(),
             first_output_at: None,
         }
     }
@@ -559,6 +577,101 @@ impl GateViewState {
     }
 }
 
+// ============================================================================
+// 输出渲染器：把 raw_lines -> Line<'static>
+// ============================================================================
+//
+// 说明：
+// - 这个渲染器刻意不持有 `ParallelTuiState` 的整体可变引用。
+// - 以“连续 chunk”为单位渲染，减少跨流语义的复杂度，同时保留原始顺序。
+// - 彻底移除 Big Headers / 图片块等 `mdfried` 相关渲染特性。
+// - stderr 的区分由上游渲染器通过样式（灰色）完成，不再使用左侧前缀列。
+struct ParallelOutputRenderer {
+    mode: MarkdownRenderMode,
+    width: u16,
+}
+
+impl ParallelOutputRenderer {
+    fn new(mode: MarkdownRenderMode, width: u16) -> Self {
+        Self {
+            mode,
+            width: width.max(1),
+        }
+    }
+
+    /// 把 job 的原始输出行渲染为可展示的“逻辑行”。
+    ///
+    /// 设计要点：
+    /// - 输出顺序以 raw_lines 的时间顺序为准（stdout/stderr 交错也能保持相对顺序）；
+    /// - 以“连续 chunk”为单位渲染：stdout/stderr 分段渲染，降低跨流语义复杂度；
+    /// - stderr 不再使用左侧前缀列，仅做灰色弱化。
+    fn render_job_output_document(&self, job: &JobViewState) -> Vec<Line<'static>> {
+        let mut out: Vec<Line<'static>> = Vec::new();
+
+        let mut stdout_chunk: Vec<String> = Vec::new();
+        let mut stderr_chunk: Vec<String> = Vec::new();
+
+        for raw in &job.raw_lines {
+            match raw.stream {
+                OutputStream::Stdout => {
+                    if !stderr_chunk.is_empty() {
+                        out.extend(self.render_stream_chunk(&stderr_chunk, true));
+                        stderr_chunk.clear();
+                    }
+                    stdout_chunk.push(raw.line.clone());
+                }
+                OutputStream::Stderr => {
+                    if !stdout_chunk.is_empty() {
+                        out.extend(self.render_stream_chunk(&stdout_chunk, false));
+                        stdout_chunk.clear();
+                    }
+                    stderr_chunk.push(raw.line.clone());
+                }
+            }
+        }
+
+        if !stdout_chunk.is_empty() {
+            out.extend(self.render_stream_chunk(&stdout_chunk, false));
+        }
+        if !stderr_chunk.is_empty() {
+            out.extend(self.render_stream_chunk(&stderr_chunk, true));
+        }
+
+        out
+    }
+
+    fn render_stream_chunk(&self, lines: &[String], muted: bool) -> Vec<Line<'static>> {
+        if lines.is_empty() {
+            return Vec::new();
+        }
+
+        let text = lines.join("\n");
+
+        // 单独处理“只有一个空行”的情况：否则会被 `render_text_to_lines` 的 empty fast-path 吃掉。
+        let mut rendered = if text.is_empty() {
+            vec![Line::from(String::new())]
+        } else {
+            render_text_to_lines(&text, self.mode, self.width)
+        };
+
+        if muted {
+            rendered = rendered
+                .into_iter()
+                .map(|line| {
+                    let spans: Vec<Span<'static>> = line
+                        .spans
+                        .into_iter()
+                        .map(|span| Span::styled(span.content, span.style.fg(MUTED_FG)))
+                        .collect();
+                    Line::from(spans)
+                })
+                .collect();
+        }
+
+        rendered
+    }
+}
+
 /// 并行模式的整体 UI state（挂到 `TuiState.parallel` 下）。
 #[derive(Debug)]
 pub struct ParallelTuiState {
@@ -587,6 +700,20 @@ pub struct ParallelTuiState {
     /// 当前选中的 gate（用于展示 gate 详情与快捷 actions）。
     pub selected_gate: Option<String>,
 
+    /// 输出渲染模式：
+    /// - 默认 Rendered：更适合阅读 AI code agent 的 Markdown 输出。
+    /// - `--plain` 会切换为 Plain：便于排障/复制粘贴/对齐旧行为。
+    pub output_render_mode: MarkdownRenderMode,
+
+    /// Markdown 语义换行宽度（仅用于 Rendered 模式下的 stdout 渲染）。
+    ///
+    /// 说明：
+    /// - `ContentPane` 本身会做“按字符的软换行”，但它不会在换行后的新行补齐 blockquote bar、
+    ///   list marker 等结构性前缀；
+    /// - 因此在使用 `termimad` 渲染 Markdown 时，需要提前按“输出面板可用宽度”做语义化换行，
+    ///   让每一行都带齐必要前缀，从而在 UI 上保持语义一致。
+    pub output_render_width: u16,
+
     /// 输出 buffer 的最大行数（超过即丢弃最旧的行）。
     pub max_buffer_lines: usize,
 }
@@ -606,6 +733,8 @@ impl Default for ParallelTuiState {
             gates: HashMap::new(),
             gate_order: Vec::new(),
             selected_gate: None,
+            output_render_mode: MarkdownRenderMode::Rendered,
+            output_render_width: 80,
             max_buffer_lines: 5_000,
         }
     }
@@ -615,6 +744,34 @@ impl ParallelTuiState {
     pub fn clear_output_selection(&mut self) {
         self.output_selection = None;
         self.output_selecting = false;
+    }
+
+    /// 更新 Markdown 渲染的换行宽度，并在宽度变化时重渲染所有 job buffer。
+    ///
+    /// 说明：
+    /// - 终端 resize 会改变输出面板的可用宽度；
+    /// - 若不重渲染，旧宽度下的“语义换行结果”会导致 blockquote/list 等前缀错位或视觉不一致；
+    /// - 为保证体验稳定，这里在宽度变化时对所有 job 做一次 best-effort 重渲染。
+    pub fn set_output_render_width(&mut self, width: u16) {
+        let width = width.max(1);
+        if self.output_render_width == width {
+            return;
+        }
+
+        self.output_render_width = width;
+
+        let max_buffer_lines = self.max_buffer_lines;
+        let mode = self.output_render_mode;
+        let width = self.output_render_width.max(1);
+
+        let renderer = ParallelOutputRenderer::new(mode, width);
+
+        for instance in self.instances.values_mut() {
+            for job in &mut instance.jobs {
+                let lines = renderer.render_job_output_document(job);
+                job.buffer.replace_content_capped(lines, max_buffer_lines);
+            }
+        }
     }
 
     pub fn set_output_cursor(&mut self, pos: ScreenPos) {
@@ -831,6 +988,10 @@ impl ParallelTuiState {
         let instance_id = chunk.instance_id.clone();
         self.register_instance(instance_id.clone(), HatInstanceState::Created);
 
+        let max_buffer_lines = self.max_buffer_lines;
+        let mode = self.output_render_mode;
+        let width = self.output_render_width.max(1);
+
         let Some(instance) = self.instances.get_mut(&instance_id) else {
             return;
         };
@@ -855,25 +1016,26 @@ impl ParallelTuiState {
                 job.first_output_at = Some(Instant::now());
             }
 
-            // 注意：并行模式输出需要带 stream 线索（避免 stderr 混淆）。
-            let prefix = match chunk.stream {
-                ralph_core::OutputStream::Stdout => "",
-                ralph_core::OutputStream::Stderr => "[stderr] ",
-            };
-            let content = format!("{prefix}{}", chunk.line);
+            // 先保存原始行，再统一渲染（支持跨行 Markdown 语义，例如 fenced code block）。
+            job.raw_lines.push(JobOutputLine {
+                stream: chunk.stream,
+                line: chunk.line.clone(),
+            });
 
-            // stderr 用灰色显示，避免和 stdout 混在一起时抢眼。
-            let line = match chunk.stream {
-                ralph_core::OutputStream::Stdout => Line::from(content),
-                ralph_core::OutputStream::Stderr => Line::from(vec![Span::styled(
-                    content,
-                    Style::default().fg(Color::DarkGray),
-                )]),
-            };
+            // 控制原始输入的上限，避免长期运行导致内存无限增长。
+            if max_buffer_lines > 0 && job.raw_lines.len() > max_buffer_lines {
+                let overflow = job.raw_lines.len().saturating_sub(max_buffer_lines);
+                job.raw_lines.drain(0..overflow);
+            }
 
-            job.buffer.append_line_capped(line, self.max_buffer_lines);
+            // 重新渲染本 job 的所有可见输出（best-effort）。
+            let renderer = ParallelOutputRenderer::new(mode, width);
+            let lines = renderer.render_job_output_document(job);
+            job.buffer.replace_content_capped(lines, max_buffer_lines);
         }
     }
+
+    // 输出渲染逻辑已抽到 `ParallelOutputRenderer`，以便在遍历 instances 时避免 &mut self 的重入借用。
 
     pub fn selected_instance_id(&self) -> Option<&HatInstanceId> {
         self.instance_order.get(self.selected_instance)
@@ -1035,5 +1197,216 @@ mod tests {
         assert_eq!(editor.text(), "X");
         assert_eq!(editor.cursor, TextPos { row: 0, col: 1 });
         assert!(!editor.has_selection());
+    }
+
+    // =========================================================================
+    // Parallel Output Rendering: Markdown Rendered / Plain
+    // =========================================================================
+
+    fn collect_latest_job_text(state: &ParallelTuiState, instance_id: &HatInstanceId) -> String {
+        let instance = state
+            .instances
+            .get(instance_id)
+            .expect("instance must exist");
+        let job = instance.jobs.last().expect("job must exist");
+        job.buffer
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn parallel_output_rendered_hides_markdown_markers_best_effort() {
+        let mut state = ParallelTuiState::default();
+        state.output_render_mode = MarkdownRenderMode::Rendered;
+
+        let instance_id = HatInstanceId::from("writer#1");
+        let job_id = 1;
+
+        // Header + blank line
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "## Section Title".to_string(),
+        });
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: String::new(),
+        });
+
+        // Blockquote
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "> quoted".to_string(),
+        });
+
+        // Fenced code block
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "```rust".to_string(),
+        });
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "let x = 1;".to_string(),
+        });
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "```".to_string(),
+        });
+
+        let text = collect_latest_job_text(&state, &instance_id);
+        assert!(
+            text.contains("Section Title"),
+            "Rendered should keep content: {text}"
+        );
+        assert!(
+            text.contains("quoted"),
+            "Rendered should keep content: {text}"
+        );
+        assert!(
+            text.contains("let x = 1;"),
+            "Rendered should keep content: {text}"
+        );
+
+        // Best-effort expectations: markdown control markers should not be shown verbatim.
+        assert!(
+            !text.contains("## "),
+            "Rendered should hide header markers: {text}"
+        );
+        assert!(
+            !text.contains("> quoted"),
+            "Rendered should hide blockquote markers: {text}"
+        );
+        assert!(
+            !text.contains("```"),
+            "Rendered should hide fence markers: {text}"
+        );
+    }
+
+    #[test]
+    fn parallel_output_stderr_markdown_rendering_matches_renderer_output() {
+        // 关键点：
+        // - stderr 不应该在“正文”里被拼接任何前缀（例如 "[stderr]" / "E "）。
+        // - 否则会破坏 Markdown 行首语义（标题/引用/列表等）。
+        let mut state = ParallelTuiState::default();
+        state.output_render_mode = MarkdownRenderMode::Rendered;
+
+        let instance_id = HatInstanceId::from("writer#1");
+        let job_id = 1;
+
+        let input = ["## Section Title", "", "> quoted", "- item"].join("\n");
+        for line in input.split('\n') {
+            state.append_output(&HatJobOutputChunk {
+                job_id,
+                instance_id: instance_id.clone(),
+                stream: OutputStream::Stderr,
+                line: line.to_string(),
+            });
+        }
+
+        let got = collect_latest_job_text(&state, &instance_id);
+        let expected = render_text_to_lines(
+            &input,
+            MarkdownRenderMode::Rendered,
+            state.output_render_width,
+        )
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        assert_eq!(
+            got, expected,
+            "stderr 内容应与 markdown 渲染器输出一致（不应注入任何 stderr 前缀）"
+        );
+    }
+
+    #[test]
+    fn parallel_output_plain_keeps_markdown_control_symbols_visible() {
+        let mut state = ParallelTuiState::default();
+        state.output_render_mode = MarkdownRenderMode::Plain;
+
+        let instance_id = HatInstanceId::from("writer#1");
+        let job_id = 1;
+
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "## Section Title".to_string(),
+        });
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "> quoted".to_string(),
+        });
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "```rust".to_string(),
+        });
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "let x = 1;".to_string(),
+        });
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "```".to_string(),
+        });
+
+        let text = collect_latest_job_text(&state, &instance_id);
+        assert!(
+            text.contains("## Section Title"),
+            "Plain should keep header markers: {text}"
+        );
+        assert!(
+            text.contains("> quoted"),
+            "Plain should keep blockquote markers: {text}"
+        );
+        assert!(
+            text.contains("```"),
+            "Plain should keep fence markers: {text}"
+        );
+    }
+
+    #[test]
+    fn parallel_output_single_empty_stdout_line_is_preserved() {
+        let mut state = ParallelTuiState::default();
+        state.output_render_mode = MarkdownRenderMode::Plain;
+
+        let instance_id = HatInstanceId::from("writer#1");
+        let job_id = 1;
+
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: String::new(),
+        });
+
+        let text = collect_latest_job_text(&state, &instance_id);
+        assert_eq!(
+            text, "",
+            "Single empty line should be preserved as empty text"
+        );
     }
 }

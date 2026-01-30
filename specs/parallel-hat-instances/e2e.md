@@ -8,6 +8,7 @@
 - `parallel.enabled=true` 时，Supervisor 能启动多个实例（含同一 hat 的多实例）。
 - 不写 `parallel.topic_contracts` 时，默认按 `hats.*.triggers` 路由（topic → hats fanout）。
 - 输出归因可观测（例如 `[writer#1:out] ...`）。
+- 输出归因可观测（例如 `[writer#1:out:job=12] ...`）。
 - `<event ...>` 能被解析并落盘到 `.ralph/events-*.jsonl`，便于回放与排障。
 - 目标校验失败可观测：会生成 `routing.escalate` 事件。
 
@@ -42,7 +43,8 @@ cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --keep-workspace
 
 1. stdout 中能看到：
    - `[supervisor] instances ...`
-   - 至少出现 `writer#1`、`writer#2`、`tester#1` 的输出/状态前缀（`writer#2` 由 autoscale 触发）
+   - 至少出现 `writer#1`、`writer#2`、`tester#1`、`collector#1` 的输出/状态前缀（`writer#2` 由 autoscale 触发）
+   - `LOOP_COMPLETE` 之后不应再出现“新的 job_id”（避免收敛后仍继续派生新 job）
 2. `.e2e-tests/<workspace>/.ralph/events-*.jsonl` 中能看到：
    - `build.task`（触发 fanout）
    - `build.done`（至少 2 次，用于证明同一 hat 多次任务可并行调度）
@@ -60,7 +62,7 @@ cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --keep-workspace
 3. 再看事件日志：
    - `.e2e-tests/<scenario>/.ralph/events-*.jsonl`
 4. 最后回到 stdout：
-   - 检查是否缺少 `[writer#2:out]`（可能并发没真正跑起来）
+   - 检查是否缺少 `[writer#2:out:job=...]`（可能并发没真正跑起来）
    - 检查是否缺少 `<event ...>`（可能模型没按格式输出，导致事件解析失败）
 
 ## 流程图（graph）
@@ -72,20 +74,24 @@ graph TD
   Ralph --> Sup["ParallelSupervisor"]
 
   Sup -->|deliver task.start| R[ralph#1]
-  R -->|emit build.task| Sup
+  R -->|"emit build.task (task_id:1)"| Sup
 
   Sup -->|fanout build.task| W1[writer#1]
   Sup -->|fanout build.task| T1[tester#1]
 
-  W1 -->|emit build.done| Events[".ralph/events-*.jsonl"]
+  W1 -->|"emit build.done (task_id:1)"| Events[".ralph/events-*.jsonl"]
   T1 -->|emit test.done| Events
 
-  R -->|emit build.task target=writer| Sup
+  T1 -->|"emit build.task target=writer (task_id:2)"| Sup
   Sup -->|autoscale + deliver| W2[writer#2]
-  W2 -->|emit build.done| Events
+  W2 -->|"emit build.done (task_id:2)"| Events
 
-  R -->|emit build.task target=ghost| Sup
+  Events -->|"deliver build.done/test.done"| C1[collector#1]
+  C1 -->|emit build.task target=ghost_hat| Sup
+
   Sup -->|reject + emit routing.escalate| Events
+  Sup -->|deliver routing.escalate| R
+  R -->|output LOOP_COMPLETE| Sup
 
   Events -->|read+assert| E2E
   E2E --> Report["report.md / report.json"]
@@ -104,24 +110,24 @@ sequenceDiagram
   participant W1 as writer#1
   participant W2 as writer#2
   participant T1 as tester#1
+  participant C1 as collector#1
 
   Dev->>E2E: run (filter=parallel-hat-instances)
   E2E->>Ralph: spawn ralph run -c ralph.yml -p <prompt>
   Ralph->>Sup: start (parallel.enabled=true)
   Sup->>R: deliver task.start(prompt)
-  R-->>Sup: <event build.task> ...
+  R-->>Sup: <event build.task> (task_id:1)
   Sup->>W1: deliver build.task
   Sup->>T1: deliver build.task
-  W1-->>Sup: <event build.done> ...
   T1-->>Sup: <event test.done> ...
-
-  R-->>Sup: <event build.task target="writer"> ...
+  T1-->>Sup: <event build.task target="writer"> (task_id:2)
   Sup->>W2: autoscale + deliver build.task
-  W2-->>Sup: <event build.done> ...
-
-  R-->>Sup: <event build.task target="ghost_hat"> ...
+  W1-->>Sup: <event build.done> (task_id:1)
+  Sup->>C1: deliver build.done/test.done
+  W2-->>Sup: <event build.done> (task_id:2)
+  Sup->>C1: deliver build.done/test.done
+  C1-->>Sup: <event build.task target="ghost_hat"> ...
   Sup-->>R: <event routing.escalate> ...
-  Sup->>R: deliver build.done/test.done
   R-->>Sup: output LOOP_COMPLETE
   Sup-->>Ralph: terminate
   Ralph-->>E2E: exit code + stdout/stderr

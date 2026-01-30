@@ -81,7 +81,7 @@ pub struct ShowArgs {
 }
 
 /// Execute a hats command.
-pub fn execute(config_path: &std::path::PathBuf, args: HatsArgs, use_colors: bool) -> Result<()> {
+pub fn execute(config_path: &std::path::Path, args: HatsArgs, use_colors: bool) -> Result<()> {
     let config_source = ConfigSource::parse(config_path.to_string_lossy().as_ref());
     let mut config = load_config(&config_source)?;
     config.normalize();
@@ -101,13 +101,9 @@ pub fn execute(config_path: &std::path::PathBuf, args: HatsArgs, use_colors: boo
             show_hat(&mut stdout, &registry, &show_args.name, use_colors)
         }
         Some(HatsCommands::Validate) => validate_hats(&mut stdout, &config, &registry, use_colors),
-        Some(HatsCommands::Graph { format, backend }) => graph_hats(
-            &mut stdout,
-            &config,
-            &registry,
-            format,
-            backend.as_deref(),
-        ),
+        Some(HatsCommands::Graph { format, backend }) => {
+            graph_hats(&mut stdout, &config, &registry, format, backend.as_deref())
+        }
     }
 }
 
@@ -263,7 +259,10 @@ fn validate_hats<W: Write>(
                 print_check(
                     writer,
                     CheckResult::Warn,
-                    &format!("Event '{topic}' published by '{}' has no hat subscribers", hat.name),
+                    &format!(
+                        "Event '{topic}' published by '{}' has no hat subscribers",
+                        hat.name
+                    ),
                     use_colors,
                 )?;
                 warnings += 1;
@@ -296,7 +295,10 @@ fn validate_hats<W: Write>(
 
     writeln!(writer)?;
     if errors > 0 {
-        writeln!(writer, "Result: Invalid ({errors} errors, {warnings} warnings)")?;
+        writeln!(
+            writer,
+            "Result: Invalid ({errors} errors, {warnings} warnings)"
+        )?;
         // Return error to propagate failure to main
         return Err(anyhow::anyhow!("Validation failed with {errors} errors"));
     }
@@ -323,7 +325,9 @@ fn print_check<W: Write>(
 ) -> Result<()> {
     if use_colors {
         match result {
-            CheckResult::Ok => writeln!(writer, "  [{}ok{}] {}", colors::GREEN, colors::RESET, msg)?,
+            CheckResult::Ok => {
+                writeln!(writer, "  [{}ok{}] {}", colors::GREEN, colors::RESET, msg)?
+            }
             CheckResult::Warn => writeln!(
                 writer,
                 "  [{}warn{}] {}",
@@ -425,7 +429,9 @@ fn render_hat_dag_via_ai(
     }
 
     // Wait for completion
-    let output = child.wait_with_output().context("Failed to wait for backend")?;
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for backend")?;
 
     spinner.finish_and_clear();
 
@@ -439,7 +445,9 @@ fn render_hat_dag_via_ai(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() {
-        return Err(anyhow::anyhow!("Backend '{backend_name}' returned empty output"));
+        return Err(anyhow::anyhow!(
+            "Backend '{backend_name}' returned empty output"
+        ));
     }
 
     // Extract just the ASCII diagram from the response
@@ -616,7 +624,11 @@ fn generate_mermaid_string(registry: &HatRegistry) -> String {
     for hat in registry.all() {
         let node_id = sanitize_id(&hat.name);
         for pub_event in &hat.publishes {
-            output.push_str(&format!("    {} -->|{}| Ralph\n", node_id, pub_event.as_str()));
+            output.push_str(&format!(
+                "    {} -->|{}| Ralph\n",
+                node_id,
+                pub_event.as_str()
+            ));
         }
     }
 
@@ -770,7 +782,9 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
 
         // Should warn about build.done having no subscribers
-        assert!(output.contains("Event 'build.done' published by 'Builder' has no hat subscribers"));
+        assert!(
+            output.contains("Event 'build.done' published by 'Builder' has no hat subscribers")
+        );
         assert!(output.contains("Result: Valid"));
     }
 

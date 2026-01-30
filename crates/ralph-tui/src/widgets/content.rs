@@ -128,8 +128,7 @@ impl Widget for ContentPane<'_> {
                         while x < area.x + area.width {
                             let rel_x = x.saturating_sub(area.x);
                             let rel_y = y.saturating_sub(area.y);
-                            let selected =
-                                self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                            let selected = self.selection.is_some_and(|s| s.contains(rel_x, rel_y));
                             let style = if selected {
                                 Style::default().bg(selection_bg)
                             } else {
@@ -151,7 +150,7 @@ impl Widget for ContentPane<'_> {
                     // write ASCII into a CJK/emoji continuation cell and "swallow" the next char.
                     let rel_x = x.saturating_sub(area.x);
                     let rel_y = y.saturating_sub(area.y);
-                    let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                    let selected = self.selection.is_some_and(|s| s.contains(rel_x, rel_y));
                     let style = if selected {
                         span.style.bg(selection_bg)
                     } else {
@@ -164,7 +163,7 @@ impl Widget for ContentPane<'_> {
                     while x < next_symbol {
                         let rel_x = x.saturating_sub(area.x);
                         let rel_y = y.saturating_sub(area.y);
-                        let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                        let selected = self.selection.is_some_and(|s| s.contains(rel_x, rel_y));
                         if selected {
                             buf[(x, y)].reset();
                             buf[(x, y)].set_style(Style::default().bg(selection_bg));
@@ -180,7 +179,7 @@ impl Widget for ContentPane<'_> {
             while x < area.x + area.width {
                 let rel_x = x.saturating_sub(area.x);
                 let rel_y = y.saturating_sub(area.y);
-                let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                let selected = self.selection.is_some_and(|s| s.contains(rel_x, rel_y));
                 let style = if selected {
                     Style::default().bg(selection_bg)
                 } else {
@@ -200,7 +199,7 @@ impl Widget for ContentPane<'_> {
             for x in area.x..area.x + area.width {
                 let rel_x = x.saturating_sub(area.x);
                 let rel_y = y.saturating_sub(area.y);
-                let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
+                let selected = self.selection.is_some_and(|s| s.contains(rel_x, rel_y));
                 let style = if selected {
                     Style::default().bg(selection_bg)
                 } else {

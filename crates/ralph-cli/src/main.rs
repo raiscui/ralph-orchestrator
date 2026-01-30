@@ -347,6 +347,13 @@ struct RunArgs {
     #[arg(long, conflicts_with = "autonomous")]
     no_tui: bool,
 
+    /// Disable Markdown rendering in output views (show raw text).
+    ///
+    /// Why: AI code agent 输出常包含 Markdown。默认渲染更易读；
+    /// 当你需要排障/复制粘贴/对齐旧行为时，用 `--plain` 强制纯文本。
+    #[arg(long)]
+    plain: bool,
+
     /// Force autonomous mode (headless, non-interactive).
     /// Overrides default_mode from config.
     #[arg(short, long, conflicts_with = "no_tui")]
@@ -373,11 +380,11 @@ struct RunArgs {
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
 
-    /// (Parallel mode) Show stderr (`:err:`) streaming lines (hidden by default).
+    /// (Parallel mode) Hide stderr (`:err:`) streaming lines (shown by default).
     ///
-    /// Why: In parallel mode, stderr is often backend/CLI logs and echoes,
-    /// which can drown out the actual stdout "work output".
-    #[arg(long)]
+    /// Why: In parallel mode, stderr is often backend/CLI logs and echoes.
+    /// When you want a quieter view, hide it explicitly.
+    #[arg(long = "hide-stderr", action = clap::ArgAction::SetFalse, default_value_t = true)]
     show_stderr: bool,
 
     /// (Parallel mode) Only show streaming output from these instances (repeatable).
@@ -401,6 +408,10 @@ struct ResumeArgs {
     #[arg(long, conflicts_with = "autonomous")]
     no_tui: bool,
 
+    /// Disable Markdown rendering in output views (show raw text).
+    #[arg(long)]
+    plain: bool,
+
     /// Force autonomous mode
     #[arg(short, long, conflicts_with = "no_tui")]
     autonomous: bool,
@@ -421,8 +432,8 @@ struct ResumeArgs {
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
 
-    /// (Parallel mode) Show stderr (`:err:`) streaming lines (hidden by default).
-    #[arg(long)]
+    /// (Parallel mode) Hide stderr (`:err:`) streaming lines (shown by default).
+    #[arg(long = "hide-stderr", action = clap::ArgAction::SetFalse, default_value_t = true)]
     show_stderr: bool,
 
     /// (Parallel mode) Only show streaming output from these instances (repeatable).
@@ -644,7 +655,9 @@ async fn main() -> Result<()> {
         Some(Commands::CodeTask(args)) => code_task_command(cli.config, cli.color, args),
         Some(Commands::Task(args)) => code_task_command(cli.config, cli.color, args),
         Some(Commands::Tools(args)) => tools::execute(args, cli.color.should_use_colors()),
-        Some(Commands::Hats(args)) => hats::execute(&cli.config, args, cli.color.should_use_colors()),
+        Some(Commands::Hats(args)) => {
+            hats::execute(&cli.config, args, cli.color.should_use_colors())
+        }
         None => {
             // Default to run with TUI enabled (new default behavior)
             let args = RunArgs {
@@ -656,12 +669,13 @@ async fn main() -> Result<()> {
                 dry_run: false,
                 continue_mode: false,
                 no_tui: false, // TUI enabled by default
+                plain: false,
                 autonomous: false,
                 idle_timeout: None,
                 verbose: false,
                 quiet: false,
                 record_session: None,
-                show_stderr: false,
+                show_stderr: true,
                 instance: Vec::new(),
             };
             run_command(cli.config, cli.verbose, cli.color, args).await
@@ -865,10 +879,13 @@ async fn run_command(
         parallel_runner::run_parallel_loop_impl(
             config,
             color_mode,
-            resume,
-            enable_tui,
+            parallel_runner::ParallelLoopFlags {
+                resume,
+                enable_tui,
+                plain: args.plain,
+                show_stderr: args.show_stderr,
+            },
             verbosity,
-            args.show_stderr,
             args.record_session,
             args.instance.clone(),
         )
@@ -880,6 +897,7 @@ async fn run_command(
             resume,
             enable_tui,
             verbosity,
+            args.plain,
             args.record_session,
         )
         .await?
@@ -1002,10 +1020,13 @@ async fn resume_command(
         parallel_runner::run_parallel_loop_impl(
             config,
             color_mode,
-            true,
-            enable_tui,
+            parallel_runner::ParallelLoopFlags {
+                resume: true,
+                enable_tui,
+                plain: args.plain,
+                show_stderr: args.show_stderr,
+            },
             verbosity,
-            args.show_stderr,
             args.record_session,
             args.instance.clone(),
         )
@@ -1017,6 +1038,7 @@ async fn resume_command(
             true,
             enable_tui,
             verbosity,
+            args.plain,
             args.record_session,
         )
         .await?
@@ -1485,6 +1507,58 @@ fn list_directory_contents(path: &Path, use_colors: bool, indent: usize) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_args_show_stderr_defaults_to_true() {
+        // 说明：并行模式默认显示 stderr（便于调试），只有显式 `--hide-stderr` 才隐藏。
+        let args = RunArgs::parse_from(["run"]);
+        assert!(args.show_stderr);
+    }
+
+    #[test]
+    fn run_args_hide_stderr_sets_show_stderr_false() {
+        // 说明：`--hide-stderr` 是显式降噪开关。
+        let args = RunArgs::parse_from(["run", "--hide-stderr"]);
+        assert!(!args.show_stderr);
+    }
+
+    #[test]
+    fn resume_args_show_stderr_defaults_to_true() {
+        // 说明：resume 与 run 的默认策略保持一致。
+        let args = ResumeArgs::parse_from(["resume"]);
+        assert!(args.show_stderr);
+    }
+
+    #[test]
+    fn resume_args_hide_stderr_sets_show_stderr_false() {
+        // 说明：resume 也支持显式隐藏 stderr。
+        let args = ResumeArgs::parse_from(["resume", "--hide-stderr"]);
+        assert!(!args.show_stderr);
+    }
+
+    #[test]
+    fn run_args_plain_defaults_to_false() {
+        let args = RunArgs::parse_from(["run"]);
+        assert!(!args.plain);
+    }
+
+    #[test]
+    fn run_args_plain_sets_true() {
+        let args = RunArgs::parse_from(["run", "--plain"]);
+        assert!(args.plain);
+    }
+
+    #[test]
+    fn resume_args_plain_defaults_to_false() {
+        let args = ResumeArgs::parse_from(["resume"]);
+        assert!(!args.plain);
+    }
+
+    #[test]
+    fn resume_args_plain_sets_true() {
+        let args = ResumeArgs::parse_from(["resume", "--plain"]);
+        assert!(args.plain);
+    }
 
     #[test]
     fn test_verbosity_cli_quiet() {

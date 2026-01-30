@@ -11,6 +11,7 @@ use crate::Backend;
 use crate::executor::{ExecutionResult, PromptSource, RalphExecutor, ScenarioConfig};
 use crate::models::TestResult;
 use async_trait::async_trait;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -34,6 +35,119 @@ pub struct ParallelHatInstancesScenario {
     description: String,
     tier: String,
     locale: ParallelScenarioLocale,
+}
+
+// =============================================================================
+// 并行 stdout 解析：统计“每个 instance 实际跑了多少个 job”
+// =============================================================================
+
+/// 从并行日志模式 stdout 中提取“实例→job_id 集合”。
+///
+/// 说明：
+/// - 并行 runner 的日志行形如：`[writer#1:out:job=12] ...`
+/// - 同一个 job 会输出多行，因此必须按 job_id 去重。
+/// - 这里不依赖 `.ralph/events*.jsonl`，因为很多 hat 不一定会 publish 事件，但仍可能运行 job。
+#[derive(Debug, Default, Clone)]
+pub(super) struct JobRunCounts {
+    jobs_by_instance: HashMap<String, HashSet<u64>>,
+}
+
+impl JobRunCounts {
+    pub(super) fn from_stdout(stdout: &str) -> Self {
+        let mut out = Self::default();
+
+        for line in stdout.lines() {
+            if let Some((instance_id, job_id)) = parse_parallel_job_line(line) {
+                out.jobs_by_instance
+                    .entry(instance_id)
+                    .or_default()
+                    .insert(job_id);
+            }
+        }
+
+        out
+    }
+
+    pub(super) fn runs_for_instance(&self, instance_id: &str) -> usize {
+        self.jobs_by_instance
+            .get(instance_id)
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+
+    /// 按“hat 名称”聚合的运行次数（跨 instance 汇总）。
+    ///
+    /// 说明：
+    /// - 并行 autoscale 可能产生动态实例（例如 `spec_writer#2`）。
+    /// - 因此在断言“某个 hat 总共跑了多少次”时，应按 hat 名聚合，而不是只盯某个固定实例号。
+    pub(super) fn runs_for_hat(&self, hat_name: &str) -> usize {
+        let prefix = format!("{hat_name}#");
+
+        self.jobs_by_instance
+            .iter()
+            .filter(|(instance_id, _)| instance_id.starts_with(&prefix))
+            .map(|(_, jobs)| jobs.len())
+            .sum()
+    }
+
+    pub(super) fn summary(&self) -> String {
+        // 稳定排序：便于在失败时阅读（避免 HashMap 顺序抖动）
+        let mut pairs = self
+            .jobs_by_instance
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.len()))
+            .collect::<Vec<_>>();
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+
+        pairs
+            .into_iter()
+            .map(|(k, n)| format!("{k}={n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub(super) fn hat_summary(&self) -> String {
+        let mut by_hat: HashMap<String, usize> = HashMap::new();
+
+        for (instance_id, jobs) in &self.jobs_by_instance {
+            let hat = instance_id.split('#').next().unwrap_or(instance_id);
+            *by_hat.entry(hat.to_string()).or_default() += jobs.len();
+        }
+
+        let mut pairs = by_hat.into_iter().collect::<Vec<_>>();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        pairs
+            .into_iter()
+            .map(|(k, n)| format!("{k}={n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+pub(super) fn parse_parallel_job_line(line: &str) -> Option<(String, u64)> {
+    // 期望格式：
+    // - [writer#1:out:job=12] ...
+    // - [writer#1:err:job=12] ...
+    let line = line.trim_start();
+    if !line.starts_with('[') {
+        return None;
+    }
+
+    let end = line.find(']')?;
+    let inside = &line[1..end];
+
+    let mut parts = inside.split(':');
+    let instance_id = parts.next()?;
+    let stream = parts.next()?;
+    let job_part = parts.next()?;
+
+    if stream != "out" && stream != "err" {
+        return None;
+    }
+
+    let job_id = job_part.strip_prefix("job=")?.parse::<u64>().ok()?;
+    Some((instance_id.to_string(), job_id))
 }
 
 impl ParallelHatInstancesScenario {
@@ -83,9 +197,17 @@ impl ParallelHatInstancesScenario {
         let stdout = &result.stdout;
 
         // 这里不依赖模型在 payload 里回显 instance_id，而是依赖 runner 的“日志归因前缀”。
-        let has_writer_1 = stdout.contains("[writer#1:out]") || stdout.contains("[writer#1:state]");
-        let has_writer_2 = stdout.contains("[writer#2:out]") || stdout.contains("[writer#2:state]");
-        let has_tester_1 = stdout.contains("[tester#1:out]") || stdout.contains("[tester#1:state]");
+        //
+        // 注意：并行日志模式的输出行形如 `[writer#1:out:job=12] ...`，因此这里用 `:out:job=` 匹配。
+        let has_writer_1 = stdout.contains("[writer#1:out:job=")
+            || stdout.contains("[writer#1:err:job=")
+            || stdout.contains("[writer#1:state]");
+        let has_writer_2 = stdout.contains("[writer#2:out:job=")
+            || stdout.contains("[writer#2:err:job=")
+            || stdout.contains("[writer#2:state]");
+        let has_tester_1 = stdout.contains("[tester#1:out:job=")
+            || stdout.contains("[tester#1:err:job=")
+            || stdout.contains("[tester#1:state]");
         let ok = has_writer_1 && has_writer_2 && has_tester_1;
 
         let builder = AssertionBuilder::new("Attributed instance output")
@@ -155,6 +277,105 @@ impl ParallelHatInstancesScenario {
             builder.failed().build()
         }
     }
+
+    fn hat_run_counts_expected(&self, result: &ExecutionResult) -> crate::models::Assertion {
+        // 说明：
+        // - 这里统计的是“job 次数”，而不是事件次数。
+        // - 一个 job 可能输出很多行，因此必须按 job_id 去重（见 JobRunCounts）。
+        let counts = JobRunCounts::from_stdout(&result.stdout);
+
+        // 期望闭环（确定性）：
+        // - ralph#1：2 次（task.start -> entry；routing.escalate -> completion）
+        // - writer：2 次（task_id=1 -> writer#1；task_id=2 -> autoscale -> writer#2）
+        // - tester：1 次（build.task(task_id=1)）
+        // - collector：3 次（test.done + build.done(task_id=1) + build.done(task_id=2)）
+        let expected = [
+            ("ralph#1", 2),
+            ("writer#1", 1),
+            ("writer#2", 1),
+            ("tester#1", 1),
+            ("collector#1", 3),
+        ];
+
+        let mut mismatches = Vec::new();
+        for (instance_id, expected_runs) in expected {
+            let got = counts.runs_for_instance(instance_id);
+            if got != expected_runs {
+                mismatches.push(format!(
+                    "{instance_id}: expected {expected_runs}, got {got}"
+                ));
+            }
+        }
+
+        let ok = mismatches.is_empty();
+        let builder = AssertionBuilder::new("Hat run counts")
+            .expected("ralph#1=2, writer#1=1, writer#2=1, tester#1=1, collector#1=3")
+            .actual(if ok {
+                counts.summary()
+            } else {
+                format!(
+                    "counts: {}; mismatches: {}",
+                    counts.summary(),
+                    mismatches.join("; ")
+                )
+            });
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
+    fn no_new_jobs_started_after_loop_complete(
+        &self,
+        result: &ExecutionResult,
+    ) -> crate::models::Assertion {
+        // 说明：
+        // - `LOOP_COMPLETE` 出现后，允许“已在跑的 job”继续输出（同一个 job_id 会重复出现）。
+        // - 但不允许再出现“新的 job_id”（这意味着 completion 之后仍在派生新 job）。
+        let completion_promise = "LOOP_COMPLETE";
+        let mut completion_seen = false;
+
+        let mut jobs_before: HashSet<(String, u64)> = HashSet::new();
+        let mut new_jobs_after: HashSet<(String, u64)> = HashSet::new();
+
+        for line in result.stdout.lines() {
+            if let Some((instance_id, job_id)) = parse_parallel_job_line(line) {
+                let key = (instance_id, job_id);
+                if completion_seen {
+                    if !jobs_before.contains(&key) {
+                        new_jobs_after.insert(key);
+                    }
+                } else {
+                    jobs_before.insert(key);
+                }
+            }
+
+            // 注意：必须在解析 job_id 之后再判断 completion，
+            // 这样 `[ralph#1:out:job=...] LOOP_COMPLETE` 会被算作 completion 之前的 job。
+            if !completion_seen && line.trim_end().ends_with(completion_promise) {
+                completion_seen = true;
+            }
+        }
+
+        let mut new_list = new_jobs_after.into_iter().collect::<Vec<_>>();
+        new_list.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        let ok = completion_seen && new_list.is_empty();
+        let builder = AssertionBuilder::new("No new jobs after LOOP_COMPLETE")
+            .expected("After LOOP_COMPLETE, no new job_id should appear in stdout")
+            .actual(format!(
+                "completion_seen={}, new_jobs_after={:?}",
+                completion_seen, new_list
+            ));
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -207,9 +428,9 @@ impl TestScenario for ParallelHatInstancesScenario {
         // - complete_publishes=routing.escalate：将“严格投递失败”的升级事件作为 completion candidate
         //   - 该事件由 Supervisor 显式投递给 ralph#1（不走 triggers），因此可作为稳定的收敛信号
         // - tester 在其输出中：
-        //   1) 发 test.done（用于断言）
-        //   2) 发 build.task target=writer（期望触发 autoscale -> writer#2）
-        //   3) 发 build.task target=ghost_hat（严格投递失败 -> routing.escalate -> ralph#1 收敛）
+        //   1) 在收到 build.task(task_id=1) 时：发 test.done + build.task(target=writer, task_id=2)（触发 autoscale -> writer#2）
+        // - collector 在其输出中：
+        //   1) 在收到 build.done(task_id=2) 时：发 build.task(target=ghost_hat)（严格投递失败 -> routing.escalate -> ralph#1 收敛）
         // - 增加 collector 订阅 build.done/test.done，避免 ralph#1 被“非收敛事件”打扰（只处理 routing.escalate）
         let config_content = match self.locale {
             ParallelScenarioLocale::English => format!(
@@ -250,12 +471,17 @@ hats:
       When you receive a build.task event:
       IMPORTANT (E2E harness):
       - Do NOT run tests, do NOT run shell commands/tools, do NOT edit files.
-      - Emit the output line + the event immediately.
+      - Print at least 1 stdout line immediately (so the harness can see the job_id).
 
-      1) Print 200 short lines that include the word "writer" (make this slower to keep writer#1 busy)
-      2) Emit ONE build.done event using this exact XML format:
+      1) Print one short line that includes the word "writer"
+      2) Print 200 short lines that include the word "writer" (make this slower to keep writer#1 busy)
+      3) Emit ONE build.done event using this exact XML format.
+         IMPORTANT: include a task_id in the payload:
+         - If the input payload contains the line "task_id: 2", emit "task_id: 2"
+         - Otherwise emit "task_id: 1"
 
       <event topic="build.done">
+      task_id: 1
       status: ok
       </event>
 
@@ -263,21 +489,20 @@ hats:
 
   tester:
     name: "Tester"
-    description: "Emits test.done, triggers autoscale, and closes the workflow."
+    description: "Emits test.done, triggers autoscale, then waits for Collector to close the workflow."
     instances: 1
     triggers: ["build.task"]
     publishes: ["test.done", "build.task"]
     instructions: |
       You are Tester.
 
-      When you receive a build.task event:
       IMPORTANT (E2E harness):
       - Do NOT run tests, do NOT run shell commands/tools, do NOT edit files.
-      - Emit the output line + the event immediately.
+      - Print exactly ONE short stdout line per job so the harness can count job runs.
 
+      When you receive a build.task event (task_id: 1):
       1) Print one short line that includes the word "tester"
-
-      2) Emit ONE test.done event using this exact XML format:
+      2) Emit ONE test.done event:
 
       <event topic="test.done">
       status: ok
@@ -286,32 +511,37 @@ hats:
       3) Emit ONE build.task event targeting writer (this should trigger autoscale -> writer#2):
 
       <event topic="build.task" target="writer">
+      task_id: 2
       Task: Second task to exercise autoscale (writer#2)
       </event>
 
-      4) Emit ONE build.task event targeting ghost_hat (this MUST be rejected and should trigger routing.escalate):
-
-      <event topic="build.task" target="ghost_hat">
-      Task: This must be rejected and should trigger routing.escalate
-      </event>
+      Do NOT emit any other events in this job.
 
       Do NOT output LOOP_COMPLETE.
-      Do NOT emit any other events.
 
   collector:
     name: "Collector"
-    description: "Consumes build/test events so ralph#1 can focus on completion (routing.escalate)."
+    description: "Consumes build/test events and closes the workflow by triggering a strict target failure."
     instances: 1
     triggers: ["build.done", "test.done"]
-    publishes: []
+    publishes: ["build.task"]
     instructions: |
       You are Collector.
 
       IMPORTANT (E2E harness):
       - Do NOT run tests, do NOT run shell commands/tools, do NOT edit files.
-      - Do NOT emit any events.
+      - Print exactly ONE short stdout line per job.
 
-      For each input event, print ONE short line that includes the topic.
+      Rules:
+      - For each input event, print ONE short line that includes the topic.
+      - If you receive build.done and the payload contains the line "task_id: 2", emit ONE build.task targeting ghost_hat
+        (this MUST be rejected and should trigger routing.escalate):
+
+        <event topic="build.task" target="ghost_hat">
+        Task: This must be rejected and should trigger routing.escalate
+        </event>
+
+      - Otherwise, emit NO events.
 "#,
                 backend = backend,
                 cli_backend = backend.as_config_str(),
@@ -354,12 +584,17 @@ hats:
       当你收到 build.task 事件时：
       重要（E2E harness 约束）：
       - 不要运行测试，不要运行任何 shell 命令/工具，不要编辑文件。
-      - 立刻输出文本，然后立刻发出事件。
+      - 至少先立刻输出 1 行 stdout（让 harness 能看到 job_id），再发事件。
 
-      1) 打印 200 行短文本，每行都包含单词 "writer"（刻意慢一点，保证 writer#1 足够忙）
-      2) 只发出一个 build.done 事件，必须使用如下 XML 格式（格式必须完全一致）：
+      1) 打印 1 行短文本，包含单词 "writer"
+      2) 打印 200 行短文本，每行都包含单词 "writer"（刻意慢一点，保证 writer#1 足够忙）
+      3) 只发出一个 build.done 事件，必须使用如下 XML 格式（格式必须完全一致）。
+         重要：payload 里必须带 task_id：
+         - 如果输入 payload 里包含一行 "task_id: 2"，则输出 "task_id: 2"
+         - 否则输出 "task_id: 1"
 
       <event topic="build.done">
+      task_id: 1
       status: ok
       </event>
 
@@ -367,21 +602,20 @@ hats:
 
   tester:
     name: "测试员"
-    description: "发出 test.done，触发 autoscale，并发出完成候选事件。"
+    description: "发出 test.done，触发 autoscale，然后等待 Collector 触发收敛。"
     instances: 1
     triggers: ["build.task"]
     publishes: ["test.done", "build.task"]
     instructions: |
       你是 Tester（测试员）。
 
-      当你收到 build.task 事件时：
       重要（E2E harness 约束）：
       - 不要运行测试，不要运行任何 shell 命令/工具，不要编辑文件。
-      - 立刻输出文本，然后立刻发出事件。
+      - 每次 job 只输出 1 行 stdout（让 harness 能统计 job 运行次数）。
 
+      当你收到 build.task（task_id: 1）事件：
       1) 打印 1 行短文本，包含单词 "tester"
-
-      2) 只发出一个 test.done 事件，必须使用如下 XML 格式（格式必须完全一致）：
+      2) 发出一个 test.done 事件（格式必须完全一致）：
 
       <event topic="test.done">
       status: ok
@@ -390,32 +624,37 @@ hats:
       3) 发出一个 build.task 事件，target=writer（这应该触发 autoscale -> writer#2）：
 
       <event topic="build.task" target="writer">
+      task_id: 2
       Task: Second task to exercise autoscale (writer#2)
       </event>
 
-      4) 发出一个 build.task 事件，target=ghost_hat（必须被拒绝，并触发 routing.escalate）：
-
-      <event topic="build.task" target="ghost_hat">
-      Task: This must be rejected and should trigger routing.escalate
-      </event>
+      不要发出任何其它事件。
 
       不要输出 LOOP_COMPLETE。
-      不要发出任何其它事件。
 
   collector:
     name: "收集员"
     description: "消费 build/test 事件，避免 ralph#1 被非收敛事件打扰。"
     instances: 1
     triggers: ["build.done", "test.done"]
-    publishes: []
+    publishes: ["build.task"]
     instructions: |
       你是 Collector（收集员）。
 
       重要（E2E harness 约束）：
       - 不要运行测试，不要运行任何 shell 命令/工具，不要编辑文件。
-      - 不要发出任何事件。
+      - 每次 job 只输出 1 行 stdout（让 harness 能统计 job 运行次数）。
 
-      对每个输入事件，只输出一行短文本，内容里要包含 topic。
+      规则：
+      - 对每个输入事件，只输出一行短文本，内容里要包含 topic。
+      - 如果你收到 build.done 且 payload 里包含一行 "task_id: 2"，则发出一个 build.task 事件，target=ghost_hat
+        （必须被拒绝，并触发 routing.escalate）：
+
+        <event topic="build.task" target="ghost_hat">
+        Task: This must be rejected and should trigger routing.escalate
+        </event>
+
+      - 否则，不要发出任何事件。
 "#,
                 backend = backend,
                 cli_backend = backend.as_config_str(),
@@ -456,6 +695,7 @@ status: this must NOT be recorded as a real event
 
 Goal:
 - Follow the configured workflow (starting_event + complete_publishes).
+- When you emit the workflow entry event (starting_event: build.task), the payload MUST include the line `task_id: 1`.
 - Do NOT implement code, do NOT run tools/shell commands, do NOT edit files.
 - In this E2E test, `routing.escalate` is EXPECTED (invalid target is deliberate).
 - You MUST output `LOOP_COMPLETE` on its own line and stop when you observe the completion candidate event `routing.escalate`.
@@ -480,6 +720,7 @@ status: this must NOT be recorded as a real event
 
 Goal:
 - Follow the configured workflow (starting_event + complete_publishes).
+- When you emit the workflow entry event (starting_event: build.task), the payload MUST include the line `task_id: 1`.
 - Do NOT implement code, do NOT run tools/shell commands, do NOT edit files.
 - In this E2E test, `routing.escalate` is EXPECTED (invalid target is deliberate).
 - You MUST output `LOOP_COMPLETE` on its own line and stop when you observe the completion candidate event `routing.escalate`.
@@ -490,15 +731,16 @@ IMPORTANT:
 "#
             }
             (ParallelScenarioLocale::English, _) => {
-                r#"You are running an E2E test for Ralph's PARALLEL runtime.
+                r"You are running an E2E test for Ralph's PARALLEL runtime.
 
 Goal:
 - Follow the configured workflow (starting_event + complete_publishes).
+- When you emit the workflow entry event (starting_event: build.task), the payload MUST include the line `task_id: 1`.
 - Do NOT implement code, do NOT run tools/shell commands, do NOT edit files.
 - In this E2E test, `routing.escalate` is EXPECTED (invalid target is deliberate).
 - You MUST output `LOOP_COMPLETE` on its own line and stop when you observe the completion candidate event `routing.escalate`.
 - Do NOT retry or emit follow-up events when you see `routing.escalate`.
-"#
+"
             }
             (ParallelScenarioLocale::Chinese, "variant1") => {
                 r#"你正在运行 Ralph 的并行 runtime 的端到端（E2E）测试。
@@ -514,6 +756,7 @@ status: 这段绝不能被记录为真实事件
 
 目标：
 - 遵循配置中的工作流（starting_event + complete_publishes）。
+- 当你发出工作流入口事件（starting_event: build.task）时，payload 必须包含一行 `task_id: 1`。
 - 不实现代码，不运行任何工具/命令，不编辑文件。
 - 在这个 E2E 测试里，`routing.escalate` 是预期事件（无效 target 是故意的）。
 - 当你观察到完成候选事件 `routing.escalate` 时，你必须单独一行输出 `LOOP_COMPLETE` 并停止。
@@ -538,6 +781,7 @@ status: 这段绝不能被记录为真实事件
 
 目标：
 - 遵循配置中的工作流（starting_event + complete_publishes）。
+- 当你发出工作流入口事件（starting_event: build.task）时，payload 必须包含一行 `task_id: 1`。
 - 不实现代码，不运行任何工具/命令，不编辑文件。
 - 在这个 E2E 测试里，`routing.escalate` 是预期事件（无效 target 是故意的）。
 - 当你观察到完成候选事件 `routing.escalate` 时，你必须单独一行输出 `LOOP_COMPLETE` 并停止。
@@ -548,15 +792,16 @@ status: 这段绝不能被记录为真实事件
 "#
             }
             (ParallelScenarioLocale::Chinese, _) => {
-                r#"你正在运行 Ralph 的并行 runtime 的端到端（E2E）测试。
+                r"你正在运行 Ralph 的并行 runtime 的端到端（E2E）测试。
 
 目标：
 - 遵循配置中的工作流（starting_event + complete_publishes）。
+- 当你发出工作流入口事件（starting_event: build.task）时，payload 必须包含一行 `task_id: 1`。
 - 不实现代码，不运行任何工具/命令，不编辑文件。
 - 在这个 E2E 测试里，`routing.escalate` 是预期事件（无效 target 是故意的）。
 - 当你观察到完成候选事件 `routing.escalate` 时，你必须单独一行输出 `LOOP_COMPLETE` 并停止。
 - 看到 `routing.escalate` 不要重试，也不要再派发后续事件。
-"#
+"
             }
         };
 
@@ -597,6 +842,8 @@ status: 这段绝不能被记录为真实事件
             self.attributed_outputs_visible(&execution),
             self.expected_events_recorded(&execution),
             self.routing_escalate_recorded(&execution),
+            self.hat_run_counts_expected(&execution),
+            self.no_new_jobs_started_after_loop_complete(&execution),
         ];
 
         let all_passed = assertions.iter().all(|a| a.passed);

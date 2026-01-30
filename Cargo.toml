@@ -110,7 +110,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 
 # Terminal markdown rendering
-termimad = "0.31"
+termimad = "0.34.1"
 
 # Terminal colors
 colored = "3"

@@ -89,6 +89,7 @@ pub use crate::scenarios::{
     MultiIterScenario,
     // Tier 8: Parallel Runtime (experimental)
     ParallelHatInstancesScenario,
+    ParallelTriggerRoutingExampleScenario,
     ScenarioError,
     SingleIterScenario,
     // Tier 4: Capabilities (backend-agnostic)

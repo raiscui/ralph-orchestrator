@@ -1,6 +1,7 @@
 //! 并行模式：实例列表面板（HatInstance 列表）。
 
 use crate::state::{ParallelFocus, ParallelTuiState};
+use crate::theme::MUTED_FG;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -73,7 +74,7 @@ impl Widget for InstancesPane<'_> {
                     Span::raw(" "),
                     Span::raw(state),
                     Span::raw(" "),
-                    Span::styled(age, Style::default().fg(Color::DarkGray)),
+                    Span::styled(age, Style::default().fg(MUTED_FG)),
                 ]);
                 ListItem::new(line)
             })

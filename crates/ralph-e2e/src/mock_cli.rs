@@ -128,10 +128,10 @@ fn replay_terminal_writes<W: Write>(
             })?;
 
         // instance_id 过滤（并行模式回放分流）
-        if let Some(filter) = instance_filter {
-            if write.instance_id.as_deref() != Some(filter) {
-                continue;
-            }
+        if let Some(filter) = instance_filter
+            && write.instance_id.as_deref() != Some(filter)
+        {
+            continue;
         }
 
         // timing：只基于“被选中的记录”计算 delay（避免过滤后 still sleep 太久）

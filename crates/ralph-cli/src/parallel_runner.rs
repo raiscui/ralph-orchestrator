@@ -313,20 +313,30 @@ impl CliHatJobExecutor {
 ///
 /// 说明：
 /// - 目前 parallel 模式先走“日志输出”路径，TUI 仍沿用旧串行实现。
+#[derive(Debug, Clone, Copy)]
+pub struct ParallelLoopFlags {
+    pub resume: bool,
+    pub enable_tui: bool,
+    pub plain: bool,
+    pub show_stderr: bool,
+}
+
 pub async fn run_parallel_loop_impl(
     config: RalphConfig,
     color_mode: ColorMode,
-    resume: bool,
-    enable_tui: bool,
+    flags: ParallelLoopFlags,
     verbosity: Verbosity,
-    show_stderr: bool,
     record_session: Option<PathBuf>,
     instance_filters: Vec<String>,
 ) -> Result<TerminationReason> {
     process_management::setup_process_group();
 
+    let resume = flags.resume;
+    let plain = flags.plain;
+    let show_stderr = flags.show_stderr;
+
     // TUI 需要 stdin/stdout 都是 TTY（crossterm 既要读键盘也要写屏幕）
-    let enable_tui = enable_tui && stdin().is_terminal() && stdout().is_terminal();
+    let enable_tui = flags.enable_tui && stdin().is_terminal() && stdout().is_terminal();
     let session_recorder: Option<Arc<SessionRecorder<std::io::BufWriter<File>>>> =
         if let Some(record_path) = record_session {
             let file = File::create(&record_path).with_context(|| {
@@ -395,6 +405,7 @@ pub async fn run_parallel_loop_impl(
     // TUI（并行 Supervisor UI）
     let (mut tui_handle, tui_update_tx) = if enable_tui {
         let tui = Tui::new_parallel()
+            .with_parallel_markdown_rendering(!plain)
             .with_termination_signal(terminated_rx)
             .with_interrupt_tx(interrupt_tx.clone());
 
@@ -438,23 +449,23 @@ pub async fn run_parallel_loop_impl(
         let output_tx = update_tx.clone();
         let recorder_for_output = session_recorder.clone();
         let observer: OutputObserver = Arc::new(move |chunk: &HatJobOutputChunk| {
-            // 默认折叠/隐藏 stderr（减少噪音）。
-            // 需要时用 `ralph run --show-stderr` 显式打开。
+            // 默认显示 stderr，便于调试。
+            // 如需降噪，用 `ralph run --hide-stderr` 显式隐藏。
             if !show_stderr && matches!(chunk.stream, OutputStream::Stderr) {
                 return;
             }
 
             // best-effort：把 stdout 写入 cassette（并行回放用）
-            if let Some(recorder) = &recorder_for_output {
-                if chunk.stream == OutputStream::Stdout {
-                    let offset_ms = recorder.elapsed().as_millis() as u64;
-                    let mut line = chunk.line.clone();
-                    line.push('\n');
-                    recorder.record_ux_event(&UxEvent::TerminalWrite(
-                        TerminalWrite::new(line.as_bytes(), true, offset_ms)
-                            .with_instance_id(chunk.instance_id.to_string()),
-                    ));
-                }
+            if let Some(recorder) = &recorder_for_output
+                && chunk.stream == OutputStream::Stdout
+            {
+                let offset_ms = recorder.elapsed().as_millis() as u64;
+                let mut line = chunk.line.clone();
+                line.push('\n');
+                recorder.record_ux_event(&UxEvent::TerminalWrite(
+                    TerminalWrite::new(line.as_bytes(), true, offset_ms)
+                        .with_instance_id(chunk.instance_id.to_string()),
+                ));
             }
 
             let _ = output_tx.send(TuiUpdate::ParallelOutputChunk(chunk.clone()));
@@ -499,16 +510,16 @@ pub async fn run_parallel_loop_impl(
         let recorder_for_output = session_recorder.clone();
         let observer: OutputObserver = Arc::new(move |chunk: &HatJobOutputChunk| {
             // best-effort：把 stdout 写入 cassette（并行回放用）
-            if let Some(recorder) = &recorder_for_output {
-                if chunk.stream == OutputStream::Stdout {
-                    let offset_ms = recorder.elapsed().as_millis() as u64;
-                    let mut line = chunk.line.clone();
-                    line.push('\n');
-                    recorder.record_ux_event(&UxEvent::TerminalWrite(
-                        TerminalWrite::new(line.as_bytes(), true, offset_ms)
-                            .with_instance_id(chunk.instance_id.to_string()),
-                    ));
-                }
+            if let Some(recorder) = &recorder_for_output
+                && chunk.stream == OutputStream::Stdout
+            {
+                let offset_ms = recorder.elapsed().as_millis() as u64;
+                let mut line = chunk.line.clone();
+                line.push('\n');
+                recorder.record_ux_event(&UxEvent::TerminalWrite(
+                    TerminalWrite::new(line.as_bytes(), true, offset_ms)
+                        .with_instance_id(chunk.instance_id.to_string()),
+                ));
             }
 
             if matches!(verbosity, Verbosity::Quiet) {
@@ -521,15 +532,14 @@ pub async fn run_parallel_loop_impl(
                 return;
             }
 
-            // 默认折叠/隐藏 stderr 行（减少噪音）。
-            // 需要时用 `ralph run --show-stderr` 显式打开。
+            // 默认显示 stderr 行，便于调试；如需降噪可显式隐藏。
             if !show_stderr && matches!(chunk.stream, OutputStream::Stderr) {
                 // 仅在第一次“确实出现 stderr”时提醒一次，避免用户困惑但又不刷屏。
                 if !stderr_hidden_hint_printed.swap(true, Ordering::Relaxed) {
                     let mut out = std::io::stdout().lock();
                     let _ = writeln!(
                         out,
-                        "[supervisor] stderr streaming lines are hidden by default; use `--show-stderr` to show them."
+                        "[supervisor] stderr streaming lines are hidden (via `--hide-stderr`); omit it to show them."
                     );
                 }
                 return;

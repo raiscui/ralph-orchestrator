@@ -310,46 +310,45 @@ impl TestRunner {
 
                 // mock-mode：在执行前把 workspace 里的 `ralph.yml` 改成 custom backend，
                 // 让 `ralph run` 启动我们自己的 `ralph-e2e mock-cli` 来回放 cassette。
-                if let Some(ref mock_config) = config.mock_config {
-                    if let Err(e) = self.configure_mock_mode(
+                if let Some(mock_config) = config.mock_config.as_ref()
+                    && let Err(e) = self.configure_mock_mode(
                         &workspace_path,
                         scenario.id(),
                         backend,
                         mock_config,
-                    ) {
-                        // 在 mock-mode 下，缺 cassette 属于“硬失败”：
-                        // - 否则会出现“全部跳过但 exit 0”的假绿。
-                        let failed_result = TestResult {
-                            scenario_id: scenario_id.clone(),
-                            scenario_description: scenario.description().to_string(),
-                            backend: backend.to_string(),
-                            tier: tier.clone(),
+                    )
+                {
+                    // 在 mock-mode 下，缺 cassette 属于“硬失败”：
+                    // - 否则会出现“全部跳过但 exit 0”的假绿。
+                    let failed_result = TestResult {
+                        scenario_id: scenario_id.clone(),
+                        scenario_description: scenario.description().to_string(),
+                        backend: backend.to_string(),
+                        tier: tier.clone(),
+                        passed: false,
+                        assertions: vec![crate::models::Assertion {
+                            name: "Mock cassette".to_string(),
                             passed: false,
-                            assertions: vec![crate::models::Assertion {
-                                name: "Mock cassette".to_string(),
-                                passed: false,
-                                expected: "Cassette exists and mock backend is configured"
-                                    .to_string(),
-                                actual: format!("{e}"),
-                            }],
-                            duration: Duration::from_secs(0),
-                        };
+                            expected: "Cassette exists and mock backend is configured".to_string(),
+                            actual: format!("{e}"),
+                        }],
+                        duration: Duration::from_secs(0),
+                    };
 
-                        self.emit_progress(ProgressEvent::ScenarioCompleted {
-                            scenario_id: scenario_id.clone(),
-                            passed: false,
-                            duration: Duration::from_secs(0),
-                            result: failed_result.clone(),
-                        });
+                    self.emit_progress(ProgressEvent::ScenarioCompleted {
+                        scenario_id: scenario_id.clone(),
+                        passed: false,
+                        duration: Duration::from_secs(0),
+                        result: failed_result.clone(),
+                    });
 
-                        results.push(failed_result);
+                    results.push(failed_result);
 
-                        if !config.keep_workspaces {
-                            scenario.cleanup(&workspace_path).ok();
-                            self.workspace_mgr.cleanup(&scenario_id).ok();
-                        }
-                        continue;
+                    if !config.keep_workspaces {
+                        scenario.cleanup(&workspace_path).ok();
+                        self.workspace_mgr.cleanup(&scenario_id).ok();
                     }
+                    continue;
                 }
 
                 // Execute the scenario

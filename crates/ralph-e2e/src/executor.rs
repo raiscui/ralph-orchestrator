@@ -72,6 +72,13 @@ pub enum PromptSource {
     File(PathBuf),
     /// Inline prompt string.
     Inline(String),
+    /// Use the prompt defined in the scenario's `ralph.yml` (do not pass `-p`).
+    ///
+    /// 说明：
+    /// - 用于“直接跑仓库 example 配置”的场景：我们希望验证示例本身可用，
+    ///   而不是被 E2E runner 的额外提示词影响。
+    /// - 该模式下，E2E 仍会通过 `--max-iterations` / `--no-tui` 等 CLI 参数提供测试护栏。
+    Config,
 }
 
 /// Result of executing Ralph.
@@ -299,6 +306,9 @@ impl RalphExecutor {
             }
             PromptSource::Inline(prompt) => {
                 cmd.arg("-p").arg(prompt);
+            }
+            PromptSource::Config => {
+                // 不传 `-p`：让 `ralph run` 使用 `ralph.yml` 里的 `event_loop.prompt`。
             }
         }
 

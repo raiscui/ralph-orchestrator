@@ -414,3 +414,403 @@
     - `_meta.loop_start`
     - `bus.publish`
     - `ux.terminal.write`（含 `instance_id: "ralph#1"`）
+
+## 2026-01-29 20:22 +0800｜并行 TUI：chat `Shift+Enter` 换行不稳定 + 单行输入贴顶 + 默认 stderr 策略调整
+
+### 现象
+1) 并行 Supervisor TUI 的 chat 输入框里，`Shift+Enter` 期望换行，但在部分终端环境里无效：
+   - 用户实际看到的效果是“仍触发提交/发送”。
+
+2) chat 输入框为多行高度，但当只输入一行（例如 `@writer#1 hello`）时，文本贴着输入框上沿，视觉上“太靠上”。
+
+3) 并行模式流式输出默认隐藏 stderr，不利于调试（用户希望默认显示 stderr）。
+
+### 根因
+1) `Shift+Enter` 的可识别性依赖终端是否上报 `KeyModifiers::SHIFT`：
+   - crossterm 在 API 层面支持 `KeyModifiers::SHIFT/ALT/CONTROL`；
+   - 但“终端是否区分 Enter + Shift”是终端实现相关，部分环境下 `Shift+Enter` 与 `Enter` 无法区分。
+
+2) chat 输入框渲染逻辑默认从顶部开始绘制；当行数不足输入框高度时，上方没有 padding → 单行内容贴顶。
+
+3) stderr 的默认展示策略在 CLI 层被设定为默认隐藏（`show_stderr=false`），并在 observer 侧直接过滤掉了 stderr chunk。
+
+### 修复
+- `crates/ralph-tui/src/app.rs`：
+  - 换行：保留 `Shift+Enter`，并增加更稳定的 fallback：
+    - `Alt+Enter` 换行
+    - `Ctrl+J` 换行
+  - 视觉：当总行数不足输入框高度时，在顶部补空行做“底部对齐”，让输入内容整体下移。
+  - 一致性：`hit_test_chat_editor` 同步扣除顶部 padding，避免鼠标点击定位与渲染不一致。
+
+- `crates/ralph-tui/src/widgets/help.rs`：
+  - help overlay 补充 `Alt+Enter` / `Ctrl+J` 的说明，降低学习成本。
+
+- `crates/ralph-cli/src/main.rs`：
+  - 并行模式默认 `show_stderr=true`；
+  - 提供 `--hide-stderr`（SetFalse）用于显式隐藏 stderr（降噪）。
+  - 增加单测覆盖默认值与开关行为（run/resume）。
+
+- `crates/ralph-cli/src/parallel_runner.rs`：
+  - 更新注释与提示文案，避免仍写“默认隐藏”造成误导。
+
+### 验证
+- `cargo fmt` ✅
+- `cargo test` ✅（包含 replay smoke tests）
+
+## 2026-01-30 13:34 +0800｜并行 Output：移除左侧红色 E + 撤回 Big Headers/图片渲染 + 许可证回退 MIT
+
+### 现象
+1) 你希望“彻底回退” Big Headers/图片渲染等 `mdfried` 相关特性，恢复为纯文本 Output。
+
+2) 你反馈并行 Output 面板左侧的红色 `E`（stderr 标识）不正常：
+   - 你认为 stderr 用灰色弱化即可区分，无需额外的前缀列。
+
+3) 你要求把仓库许可证从 `GPL-3.0-or-later` 回退到项目原本的许可（MIT）。
+
+### 根因
+- Big Headers/图片渲染与左侧前缀列属于同一轮“对齐 mdfried 视觉层级”的实现，会引入：
+  - 额外的数据结构（Image block/row）
+  - 额外依赖（`ratatui-image`/`cosmic-text`/`image`）
+  - 输出布局复杂度（前缀列占宽、copy 需要特殊处理）
+- 许可证当时为兼容 `mdfrier`（GPL）而切到 GPL；当决定取消 `mdfrier` 后，GPL 也不再是必须条件。
+
+### 修复
+- 移除 Big Headers/图片渲染：
+  - 删除 Image 相关中间表示与渲染逻辑，输出 buffer 回到“纯文本行”模型。
+  - 移除 `ratatui-image` / `cosmic-text` / `image` 依赖，并删除对应代码。
+  - 移除 `tui.images.*` 配置项与 CLI/TUI 传递链路。
+- 移除左侧红色 `E`：
+  - `ParallelOutputPane` 不再渲染任何左侧前缀列。
+  - stderr 仅通过 `MUTED_FG`（灰色）弱化呈现来区分。
+- 许可证回退：
+  - `Cargo.toml`：`workspace.package.license = "MIT"`
+  - 根目录 `LICENSE`：替换为 MIT License 文本
+  - README/docs：许可证 badge 与说明同步改为 MIT
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅（包含 replay smoke tests）
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-01-30 12:47 +0800｜回退 Markdown 渲染器：mdfrier → termimad
+
+### 现象
+- 需求变更：你决定取消 `mdfried/mdfrier` 渲染 Markdown，并要求恢复项目原本的 `termimad` 渲染方式。
+
+### 根因
+- 之前为了对齐 `mdfried` 的渲染风格与语义换行能力，引入了 `mdfrier` 并替换了渲染链路。
+- 现在需求反转，需要把渲染器与依赖完整回退，避免维护两套行为分叉。
+
+### 修复
+- 渲染回退：
+  - `crates/ralph-adapters/src/stream_handler.rs`：
+    - `Rendered` 模式改用 `termimad::MadSkin` 渲染 Markdown。
+    - stdout 直接输出 termimad ANSI；TUI 用 `ansi-to-tui` 解析回 `ratatui::Line`。
+- 依赖回退：
+  - `Cargo.toml`：移除 `mdfrier`，新增 `termimad = "0.34.1"`。
+  - `crates/ralph-adapters/Cargo.toml`：依赖切回 `termimad.workspace`。
+  - `Cargo.lock`：更新后不再包含 `mdfrier`。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-01-30 03:56 +0800｜并行 Output 面板重构后的编译/Clippy 修复记录
+
+### 问题
+- `cargo check -p ralph-tui` 失败：
+  - `parallel_output.rs` 中软换行渲染函数引用了不存在的变量 `area`
+  - `ratatui_image::protocol::Protocol` 不实现 `Debug`，导致 `#[derive(Debug)]` 编译失败
+  - `ParallelTuiState` 在遍历 `instances.values_mut()` 时又调用需要 `&mut self` 的渲染方法，触发 E0499（可变借用冲突）
+- `cargo clippy -- -D warnings` 失败：
+  - `clippy::collapsible_if`（两处嵌套 if 可折叠）
+
+### 根因
+- 重构把并行 Output 从“纯文本行”升级为“Text + Image”后：
+  - 原有测试/示例里仍用 `ContentPane` 渲染并行 buffer，类型不匹配
+  - 渲染逻辑放在 `ParallelTuiState` 的 `&mut self` 方法里，在持有 `instances` 的可变借用时无法重入调用
+  - 图片协议对象 `Protocol` 是“不希望被 Debug 打印”的外部类型
+
+### 修复
+- `crates/ralph-tui/src/widgets/parallel_output.rs`
+  - 修复软换行渲染函数变量名（`area` → `widget_area`）
+  - 按 clippy 建议折叠嵌套 if
+- `crates/ralph-tui/src/state/parallel/output.rs` + `crates/ralph-tui/src/state/parallel.rs`
+  - 为包含 `Protocol` 的结构改为手写 `Debug`（只打印 `alt/area`，省略 protocol 细节）
+  - 抽出 `ParallelOutputRenderer`，避免 `&mut self` 重入借用导致 E0499
+- `crates/ralph-tui/examples/validate_widgets.rs` + `crates/ralph-tui/tests/common/mod.rs`
+  - 并行 Output 统一使用 `ParallelOutputPane` 渲染（不再错误复用 `ContentPane`）
+- `crates/ralph-tui/src/app.rs`
+  - 单测里调用 `extract_output_selection_text` 时按新签名传 `CurrentOutputBuffer::Serial(...)`
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core --test smoke_runner` ✅
+
+## 2026-01-30 01:16 +0800｜并行 Supervisor：`LOOP_COMPLETE` 后仍派工（parallel-trigger-routing）+ Tier8 E2E 回归
+
+### 现象
+1) 在 `examples/parallel-trigger-routing` 的并行 demo 中：
+   - `ralph#1` 已输出 `LOOP_COMPLETE`，
+   - 但其他实例仍持续创建/运行新的 job，表现为“已经完成但仍在忙”。
+
+2) 你还观察到 `spec_writer` 在 `LOOP_COMPLETE` 前跑了 3 次（理论上该 demo 应为 2 次）。
+
+### 根因
+1) completion promise（`LOOP_COMPLETE`）属于“软退出信号”：
+   - 旧逻辑在看到 completion promise 后，仍继续路由其它实例产出的事件/Published 事件，
+   - 从而在 completion 之后仍可能派生新 job（出现不收敛）。
+
+2) 关于 “spec_writer 跑 3 次”：
+   - `examples/parallel-trigger-routing/.ralph/events.jsonl` 是 append-only 历史日志，
+   - 多次运行 demo 会把多次 run 的事件叠加在同一个文件里，容易把“多次 run”误判成“单次 run 重复触发”。
+
+### 修复
+- `crates/ralph-core/src/parallel/supervisor.rs`：
+  - completion promise 出现后进入“收敛态”：
+    - 允许已在跑的 job 自然结束（drain）；
+    - **禁止再路由/派发任何新 job**（包括 Published / external / gate.timeout 等）。
+  - 额外增加一个短 drain 窗口，避免 ralph 输出 completion 的同轮事件还没来得及触发下游就被立刻打断。
+
+- `crates/ralph-e2e/src/scenarios/parallel_trigger_routing_example.rs`：
+  - 新增 Tier8 场景：直接拷贝 `examples/parallel-trigger-routing/ralph.yml` 到 E2E workspace 跑。
+  - 断言按 job_id 去重并按 hat 聚合的 `job_runs`：
+    - `spec_writer == 2`
+    - `spec_reviewer == 2`
+    - `spec_logger == 3`
+  - 额外断言：`LOOP_COMPLETE` 后不得出现新的 job_id（防止回归）。
+
+- `crates/ralph-e2e/src/executor.rs`：
+  - 新增 `PromptSource::Config`：让 E2E 场景可以不传 `-p`，直接使用 `ralph.yml` 内置的 `event_loop.prompt`（避免 E2E 提示词“改写 example 语义”）。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-trigger-routing-example --keep-workspace --verbose --skip-analysis` ✅
+
+## 2026-01-29 23:59 +0800｜并行 E2E：example 覆盖 + spec_writer 次数断言（防回归）
+
+### 现象
+- 你观察到 `examples/parallel-trigger-routing` 在一次闭环中可能出现 **3 次** `spec_writer`（预期应为 2 次）。
+- 且在 `ralph#1` 输出 `LOOP_COMPLETE` 后，仍可能出现其它进程继续创建/运行的“假活跃”。
+
+### 根因
+- E2E 之前没有“直接覆盖 example 配置”的场景，也缺少“按 job_id 去重统计 hat 运行次数”的硬断言。
+  - 这会导致回归发生时，只能靠人工看日志发现，反馈周期长且不稳定。
+
+### 修复
+- 新增 Tier8 场景：`ParallelTriggerRoutingExampleScenario`
+  - 直接拷贝 `examples/parallel-trigger-routing/ralph.yml` 到 E2E workspace 运行。
+  - 解析并行 stdout 的 `job_id` 前缀并聚合到 hat 名（跨 instance 汇总）。
+  - 断言（强调是 job 次数，不是 instance 数）：`spec_writer job_runs=2`、`spec_reviewer job_runs=2`、`spec_logger job_runs=3`，并额外要求 `LOOP_COMPLETE` 后不应出现新 job_id。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-01-29 23:01 +0800｜并行运行时：`LOOP_COMPLETE` 之后仍派生新 job
+
+### 现象
+- 并行模式下，`ralph#1` 已输出 `LOOP_COMPLETE`（completion promise）后：
+  - Supervisor 仍可能继续路由其它实例产出的事件；
+  - 进而触发新的 hat job（例如 `writer` 结束后发出 `build.done`，继续触发 `collector`），表现为“已收敛但仍在跑/仍在创建新 job”。
+
+### 根因
+- `ParallelSupervisor::run` 在检测到 completion promise 后，只设置 `termination=CompletionPromise` 并进入 drain 窗口：
+  - 但 drain 期间仍会继续调用 `route_events_batch(...)` / `route_event(...)` 去路由后续事件。
+  - 结果是 completion 之后依然可能产生新的投递与新 job（这会放大并行场景的噪音与不确定性）。
+
+### 修复
+- `crates/ralph-core/src/parallel/supervisor.rs`：
+  - completion promise 之后进入“收敛态”：
+    - 仍允许正在运行的 job 自然结束（保留 drain 行为）。
+    - 但不再路由/派发任何新事件（含 JobCompleted/Published/external/gate.timeout）。
+- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`：
+  - 新增回归测试 `supervisor_does_not_route_new_events_after_completion_promise`：
+    - 构造 “completion 先发生、build.done 后发生” 的最小链路；
+    - 断言 completion 后不应再触发下游 `collector`（修复前失败，修复后通过）。
+
+### 额外加固（E2E）
+- `crates/ralph-e2e/src/scenarios/parallel.rs`：
+  - 新增按 stdout `job_id` 统计 instance job 次数的断言；
+  - 新增 `LOOP_COMPLETE` 后不应出现新 job_id 的断言；
+  - 调整场景，让 `collector` 在 `build.done(task_id=2)` 时触发严格投递失败，确保收敛发生在闭环末尾，便于稳定计数。
+
+### 验证
+- `cargo test` ✅（workspace 全量）
+
+## 2026-01-29 22:26 +0800｜tui-markdown-rendering：并行/串行 TUI 默认渲染 Markdown，`--plain` 可关闭
+
+### 现象
+- AI code agent 的 CLI 输出通常是 Markdown（h1/h2、引用、代码块等）。
+- 之前并行 Supervisor TUI 的输出视图只是 `Line::from(raw)`，导致：
+  - Markdown 控制符（`##`、`>`、`````）原样堆在屏幕上，可读性差；
+  - CLI 侧即使新增了 `--plain` 开关，也无法真正影响并行输出的渲染路径（TUI 侧缺少贯通的 render mode）。
+
+### 根因
+1) 渲染逻辑分叉：
+   - 串行 TUI 已经有 `termimad` 渲染能力；
+   - 并行 Supervisor TUI 只做“按行追加”，没有 Markdown 渲染与模式开关。
+
+2) 配置未贯通：
+   - `ralph-cli` 需要把 `--plain` 传给 TUI；
+   - `ralph-tui` 需要在 state 中保存渲染模式，并在追加输出时使用该模式重新渲染。
+
+### 修复
+- 统一渲染入口（复用既有依赖，避免引入 GPL 风险）：
+  - `crates/ralph-adapters/src/stream_handler.rs`：
+    - 新增 `MarkdownRenderMode`（Rendered/Plain）
+    - 新增 `render_text_to_lines(text, mode)`：Rendered best-effort Markdown；Plain 保留控制符；两者都保留 ANSI 解析
+
+- 并行 Supervisor TUI 贯通：
+  - `crates/ralph-tui/src/state/parallel.rs`：
+    - 增加 `output_render_mode: MarkdownRenderMode`
+    - job 侧保存 raw 输出行并“全量重渲染”（支持跨行 fenced code block）
+    - stderr 始终 Plain 并弱化前景色（但仍解析 ANSI）
+  - `crates/ralph-tui/src/lib.rs`：
+    - `with_parallel_output_render_mode(...)` / `with_parallel_markdown_rendering(...)` 实际写入 state（不再 no-op）
+
+- CLI 参数：
+  - `crates/ralph-cli/src/main.rs`：`ralph run` / `ralph resume` 新增 `--plain`
+
+### 验证
+- `cargo test` ✅（workspace 全量，包含 replay smoke tests）
+
+## 2026-01-29 22:20 +0800｜`cargo test` 编译失败：`Tui` 缺少 Markdown 渲染开关接口
+
+### 现象
+- 运行 `cargo test` 时，`ralph-cli` 编译失败：
+  - `crates/ralph-cli/src/parallel_runner.rs` 调用 `Tui::with_parallel_markdown_rendering(...)`，
+    但 `ralph-tui::Tui` 未实现该方法（以及另一处 render-mode 相关接口）。
+
+### 根因
+- CLI 侧已开始为 `--plain` 等参数预留“并行 TUI 输出渲染模式”的接线点；
+- TUI 侧缺少对应的 builder-style 方法，导致链接阶段前的编译直接失败。
+
+### 修复
+- `crates/ralph-tui/src/lib.rs`：
+  - 补齐兼容接口（最小实现）：
+    - `with_parallel_markdown_rendering(...)`
+    - `with_parallel_output_render_mode(...)`
+  - 当前实现为 no-op（先保证编译与测试闭环），并在注释中标明后续应该把 render mode 写入 state 并接入渲染管线。
+
+### 验证
+- `cargo fmt` ✅
+- `cargo test` ✅
+
+## 2026-01-29 22:10 +0800｜并行 TUI：Shift+Enter 无法换行 + 灰色过亮/过暗
+
+### 现象
+1) `Shift+Enter` 在并行 TUI 的 chat 输入框里仍然无法触发换行（表现为普通 Enter 的提交行为），但 `Ctrl+J` 可以换行。
+
+2) 灰色样式在不同终端主题下不稳定：
+   - `Color::DarkGray` 太暗；
+   - `Color::Gray`（在你的主题下）接近白色，太亮。
+
+### 根因
+1) `Shift+Enter` 无法区分：
+   - 不是我们 chat editor 的逻辑问题，而是“终端输入上报模式”的问题。
+   - 很多终端在默认模式下不会把 `Shift+Enter` 作为“带 SHIFT 的 Enter”上报，导致应用层拿不到 `KeyModifiers::SHIFT`。
+
+2) 灰色不稳定：
+   - `Color::DarkGray`/`Color::Gray` 都属于 ANSI 16 色语义色，具体亮度由终端主题调色板决定；
+   - 因此在不同主题下可能出现“过暗/过亮”的极端表现。
+
+### 修复
+- `Shift+Enter`：
+  - `crates/ralph-tui/src/app.rs` 启动时 best-effort 启用 crossterm 的 kitty keyboard protocol：
+    - `PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)`
+  - 退出时配对：
+    - `PopKeyboardEnhancementFlags`
+  - 让支持该协议的终端可以上报 Enter 的修饰键，从而触发我们已有的 `Shift+Enter=换行` 分支。
+
+- 灰色折中：
+  - 新增 `crates/ralph-tui/src/theme.rs`，集中定义：
+    - `MUTED_FG = Color::Indexed(245)`（256 色灰阶中灰）
+  - 将提示/标签/空态文本统一改用 `MUTED_FG`，避免 `Gray≈白色` 或 `DarkGray≈看不清`。
+
+### 验证
+- `cargo fmt` ✅
+- `cargo test` ✅（包含 replay smoke tests）
+
+## 2026-01-29 21:45 +0800｜并行 TUI：Chat 输入贴 Targets + 灰色过暗（可读性差）
+
+### 现象
+1) Chat 输入框只输入一行时，文本/光标会贴着输入框底线显示，紧挨着下方 `Targets:` 行，视觉上“太挤”。
+
+2) TUI 内多处灰色提示/标签使用 `Color::DarkGray`，在部分终端主题下对比度偏低，阅读困难。
+
+### 根因
+1) 之前为了解决“太靠上”，输入框做了“底部对齐”（上方 padding）。
+   - 但当输入框高度固定为 3 行且内容只有 1 行时，正文会落在最后一行，导致与下方区域没有“呼吸间距”。
+
+2) `Color::DarkGray` 在某些主题里接近背景色，导致灰色信息“看不清”。
+
+### 修复
+- `crates/ralph-tui/src/app.rs`：
+  - 抽出 `chat_editor_pad_top()`，统一管理 chat 输入框的垂直对齐策略：
+    - 内容不足高度时“下移”；
+    - 同时保留 1 行底部留白，让输入内容不贴着 `Targets:` 行。
+  - `hit_test_chat_editor` 同步使用同一策略，保证点击定位与渲染一致。
+  - 更新回归测试 `hit_test_chat_editor_accounts_for_bottom_aligned_padding`，覆盖“顶部 padding + 底部留白”的布局。
+
+- 灰色提亮（可读性改良）：
+  - `crates/ralph-tui/src/app.rs` / `crates/ralph-tui/src/state/parallel.rs` / `crates/ralph-tui/src/widgets/*`：
+    - 将 `Color::DarkGray` 统一替换为 `Color::Gray`。
+
+### 验证
+- `cargo fmt` ✅
+- `cargo test` ✅（包含 replay smoke tests）
+
+## 2026-01-29 20:50 +0800｜并行 TUI：框选后 Cmd+C/Cmd+V 无法复制粘贴
+
+### 现象
+- 用户在 TUI 输出面板里用鼠标框选（蓝色高亮）后：
+  - `Command+C` 没有把选中文本复制到系统剪贴板；
+  - 随后 `Command+V` 也无法粘贴出预期内容（因为剪贴板里没有被选中的文本）。
+
+### 根因
+1) TUI 使用 raw mode 并启用了 mouse capture：
+   - 终端模拟器的“原生文本选择”通常会被关闭或需要额外按键绕过；
+   - 应用内的蓝色高亮只是 UI 状态，不会自动进入系统剪贴板。
+
+2) `Command+C` / `Command+V` 是终端模拟器快捷键：
+   - `Cmd+C` 通常不会以 key event 的形式交给应用（crossterm 也拿不到 Command 修饰键）；
+   - 所以如果应用不主动写剪贴板，就无法形成复制闭环。
+
+3) 粘贴侧：部分终端会用 bracketed paste 上报 `Event::Paste(text)`：
+   - 若应用忽略该事件，用户会感知为“Cmd+V 没反应”。
+
+### 修复
+- `crates/ralph-tui/src/app.rs`：
+  - MouseUp（结束输出框选）时自动复制选中文本到剪贴板（best-effort）。
+  - 增加 `y` 显式复制键（并行模式非 Chat 焦点下可用）。
+  - 支持 `Event::Paste(text)`：
+    - search mode：追加到搜索输入（压平换行）
+    - chat focus：插入到 chat editor（保留换行）
+  - 选中文本提取复用 `ContentPane` 渲染，保证“所见即所得”（含 soft wrap / scroll）。
+  - 剪贴板后端：
+    - macOS 优先 `pbcopy`
+    - 兜底使用 OSC52（终端剪贴板）
+
+- `crates/ralph-tui/src/widgets/help.rs`：
+  - 补充 `Drag`（自动复制）与 `y`（复制）提示。
+
+- `crates/ralph-tui/Cargo.toml`：
+  - 增加 `base64` 依赖（用于 OSC52）。
+
+- 规格：
+  - `specs/tui-selection-clipboard.spec.md` 补齐验收标准。
+
+### 验证
+- `cargo fmt` ✅
+- `cargo test` ✅（包含 replay smoke tests）

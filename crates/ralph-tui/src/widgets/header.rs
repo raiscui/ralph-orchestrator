@@ -1,4 +1,5 @@
 use crate::state::TuiState;
+use crate::theme::MUTED_FG;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -96,10 +97,7 @@ pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
 
     // Priority 6: Help hint - shown only at WIDTH_FULL (80+)
     if width >= WIDTH_FULL {
-        spans.push(Span::styled(
-            " | ? help",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled(" | ? help", Style::default().fg(MUTED_FG)));
     }
 
     let line = Line::from(spans);

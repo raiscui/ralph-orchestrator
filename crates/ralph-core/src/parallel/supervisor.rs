@@ -272,10 +272,15 @@ impl ParallelSupervisor {
                             // 将新事件继续路由
                             //
                             // 说明：
-                            // - 同一轮输出可能解析出多条事件。
+                            // - completion promise 之后，我们不再派生任何新 job（避免“已收敛但仍继续跑”的假活跃）。
+                            // - 但“触发 completion 的那次 ralph 输出”仍允许正常路由其同轮解析出的事件
+                            //   （尽管按规范 ralph 在输出 completion 时不应再发事件，这里仍做防御性处理）。
                             // - 在顺序路由这些事件时，我们无法同时消费 `StateChanged`，
                             //   因此需要在 batch 内维护一份“乐观运行态”，避免后续事件误判实例仍然空闲。
-                            self.route_events_batch(events).await?;
+                            let stop_spawning = matches!(termination, Some(TerminationReason::CompletionPromise));
+                            if !stop_spawning || completion_promise {
+                                self.route_events_batch(events).await?;
+                            }
 
                             if completion_promise && completion_promise_seen_at.is_none() {
                                 termination = Some(TerminationReason::CompletionPromise);
@@ -305,7 +310,10 @@ impl ParallelSupervisor {
                                 .event_logger
                                 .log_event(0, hat_id.as_str(), &event, triggered);
 
-                            self.route_event(event).await?;
+                            // completion promise 之后不再派生新 job（但仍可落盘，便于排障）。
+                            if !matches!(termination, Some(TerminationReason::CompletionPromise)) {
+                                self.route_event(event).await?;
+                            }
                         }
                     }
                 }
@@ -336,6 +344,13 @@ impl ParallelSupervisor {
                         if at.elapsed() >= completion_drain_max {
                             break;
                         }
+                    }
+
+                    // completion promise 之后进入“收敛态”：
+                    // - 不再接收/派发任何新事件（包括 external/gate.timeout）
+                    // - 只做 drain：等待在跑的 job 自然结束，或 hit completion_drain_max
+                    if matches!(termination, Some(TerminationReason::CompletionPromise)) {
+                        continue;
                     }
 
                     // 1) 读取外部事件（human/工具写入的 JSONL）
@@ -854,7 +869,7 @@ impl ParallelSupervisor {
         self.instances.keys().all(|instance_id| {
             matches!(
                 self.instance_states.get(instance_id),
-                Some(HatInstanceState::Done) | Some(HatInstanceState::Failed)
+                Some(HatInstanceState::Done | HatInstanceState::Failed)
             )
         })
     }

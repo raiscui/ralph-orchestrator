@@ -15,6 +15,7 @@ use ralph_proto::{
     AudienceOverride, AudienceSelector, Delivery, Event, HatInstanceId, HatInstanceState,
     MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TopicContract,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -85,6 +86,12 @@ struct BlockingExecutor {
     notify: Arc<Notify>,
 }
 
+#[derive(Debug, Clone)]
+struct CompletionStopsRoutingExecutor {
+    /// 记录每个 instance 实际启动了多少次（用于断言“收敛后不再派生新 job”）。
+    starts: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
+}
+
 #[async_trait::async_trait]
 impl HatJobExecutor for BlockingExecutor {
     async fn execute(
@@ -133,6 +140,151 @@ async fn wait_for_starts(executor: &BlockingExecutor, expected: usize) {
 }
 
 #[tokio::test]
+async fn supervisor_does_not_route_new_events_after_completion_promise() {
+    // =====================================================================
+    // 目的：
+    // - 复现你反馈的“ralph#1 输出 LOOP_COMPLETE 后仍不断创建/运行其它 job”的核心机制。
+    // - 这里用纯内存 Fake executor 构造一个最小链路：
+    //   1) ralph#1 先发 build.task（fanout -> writer + tester）
+    //   2) tester 很快发 routing.escalate（触发 ralph#1 输出 LOOP_COMPLETE）
+    //   3) writer 延迟后才发 build.done（若 completion 后仍继续路由，会触发 collector -> 新 job）
+    // - 断言：完成 promise 之后，writer 的 build.done **不应**再触发 collector（不再派生新 job）。
+    // =====================================================================
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.max_runtime_seconds = 10;
+
+    // 关键点：隔离 workspace_root，避免读到 repo 根目录开发过程留下的 `.ralph/*` 文件。
+    config.core = config.core.with_workspace_root(temp_dir.path());
+
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+    config.hats.insert(
+        "tester".to_string(),
+        hat_config("Tester", vec!["build.task"], 1),
+    );
+    config.hats.insert(
+        "collector".to_string(),
+        hat_config("Collector", vec!["build.done"], 1),
+    );
+
+    let starts: Arc<tokio::sync::Mutex<HashMap<String, usize>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    let executor = CompletionStopsRoutingExecutor {
+        starts: Arc::clone(&starts),
+    };
+
+    // 说明：本测试不需要覆盖真实文件输出，events.jsonl 只用于满足 supervisor 的 log 写入。
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed");
+    supervisor.event_logger = EventLogger::new(events_path);
+
+    supervisor
+        .run(false)
+        .await
+        .expect("supervisor run should succeed");
+
+    let got = starts.lock().await.clone();
+    let get = |id: &str| got.get(id).copied().unwrap_or(0);
+
+    // ralph#1：两次（第一次发 build.task；第二次看到 routing.escalate 输出 LOOP_COMPLETE）
+    assert_eq!(get("ralph#1"), 2, "ralph#1 should run exactly twice");
+    // writer/tester：各一次（由 build.task fanout 触发）
+    assert_eq!(get("writer#1"), 1, "writer#1 should run exactly once");
+    assert_eq!(get("tester#1"), 1, "tester#1 should run exactly once");
+    // collector：如果 completion 后仍继续路由 writer 的 build.done，就会被触发（这是我们要禁止的）。
+    assert_eq!(
+        get("collector#1"),
+        0,
+        "collector#1 must NOT run after completion promise"
+    );
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for CompletionStopsRoutingExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<HatJobResult> {
+        // 记录启动次数：用于测试断言
+        let instance_id = job.instance_id.to_string();
+        let now = {
+            let mut starts = self.starts.lock().await;
+            let entry = starts.entry(instance_id.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+
+        // 说明：
+        // - 这里不解析 prompt，而是用“同一实例第 N 次执行”来构造确定性输出。
+        // - 这能把测试焦点聚焦在 Supervisor 的“路由/收敛”逻辑，而不是 prompt/LLM 行为。
+        let output = match instance_id.as_str() {
+            // ralph#1：第一次发 build.task，第二次输出 completion promise
+            "ralph#1" if now == 1 => r#"<event topic="build.task">
+Task: first
+</event>
+"#
+            .to_string(),
+            "ralph#1" => "LOOP_COMPLETE\n".to_string(),
+
+            // tester：快速触发 completion candidate（routing.escalate 是 orphan -> 会交给 ralph#1）
+            "tester#1" => r#"<event topic="routing.escalate">
+status: ok
+</event>
+"#
+            .to_string(),
+
+            // writer：刻意延迟，保证 completion 发生在 build.done 之前
+            "writer#1" => {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(700)) => {}
+                    changed = cancel_rx.changed() => {
+                        // 如果被 supervisor cancel/shutdown，也要及时退出，避免测试卡住
+                        if changed.is_ok() && *cancel_rx.borrow() {
+                            return Ok(HatJobResult {
+                                output: String::new(),
+                                success: true,
+                                exit_code: Some(0),
+                                timed_out: false,
+                                canceled: true,
+                            });
+                        }
+                    }
+                }
+
+                r#"<event topic="build.done">
+status: ok
+</event>
+"#
+                .to_string()
+            }
+
+            // collector：理论上不应被触发；如果触发了，输出任意文本即可（用于定位）。
+            "collector#1" => "collector saw build.done\n".to_string(),
+
+            _ => String::new(),
+        };
+
+        Ok(HatJobResult {
+            output,
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
+        })
+    }
+}
+
+#[tokio::test]
 async fn supervisor_run_waits_for_instances_to_reach_terminal_state_on_shutdown() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
@@ -177,11 +329,11 @@ async fn supervisor_run_waits_for_instances_to_reach_terminal_state_on_shutdown(
     // “Failed to send StateChanged to supervisor” 的收尾 warning。
     assert!(matches!(
         result.instance_states.get(&ralph),
-        Some(HatInstanceState::Done) | Some(HatInstanceState::Failed)
+        Some(HatInstanceState::Done | HatInstanceState::Failed)
     ));
     assert!(matches!(
         result.instance_states.get(&logger),
-        Some(HatInstanceState::Done) | Some(HatInstanceState::Failed)
+        Some(HatInstanceState::Done | HatInstanceState::Failed)
     ));
 }
 

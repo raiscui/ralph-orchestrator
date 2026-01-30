@@ -6,8 +6,9 @@
 
 use anyhow::{Context, Result};
 use ralph_adapters::{
-    CliBackend, CliExecutor, ConsoleStreamHandler, OutputFormat as BackendOutputFormat,
-    PrettyStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler, TuiStreamHandler,
+    CliBackend, CliExecutor, ConsoleStreamHandler, MarkdownRenderMode,
+    OutputFormat as BackendOutputFormat, PrettyStreamHandler, PtyConfig, PtyExecutor,
+    QuietStreamHandler, TuiStreamHandler,
 };
 use ralph_core::{
     EventLogger, EventLoop, EventParser, EventRecord, RalphConfig, Record, SessionRecorder,
@@ -46,6 +47,7 @@ pub async fn run_loop_impl(
     resume: bool,
     enable_tui: bool,
     verbosity: Verbosity,
+    plain: bool,
     record_session: Option<PathBuf>,
 ) -> Result<TerminationReason> {
     // Set up process group leadership per spec
@@ -70,6 +72,9 @@ pub async fn run_loop_impl(
     };
     // Always use PTY for real-time streaming output (vs buffered CliExecutor)
     let use_pty = true;
+
+    // 输出渲染策略：默认渲染 Markdown；`--plain` 强制纯文本。
+    let render_mode = MarkdownRenderMode::from_plain(plain);
 
     // Set up interrupt channel for signal handling
     // Per spec:
@@ -519,6 +524,7 @@ pub async fn run_loop_impl(
                     user_interactive,
                     interrupt_rx_for_pty,
                     verbosity,
+                    render_mode,
                     tui_lines_for_pty,
                 )
                 .await
@@ -587,20 +593,20 @@ pub async fn run_loop_impl(
         let success = outcome.success;
 
         // best-effort：将本轮“用于事件解析”的输出写入 cassette（stdout-only）
-        if let Some(recorder) = &session_recorder {
-            if !output.is_empty() {
-                let offset_ms = recorder.elapsed().as_millis() as u64;
-                recorder.record_meta(Record::meta_iteration(
-                    iteration,
-                    offset_ms,
-                    hat_id.as_str(),
-                ));
-                recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(
-                    output.as_bytes(),
-                    true,
-                    offset_ms,
-                )));
-            }
+        if let Some(recorder) = &session_recorder
+            && !output.is_empty()
+        {
+            let offset_ms = recorder.elapsed().as_millis() as u64;
+            recorder.record_meta(Record::meta_iteration(
+                iteration,
+                offset_ms,
+                hat_id.as_str(),
+            ));
+            recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(
+                output.as_bytes(),
+                true,
+                offset_ms,
+            )));
         }
 
         // Note: TUI lines are now written directly to IterationBuffer during streaming,
@@ -705,6 +711,7 @@ async fn execute_pty(
     interactive: bool,
     interrupt_rx: tokio::sync::watch::Receiver<bool>,
     verbosity: Verbosity,
+    render_mode: MarkdownRenderMode,
     tui_lines: Option<Arc<std::sync::Mutex<Vec<ratatui::text::Line<'static>>>>>,
 ) -> Result<ExecutionOutcome> {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -758,7 +765,7 @@ async fn execute_pty(
     } else if let Some(lines) = tui_lines {
         // TUI mode: use TuiStreamHandler to capture output for TUI display
         let verbose = verbosity == Verbosity::Verbose;
-        let mut handler = TuiStreamHandler::with_lines(verbose, lines);
+        let mut handler = TuiStreamHandler::with_lines_and_mode(verbose, lines, render_mode);
         exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
             .await
     } else {
@@ -776,7 +783,7 @@ async fn execute_pty(
             }
             Verbosity::Normal => {
                 if use_pretty {
-                    let mut handler = PrettyStreamHandler::new(false);
+                    let mut handler = PrettyStreamHandler::new_with_mode(false, render_mode);
                     exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
                         .await
                 } else {
@@ -787,7 +794,7 @@ async fn execute_pty(
             }
             Verbosity::Verbose => {
                 if use_pretty {
-                    let mut handler = PrettyStreamHandler::new(true);
+                    let mut handler = PrettyStreamHandler::new_with_mode(true, render_mode);
                     exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
                         .await
                 } else {

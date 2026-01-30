@@ -146,6 +146,12 @@ Times update every 100ms via a separate tick mechanism (not blocking on events).
 - `◯ idle` (dim): No events in last 2 seconds
 - `■ done` (blue): Loop terminated
 
+## Styling Notes
+
+- "Dim"/"hint" text MUST remain readable on common terminal themes.
+- If ANSI 16-color grays are too theme-dependent (too dark/too bright), prefer a 256-color mid gray
+  (e.g., `Color::Indexed(245)`) for muted text.
+
 ## Integration
 
 ### Invocation

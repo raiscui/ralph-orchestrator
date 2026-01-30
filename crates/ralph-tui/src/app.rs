@@ -8,9 +8,11 @@ use crate::chat::{ChatSubmit, parse_chat_submit};
 use crate::external_event_writer::ExternalEventWriter;
 use crate::input::{Action, map_key};
 use crate::state::{GateStatus, ParallelFocus, TuiMode, TuiState, TuiUpdate};
+use crate::theme::MUTED_FG;
 use crate::widgets::{
     content::{ContentPane, SelectionBounds},
     footer, header, help, instances,
+    parallel_output::ParallelOutputPane,
 };
 use anyhow::Result;
 use crossterm::{
@@ -106,6 +108,21 @@ fn clamp_usize(value: usize, max_exclusive: usize) -> usize {
     value.min(max_exclusive.saturating_sub(1))
 }
 
+fn chat_editor_pad_top(viewport_rows: usize, total_lines: usize) -> usize {
+    // =========================================================================
+    // Chat 输入框垂直对齐策略（与渲染/hit-test 共用）
+    //
+    // 目标：
+    // 1) 当内容行数不足输入框高度时，把内容“下移”，更像聊天输入区；
+    // 2) 但不要“贴底”，保留 1 行底部留白，让输入内容与下方 Targets 行有呼吸间距。
+    //
+    // 说明：
+    // - diff = viewport_rows - total_lines：可用的空白行数
+    // - pad_top = diff - 1：上方 padding，底部固定留 1 行空白（diff=0/1 时自动退化）
+    // =========================================================================
+    viewport_rows.saturating_sub(total_lines).saturating_sub(1)
+}
+
 fn hit_test_chat_editor(
     editor: &crate::state::ChatEditorState,
     area: ratatui::layout::Rect,
@@ -123,9 +140,18 @@ fn hit_test_chat_editor(
     let viewport_rows = area.height as usize;
     let total_lines = editor.lines.len().max(1);
     let cursor_row = editor.cursor.row.min(total_lines.saturating_sub(1));
-    let start_row = cursor_row.saturating_sub(viewport_rows.saturating_sub(1));
+    // 与渲染逻辑保持一致：
+    // - 当总行数不足输入框高度时，渲染会做“底部对齐”（上方 padding）。
+    // - 当总行数超过输入框高度时，渲染会做“跟随光标”的垂直滚动。
+    let start_row = if total_lines <= viewport_rows {
+        0
+    } else {
+        cursor_row.saturating_sub(viewport_rows.saturating_sub(1))
+    };
+    let pad_top = chat_editor_pad_top(viewport_rows, total_lines);
 
     let rel_y = y.saturating_sub(area.y) as usize;
+    let rel_y = rel_y.saturating_sub(pad_top);
     let mut row = start_row.saturating_add(rel_y);
     row = row.min(total_lines.saturating_sub(1));
 
@@ -273,8 +299,168 @@ fn resolve_human_message_target_instance(
     explicit.or_else(|| selected_instance_id.map(|id| id.to_string()))
 }
 
+// =============================================================================
+// Clipboard（复制/粘贴）支持
+// =============================================================================
+
+/// Clipboard 写入方式（用于 UI status 提示）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardCopyMethod {
+    /// macOS: pbcopy（写入系统剪贴板）
+    Pbcopy,
+    /// OSC52（写入终端剪贴板，适合远程/跨平台）
+    Osc52,
+}
+
+/// Clipboard 写入结果（best-effort）。
+#[derive(Debug, Clone, Copy)]
+struct ClipboardCopyOutcome {
+    method: ClipboardCopyMethod,
+    truncated: bool,
+}
+
+fn truncate_utf8_to_max_bytes(s: &str, max_bytes: usize) -> (&str, bool) {
+    if s.len() <= max_bytes {
+        return (s, false);
+    }
+
+    // 说明：避免切在 UTF-8 字节序列中间导致 panic。
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+
+    (&s[..end], true)
+}
+
+#[cfg(target_os = "macos")]
+fn copy_to_pbcopy(text: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("spawn pbcopy failed: {e}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("pbcopy stdin is not piped"))?;
+    stdin
+        .write_all(text.as_bytes())
+        .map_err(|e| anyhow::anyhow!("write to pbcopy failed: {e}"))?;
+    drop(stdin);
+
+    let status = child
+        .wait()
+        .map_err(|e| anyhow::anyhow!("wait pbcopy failed: {e}"))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("pbcopy exited with status: {status}"));
+    }
+
+    Ok(())
+}
+
+fn copy_to_osc52(text: &str) -> Result<bool> {
+    use base64::Engine;
+    use std::io::Write as _;
+
+    // 经验值：OSC52 在不同终端/代理链路里可能有长度限制。
+    // 这里做一个保守上限，避免一次性写入过大导致不可预期行为。
+    const MAX_OSC52_BYTES: usize = 100_000;
+    let (text, truncated) = truncate_utf8_to_max_bytes(text, MAX_OSC52_BYTES);
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    // OSC52：设置剪贴板（c = clipboard）
+    // 参考形式：ESC ] 52 ; c ; <base64> BEL
+    let seq = format!("\x1b]52;c;{encoded}\x07");
+
+    let mut stdout = io::stdout();
+    stdout
+        .write_all(seq.as_bytes())
+        .map_err(|e| anyhow::anyhow!("write osc52 failed: {e}"))?;
+    stdout
+        .flush()
+        .map_err(|e| anyhow::anyhow!("flush osc52 failed: {e}"))?;
+
+    Ok(truncated)
+}
+
+fn copy_text_to_clipboard(text: &str) -> Result<ClipboardCopyOutcome> {
+    // best-effort：优先用系统剪贴板（macOS），否则回退到 OSC52。
+    #[cfg(target_os = "macos")]
+    {
+        if copy_to_pbcopy(text).is_ok() {
+            return Ok(ClipboardCopyOutcome {
+                method: ClipboardCopyMethod::Pbcopy,
+                truncated: false,
+            });
+        }
+    }
+
+    let truncated = copy_to_osc52(text)?;
+    Ok(ClipboardCopyOutcome {
+        method: ClipboardCopyMethod::Osc52,
+        truncated,
+    })
+}
+
+fn extract_output_selection_text(
+    buffer: crate::state::CurrentOutputBuffer<'_>,
+    width: u16,
+    height: u16,
+    selection: crate::state::ScreenSelection,
+    search_query: Option<&str>,
+) -> String {
+    if width == 0 || height == 0 {
+        return String::new();
+    }
+
+    // 说明：selection 坐标是相对 output_inner（0,0 起）的屏幕坐标。
+    let (min_x, max_x, min_y, max_y) = selection.bounds();
+    let max_x = max_x.min(width.saturating_sub(1));
+    let max_y = max_y.min(height.saturating_sub(1));
+    let min_x = min_x.min(max_x);
+    let min_y = min_y.min(max_y);
+
+    let area = ratatui::layout::Rect::new(0, 0, width, height);
+    let mut scratch = ratatui::buffer::Buffer::empty(area);
+
+    // 复用实际渲染器，保证“所见即所得”（含 soft wrap / scroll offset）。
+    match buffer {
+        crate::state::CurrentOutputBuffer::Serial(buffer) => {
+            let mut widget = ContentPane::new(buffer);
+            if let Some(q) = search_query {
+                widget = widget.with_search(q);
+            }
+            ratatui::widgets::Widget::render(widget, area, &mut scratch);
+        }
+        crate::state::CurrentOutputBuffer::Parallel(buffer) => {
+            let mut widget = ParallelOutputPane::new(buffer);
+            if let Some(q) = search_query {
+                widget = widget.with_search(q);
+            }
+            ratatui::widgets::Widget::render(widget, area, &mut scratch);
+        }
+    }
+
+    // 提取选中矩形区域的字符（并对每行做一次右侧裁剪，减少粘贴噪音）。
+    let mut lines: Vec<String> = Vec::new();
+    for y in min_y..=max_y {
+        let mut row = String::new();
+        for x in min_x..=max_x {
+            row.push_str(scratch[(x, y)].symbol());
+        }
+        let trimmed = row.trim_end_matches(' ').to_string();
+        lines.push(trimmed);
+    }
+
+    lines.join("\n")
+}
+
 fn handle_parallel_mouse_down(
-    mouse: &MouseEvent,
+    mouse: MouseEvent,
     state: &mut TuiState,
     layout: ParallelLayoutSnapshot,
     chat_drag_anchor: &mut Option<crate::state::TextPos>,
@@ -411,22 +597,22 @@ pub fn dispatch_action(action: Action, state: &mut TuiState, viewport_height: us
     match action {
         Action::Quit => return true,
         Action::ScrollDown => {
-            if let Some(buffer) = state.current_output_buffer_mut() {
+            if let Some(mut buffer) = state.current_output_buffer_mut() {
                 buffer.scroll_down(viewport_height);
             }
         }
         Action::ScrollUp => {
-            if let Some(buffer) = state.current_output_buffer_mut() {
+            if let Some(mut buffer) = state.current_output_buffer_mut() {
                 buffer.scroll_up();
             }
         }
         Action::ScrollTop => {
-            if let Some(buffer) = state.current_output_buffer_mut() {
+            if let Some(mut buffer) = state.current_output_buffer_mut() {
                 buffer.scroll_top();
             }
         }
         Action::ScrollBottom => {
-            if let Some(buffer) = state.current_output_buffer_mut() {
+            if let Some(mut buffer) = state.current_output_buffer_mut() {
                 buffer.scroll_bottom(viewport_height);
             }
         }
@@ -506,6 +692,23 @@ impl App {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+        // 为了让终端能区分 `Enter` 与 `Shift+Enter`，这里启用 kitty keyboard protocol
+        // （crossterm: progressive keyboard enhancement）。
+        //
+        // 背景：
+        // - 许多终端在默认模式下不会把 `Shift+Enter` 作为“带 SHIFT 的 Enter”上报；
+        // - 结果就是应用层只能看到一次普通 Enter，无法实现 “Shift+Enter=换行” 的体验。
+        //
+        // 处理策略：
+        // - best-effort 启用：失败也不影响 TUI 运行（例如不支持的终端/平台）。
+        let _ = execute!(
+            stdout,
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        );
+
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -515,7 +718,13 @@ impl App {
         // guard runs on Drop, which is guaranteed even during task cancellation.
         defer! {
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
+            let _ = execute!(
+                io::stdout(),
+                crossterm::event::PopKeyboardEnhancementFlags,
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                Show
+            );
         }
 
         // Event-driven architecture: input polling is the primary driver
@@ -564,7 +773,7 @@ impl App {
                                     match mouse.kind {
                                         MouseEventKind::ScrollUp => {
                                             let mut state = self.state.lock().unwrap();
-                                            if let Some(buffer) = state.current_output_buffer_mut() {
+                                            if let Some(mut buffer) = state.current_output_buffer_mut() {
                                                 for _ in 0..3 {
                                                     buffer.scroll_up();
                                                 }
@@ -572,7 +781,7 @@ impl App {
                                         }
                                         MouseEventKind::ScrollDown => {
                                             let mut state = self.state.lock().unwrap();
-                                            if let Some(buffer) = state.current_output_buffer_mut() {
+                                            if let Some(mut buffer) = state.current_output_buffer_mut() {
                                                 for _ in 0..3 {
                                                     buffer.scroll_down(viewport_height);
                                                 }
@@ -584,7 +793,7 @@ impl App {
                                                 && let Some(layout) = parallel_layout
                                             {
                                                 handle_parallel_mouse_down(
-                                                    &mouse,
+                                                    mouse,
                                                     &mut state,
                                                     layout,
                                                     &mut chat_drag_anchor,
@@ -659,11 +868,51 @@ impl App {
                                             if matches!(state.mode, TuiMode::Parallel)
                                                 && let Some(layout) = parallel_layout
                                             {
-                                                let _ = layout;
-
                                                 // Output：结束拖拽选择。
                                                 if state.parallel.output_selecting {
                                                     state.parallel.finish_output_selection();
+
+                                                    // 鼠标框选结束后：自动复制到剪贴板（best-effort）。
+                                                    // 说明：在 raw mode + mouse capture 下，终端原生选择通常不可用；
+                                                    // 因此这里把“应用内选择”主动写入剪贴板，才能形成 Cmd+C/Cmd+V 闭环。
+                                                    if let Some(sel) = state.parallel.output_selection
+                                                        && let Some(buffer) = state.current_output_buffer()
+                                                    {
+                                                        let selected_text = extract_output_selection_text(
+                                                            buffer,
+                                                            layout.output_inner.width,
+                                                            layout.output_inner.height,
+                                                            sel,
+                                                            state.search_state.query.as_deref(),
+                                                        );
+
+                                                        if selected_text.trim().is_empty() {
+                                                            state.parallel.chat_status =
+                                                                Some("copy: no text selected".to_string());
+                                                        } else {
+                                                            match copy_text_to_clipboard(&selected_text) {
+                                                                Ok(outcome) => {
+                                                                    let method = match outcome.method {
+                                                                        ClipboardCopyMethod::Pbcopy => "pbcopy",
+                                                                        ClipboardCopyMethod::Osc52 => "osc52",
+                                                                    };
+                                                                    let truncated = if outcome.truncated {
+                                                                        " (truncated)"
+                                                                    } else {
+                                                                        ""
+                                                                    };
+                                                                    state.parallel.chat_status = Some(format!(
+                                                                        "copied {} chars to clipboard via {method}{truncated}",
+                                                                        selected_text.chars().count()
+                                                                    ));
+                                                                }
+                                                                Err(e) => {
+                                                                    state.parallel.chat_status =
+                                                                        Some(format!("copy failed: {e:#}"));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
 
                                                 // Chat：结束拖拽选择（保留 selection 结果，仅清理锚点）。
@@ -671,6 +920,41 @@ impl App {
                                             }
                                         }
                                         _ => {}
+                                    }
+                                }
+                                Event::Paste(paste) => {
+                                    // 说明：
+                                    // - 部分终端会使用 bracketed paste，上报为 `Event::Paste(text)`。
+                                    // - 如果忽略该事件，用户会感知为“Cmd+V 没反应”。
+                                    let mut state = self.state.lock().unwrap();
+
+                                    // Paste 也视为“用户有意输入”，因此顺手关闭 help overlay，避免挡住视线。
+                                    if state.show_help {
+                                        state.show_help = false;
+                                    }
+
+                                    // 搜索输入模式：追加到 query（并压平换行，保持单行语义）
+                                    if state.search_state.search_mode {
+                                        let normalized = paste
+                                            .replace('\r', "")
+                                            .replace('\n', " ")
+                                            .trim_end()
+                                            .to_string();
+                                        state.search_query.push_str(&normalized);
+                                        continue;
+                                    }
+
+                                    // 并行模式：仅在 Chat 聚焦时接收粘贴内容（避免误写到其它区域）
+                                    if matches!(state.mode, TuiMode::Parallel)
+                                        && state.parallel.focus == ParallelFocus::Chat
+                                    {
+                                        for ch in paste.chars() {
+                                            match ch {
+                                                '\r' => {}
+                                                '\n' => state.parallel.chat_editor.insert_newline(),
+                                                c => state.parallel.chat_editor.insert_char(c),
+                                            }
+                                        }
                                     }
                                 }
                                 Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -754,6 +1038,66 @@ impl App {
                                                     request_interrupt(self.interrupt_tx.as_ref());
                                                     break;
                                                 }
+                                                if key.code == KeyCode::Char('y') {
+                                                    // `y`：复制当前输出选择到剪贴板（best-effort）。
+                                                    // 说明：Cmd+C 是终端模拟器快捷键，通常不会被 TUI 应用接收到；
+                                                    // 因此这里提供一个应用内显式复制键作为兜底。
+                                                    let Some(layout) = parallel_layout else {
+                                                        state.parallel.chat_status =
+                                                            Some("copy failed: layout not ready".to_string());
+                                                        continue;
+                                                    };
+
+                                                    let Some(sel) = state.parallel.output_selection else {
+                                                        state.parallel.chat_status =
+                                                            Some("copy: no selection".to_string());
+                                                        continue;
+                                                    };
+
+                                                    let Some(buffer) = state.current_output_buffer() else {
+                                                        state.parallel.chat_status =
+                                                            Some("copy failed: no output buffer".to_string());
+                                                        continue;
+                                                    };
+
+                                                    let selected_text = extract_output_selection_text(
+                                                        buffer,
+                                                        layout.output_inner.width,
+                                                        layout.output_inner.height,
+                                                        sel,
+                                                        state.search_state.query.as_deref(),
+                                                    );
+
+                                                    if selected_text.trim().is_empty() {
+                                                        state.parallel.chat_status =
+                                                            Some("copy: no text selected".to_string());
+                                                        continue;
+                                                    }
+
+                                                    match copy_text_to_clipboard(&selected_text) {
+                                                        Ok(outcome) => {
+                                                            let method = match outcome.method {
+                                                                ClipboardCopyMethod::Pbcopy => "pbcopy",
+                                                                ClipboardCopyMethod::Osc52 => "osc52",
+                                                            };
+                                                            let truncated = if outcome.truncated {
+                                                                " (truncated)"
+                                                            } else {
+                                                                ""
+                                                            };
+                                                            state.parallel.chat_status = Some(format!(
+                                                                "copied {} chars to clipboard via {method}{truncated}",
+                                                                selected_text.chars().count()
+                                                            ));
+                                                        }
+                                                        Err(e) => {
+                                                            state.parallel.chat_status =
+                                                                Some(format!("copy failed: {e:#}"));
+                                                        }
+                                                    }
+
+                                                    continue;
+                                                }
                                                 if key.code == KeyCode::Char('?') {
                                                     state.show_help = true;
                                                     continue;
@@ -826,9 +1170,20 @@ impl App {
                                                         KeyCode::Delete => {
                                                             state.parallel.chat_editor.delete();
                                                         }
+                                                        KeyCode::Char('j')
+                                                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                                        {
+                                                            // Ctrl+J：换行（在很多终端里比 Shift+Enter 更稳定可区分）。
+                                                            state.parallel.chat_editor.insert_newline();
+                                                        }
                                                         KeyCode::Enter => {
-                                                            // Shift+Enter：换行；Enter：提交。
-                                                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                                            // 说明：
+                                                            // - 理想情况：Shift+Enter 可被终端区分，用于换行。
+                                                            // - 现实情况：部分终端不会把 Shift 修饰符上报给 TUI（Shift+Enter 看起来就像 Enter）。
+                                                            // 因此这里保留 Shift+Enter，同时提供 Alt+Enter 作为更可靠的 fallback。
+                                                            if key.modifiers.contains(KeyModifiers::SHIFT)
+                                                                || key.modifiers.contains(KeyModifiers::ALT)
+                                                            {
                                                                 state.parallel.chat_editor.insert_newline();
                                                                 continue;
                                                             }
@@ -938,7 +1293,7 @@ impl App {
                                         }
                                     }
                                 }
-                                // Ignore other events (FocusGained, FocusLost, Paste, Resize, key releases)
+                                // Ignore other events (FocusGained, FocusLost, Resize, key releases)
                                 _ => {}
                             }
                         }
@@ -985,13 +1340,38 @@ impl App {
                             main_height.saturating_sub(2) as usize
                         }
                     };
-                    if let Some(buffer) = state.current_output_buffer_mut()
-                        && buffer.following_bottom
+                    if let Some(mut buffer) = state.current_output_buffer_mut()
+                        && buffer.following_bottom()
                     {
                         let max_scroll = buffer
-                            .line_count()
+                            .row_count()
                             .saturating_sub(effective_viewport_height);
-                        buffer.scroll_offset = max_scroll;
+                        buffer.set_scroll_offset_clamped(max_scroll);
+                    }
+
+                    // 并行模式下：把“输出面板可用宽度”同步到 state，用于 Markdown 语义换行。
+                    // 这样 blockquote/list 等结构前缀在换行后仍能保持正确展示。
+                    if state.mode == TuiMode::Parallel {
+                        let vertical = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([
+                                Constraint::Min(0), // main
+                                Constraint::Length(PARALLEL_BOTTOM_PANEL_HEIGHT), // bottom panel
+                            ])
+                            .split(content_area);
+
+                        let main_area = vertical[0];
+                        let horizontal = Layout::default()
+                            .direction(Direction::Horizontal)
+                            .constraints([
+                                Constraint::Length(30), // instances
+                                Constraint::Min(0),     // output
+                            ])
+                            .split(main_area);
+
+                        let output_area = horizontal[1];
+                        let output_inner_width = output_area.width.saturating_sub(2);
+                        state.parallel.set_output_render_width(output_inner_width);
                     }
 
                     let state = state; // Rebind as immutable for rendering
@@ -1074,7 +1454,7 @@ impl App {
                                 if let Some(instance) = state.parallel.selected_instance()
                                     && let Some(buffer) = instance.current_job_buffer()
                                 {
-                                    let mut content_widget = ContentPane::new(buffer);
+                                    let mut content_widget = ParallelOutputPane::new(buffer);
                                     if let Some(query) = &state.search_state.query {
                                         content_widget = content_widget.with_search(query);
                                     }
@@ -1090,7 +1470,7 @@ impl App {
                                 } else {
                                     let empty = Paragraph::new(Line::from(vec![
                                         Span::raw(" "),
-                                        Span::styled("No instance selected", Style::default().fg(Color::DarkGray)),
+                                        Span::styled("No instance selected", Style::default().fg(MUTED_FG)),
                                     ]));
                                     f.render_widget(empty, inner);
                                 }
@@ -1167,7 +1547,7 @@ impl App {
                                     let prompt_style = if bottom_focused {
                                         Style::default().fg(Color::Cyan)
                                     } else {
-                                        Style::default().fg(Color::DarkGray)
+                                        Style::default().fg(MUTED_FG)
                                     };
 
                                     let selection_style = Style::default().bg(Color::Blue);
@@ -1181,28 +1561,50 @@ impl App {
                                     let mut cursor_pos: Option<(u16, u16)> = None;
 
                                     if editor.is_empty() && !bottom_focused {
-                                        // 未聚焦且为空：显示占位提示
+                                        // 未聚焦且为空：显示占位提示。
+                                        // 这里也做与正文一致的“下移 + 底部留白”，避免点击定位与渲染产生错位感。
+                                        let viewport_rows = input_area.height as usize;
+                                        let pad_top = chat_editor_pad_top(viewport_rows, 1);
+                                        for _ in 0..pad_top {
+                                            input_lines.push(Line::from(""));
+                                        }
+
                                         input_lines.push(Line::from(vec![
                                             Span::raw(" "),
                                             Span::styled(">", prompt_style),
                                             Span::raw(" "),
                                             Span::styled(
                                                 "Type: msg (-> selected) | @instance msg | !approve/!deny/!resolve ...",
-                                                Style::default().fg(Color::DarkGray),
+                                                Style::default().fg(MUTED_FG),
                                             ),
                                         ]));
                                     } else {
-                                        let total_lines = editor.lines.len().max(1);
-                                        let cursor_row = editor.cursor.row.min(total_lines.saturating_sub(1));
-                                        let viewport_rows = input_area.height as usize;
-                                        let start_row = cursor_row.saturating_sub(viewport_rows.saturating_sub(1));
+                                            let total_lines = editor.lines.len().max(1);
+                                            let cursor_row = editor.cursor.row.min(total_lines.saturating_sub(1));
+                                            let viewport_rows = input_area.height as usize;
+                                            // 视觉对齐策略：
+                                            // - 当行数不足输入框高度时，把内容“下移”（底部对齐），更符合聊天输入区直觉。
+                                            // - 当行数超过输入框高度时，保持光标行可见（垂直滚动）。
+                                            let start_row = if total_lines <= viewport_rows {
+                                                0
+                                            } else {
+                                                cursor_row.saturating_sub(viewport_rows.saturating_sub(1))
+                                            };
+                                            let pad_top = chat_editor_pad_top(viewport_rows, total_lines);
 
-                                        for i in 0..viewport_rows {
-                                            let row = start_row.saturating_add(i);
-                                            if row >= total_lines {
-                                                input_lines.push(Line::from(""));
-                                                continue;
-                                            }
+                                            for i in 0..viewport_rows {
+                                                // 内容不足高度时，在上方补空行，把实际文本推到更靠下的位置。
+                                                if pad_top > 0 && i < pad_top {
+                                                    input_lines.push(Line::from(""));
+                                                    continue;
+                                                }
+
+                                                let row =
+                                                    start_row.saturating_add(i.saturating_sub(pad_top));
+                                                if row >= total_lines {
+                                                    input_lines.push(Line::from(""));
+                                                    continue;
+                                                }
 
                                             let prefix_symbol = if row == 0 { ">" } else { "|" };
 
@@ -1326,13 +1728,13 @@ impl App {
                                     let selected_id = state.parallel.selected_instance_id();
                                     let mut targets_spans: Vec<Span> = vec![
                                         Span::raw(" "),
-                                        Span::styled("Targets:", Style::default().fg(Color::DarkGray)),
+                                        Span::styled("Targets:", Style::default().fg(MUTED_FG)),
                                         Span::raw(" "),
                                     ];
                                     if state.parallel.instance_order.is_empty() {
                                         targets_spans.push(Span::styled(
                                             "(none)",
-                                            Style::default().fg(Color::DarkGray),
+                                            Style::default().fg(MUTED_FG),
                                         ));
                                     } else {
                                         for id in &state.parallel.instance_order {
@@ -1359,13 +1761,13 @@ impl App {
                                         .chat_status
                                         .as_deref()
                                         .unwrap_or(if bottom_focused {
-                                            "Enter=send  Shift+Enter=newline  Arrows=move  Esc=clear  Tab=switch"
+                                            "Enter=send  Shift+Enter|Alt+Enter|Ctrl+J=newline  Arrows=move  Esc=clear  Tab=switch"
                                         } else {
                                             "Tab to focus chat"
                                         });
                                     let status_line = Line::from(vec![
                                         Span::raw(" "),
-                                        Span::styled(status.to_string(), Style::default().fg(Color::DarkGray)),
+                                        Span::styled(status.to_string(), Style::default().fg(MUTED_FG)),
                                     ]);
                                     f.render_widget(Paragraph::new(status_line), status_area);
 
@@ -1381,7 +1783,7 @@ impl App {
                                         if gate_info_area.height > 0 {
                                             let info_line = Line::from(vec![
                                                 Span::raw(" "),
-                                                Span::styled("Gate:", Style::default().fg(Color::DarkGray)),
+                                                Span::styled("Gate:", Style::default().fg(MUTED_FG)),
                                                 Span::raw(" "),
                                                 Span::styled(
                                                     gate_id.to_string(),
@@ -1395,7 +1797,7 @@ impl App {
                                                     Style::default().fg(Color::Magenta),
                                                 ),
                                                 Span::raw(" "),
-                                                Span::styled("by=", Style::default().fg(Color::DarkGray)),
+                                                Span::styled("by=", Style::default().fg(MUTED_FG)),
                                                 Span::styled(
                                                     g.request.requested_by.to_string(),
                                                     Style::default().fg(Color::Cyan),
@@ -1415,7 +1817,7 @@ impl App {
 
                                             let prompt_line = Line::from(vec![
                                                 Span::raw(" "),
-                                                Span::styled("Prompt:", Style::default().fg(Color::DarkGray)),
+                                                Span::styled("Prompt:", Style::default().fg(MUTED_FG)),
                                                 Span::raw(" "),
                                                 Span::raw(prompt),
                                             ]);
@@ -1428,7 +1830,7 @@ impl App {
                                                 .add_modifier(ratatui::style::Modifier::BOLD);
                                             let actions_line = Line::from(vec![
                                                 Span::raw(" "),
-                                                Span::styled("Actions:", Style::default().fg(Color::DarkGray)),
+                                                Span::styled("Actions:", Style::default().fg(MUTED_FG)),
                                                 Span::raw(" "),
                                                 Span::styled("!approve", action_style),
                                                 Span::raw(" "),
@@ -1504,7 +1906,7 @@ impl App {
                                             Span::raw(" "),
                                             Span::styled(
                                                 g.request.requested_by.to_string(),
-                                                Style::default().fg(Color::DarkGray),
+                                                Style::default().fg(MUTED_FG),
                                             ),
                                             Span::raw(" "),
                                             Span::raw(prompt),
@@ -1514,7 +1916,7 @@ impl App {
                                     if gate_lines.is_empty() {
                                         gate_lines.push(Line::from(vec![
                                             Span::raw(" "),
-                                            Span::styled("No gates", Style::default().fg(Color::DarkGray)),
+                                            Span::styled("No gates", Style::default().fg(MUTED_FG)),
                                         ]));
                                     }
 
@@ -1823,6 +2225,101 @@ mod tests {
     }
 
     // =========================================================================
+    // Parallel TUI: Shift+Enter（需要启用 kitty keyboard protocol）
+    // =========================================================================
+
+    #[test]
+    fn enables_keyboard_enhancement_flags_for_shift_enter() {
+        // 说明：
+        // - `Shift+Enter` 是否可区分，核心取决于“终端会不会上报 Enter 的修饰键”。
+        // - 我们通过 crossterm 的 progressive keyboard enhancement（kitty protocol）来提升可区分性。
+        // - 这里用结构性测试确保该能力不会在重构中被意外删除。
+        let source = include_str!("app.rs");
+        let test_module_start = source.find("#[cfg(test)]").unwrap_or(source.len());
+        let production_code = &source[..test_module_start];
+
+        assert!(
+            production_code.contains("PushKeyboardEnhancementFlags"),
+            "Expected app.rs to enable keyboard enhancement flags (PushKeyboardEnhancementFlags)"
+        );
+        assert!(
+            production_code.contains("PopKeyboardEnhancementFlags"),
+            "Expected app.rs to disable keyboard enhancement flags on exit (PopKeyboardEnhancementFlags)"
+        );
+    }
+
+    // =========================================================================
+    // Parallel TUI: Chat 输入框（底部对齐 + hit-test）
+    // =========================================================================
+
+    #[test]
+    fn hit_test_chat_editor_accounts_for_bottom_aligned_padding() {
+        // 说明：
+        // - 输入框的垂直对齐策略是“下移 + 底部留白 1 行”。
+        // - 当高度为 4 行、内容为 2 行时：顶部会补 1 行空白，底部也会留 1 行空白。
+        // - hit-test 必须扣掉顶部 padding，否则点击第一行内容会错误映射到第二行。
+        let mut editor = crate::state::ChatEditorState::default();
+        editor.lines = vec!["first".to_string(), "second".to_string()];
+        editor.cursor = crate::state::TextPos { row: 0, col: 0 };
+        editor.selection = None;
+
+        let area = ratatui::layout::Rect::new(0, 0, 20, 4);
+
+        // 第 0 行是 padding；第 1 行应映射到 logical row=0。
+        let pos_first = hit_test_chat_editor(&editor, area, area.x, area.y + 1);
+        assert_eq!(pos_first.row, 0);
+
+        // 第 2 行应映射到 logical row=1（第 3 行是底部留白）。
+        let pos_second = hit_test_chat_editor(&editor, area, area.x, area.y + 2);
+        assert_eq!(pos_second.row, 1);
+    }
+
+    // =========================================================================
+    // Parallel TUI: Clipboard selection text（所见即所得）
+    // =========================================================================
+
+    #[test]
+    fn extract_output_selection_text_copies_single_line_region() {
+        let mut buffer = crate::state::IterationBuffer::new(1);
+        buffer.append_line(Line::from("hello world"));
+
+        let sel = crate::state::ScreenSelection::new(
+            crate::state::ScreenPos { x: 0, y: 0 },
+            crate::state::ScreenPos { x: 4, y: 0 },
+        );
+
+        let got = extract_output_selection_text(
+            crate::state::CurrentOutputBuffer::Serial(&buffer),
+            40,
+            1,
+            sel,
+            None,
+        );
+        assert_eq!(got, "hello");
+    }
+
+    #[test]
+    fn extract_output_selection_text_copies_multi_line_region_with_newlines() {
+        let mut buffer = crate::state::IterationBuffer::new(1);
+        buffer.append_line(Line::from("hello"));
+        buffer.append_line(Line::from("world"));
+
+        let sel = crate::state::ScreenSelection::new(
+            crate::state::ScreenPos { x: 0, y: 0 },
+            crate::state::ScreenPos { x: 4, y: 1 },
+        );
+
+        let got = extract_output_selection_text(
+            crate::state::CurrentOutputBuffer::Serial(&buffer),
+            40,
+            2,
+            sel,
+            None,
+        );
+        assert_eq!(got, "hello\nworld");
+    }
+
+    // =========================================================================
     // Parallel TUI: Targets/Gates 快捷交互（chips + 默认目标）
     // =========================================================================
 
@@ -1878,7 +2375,7 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         };
         let mut anchor = None;
-        handle_parallel_mouse_down(&mouse, &mut state, layout, &mut anchor);
+        handle_parallel_mouse_down(mouse, &mut state, layout, &mut anchor);
 
         assert_eq!(
             state.parallel.selected_instance_id().unwrap().as_str(),
@@ -1945,7 +2442,7 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         };
         let mut anchor = None;
-        handle_parallel_mouse_down(&mouse, &mut state, layout, &mut anchor);
+        handle_parallel_mouse_down(mouse, &mut state, layout, &mut anchor);
 
         assert_eq!(state.parallel.selected_gate.as_deref(), Some("g2"));
         assert_eq!(
@@ -1983,7 +2480,7 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         };
         let mut anchor = None;
-        handle_parallel_mouse_down(&mouse, &mut state, layout, &mut anchor);
+        handle_parallel_mouse_down(mouse, &mut state, layout, &mut anchor);
 
         assert_eq!(state.parallel.chat_editor.text(), "!resolve g2 ");
     }

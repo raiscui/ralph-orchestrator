@@ -9,11 +9,111 @@ use std::time::{Duration, Instant};
 // 并行模式（Supervisor TUI）state
 // ============================================================================
 
-mod parallel;
+pub(crate) mod parallel;
+use parallel::output::ParallelOutputBuffer;
 pub use parallel::{
     ChatEditorState, GateStatus, ParallelFocus, ParallelTuiState, ScreenPos, ScreenSelection,
     TextPos, TextSelection,
 };
+
+/// 当前输出视图的只读 buffer 视图（串行/并行统一抽象）。
+pub enum CurrentOutputBuffer<'a> {
+    Serial(&'a IterationBuffer),
+    Parallel(&'a ParallelOutputBuffer),
+}
+
+impl CurrentOutputBuffer<'_> {
+    pub fn row_count(&self) -> usize {
+        match self {
+            Self::Serial(buf) => buf.line_count(),
+            Self::Parallel(buf) => buf.row_count(),
+        }
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        match self {
+            Self::Serial(buf) => buf.scroll_offset,
+            Self::Parallel(buf) => buf.scroll_offset,
+        }
+    }
+
+    pub fn following_bottom(&self) -> bool {
+        match self {
+            Self::Serial(buf) => buf.following_bottom,
+            Self::Parallel(buf) => buf.following_bottom,
+        }
+    }
+}
+
+/// 当前输出视图的可变 buffer 视图（串行/并行统一抽象）。
+pub enum CurrentOutputBufferMut<'a> {
+    Serial(&'a mut IterationBuffer),
+    Parallel(&'a mut ParallelOutputBuffer),
+}
+
+impl CurrentOutputBufferMut<'_> {
+    pub fn row_count(&self) -> usize {
+        match self {
+            Self::Serial(buf) => buf.line_count(),
+            Self::Parallel(buf) => buf.row_count(),
+        }
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        match self {
+            Self::Serial(buf) => buf.scroll_offset,
+            Self::Parallel(buf) => buf.scroll_offset,
+        }
+    }
+
+    pub fn set_scroll_offset_clamped(&mut self, idx: usize) {
+        match self {
+            Self::Serial(buf) => {
+                if buf.line_count() == 0 {
+                    buf.scroll_offset = 0;
+                } else {
+                    buf.scroll_offset = idx.min(buf.line_count().saturating_sub(1));
+                }
+            }
+            Self::Parallel(buf) => buf.set_scroll_offset_clamped(idx),
+        }
+    }
+
+    pub fn following_bottom(&self) -> bool {
+        match self {
+            Self::Serial(buf) => buf.following_bottom,
+            Self::Parallel(buf) => buf.following_bottom,
+        }
+    }
+
+    pub fn scroll_up(&mut self) {
+        match self {
+            Self::Serial(buf) => buf.scroll_up(),
+            Self::Parallel(buf) => buf.scroll_up(),
+        }
+    }
+
+    pub fn scroll_down(&mut self, viewport_height: usize) {
+        match self {
+            Self::Serial(buf) => buf.scroll_down(viewport_height),
+            Self::Parallel(buf) => buf.scroll_down(viewport_height),
+        }
+    }
+
+    pub fn scroll_top(&mut self) {
+        match self {
+            Self::Serial(buf) => buf.scroll_top(),
+            Self::Parallel(buf) => buf.scroll_top(),
+        }
+    }
+
+    pub fn scroll_bottom(&mut self, viewport_height: usize) {
+        match self {
+            Self::Serial(buf) => buf.scroll_bottom(viewport_height),
+            Self::Parallel(buf) => buf.scroll_bottom(viewport_height),
+        }
+    }
+}
 
 /// TUI 运行模式：串行（按 iteration）/ 并行（按 instance/job）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,24 +592,28 @@ impl TuiState {
     ///
     /// - 串行模式：当前 iteration 的 buffer
     /// - 并行模式：当前选中实例的当前 job buffer
-    pub fn current_output_buffer(&self) -> Option<&IterationBuffer> {
+    pub fn current_output_buffer(&self) -> Option<CurrentOutputBuffer<'_>> {
         match self.mode {
-            TuiMode::Serial => self.current_iteration(),
+            TuiMode::Serial => self.current_iteration().map(CurrentOutputBuffer::Serial),
             TuiMode::Parallel => self
                 .parallel
                 .selected_instance()
-                .and_then(|i| i.current_job_buffer()),
+                .and_then(|i| i.current_job_buffer())
+                .map(CurrentOutputBuffer::Parallel),
         }
     }
 
     /// 返回“当前可滚动输出视图”的可变 buffer。
-    pub fn current_output_buffer_mut(&mut self) -> Option<&mut IterationBuffer> {
+    pub fn current_output_buffer_mut(&mut self) -> Option<CurrentOutputBufferMut<'_>> {
         match self.mode {
-            TuiMode::Serial => self.current_iteration_mut(),
+            TuiMode::Serial => self
+                .current_iteration_mut()
+                .map(CurrentOutputBufferMut::Serial),
             TuiMode::Parallel => self
                 .parallel
                 .selected_instance_mut()
-                .and_then(|i| i.current_job_buffer_mut()),
+                .and_then(|i| i.current_job_buffer_mut())
+                .map(CurrentOutputBufferMut::Parallel),
         }
     }
 
@@ -584,31 +688,52 @@ impl TuiState {
 
         // Collect matches first (avoid borrow conflicts)
         let matches: Vec<(usize, usize)> = match self.mode {
-            TuiMode::Serial => self.iterations.get(self.current_view),
-            TuiMode::Parallel => self
-                .parallel
-                .selected_instance()
-                .and_then(|i| i.current_job_buffer()),
-        }
-        .and_then(|buffer| {
-            let lines = buffer.lines.lock().ok()?;
-            let mut found = Vec::new();
-            for (line_idx, line) in lines.iter().enumerate() {
-                // Get the text content of the line
-                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                let line_lower = line_text.to_lowercase();
+            TuiMode::Serial => self
+                .iterations
+                .get(self.current_view)
+                .and_then(|buffer| buffer.lines.lock().ok().map(|lines| lines.clone()))
+                .map(|lines| {
+                    let mut found = Vec::new();
+                    for (line_idx, line) in lines.iter().enumerate() {
+                        let line_text: String =
+                            line.spans.iter().map(|s| s.content.as_ref()).collect();
+                        let line_lower = line_text.to_lowercase();
 
-                // Find all occurrences in this line
-                let mut search_start = 0;
-                while let Some(pos) = line_lower[search_start..].find(&query_lower) {
-                    let char_offset = search_start + pos;
-                    found.push((line_idx, char_offset));
-                    search_start = char_offset + query_lower.len();
+                        let mut search_start = 0;
+                        while let Some(pos) = line_lower[search_start..].find(&query_lower) {
+                            let char_offset = search_start + pos;
+                            found.push((line_idx, char_offset));
+                            search_start = char_offset + query_lower.len();
+                        }
+                    }
+                    found
+                })
+                .unwrap_or_default(),
+            TuiMode::Parallel => {
+                let Some(buffer) = self
+                    .parallel
+                    .selected_instance()
+                    .and_then(|i| i.current_job_buffer())
+                else {
+                    self.search_state.matches = Vec::new();
+                    return;
+                };
+
+                let mut found = Vec::new();
+                for (line_idx, line) in buffer.lines.iter().enumerate() {
+                    let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                    let line_lower = line_text.to_lowercase();
+
+                    let mut search_start = 0;
+                    while let Some(pos) = line_lower[search_start..].find(&query_lower) {
+                        let char_offset = search_start + pos;
+                        found.push((line_idx, char_offset));
+                        search_start = char_offset + query_lower.len();
+                    }
                 }
+                found
             }
-            Some(found)
-        })
-        .unwrap_or_default();
+        };
 
         self.search_state.matches = matches;
 
@@ -659,14 +784,14 @@ impl TuiState {
         // Adjust scroll to show the match line
         // Use a default viewport height for calculation (will be overridden by actual render)
         let viewport_height = 20;
-        if let Some(buffer) = self.current_output_buffer_mut() {
+        if let Some(mut buffer) = self.current_output_buffer_mut() {
             // If the match line is above the current view, scroll up to it
-            if line_idx < buffer.scroll_offset {
-                buffer.scroll_offset = line_idx;
+            if line_idx < buffer.scroll_offset() {
+                buffer.set_scroll_offset_clamped(line_idx);
             }
             // If the match line is below the current view, scroll down to show it
-            else if line_idx >= buffer.scroll_offset + viewport_height {
-                buffer.scroll_offset = line_idx.saturating_sub(viewport_height / 2);
+            else if line_idx >= buffer.scroll_offset() + viewport_height {
+                buffer.set_scroll_offset_clamped(line_idx.saturating_sub(viewport_height / 2));
             }
         }
     }
@@ -758,6 +883,35 @@ impl IterationBuffer {
         // 移除最旧的 overflow 行
         lines.drain(0..overflow);
         self.scroll_offset = self.scroll_offset.saturating_sub(overflow);
+    }
+
+    /// 替换整段输出内容，并在超过上限时丢弃最旧的行。
+    ///
+    /// 说明：
+    /// - 并行 Supervisor TUI 需要“保留原始输出行 → 重新渲染”为 styled lines，
+    ///   因此每次追加输出后，可能会对当前 job 的整段内容做一次全量重渲染。
+    /// - 为了避免内存无限增长，这里同样需要一个按行上限的裁剪策略。
+    pub fn replace_lines_capped(&mut self, mut new_lines: Vec<Line<'static>>, max_lines: usize) {
+        if max_lines == 0 {
+            return;
+        }
+
+        if new_lines.len() > max_lines {
+            let overflow = new_lines.len().saturating_sub(max_lines);
+            new_lines.drain(0..overflow);
+            self.scroll_offset = self.scroll_offset.saturating_sub(overflow);
+        }
+
+        // 防御性：避免 scroll_offset 指向越界位置导致“看起来像空白输出”。
+        if new_lines.is_empty() {
+            self.scroll_offset = 0;
+        } else {
+            self.scroll_offset = self.scroll_offset.min(new_lines.len().saturating_sub(1));
+        }
+
+        if let Ok(mut lines) = self.lines.lock() {
+            *lines = new_lines;
+        }
     }
 
     /// Returns the total number of lines in the buffer.
@@ -856,6 +1010,35 @@ mod tests {
             assert_eq!(lines[0].spans[0].content, "first");
             assert_eq!(lines[1].spans[0].content, "second");
             assert_eq!(lines[2].spans[0].content, "third");
+        }
+
+        #[test]
+        fn replace_lines_capped_replaces_entire_content() {
+            let mut buffer = IterationBuffer::new(1);
+            buffer.append_line(Line::from("old"));
+
+            buffer.replace_lines_capped(vec![Line::from("new1"), Line::from("new2")], 100);
+
+            let lines = buffer.lines.lock().unwrap();
+            assert_eq!(lines.len(), 2);
+            assert_eq!(lines[0].spans[0].content, "new1");
+            assert_eq!(lines[1].spans[0].content, "new2");
+        }
+
+        #[test]
+        fn replace_lines_capped_drops_overflow_from_front_and_adjusts_scroll() {
+            let mut buffer = IterationBuffer::new(1);
+            buffer.scroll_offset = 2;
+
+            let new_lines = (0..5)
+                .map(|i| Line::from(format!("line {i}")))
+                .collect::<Vec<_>>();
+            buffer.replace_lines_capped(new_lines, 3);
+
+            let lines = buffer.lines.lock().unwrap();
+            assert_eq!(lines.len(), 3);
+            assert_eq!(lines[0].spans[0].content, "line 2");
+            assert_eq!(buffer.scroll_offset, 0);
         }
 
         #[test]

@@ -5,7 +5,9 @@
 
 use ralph_proto::Event;
 use ralph_tui::state::{TuiMode, TuiState, TuiUpdate};
-use ralph_tui::widgets::{content::ContentPane, footer, header, instances};
+use ralph_tui::widgets::{
+    content::ContentPane, footer, header, instances, parallel_output::ParallelOutputPane,
+};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -339,7 +341,7 @@ impl TuiTestHarness {
                         if let Some(instance) = state.parallel.selected_instance()
                             && let Some(buffer) = instance.current_job_buffer()
                         {
-                            let mut content_widget = ContentPane::new(buffer);
+                            let mut content_widget = ParallelOutputPane::new(buffer);
                             if let Some(query) = &state.search_state.query {
                                 content_widget = content_widget.with_search(query);
                             }
