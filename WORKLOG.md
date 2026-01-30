@@ -113,6 +113,21 @@
 - `cargo test -p ralph-core smoke_runner` ✅
 - `cargo test -p ralph-core kiro` ✅
 
+## 2026-01-30 23:03 +0800｜continuous-learning：四文件摘要 + 归档清理（保持工作区干净）
+
+### 我做了什么
+- 在 `notes.md` 追加“四文件摘要（用于决定是否提取 skill）”，并确认 termimad 的 H1 默认居中属于可复用踩坑点。
+- 新增一个全局可复用 skill：
+  - `self-learning.termimad-h1-left-align`
+  - 位置：`/Users/cuiluming/.codex/skills/self-learning.termimad-h1-left-align/SKILL.md`
+- 归档历史文件，减少根目录噪音：
+  - `notes_*.md` / `task_plan_*.md` → `archive/`
+  - `WORKLOG_2026-01-29_1908.md` / `WORKLOG_2026-01-29_2022.md` → `archive/`（并同步更新 `WORKLOG.md` 引用路径）
+- 删除重复的未跟踪 example：`examples/parallel-trigger-routing2/`
+
+### 提交
+- `f4de8c5`：`chore: archive session notes and plans`
+
 ## 2026-01-30 22:22 +0800｜termimad：H1 标题改为左对齐（取消居中）
 
 ### 你要的效果
