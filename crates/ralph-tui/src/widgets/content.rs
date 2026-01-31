@@ -4,10 +4,10 @@
 //! renderer that displays formatted Lines from an IterationBuffer.
 
 use crate::state::IterationBuffer;
+use crate::theme::TuiTheme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Widget,
 };
@@ -52,15 +52,18 @@ pub struct ContentPane<'a> {
     search_query: Option<&'a str>,
     /// Optional selection bounds (relative to the widget area)
     selection: Option<SelectionBounds>,
+    /// 主题（用于 selection/search 的高亮样式）。
+    theme: TuiTheme,
 }
 
 impl<'a> ContentPane<'a> {
     /// Creates a new ContentPane for the given iteration buffer.
-    pub fn new(buffer: &'a IterationBuffer) -> Self {
+    pub fn new(buffer: &'a IterationBuffer, theme: TuiTheme) -> Self {
         Self {
             buffer,
             search_query: None,
             selection: None,
+            theme,
         }
     }
 
@@ -85,19 +88,55 @@ impl Widget for ContentPane<'_> {
             return;
         }
 
+        // =========================================================================
+        // 背景/底色策略（非常关键）
+        // =========================================================================
+        //
+        // 现象（用户可见）：
+        // - Warp 透明背景（app bg=Reset）下，如果内容区 cell 最终留下了 bg=Reset，
+        //   那么动画（tachyonfx sweep）在插值时会把 Reset 当作黑色参与计算，
+        //   进而被用户感知为“整屏背景变动/闪烁”。
+        // - 同时，pane 内部如果没有稳定底色，会导致文本可读性下降、扫入白条更刺眼。
+        //
+        // 根因：
+        // - ContentPane 需要大量写入/清空 cell。
+        // - 如果清空时使用 `Cell::reset()` 或写入 `Style::default()`，很容易把 bg 还原成 Reset，
+        //   把外层 panel_block 刷出来的底色抹掉。
+        //
+        // 解决：
+        // - 先从“当前区域左上角 cell”读取一个基准背景色（由外层决定：panel base / app crust / Reset）。
+        // - 以此构造 base_style：默认文本色 + 基准背景。
+        // - 全区域先铺一层 base_style（清空残影），后续渲染只在此之上叠加 span/search/selection。
+        //
+        // 这样：
+        // - Output/Chat 等 pane 内部能稳定保留底色（base），更易读；
+        // - Warp 模式下，外圈仍可保持 Reset（半透明），不会被 content 清空逻辑污染。
+        let base_bg = buf[(area.x, area.y)].bg;
+        let base_style = self.theme.text().bg(base_bg);
+
+        let x_end = area.x.saturating_add(area.width);
+        let y_end = area.y.saturating_add(area.height);
+
+        // 先铺底：防止切换 iteration/滚动时留下上一帧残影。
+        for y in area.y..y_end {
+            for x in area.x..x_end {
+                buf[(x, y)].set_char(' ').set_style(base_style);
+            }
+        }
+
         // Get visible lines from the buffer (now returns owned Vec due to interior mutability)
         let visible = self.buffer.visible_lines(area.height as usize);
 
-        let selection_bg = Color::Blue;
+        let selection_bg = self.theme.selection_bg();
         let mut y = area.y;
         for line in &visible {
-            if y >= area.y + area.height {
+            if y >= y_end {
                 break;
             }
 
             // Apply search highlighting if we have a query
             let rendered_line = if let Some(query) = self.search_query {
-                highlight_search_matches(line, query)
+                highlight_search_matches(line, query, self.theme)
             } else {
                 line.clone()
             };
@@ -122,108 +161,73 @@ impl Widget for ContentPane<'_> {
                     }
 
                     // Soft wrap: if the grapheme doesn't fit on this row, move to next row.
-                    // Clear the remaining cells on this row before wrapping, otherwise we can
-                    // leave artifacts from the previous frame.
-                    if x + width > area.x + area.width {
-                        while x < area.x + area.width {
-                            let rel_x = x.saturating_sub(area.x);
-                            let rel_y = y.saturating_sub(area.y);
-                            let selected =
-                                self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
-                            let style = if selected {
-                                Style::default().bg(selection_bg)
-                            } else {
-                                Style::default()
-                            };
-                            buf[(x, y)].set_char(' ').set_style(style);
-                            x += 1;
-                        }
-
-                        y += 1;
+                    if x.saturating_add(width) > x_end {
+                        y = y.saturating_add(1);
                         x = area.x;
-                        // Stop if we've filled the viewport
-                        if y >= area.y + area.height {
+                        if y >= y_end {
                             return;
                         }
                     }
 
                     // Key: write by grapheme cluster and advance by display width, so we don't
                     // write ASCII into a CJK/emoji continuation cell and "swallow" the next char.
-                    let rel_x = x.saturating_sub(area.x);
-                    let rel_y = y.saturating_sub(area.y);
-                    let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
-                    let style = if selected {
-                        span.style.bg(selection_bg)
-                    } else {
-                        span.style
-                    };
+                    //
+                    // 注意：span.style 可能不包含 bg/fg。
+                    // - bg：必须保留 base_bg（否则 pane 内部会被写回 Reset，导致透明与动画副作用）
+                    // - fg：默认用主题 text 色，保证 UI 一致性
+                    let style = base_style.patch(span.style);
                     buf[(x, y)].set_symbol(grapheme).set_style(style);
 
-                    let next_symbol = x + width;
-                    x += 1;
+                    let next_symbol = x.saturating_add(width);
+                    x = x.saturating_add(1);
                     while x < next_symbol {
-                        let rel_x = x.saturating_sub(area.x);
-                        let rel_y = y.saturating_sub(area.y);
-                        let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
-                        if selected {
-                            buf[(x, y)].reset();
-                            buf[(x, y)].set_style(Style::default().bg(selection_bg));
-                        } else {
-                            buf[(x, y)].reset();
-                        }
-                        x += 1;
+                        // 宽字符的 continuation cell 必须写空 symbol（""），否则会破坏终端的宽度对齐。
+                        buf[(x, y)].set_symbol("").set_style(base_style);
+                        x = x.saturating_add(1);
                     }
                 }
             }
 
-            // Clear remaining cells on this row after the line content
-            while x < area.x + area.width {
-                let rel_x = x.saturating_sub(area.x);
-                let rel_y = y.saturating_sub(area.y);
-                let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
-                let style = if selected {
-                    Style::default().bg(selection_bg)
-                } else {
-                    Style::default()
-                };
-                buf[(x, y)].set_char(' ').set_style(style);
-                x += 1;
-            }
-
             // Move to the next row for the next logical line
-            y += 1;
+            y = y.saturating_add(1);
         }
 
-        // Clear remaining rows below the content to prevent artifacts
-        // when switching to an iteration with fewer lines
-        while y < area.y + area.height {
-            for x in area.x..area.x + area.width {
-                let rel_x = x.saturating_sub(area.x);
-                let rel_y = y.saturating_sub(area.y);
-                let selected = self.selection.map_or(false, |s| s.contains(rel_x, rel_y));
-                let style = if selected {
-                    Style::default().bg(selection_bg)
-                } else {
-                    Style::default()
-                };
-                buf[(x, y)].set_char(' ').set_style(style);
+        // Selection overlay：
+        // - 选择区域需要覆盖“空白处”，否则用户拖拽选择时会感觉断层。
+        // - 放到最后统一叠加，能保证 selection 优先级高于 search highlight。
+        if let Some(selection) = self.selection {
+            let max_x = area.width.saturating_sub(1);
+            let max_y = area.height.saturating_sub(1);
+
+            let sel_min_x = selection.min_x.min(max_x);
+            let sel_max_x = selection.max_x.min(max_x);
+            let sel_min_y = selection.min_y.min(max_y);
+            let sel_max_y = selection.max_y.min(max_y);
+
+            for rel_y in sel_min_y..=sel_max_y {
+                let y = area.y.saturating_add(rel_y);
+                for rel_x in sel_min_x..=sel_max_x {
+                    let x = area.x.saturating_add(rel_x);
+                    if x >= x_end || y >= y_end {
+                        continue;
+                    }
+                    let cell = &mut buf[(x, y)];
+                    let style = cell.style().bg(selection_bg);
+                    cell.set_style(style);
+                }
             }
-            y += 1;
         }
     }
 }
 
 /// Highlights search matches in a line with a distinct style.
-fn highlight_search_matches(line: &Line<'static>, query: &str) -> Line<'static> {
+fn highlight_search_matches(line: &Line<'static>, query: &str, theme: TuiTheme) -> Line<'static> {
     if query.is_empty() {
         return line.clone();
     }
 
     let query_lower = query.to_lowercase();
-    let highlight_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
-        .add_modifier(Modifier::REVERSED);
+    let highlight_style = theme.search_hit();
 
     let mut new_spans = Vec::new();
 
@@ -268,8 +272,10 @@ fn highlight_search_matches(line: &Line<'static>, query: &str) -> Line<'static> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::TuiTheme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier, Style};
 
     /// Helper to render ContentPane and return buffer content as strings
     fn render_content_pane(
@@ -283,7 +289,7 @@ mod tests {
 
         terminal
             .draw(|f| {
-                let mut widget = ContentPane::new(buffer);
+                let mut widget = ContentPane::new(buffer, TuiTheme::default());
                 if let Some(q) = search {
                     widget = widget.with_search(q);
                 }
@@ -311,12 +317,13 @@ mod tests {
         x: u16,
         y: u16,
     ) -> bool {
+        let theme = TuiTheme::default();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
             .draw(|f| {
-                let widget = ContentPane::new(buffer).with_search(search);
+                let widget = ContentPane::new(buffer, theme).with_search(search);
                 f.render_widget(widget, f.area());
             })
             .unwrap();
@@ -325,8 +332,8 @@ mod tests {
         let cell = &buf[(x, y)];
         // Check for highlight: typically reverse or yellow background
         cell.modifier.contains(Modifier::REVERSED)
-            || cell.bg == Color::Yellow
-            || cell.fg == Color::Black
+            || cell.bg == theme.colors().yellow
+            || cell.fg == theme.colors().crust
     }
 
     fn has_selection_bg(
@@ -337,19 +344,20 @@ mod tests {
         x: u16,
         y: u16,
     ) -> bool {
+        let theme = TuiTheme::default();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
             .draw(|f| {
-                let widget = ContentPane::new(buffer).with_selection(selection);
+                let widget = ContentPane::new(buffer, theme).with_selection(selection);
                 f.render_widget(widget, f.area());
             })
             .unwrap();
 
         let buf = terminal.backend().buffer();
         let cell = &buf[(x, y)];
-        cell.bg == Color::Blue
+        cell.bg == theme.selection_bg()
     }
 
     // =========================================================================
@@ -397,15 +405,15 @@ mod tests {
         let selection = SelectionBounds::from_points(0, 0, 4, 0);
         assert!(
             has_selection_bg(&buffer, selection, 20, 2, 0, 0),
-            "selected cell should have blue background"
+            "selected cell should have selection background"
         );
         assert!(
             has_selection_bg(&buffer, selection, 20, 2, 4, 0),
-            "end of selection should have blue background"
+            "end of selection should have selection background"
         );
         assert!(
             !has_selection_bg(&buffer, selection, 20, 2, 6, 0),
-            "outside selection should not have blue background"
+            "outside selection should not have selection background"
         );
     }
 
@@ -424,7 +432,7 @@ mod tests {
 
         terminal
             .draw(|f| {
-                let widget = ContentPane::new(&buffer);
+                let widget = ContentPane::new(&buffer, TuiTheme::default());
                 f.render_widget(widget, f.area());
             })
             .unwrap();
@@ -554,7 +562,7 @@ mod tests {
 
         terminal
             .draw(|f| {
-                let widget = ContentPane::new(&buffer).with_search("");
+                let widget = ContentPane::new(&buffer, TuiTheme::default()).with_search("");
                 f.render_widget(widget, f.area());
             })
             .unwrap();
@@ -620,7 +628,7 @@ mod tests {
         let area = Rect::new(5, 5, 30, 10);
         terminal
             .draw(|f| {
-                let widget = ContentPane::new(&buffer);
+                let widget = ContentPane::new(&buffer, TuiTheme::default());
                 f.render_widget(widget, area);
             })
             .unwrap();
@@ -673,13 +681,13 @@ mod tests {
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
 
-        let widget = ContentPane::new(&buffer);
+        let widget = ContentPane::new(&buffer, TuiTheme::default());
         widget.render(area, &mut buf);
 
         // Expected behavior: the CJK character (U+5C06) occupies two columns; x=1 should be a
-        // blank/reset continuation cell, and the ASCII 's' should start at x=2.
+        // continuation cell (empty symbol), and the ASCII 's' should start at x=2.
         assert_eq!(buf[(0, 0)].symbol(), "将");
-        assert_eq!(buf[(1, 0)].symbol(), " ");
+        assert_eq!(buf[(1, 0)].symbol(), "");
         assert_eq!(buf[(2, 0)].symbol(), "s");
     }
 
@@ -707,7 +715,7 @@ mod tests {
         iter_buffer.append_line(Line::from("line three"));
 
         // When ContentPane renders (only 3 lines of content)
-        let widget = ContentPane::new(&iter_buffer);
+        let widget = ContentPane::new(&iter_buffer, TuiTheme::default());
         widget.render(area, &mut buf);
 
         // Then rows 0-2 should have the content

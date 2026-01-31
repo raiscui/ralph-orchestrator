@@ -1,695 +1,218 @@
-# 任务计划: parallel-trigger-routing 示例对齐语义 + 中文 parallel E2E
+# 任务计划: Warp 透明背景下 Output 动画导致“全屏背景变动”
 
 ## 目标
-1) 让 `examples/parallel-trigger-routing` 这个示例不再“靠 prompt 写死闭环逻辑”，而是用 `event_loop.starting_event` / `event_loop.complete_publishes` 体现官方语义；prompt 只表达目标（内联在 `event_loop.prompt`），不承担控制面语义。
-
-2) 增加“中文版本”的 parallel E2E 场景，并多跑几次不同 prompt 变体，验证解析/路由在文本扰动下的稳定性与鲁棒性。
+- Warp 终端 + “终端默认背景模式（bg=Reset）”下：
+  - Output pane 触发重启动画时，不再让用户感知到“全屏背景在变暗/变色/跳动”
+  - 动画仍然满足“先消失再出现”的交互语义
 
 ## 阶段
-- [x] 阶段1: 现状核对与设计定稿
-- [x] 阶段2: 调整 example 配置与文档
-- [x] 阶段3: 轻量验证与记录归档
-- [x] 阶段4: 去掉 prompt.md 依赖（内联 prompt）
-- [x] 阶段5: README 中文化（examples/parallel-trigger-routing/README.md）
-- [x] 阶段6: 增加中文 parallel E2E 场景
-- [x] 阶段7: 多跑两次 E2E（prompt 变体）验证稳定性
-- [x] 阶段8: 汇总记录（WORKLOG/notes）并准备归档
+- [x] 阶段1: 复现与定位（确认只在 Output 动画出现）
+- [x] 阶段2: 根因分析（Reset 在动画插值里被当作黑色）
+- [x] 阶段3: 修复实现（Warp 模式替换动画实现）
+- [x] 阶段4: 回归测试与全量验证
+- [x] 阶段5: 记录归档（notes/WORKLOG/ERRORFIX）
 
 ## 关键问题
-1. 示例的入口/终点 topic 应该分别是什么？（预期：`starting_event=spec.start`，`complete_publishes=spec.approved`）
-2. 示例的“目标 prompt”放哪里最合适？（预期：内联到 `event_loop.prompt`，避免依赖额外 prompt 文件）
-3. 中文 E2E 要覆盖哪些风险？（预期：中文 prompt + 中文 hats 指令；并复用现有“prompt 内包含伪 `<event>` / fenced code block”的变体回归）
+1. 为什么只有 Output 的重启动画会引发“全屏背景变动”？  
+   - 因为 Output pane 区域通常占屏幕大部分，动画遮罩会覆盖大面积区域，任何背景色插值都会被放大感知。
+2. 为什么在 bg=Reset（透明模式）时，动画会把背景“变成黑色”？  
+   - tachyonfx 在做颜色插值时，`Color::Reset` 会被映射为 RGB(0,0,0)（黑色），并且 sweep_in/out 中间帧还会把 `cell.bg==Reset` 临时当作 Black 参与 lerp。
+3. 如何在不牺牲 Warp 半透明效果的前提下，保留“先消失再出现”的动画语义？  
+   - 在 Warp 透明背景模式下，避免使用会做颜色插值的 sweep/fade；改用 dissolve/coalesce 这种“改 symbol / 覆盖 style”的遮罩型动画，避免插值把 Reset 变黑。
 
 ## 做出的决定
-- [决定] 用 config 固化 entry/exit：在示例 `ralph.yml` 写入 `starting_event` 与 `complete_publishes`。
-  - [理由] 这是 parallel-workflow-semantics 的“官方语义锚点”，示例应该带头使用。
-- [决定] 目标 prompt 内联到 `event_loop.prompt`。
-  - [理由] 在 macOS 上 `.gitignore` 的 `PROMPT.md` 规则会让 `prompt.md` 这类文件对外不可复现；内联能从根上消除“依赖 prompt 文件”的困惑。
-- [决定] 新增一个独立的中文 parallel E2E scenario（而不是改写现有英文场景）。
-  - [理由] 英文场景仍然有价值；中文场景用于覆盖“中文提示词 + 同一套语义约束”的稳定性回归，且便于定位问题归因（语言差异 vs 逻辑差异）。
+- [决定] Warp（bg=Reset）模式下，Output 重启动画改用 `dissolve_to` + `coalesce_from`（带 sweep pattern）。  
+  - [理由] 该方案不会对 `Color::Reset` 做 lerp，从根上消除“插值成黑色背景”的副作用。
+- [决定] 后续改良：Warp 模式下允许 pane 内部保留底色（`base`），并把 Output 重启动画恢复为 `sweep_out/sweep_in`（仅作用于 Output inner area）。  
+  - [理由] 内部背景不再是 Reset 后，sweep 不会触发 Reset→Black 分支；同时渐变观感更接近原版 sweep，且不再出现刺眼白条。
+- [决定] 非 Warp（显式背景色）保持原 sweep_out/sweep_in 动画不变。  
+  - [理由] 在显式背景色模式下，原动画观感更好，且不会出现 Reset→Black 的问题。
 
 ## 遇到错误
-- 暂无
+- [错误] 单测里直接用 `std::time::Duration` 调 `tachyonfx::Effect::process` 编译失败。  
+  - [原因] 当前构建的 tachyonfx 使用自定义 Duration 类型。  
+  - [修复] 在测试中用 `.into()` 把 `std::time::Duration` 转成 tachyonfx Duration。
 
 ## 状态
-**已完成**：已补写 WORKLOG/ERRORFIX，并完成两次中文 E2E 变体回归；已归档 `parallel-workflow-semantics` change，并同步 delta specs 到 `openspec/specs/`。
+**已完成**：Output 重启动画在 Warp 透明背景模式下不再引发“全屏背景变动”，并通过测试验证。
 
 ## 日志
-### 2026-01-29 00:15
-- [计划] 将 README 内容翻译为中文，但保留所有代码/配置 key、命令、topic 名称不变，避免读者复制运行时出错。
+### 2026-01-30 21:47 +0800
+- [问题] 用户反馈：现在全局背景都透明了，但唯独 Output block 动画会引起“整个全屏背景变动”。
+- [根因] tachyonfx 的 sweep_in/out 会对 fg/bg 做颜色插值；而 `Color::Reset` 在 tachyonfx 内部会被当作黑色参与插值，导致动画期出现大面积“黑底遮罩”。
+- [修复] `crates/ralph-tui/src/animation.rs`：
+  - 当 `theme.app_bg_color()==Color::Reset` 时，`output_reopen_effect` 改用 `dissolve_to` + `coalesce_from`（`SweepPattern::up_to_down`），避免插值。
+  - 增加回归测试：`output_reopen_effect_terminal_default_bg_does_not_paint_black_background`。
+- [验证] `cargo test -p ralph-tui` ✅；`cargo test` ✅；`cargo test -p ralph-core smoke_runner` ✅。
 
-### 2026-01-29 00:17
-- [完成] README 中文化已完成，示例语义未变；`cargo test -q` 全部通过。
+### 2026-01-31 02:20
+- [改良] 用户希望恢复更像原 sweep 的渐变，并且白条不要太晃眼；允许 pane 内部有底色。
+- [最终方案] Warp 模式下：app bg=Reset，但 pane bg=base；Output 重启动画恢复 sweep（仅 inner area、faded_color=base），既不闪也更好看。
 
-### 2026-01-29 00:30
-- [计划] 增加中文 parallel E2E 场景，并用 prompt 变体（含伪 `<event>` 与 fenced code block）多跑两次，观察是否会出现误解析、误路由或提早/卡死等不稳定行为。
-
-### 2026-01-29 01:50
-- [完成] 新增中文并行 E2E 场景：`parallel-hat-instances-zh`（Codex）。
-- [完成] E2E 稳定性验证（两次 prompt 变体）：
-  - `variant1`：✅ 通过（约 98s）
-  - `variant2`：✅ 通过（约 119s）
-- [改良] E2E WorkspaceManager：每次创建 workspace 前先清理旧目录，避免 `--keep-workspace` 后再次运行导致的历史产物污染与误判。
-
-### 2026-01-29 02:10
-- [计划] 使用 `openspec archive parallel-workflow-semantics` 归档该 change，并让 OpenSpec 将 delta specs 合并到 `openspec/specs/` 主规格中。
-- [计划] 归档后复核 `openspec/specs/parallel-hat-instances/spec.md` 与 `openspec/specs/parallel-trigger-routing/spec.md` 是否包含 starting_event / complete_publishes / orphan→ralph#1 等“官方语义锚点”。
 
 ---
 
-# 任务计划: 理性合并 preset 配置更新（commit: 7a346bd）
+# 任务计划: 启动入场动画必须从空屏开始（避免先全显示再动画）
 
 ## 目标
-把 `7a346bd425cf2d7a45d086875eba413a21111744` 里的“preset 配置改良”合并到当前分支。
-只保留对工作流收敛、可执行性、测试时长预算有帮助的改动。
+- 并行模式（Supervisor TUI）启动时：
+  - 在入场动画开始前，屏幕上不应出现任何 pane 内容/边框（真正的空屏）
+  - 随后按顺序逐块出场（Instances → Output → Chat/Gates），且 Instances 条目晚于框体
 
 ## 阶段
-- [x] 阶段1: 审阅 commit 变更点与影响范围
-- [x] 阶段2: 应用改动（不创建新 commit，只落地文件差异）
-- [x] 阶段3: 运行 `cargo test` 做回放/单测验证
-- [x] 阶段4: 记录合并结论（notes/WORKLOG，必要时 ERRORFIX）
+- [x] 阶段1: 复现与定位（确认哪些区域首帧仍可见）
+- [x] 阶段2: 修复实现（补齐 header/footer 等区域的遮罩）
+- [x] 阶段3: 回归测试（增加“首帧为空屏”的单测）
+- [x] 阶段4: 全量测试验证
+- [x] 阶段5: 记录归档（notes/WORKLOG/ERRORFIX）
 
 ## 关键问题
-1. 这次变更是否会影响事件语义（publish vs LOOP_COMPLETE）以及 preset 的“停机”条件？
-2. `tools/preset-test-tasks.yml` 的复杂度与 timeout 调整，是否会影响现有测试基准与期望？
-3. 是否存在与当前分支同文件改动的冲突，需要做“择优合并”而不是整块覆盖？
-
-## 做出的决定
-- [决定] 优先按“整 commit 差异”落地，再用测试做背压验证。
-  - [理由] 该 commit 只改 YAML 配置，风险可控；且改动方向统一（更务实、更易停机、时间预算更贴近真实）。
-- [决定] 不执行 `git cherry-pick` 产生新 commit，只应用变更到工作区。
-  - [理由] 遵循当前协作约定：除非明确要求，否则不自动创建提交。
-
-## 遇到错误
-- 暂无
+1. 为什么会出现“先全显示一帧，再开始逐块动画”的闪烁？
+2. 哪些区域没有被启动动画覆盖（例如 header/footer）？
+3. 在 `bg=Reset`（Warp 半透明）模式下，如何用不依赖颜色插值的方式实现“起步空屏”？
 
 ## 状态
-**已完成**：已把 `7a346bd` 的 preset 改良落地到工作区，并通过 `cargo test` 验证无回归。
+**已完成**：启动入场动画首帧为空屏（含 header/footer），随后按顺序逐块出场；并通过测试验证。
 
 ## 日志
-### 2026-01-29 12:35
-- [完成] 审阅 `7a346bd` 差异：确认主要价值点为“更务实的 review 收敛策略”和“更可靠的 LOOP_COMPLETE 停机语义”。
-- [完成] 应用 7 个 YAML 文件差异（使用 `git show | git apply`，未创建新 commit）。
-- [完成] `cargo test` 全通过。
+### 2026-01-30 22:25 
+- [反馈] 用户要求：启动时先空屏，再逐块入场；不能先显示完整 UI 再动画。
+### 2026-01-30 22:27 
+- [修复] 并行启动动画（bg=Reset）补齐 header/footer 的遮罩：首帧为真正空屏，避免先全显示再动画。
+- [测试] 新增单测：`startup_open_effect_parallel_terminal_default_bg_starts_from_blank_screen`，并通过 `cargo test`。
+
 
 ---
 
-# 任务计划: 理性合并 TUI hang 修复（commit: 685526d）
+# 任务计划: Warp 透明模式下优化“刷白条”动画观感
 
 ## 目标
-把 `685526d8b901a19f73774e7f2c80bb22494dd1c2` 中“避免在 `npx` 进程组下 TUI 卡死”的修复合并到当前分支。
-同时尽量不破坏“进程组用于清理子进程”的既有语义。
+- 在 Warp（`bg=Reset`）模式下：
+  - 保持“整屏背景不再跟着 Output 动”（不引入 Reset→Black 插值）
+  - 同时让入场/重启动画的“白条扫过”更像之前（更干净、更有速度感）
 
-## 方案（给自己看的取舍）
-1) 不惜代价，最佳方案：
-- 保持“自己成为进程组 leader”的能力，但在 TTY 场景下，必要时将新进程组设置回前台（需要 `tcsetpgrp`，并处理权限/失败分支）。
-2) 先能用，后面再优雅（本次选择）：
-- 按 upstream commit 的做法：当当前进程组就是前台 TTY 进程组时，跳过 `setpgid`，避免 TUI 输入被“踢出前台组”导致挂死。
-- 代价是：在某些 wrapper 场景下我们不再强制成为 group leader，但能换来“交互可用性”。
+## 方案（两条路）
+1. 【改良优先】在 Warp(bg=Reset) 下让 pane 内部保留底色（Catppuccin `base`），并把 Output 重启动画恢复为 `sweep_out/sweep_in` 的渐变质感（仅作用于 pane inner，避免触碰 Reset→Black 分支）。
+2. 【最佳观感】实现一个自定义 shader：只改 symbol/fg，不碰 bg，做出更接近原 `sweep_in/out` 的连续渐变扫入（成本更高，但可控性最好）。
 
 ## 阶段
-- [x] 阶段1: 审阅差异与现状（main.rs 的 process group 初始化逻辑）
-- [x] 阶段2: 落地代码改动（含必要的风格/日志改良）
-- [x] 阶段3: `cargo test` 全量验证
-- [x] 阶段4: 提交（带来源说明）+ 记录结论到 notes/WORKLOG
+- [x] 阶段1: 选择方案与参数（白条厚度/速度）
+- [x] 阶段2: 实现（调整 Output 重启动画 + 启动入场动画参数）
+- [x] 阶段3: 回归测试（确保 bg=Reset 不会被写成 Black）
+- [x] 阶段4: 全量测试验证
+- [x] 阶段5: 记录归档（notes/WORKLOG/ERRORFIX）
+
+## 状态
+**已完成**：在 Warp(bg=Reset) 下恢复更接近原 sweep 的渐变观感，同时降低白条眩光，并保持背景不再跟随 Output 动。
+
+## 日志
+### 2026-01-31 01:41 
+- [反馈] 用户觉得当前 Warp 透明模式下的“刷白条”不如以前好看，希望恢复更干净的扫入质感。
+### 2026-01-31 01:42 
+- [实现] `bg=Reset` 时 Output 重启动画从 dissolve/coalesce 改为 `slide_out + slide_in`，恢复更连续的白条扫入观感。
+- [调参] 引入 `SYMBOL_SWEEP_GRADIENT_MAX=10`，收窄 slide 渐变带，避免白条太厚/太糊。
+- [验证] `cargo test -p ralph-tui`、`cargo test -p ralph-core smoke_runner`、`cargo test` ✅。
+
+### 2026-01-31 02:20 
+- [反馈] 用户希望“更像原来 sweep 的渐变”，并且白色不要太晃眼；允许 block 内部有底色。
+- [实现] Warp 模式下保留 panel 内部底色（`base`），并把 Output 重启动画恢复为 `sweep_out/sweep_in`（仅作用于 inner area，faded_color=base）。
+- [验证] `cargo test -p ralph-tui`、`cargo test -p ralph-core smoke_runner`、`cargo test` ✅。
+
+
+---
+
+# 任务计划: Output block 动画后“底色泄漏到最外圈”
+
+## 目标
+- 我只给 pane/block 内部上底色（便于阅读），但最外圈（终端背景/空白区域）保持透明（Warp 的半透明效果）
+- Output block 做入场/重启动画时：
+  - 不要把底色写到最外圈
+  - 不要引发整屏背景闪烁/跳变
+
+## 阶段
+- [x] 阶段1: 复现与证据采集（对比 Instances vs Output）
+- [x] 阶段2: 根因定位（谁在写“全屏/外圈”的 bg）
+- [x] 阶段3: 修复实现（限制绘制/遮罩范围到 pane 区域）
+- [x] 阶段4: 回归测试（单测防止外圈被写底色）
+- [x] 阶段5: 全量测试验证 + 记录归档
 
 ## 关键问题
-1. 什么时候会出现 “npx process group” 触发的 TUI 卡死？（预期：我们调用 `setpgid` 把自己移出前台 TTY 组，导致输入不再送达）
-2. 跳过 `setpgid` 是否会导致 orphan 清理能力下降？（预期：是 trade-off，但在 wrapper 场景下优先保证交互）
-3. 是否需要额外日志/调试信息帮助以后定位（比如打印 pgrp/fg pgrp）？（预期：用 `debug!`，避免默认噪音）
+1. Output 为什么会影响最外圈，而 Instances 不会？  
+2. 是“绘制逻辑”写大了区域，还是“动画效果”覆盖了更大的区域？  
+3. 哪些区域必须保持 `Color::Reset` 才能让 Warp 的半透明生效？
 
-## 做出的决定
-- [决定] 采用 upstream 的“前台 TTY 组检测 + 安全跳过 setpgid”修复，并做少量 Rust 风格改良（inlined_format_args）。
-  - [理由] 这是最小化、可回归测试的修复；且能直接解决“交互挂死”这种硬故障。
-
-## 遇到错误
-- 暂无
+## 方案（两条路）
+1. 【改良优先】把 Output 的底色只画在 `inner_area`，并确保动画 effect 也只作用于 `inner_area`（而不是 pane 外圈 / app 全屏）。  
+2. 【先能用】Output pane 渲染前先对其区域 `Clear`，再统一由一个“背景层”渲染底色，pane 只画文字与边框（避免各 pane 互相污染）。  
 
 ## 状态
-**已完成**：已将 `685526d` 的修复落地到 `crates/ralph-cli/src/main.rs`，并通过 `cargo test` 验证无回归。
+**已完成**：Output 动画期间外圈不再被染色（Warp 透明背景保持一致），并通过测试验证。
 
 ## 日志
-### 2026-01-29 13:10
-- [完成] 审阅 `685526d` 差异：确认这是“避免 npx/wrapper 场景下 TUI 输入挂死”的关键修复。
-- [完成] 落地 process group 初始化保护逻辑（检测前台 TTY 进程组，必要时跳过 `setpgid`），并按 Rust 风格改用 inlined_format_args。
-- [完成] `cargo test` 全通过。
+### 2026-01-31 12:00 +0800
+- [补强] `crates/ralph-tui/src/widgets/content.rs`：
+  - ContentPane 先读取 `base_bg`（来自当前区域左上角 cell），构造 `base_style=theme.text()+base_bg` 并先铺满区域，避免清空/换帧时把 pane 底色写回 `Reset`。
+  - 宽字符 continuation cell 统一写入 `symbol==""`，避免对齐异常。
+  - selection 改为末尾统一 overlay，保证空白处也能被高亮覆盖。
+- [收益] Output/Chat 等 pane 内部底色更稳定，动画渐变更柔和，同时 Warp 外圈仍可保持 `bg=Reset` 的半透明效果。
+- [验证] `cargo test -p ralph-tui` ✅；`cargo test -p ralph-core smoke_runner` ✅；`cargo test` ✅。
+
 
 ---
 
-# 任务计划: 理性合并 mock-e2e（commit: e91aadc）
+# 任务计划: 切换 Instances 时 Output 先显示后消失（闪烁）
 
 ## 目标
-合并 `e91aadc437615dbd211e5c651c7f899dea9ce590` 中“cost-free E2E（mock cassette replay）”的核心价值：
-- 让 `ralph-e2e` 支持 `--mock`：用预录 JSONL cassette 回放代替真实 AI 后端调用（零成本、确定性）。
-- 提供 `mock-cli` 子命令：作为 `custom backend` 被 `ralph run` 调用，回放 cassette 输出。
-
-## 方案（给自己看的取舍）
-1) 不惜代价，最佳方案：
-- 全量合并该 commit 的所有内容（包含 specs/mock-adapter-e2e、tasks、文档、cassettes、以及代码变更）。
-- 优点：上下游语义与资料最完整；缺点：引入内容较多，可能带来与当前分支差异的冲突处理成本。
-2) 先能用，后面再优雅（本次选择）：
-- 只合并“能跑起来且可验证”的最小闭环：
-  - `ralph-e2e` 的 mock-mode + `mock-cli`（代码）
-  - `cassettes/e2e/*`（最小可运行数据）
-  - `docs/mock-cli.md`（用法文档，必要时做小幅同步修正）
-- 暂不引入 specs/ 与 tasks/（它们更像是研发过程材料，不影响功能闭环）。
+- 在并行模式（Supervisor TUI）里切换 Instances 选中项时：
+  - Output 区域不应先把“新实例的内容”画出来一帧
+  - 应该从“隐藏态”开始，再做入场动画（sweep-in）
+  - 观感上不闪烁、不抖动
 
 ## 阶段
-- [x] 阶段1: 审阅差异与本分支现状（尤其是我们已支持 Codex/parallel 场景）
-- [x] 阶段2: 落地 mock-mode 代码与资源（避免破坏现有 E2E 运行）
-- [x] 阶段3: `cargo test` 全量验证（必须通过）
-- [x] 阶段4: 提交（带来源说明）+ 记录结论到 notes/WORKLOG
+- [x] 阶段1: 复现与根因确认（为什么先可见一帧）
+- [x] 阶段2: 修复实现（让重启动画首帧从隐藏态起步）
+- [x] 阶段3: 回归测试（新增单测锁定无闪烁）
+- [x] 阶段4: 全量测试验证 + 记录归档
 
 ## 关键问题
-1. mock-mode 下，cassette 缺失应该如何处理？（本次：视为失败，避免“全跳过但 exit 0”的假绿）
-2. `mock-cli` 执行本地命令的白名单机制是否足够安全？（本次：默认最小 allowlist；且无 shell 解释执行）
-3. 文档是否与实际 CLI 参数一致？（本次：必要时同步修正文档，避免误导）
-
-## 做出的决定
-- [决定] 采用“先能用”方案：落地 mock-mode 核心闭环 + 最小 cassettes + 文档，并保留我们已有的 Codex/parallel 场景。
-  - [理由] 这是最小风险、最可验证的合并；同时也符合“改良胜过新增”的工程习惯（先把价值打通，再考虑补齐研发过程资料）。
-
-## 遇到错误
-- 暂无
+1. 为什么会“先显示一帧”？是状态先切换、动画后生效，还是动画本身首帧是可见态？
+2. 我们是否需要保留 “out→in” 语义？还是只要 “从隐藏态 sweep-in” 即可满足体验？
+3. 如何保证“添加 effect 的那一帧”一定是隐藏态（即使 `fx_delta` 不为 0）？
 
 ## 状态
-**已完成**：mock-mode 已落地、已通过 `cargo test`，并已提交（带来源说明）。
+**已完成**：切换 Instances 时 Output 不再先显示一帧，入场动画从隐藏态起步（无闪烁）。
 
 ## 日志
-### 2026-01-29 14:10
-- [完成] 选择“先能用”方案：只引入 mock-mode 闭环（代码+最小 cassettes+文档），不引入 specs/tasks。
-- [完成] `cargo test` 全通过（含 replay smoke tests 与 doctest）。
+### 2026-01-31 03:05
+- [根因] Output 重启动画之前是 `sweep_out + sweep_in`，其中 `sweep_out` 首帧是完全可见态（timer reversed → alpha=1）。
+- [触发条件] 切换实例时，我们先用“新实例”渲染了 Output 内容，再应用 effect，必然出现“先露一帧再被盖掉”的闪烁。
+- [修复] 改为 `sweep_in`（从隐藏态揭开），并在添加该 effect 的那一帧做 priming（`fx_delta=0`），保证首帧绝对隐藏。
+- [验证] `cargo fmt --check`、`cargo test -p ralph-tui`、`cargo test -p ralph-core smoke_runner`、`cargo test` ✅
 
-### 2026-01-29 14:25
-- [完成] 代码提交：`feat(e2e): add mock mode cassette replay (from e91aadc)`（commit: `40c18ae`）。
 
 ---
 
-# 任务计划: 并行输出 stderr 默认折叠 + 灰色显示
+# 任务计划: Instances 与 Output 之间增加间隙（取消边框贴合/“collapsing borders”观感）
 
 ## 目标
-1) 并行模式（尤其是 `--no-tui` 的日志模式）默认不输出 stderr（`err`）行，减少噪音。
-
-2) 提供显式开关让用户可按需打开 stderr 输出：`ralph run --show-stderr`。
-
-3) 当 stderr 输出开启时，将 stderr 行用灰色显示，提升可读性（日志模式 + 并行 TUI）。
+- 并行模式（Supervisor TUI）里：
+  - Instances pane 与 Output pane 之间不要贴在一起
+  - 两个 pane 都保留完整边框
+  - 中间留出一条背景间隙（效果类似其它区域的分隔感）
 
 ## 阶段
-- [x] 阶段1: 方案确认与参数设计
-- [x] 阶段2: CLI 开关实现与输出过滤
-- [x] 阶段3: stderr 灰色样式（log + TUI）
-- [x] 阶段4: 编译/测试验证与记录
-
-## 做出的决定
-- [决定] 默认隐藏 stderr；新增 `--show-stderr` 才显示。
-  - [理由] 并行 worker 的 stderr 往往是后端/CLI 自身日志与回显，不是“工作产物”，默认显示会显著干扰阅读。
-
-## 遇到错误
-- 暂无
+- [x] 阶段1: 现状确认（定位 Instances/Output 横向布局）
+- [x] 阶段2: 实现间隙列（Layout 增加 spacer column）
+- [x] 阶段3: 更新动画/点击 hit-test 的区域计算
+- [x] 阶段4: 回归测试与快照更新
+- [x] 阶段5: 全量测试验证 + 记录归档
 
 ## 状态
-**已完成** - `--show-stderr` 默认关闭；stderr 行默认隐藏，开启后使用灰色显示；`cargo test` 全部通过。
+**已完成**：Instances 与 Output 之间加入间隙列，取消“边框贴合/像 collapsing borders”的观感，并通过测试验证。
 
 ## 日志
-### 2026-01-29 14:21 +0800
-- [计划] 增加 `ralph run --show-stderr`，默认隐藏 `:err:` 行；stderr 开启时使用灰色输出，并在 TUI 中对 stderr 行使用 DarkGray。
-
-### 2026-01-29 14:28 +0800
-- [完成] 新增 `ralph run --show-stderr` / `ralph resume --show-stderr`，默认折叠/隐藏 stderr（`:err:`）行。
-- [完成] stderr 行灰色显示：
-  - 日志模式：使用 ANSI `\x1b[90m`（`colors::GRAY`）
-  - 并行 TUI：`Color::DarkGray`
-- [完成] 验证：`cargo test` ✅ 全部通过。
-
----
-
-# 任务计划: 修复并行模式退出时的 StateChanged send 失败 warning
-
-## 目标
-当并行模式自然结束（例如 `LOOP_COMPLETE`）时：
-
-1) 不再出现 `HatInstance actor exited with error ... Failed to send StateChanged to supervisor` 这类收尾 warning。
-
-2) `--no-tui` 的 `[supervisor] final states` 输出要可信：实例应当在退出前收敛到 `done/failed` 等终态，而不是残留 `running/idle`。
-
-## 阶段
-- [x] 阶段1: 复现与根因确认（定位触发路径）
-- [x] 阶段2: 实现修复（Supervisor 退出前 drain/等待实例终态）
-- [x] 阶段3: 加回归测试（覆盖“final states 收敛”）
-- [x] 阶段4: 编译/测试验证与记录（cargo test + 记录到 WORKLOG/ERRORFIX）
-
-## 关键问题
-1. 为什么会在“最后”才出现 warning？（预期：Supervisor 先退出导致 instance_rx drop，实例收尾发 StateChanged 失败）
-2. 最佳修复点在哪里？（预期：`ParallelSupervisor::run` 在 shutdown 后等待实例进入终态再 return）
-3. 回归测试怎么写才稳定？（预期：Fake executor 输出 `LOOP_COMPLETE`，断言 `instance_states` 全部终态）
-
-## 做出的决定
-- [决定] 选择“根治方案”：Supervisor shutdown 后继续 drain instance 事件，直到所有实例进入终态或超时。
-  - [理由] 这既能消除 warning，也能让最终状态快照更可信；属于并行运行时的正确收尾语义。
-
-## 遇到错误
-- 暂无
-
-## 状态
-**已完成** - Supervisor shutdown 后会短暂 drain instance 状态并等待终态；新增回归测试；`cargo test` 全部通过。
-
-## 日志
-### 2026-01-29 13:50 +0800
-- [计划] 先确认 warning 来自 `HatInstanceActor::set_state(Done)` 发送给 Supervisor 时 receiver 已被 drop。
-- [计划] 然后在 `ParallelSupervisor::run` 结束前增加 shutdown-drain：先发 cancel/shutdown，再等待所有实例上报终态（Done/Failed），最后再返回并打印 final states。
-
-### 2026-01-29 14:38 +0800
-- [完成] 修复并行模式退出时的收尾 warning：Supervisor 退出前会 drain `StateChanged` 并等待实例进入终态（Done/Failed）。
-- [完成] 新增回归测试：`parallel::supervisor::routing_tests::supervisor_run_waits_for_instances_to_reach_terminal_state_on_shutdown`
-- [完成] 验证：`cargo test` ✅
-
----
-
-# 任务计划: OpenSpec 新建 change（实验式工件流）
-
-## 目标
-1) 创建一个新的 OpenSpec change 目录（`openspec/changes/<name>/`）。
-
-2) 只做到“展示首个 artifact 的模板/上下文”为止。
-
-3) 严格不创建任何 artifact 内容（避免提前进入实现/写规格）。
-
-## 可选方案（至少二选一）
-
-### 方案 A：不惜代价，最佳方案（更稳）
-1) 先确认你要做的改动是什么（功能/修复/重构）。
-2) 如果你不确定用哪个 workflow，我会先运行 `openspec schemas --json` 给你看可选 schema。
-3) 你选定 schema 后，再 `openspec new change "<name>" --schema <schema>`。
-4) 然后 `openspec status` + `openspec instructions`，停在首个 artifact 模板。
-
-### 方案 B：先能用，后面再优雅（更快）
-1) 你只要给我一个变更描述或一个 kebab-case 名字。
-2) 我直接使用默认 schema（不传 `--schema`）创建 change。
-3) 然后 `openspec status` + `openspec instructions`，停在首个 artifact 模板。
-
-## 阶段
-- [x] 阶段1: 明确变更描述与命名
-- [x] 阶段2: 确认 workflow schema（默认或自选）
-- [x] 阶段3: 创建 change 脚手架
-- [x] 阶段4: 查看 status 并获取首个 artifact 模板
-
-## 关键问题
-1. 你想做的变更是什么？请用几句话描述“要构建/修复什么”和“为什么要做”。
-2. 你希望我使用默认 workflow schema，还是先把所有 workflow 列出来给你选？
-
-## 做出的决定
-- [决定] 在你没有明确要求之前，我会使用默认 schema（即不传 `--schema`）。
-  - [理由] 默认 workflow 最符合项目的“约定优于配置”，也能减少无谓分叉。
-- [决定] change 名称使用 `tui-mouse-chat-and-clean-exit`。
-  - [理由] 该名称同时覆盖两块诉求：TUI 的鼠标/聊天输入能力，以及退出时的进程清理。
-
-## 遇到错误
-- 暂无
-
-## 状态
-**已完成阶段4** - 已创建 change，并已获取首个 artifact（proposal）的模板；等待你确认后再创建 proposal.md。
-
-## 日志
-### 2026-01-29 14:30 +0800
-- [计划] 先向你确认要做的变更描述（或给出 change name）。
-- [计划] 如果你要选 workflow，我会运行 `openspec schemas --json` 给你选。
-- [计划] 然后创建 `openspec/changes/<name>/`，并输出 `openspec status` 与首个 artifact 的 `openspec instructions`。
-- [计划] 最后停在“只展示模板”这一步，等待你决定是否继续创建第一个 artifact。
-
-### 2026-01-29 14:31 +0800
-- [确认] 变更内容（来自你的描述）：
-  - TUI 支持鼠标点选当前实例。
-  - TUI 支持像编辑器一样的多行文字选择/框选（鼠标 + 键盘）。
-  - 点击 chat 进入输入；输入框像“正常终端输入窗口”，有提示符。
-  - 光标支持键盘/鼠标移动（左右上下）。
-  - 支持 `Shift+Enter` 换行。
-  - 退出 TUI 时，需要退出所有 CLI 子进程，避免残留。
-- [命名] 本次 change 名称：`tui-mouse-chat-and-clean-exit`（kebab-case）。
-
-### 2026-01-29 14:33 +0800
-- [执行] 已创建 change：
-  - `openspec new change "tui-mouse-chat-and-clean-exit"`
-  - 生成目录：`openspec/changes/tui-mouse-chat-and-clean-exit/`（默认 schema：`spec-driven`）
-- [执行] 已检查工件状态：
-  - `openspec status --change "tui-mouse-chat-and-clean-exit"`
-  - 当前进度：`0/4 artifacts complete`
-  - 首个 ready：`proposal`
-- [执行] 已获取首个工件模板（但未创建任何工件文件）：
-  - `openspec instructions proposal --change "tui-mouse-chat-and-clean-exit"`
-
-### 2026-01-29 14:41 +0800
-- [继续] 你已选择继续该 change（/opsx:continue 选择 1）。
-- [计划] 我将只创建一个工件：`proposal.md`（不会提前创建 design/specs/tasks，也不会写任何实现代码）。
-- [计划] proposal 的 Capabilities 将以“修改既有 spec”为主：
-  - `parallel-supervisor-tui`（实例选择/输出选择交互增强）
-  - `supervisor-human-chat-gate`（chat 输入框交互增强）
-  - `parallel-hat-instances`（退出时 CLI 子进程清理/终止语义）
-
-### 2026-01-29 14:42 +0800
-- [完成] 已创建工件：`openspec/changes/tui-mouse-chat-and-clean-exit/proposal.md`。
-- [状态] `openspec status --change "tui-mouse-chat-and-clean-exit"`：进度 `1/4`，已解锁 `design` 与 `specs`。
-
-### 2026-01-29 14:54 +0800
-- [需求变更] 你请求使用 `/opsx:ff` 快进：生成所有实现前所需工件（直到 apply-ready）。
-- [范围] 目标 change：`tui-mouse-chat-and-clean-exit`；schema：`spec-driven`；applyRequires：`tasks`。
-- [计划] 依次生成：`design.md` → `specs/**/spec.md` → `tasks.md`，并用 `openspec status` 验证到 `tasks=done` 为止。
-
-### 2026-01-29 15:02 +0800
-- [完成] `/opsx:ff` 已生成全部工件（apply-ready）：
-  - `openspec/changes/tui-mouse-chat-and-clean-exit/design.md`
-  - `openspec/changes/tui-mouse-chat-and-clean-exit/specs/parallel-supervisor-tui/spec.md`
-  - `openspec/changes/tui-mouse-chat-and-clean-exit/specs/supervisor-human-chat-gate/spec.md`
-  - `openspec/changes/tui-mouse-chat-and-clean-exit/specs/parallel-hat-instances/spec.md`
-  - `openspec/changes/tui-mouse-chat-and-clean-exit/tasks.md`
-- [状态] `openspec status --change "tui-mouse-chat-and-clean-exit"`：进度 `4/4`，All artifacts complete。
-- [下一步] 可以进入 `/opsx:apply` 开始实现；若你希望先 review spec/design，我可以先做一次“规格一致性自检”（逐条对照需求与任务）。
-
-### 2026-01-29 16:10 +0800
-- [需求定稿] 你确认退出 explore，进入实现阶段；并对 Chat/Gate 的交互语义做出最终选择（路线 2：语义正确 + 手感好）：
-  - 默认消息（不写 `@...`）**发送给当前选中的实例**（`selected_instance`）。
-  - 并行模式下 **所有 hats 默认订阅 `human.message`**，以保证 strict target 校验下 `target_instance` 直达投递不被拒收。
-  - 多 gate 并存时：允许鼠标点击 gate 列表行，把它设为“当前 gate”（`selected_gate`）。
-  - 点击某个 gate 行时：**同时自动切换 `selected_instance = gate.requested_by`**（方便立刻对话/处理）。
-  - Targets chips：在 chat 底部展示 **所有实例**（例如 `@writer#2`）且可点击，用于快速切换 `selected_instance`。
-  - Gate actions chips：在 gate 详情下方提供 `!approve` / `!deny` / `!resolve` 的可点击快捷入口，点击后“预填到输入框”（不自动发送）。
-- [计划] 先把以上决定固化回 OpenSpec change（更新 `design/specs/tasks`），避免实现阶段语义漂移。
-- [计划] 然后进入 `/opsx:apply` 执行实现：
-  1) TUI：targets chips + gate 选中 + gate 详情 + action chips + 默认消息目标
-  2) Core：并行模式为所有 hats 注入 `human.message` 订阅（不要求用户配置）
-  3) 补测试与帮助文案，最后 `cargo test` 全量验证并写入 `WORKLOG.md`
-
----
-
-# 任务计划: TUI 鼠标交互 + Chat 多行输入 + 退出清理子进程（实现与验收）
-
-## 目标
-1) 并行 TUI 支持鼠标点击切换实例、点击 Output 进入输出区域并支持框选多行文本（鼠标拖拽 + Shift+方向键扩展），并提供清空选择（Esc）。
-
-2) Chat 输入区支持“像终端一样”的输入体验：提示符、多行（Shift+Enter）、鼠标/键盘移动光标、鼠标/键盘框选并替换选区、Enter 提交。
-
-3) TUI 退出（按 `q`）时，不仅关闭 UI，还要触发 run 的 interrupt，确保所有 CLI/worker 子进程被清理，避免残留。
-
-4) `cargo test` 必须全绿（包含快照测试），并把结果记录到 WORKLOG/ERRORFIX。
-
-## 阶段
-- [x] 阶段1: 方案确认（对齐 OpenSpec specs/tasks）
-- [x] 阶段2: 核心实现（鼠标 hit-test / 输出选择 / Chat 编辑器 / q 退出语义）
-- [x] 阶段3: 修复测试与 warning（确保 CI 级别干净）
-- [x] 阶段4: 全量测试验证（cargo test 全通过）
-- [x] 阶段5: 归档记录（WORKLOG / ERRORFIX / tasks 勾选收敛）
-
-## 关键问题
-1. 输出选择是否需要“文本语义坐标”（行列/字符串范围）？第一版是否允许仅用“屏幕坐标选择”满足框选体验？
-2. Chat 多行输入在快照测试里如何表达？（真实渲染是 3 行输入区 + `>`/`|` 提示符）
-3. `q` 的退出路径是否会实际触发 killpg 清理？需要什么级别的回归验证才能可信？
-
-## 做出的决定
-- [决定] 输出选择先采用“屏幕坐标”方案（相对 Output inner area 的 x/y），不做文本坐标映射。
-  - [理由] 先把“可用的框选体验”做出来，降低复杂度；后续若要复制文本/语义操作，再补齐映射。
-- [决定] Chat 编辑器用最小自研 `ChatEditorState`，不引入第三方依赖。
-  - [理由] 项目体量与需求都不值得引入大依赖；最小实现更易控、更易测。
-- [决定] `q` 退出触发 interrupt 信号，复用现有 runner 的清理逻辑（killpg SIGTERM→SIGKILL）。
-  - [理由] 避免 TUI 自己做“进程管理”，统一收敛到 runtime 层做清理，减少特殊分支。
-
-## 遇到错误
-- [错误] `cargo test` 编译失败：快照测试仍引用旧字段 `state.parallel.chat_input`。
-  - [决议] 同步更新 `crates/ralph-tui/tests/common/mod.rs`，改为渲染 `chat_editor`（多行 + 提示符），并对齐新的 bottom panel 布局高度。
-
-## 状态
-**已完成** - 测试已修复、warning 已收敛、`cargo test` 全绿；OpenSpec tasks 与 WORKLOG/ERRORFIX 已同步记录。
-
-## 日志
-### 2026-01-29 15:47 +0800
-- [现状] OpenSpec change `tui-mouse-chat-and-clean-exit` 的实现已基本完成（鼠标 hit-test/输出选择/Chat 多行编辑/q 退出触发 interrupt）。
-- [问题] 当前 `cargo test` 会因为 `crates/ralph-tui/tests/common/mod.rs` 仍引用 `chat_input` 字段而无法编译。
-- [计划] 先修测试编译问题 → 再清 warning → 再跑全量 `cargo test` → 最后同步勾选 tasks 与记录 WORKLOG/ERRORFIX。
-
-### 2026-01-29 16:03 +0800
-- [完成] 已修复并行 TUI 快照测试对旧字段 `chat_input` 的引用，并对齐 3 行输入区布局。
-- [完成] 已清理编译 warning（`unused_assignments` / `dead_code`）。
-- [验证] `cargo test -p ralph-tui` ✅
-- [验证] `cargo test -p ralph-core smoke_runner` ✅
-- [验证] `cargo test` ✅
-- [完成] 已更新 OpenSpec `openspec/changes/tui-mouse-chat-and-clean-exit/tasks.md`（6.1/6.2 勾选），并把实现与验证记录追加到 `WORKLOG.md` / `ERRORFIX.md`。
-
----
-
-# 任务计划: 并行 TUI Chat/Gate 快捷交互（chips）+ 并行默认订阅 human.message
-
-## 目标
-1) Chat 面板底部展示 Targets chips（全实例），并允许鼠标点击快速切换 `selected_instance`；未写 `@...` 的默认消息发送给当前 `selected_instance`。
-
-2) Gate 列表允许鼠标点击选中当前 gate；选中 gate 时自动切换 `selected_instance = gate.requested_by`；并在 gate 详情下提供 `!approve` / `!deny` / `!resolve` 的可点击 chips（点击仅预填输入框，不自动发送）。
-
-3) 并行运行时默认为所有 hats 注入 `human.message` 订阅，保证 strict target 校验下的“直达投递”可用。
-
-4) `cargo test` 全绿（包含 replay smoke tests），并把结果记录到 `WORKLOG.md`，同时勾选 OpenSpec tasks 7-9。
-
-## 阶段
-- [x] 阶段1: 需求对齐与现状扫描
-- [x] 阶段2: TUI 交互实现（Targets/Gate chips + 点击命中）
-- [x] 阶段3: Core 实现（并行默认订阅 human.message）
-- [x] 阶段4: 测试与文案（help + 回归测试 + cargo test）
-- [x] 阶段5: 归档记录（WORKLOG + tasks 勾选）
-
-## 可选方案（已选定）
-
-### 方案 1：不惜代价，最佳方案（语义正确 + 手感好）
-- Targets chips 显示所有实例，点击即切换 `selected_instance`。
-- Gate 列表点击行选中 gate，并联动切换到 `gate.requested_by`。
-- Actions chips 只做“预填”，用户确认后再 Enter 发送。
-- 并行模式所有 hats 默认订阅 `human.message`，避免订阅拓扑导致的误投递/拒收。
-
-### 方案 2：先能用，后面再优雅（更快）
-- 仅做 `@instance` 文本输入，不做 chips 与鼠标命中。
-- 仅在 config 要求用户显式配置 `human.message` triggers。
-
-## 做出的决定
-- [决定] 采用方案 1。
-  - [理由] 你已明确选择“路线 2：最佳方案（语义正确 + 手感好）”，并且该语义已固化进 OpenSpec change `tui-mouse-chat-and-clean-exit` 的 specs/tasks。
-
-## 状态
-**已完成** - Targets/Gate chips + 默认消息目标 + human.message 默认订阅 已落地；测试全绿；OpenSpec tasks 7-9 已勾选。
-
-## 日志
-### 2026-01-29 16:25 +0800
-- [计划] 实现 OpenSpec tasks 7-9：
-  - TUI：Targets chips + gate 选中 + gate 详情 + actions chips + 默认消息目标。
-  - Core：并行模式下为所有 hats 注入 `human.message` 订阅。
-  - 验证：补测试与 help 文案后，运行 `cargo test` 全量验证；最后更新 `WORKLOG.md` 与 `openspec/changes/tui-mouse-chat-and-clean-exit/tasks.md` 勾选 7-9。
-
-### 2026-01-29 17:10 +0800
-- [完成] TUI 快捷交互：
-  - Targets chips：展示全部实例（含 `ralph#1`），点击切换 `selected_instance`。
-  - Gate：点击 gate 行选中 `selected_gate`，并联动切换到 `requested_by`；展示 gate 详情与 actions chips（预填输入框）。
-  - 默认消息：未写 `@...` 的 human.message 自动定向到 `selected_instance`。
-- [完成] Core：并行模式下 `human.message` 默认订阅仅用于 strict target 校验（不改变 fanout 行为）。
-- [验证] `cargo test` ✅ 全量通过。
-
----
-
-# 任务计划: 合并 `for_marge` 分支到 `main`
-
-## 目标
-1) 将 `for_marge` 分支的提交合并到 `main`（根据当前提交关系，预期为 fast-forward）。
-
-2) 合并过程中不丢失当前工作区的未提交修改（包含已修改文件与未跟踪目录）。
-
-3) 合并完成后通过 `cargo test` 验证整体可用。
-
-## 可选方案（至少二选一）
-
-### 方案 A：不惜代价，最佳方案（更稳）
-- 先用 `git stash push -u` 暂存当前工作区，确保合并过程是“干净工作区”。
-- 在 `main` 上执行 `git merge for_marge`（若可快进则快进，不改历史）。
-- 先跑一次 `cargo test`，验证“合并后的基线”是绿的。
-- 再 `git stash pop` 恢复本地改动；如产生冲突，逐个 resolve。
-- 再跑一次 `cargo test`，验证“恢复本地改动后”仍然是绿的。
-
-### 方案 B：先能用，后面再优雅（更快）
-- 同样先 stash，再快进合并到 `main`。
-- 只在最后（`stash pop` + 冲突处理完成后）跑一次 `cargo test`。
-
-## 做出的决定
-- [决定] 采用方案 A。
-  - [理由] 当前工作区存在大量未提交修改，且 `for_marge` 会改动 `task_plan.md` / `notes.md` / `WORKLOG.md` 等同名文件；分两次测试能更快定位“问题来自 merge 还是来自恢复本地改动”。
-
-## 遇到错误
-- [冲突] `git stash pop` 时，`task_plan.md` / `notes.md` / `WORKLOG.md` 出现内容冲突（均为双边都修改了同名日志文件）。
-  - [决议] `task_plan.md`：在保留本地任务记录的基础上，补入 `for_marge` 的三段“理性合并（preset / TUI hang / mock-e2e）”记录。
-  - [决议] `notes.md`：保留本地关于 `--show-stderr` 与 Parallel TUI chat 路由链路的笔记，并追加 `7a346bd` 与 `e91aadc` 的价值评估。
-  - [决议] `WORKLOG.md`：合并后超过 1000 行，按约定轮转归档到 `WORKLOG_2026-01-29_1908.md`，并重建一个新的 `WORKLOG.md`。
-
-## 状态
-**已完成** - `main` 已 fast-forward 到 `for_marge`；本地改动已恢复并完成冲突处理；`cargo test` 全绿。
-
-## 日志
-### 2026-01-29 19:08 +0800
-- [现状] 当前在 `main`，工作区有未提交修改；本次目标是将 `for_marge` 合并到 `main`。
-- [计划] 采用“先 stash 再合并再恢复”的方式，避免 dirty working tree 触发 merge 失败或引入隐性冲突。
-
-### 2026-01-29 19:10 +0800
-- [执行] `git stash push -u` 暂存工作区。
-- [执行] `git merge --ff-only for_marge` 将 `main` 快进到 `ddb055c`。
-- [执行] `git stash pop` 恢复本地改动；处理 `task_plan.md` / `notes.md` / `WORKLOG.md` 的冲突，并按约定轮转 `WORKLOG.md`。
-- [验证] `cargo test` ✅
-
----
-
-# 任务计划: 再次合并 `for_marge` 分支到 `main`（non-ff）
-
-## 目标
-1) 将 `for_marge` 的新提交合并进 `main`。
-
-2) 不改写历史（优先 merge commit，而不是 rebase）。
-
-3) 合并后跑 `cargo test`，确保整体仍然可用。
-
-## 可选方案（至少二选一）
-
-### 方案 A：不惜代价，最佳方案（更稳，不改历史，本次选择）
-- 在 `main` 上执行 `git merge --no-edit for_marge` 生成 merge commit（如无冲突则一步完成）。
-- 若有冲突：逐文件 resolve → `git add` → `git commit --no-edit` 完成合并提交。
-- 最后运行 `cargo test` 作为背压验证。
-
-### 方案 B：先能用，后面再优雅（线性历史，但会改写）
-- 在 `for_marge` 上 `git rebase main`（或反向 rebase），然后再让 `main` fast-forward。
-- 代价：会改写分支历史；若 `for_marge` 已共享给他人，风险更大。
-
-## 做出的决定
-- [决定] 采用方案 A（merge commit）。
-  - [理由] 你明确说“再次合并”，且当前 `main` 与 `for_marge` 已分叉；用 merge commit 能最小化风险，也不会改写 `for_marge` 的历史（它还在另一个 worktree 里被 checkout）。
-
-## 遇到错误
-- [冲突] 本次 non-ff merge 过程中产生内容冲突（均为双边都修改了同名文件）：
-  - `ERRORFIX.md`
-  - `WORKLOG.md`
-  - `crates/ralph-cli/src/parallel_runner.rs`
-  - `notes.md`
-  - `task_plan.md`
-  - [决议] 统一策略：保留双方有效内容；代码冲突以“语义合并”为主（stderr 折叠 + cassette 录制同时成立），日志文件以“合并追加”为主（避免丢历史）。
-
-## 状态
-**已完成** - 已完成 merge commit（`f84c7ae`），冲突已解决；`cargo test` 全绿。
-
-## 日志
-### 2026-01-29 19:30 +0800
-- [现状] `main` 与 `for_marge` 已分叉：
-  - `main` tip：`b9cd49a`
-  - `for_marge` tip：`9312de4`（该分支目前在另一个 worktree：`/Users/cuiluming/local_doc/l_dev/my/rust/ralph-orchestrator-for_marge`）
-- [计划] 用 `--no-edit` 做 non-ff merge，避免交互式编辑器阻塞。
-
-### 2026-01-29 19:43 +0800
-- [执行] `git merge --no-edit for_marge`：触发 non-ff 合并并产生冲突。
-- [执行] 解决冲突后提交 merge commit：`f84c7ae`（Merge branch 'for_marge'）。
-- [验证] `cargo test` ✅
-
----
-
-# 任务计划: 修复 parallel 模式 `--record-session` + 确保 mock-mode 可用（cassette 回放）
-
-## 目标
-1) `ralph run` 在 **parallel 模式**下不再忽略 `--record-session`，能够产出可用的 JSONL cassette。
-
-2) `ralph-e2e --mock` 在并行场景下也能稳定运行（至少：custom backend 调用 `ralph-e2e mock-cli` 不会因为“额外 prompt 参数”而直接崩）。
-
-## 方案（给自己看的取舍）
-1) 不惜代价，最佳方案：
-- 录制格式做到“可回放、可分流、可复现并发”：给每条 `ux.terminal.write` 增加 `instance_id` 归因字段；
-- 并行执行时用环境变量把 `instance_id` 传递给 custom backend；
-- `mock-cli` 在回放时按 `instance_id` 过滤输出（每个 hat instance 只看自己的片段），避免“一份 cassette 被所有实例重复回放”导致事件倍增/漂移。
-
-2) 先能用，后面再优雅（如果遇到风险再退回）：
-- 并行模式只录制“聚合后的 stdout 文本”，不区分实例；
-- mock-mode 只保证能跑通，不保证并行行为完全等价（依赖场景断言用 `>=`，且 cassette 本身足够短）。
-
-## 阶段
-- [x] 阶段1: 写清规格（spec）+ 更新 task_plan 日志
-- [x] 阶段2: 串行 `--record-session` 补齐（至少写入 `ux.terminal.write`）
-- [x] 阶段3: 并行 `--record-session` 接线（stdout-only + bus.publish）
-- [x] 阶段4: mock-mode 兼容（custom backend 使用 stdin 传 prompt，mock-cli 忽略 stdin）
-- [x] 阶段5: `cargo test` 全量验证 + 记录结论（WORKLOG/ERRORFIX）
-
-## 关键问题
-1. `--record-session` 目前实际写入了什么？（预期：只写了 `bus.publish`，没有 `ux.terminal.write`，因此 cassette 不可用）
-2. 并行模式的录制“最小可用”是什么？（预期：至少 stdout 文本可回放；最好能按 instance_id 分流）
-3. mock-mode 为什么可能直接崩？（预期：custom backend 默认 `prompt_mode=arg`，会把 prompt 作为末尾参数传给 `ralph-e2e mock-cli`，clap 解析会报 unexpected argument）
-
-## 做出的决定
-- [决定] 优先走“最佳方案”（instance_id 归因 + mock-cli 过滤）。
-  - [理由] 这是最少的额外复杂度，却能直接消除并行回放的核心特殊情况（多实例重复回放导致事件倍增）。
-- [决定] 录制时仍遵循并行模式的安全语义：只录 stdout 用于 event parsing，不录 stderr（避免 `<event ...>` 假事件）。
-  - [理由] 这是已验证的稳定性护栏（parallel stdout-only parsing）。
-
-## 遇到错误
-- 暂无（本段在实现过程中更新）
-
-## 状态
-**已完成**：parallel 模式不再忽略 `--record-session`；cassette 录制/回放格式与 `SessionPlayer`/fixtures 对齐；并行回放支持按 instance_id 分流。
-
-## 日志
-### 2026-01-29 16:15 +0800
-- [完成] 新增规格：`specs/parallel-record-session.spec.md`
-- [完成] 修复 `SessionRecorder` UX 记录格式（避免 double-wrapped），与 `SessionPlayer`/fixtures 对齐。
-- [完成] 串行 loop：每轮写入 `ux.terminal.write`，结束写 `_meta.termination`（best-effort）。
-- [完成] 并行 loop：接线 record-session（stdout chunk → ux write；supervisor event → bus publish），并写入 `TerminalWrite.instance_id`。
-- [完成] mock-mode：workspace `ralph.yml` 强制 `cli.prompt_mode: stdin`；mock-cli 支持按 `RALPH_HAT_INSTANCE_ID` 分流回放。
-- [验证] `cargo test` ✅
-
----
-
-# 任务计划: 理性合并 `ralph hats` CLI + 拓扑 diagrams（commit: 26f2364566fbe1d35880d889b836e5b55d343301）
-
-## 目标
-把 `26f2364566fbe1d35880d889b836e5b55d343301` 里“hats CLI + 拓扑可视化/校验”的核心价值合并到当前分支：
-
-1) 当前分支也能使用 `ralph hats ...` 命令做配置检查与拓扑展示（便于在运行前发现问题）。
-
-2) 当前分支也能输出可复用的 “diagrams” 文本（至少 Mermaid），为后续在 TUI 内展示做铺垫。
-
-## 方案（给自己看的取舍）
-1) 不惜代价，最佳方案：
-- 把“拓扑构建/校验/渲染（mermaid + 纯本地 ascii/unicode）”抽到 `ralph-core`，CLI 与 TUI 复用同一套逻辑；
-- AI 生成图仅作为可选增强（不作为默认/唯一路径）。
-- 优点：可测试、确定性强、TUI 复用成本低；缺点：需要更多重构与边界设计。
-
-2) 先能用，后面再优雅（本次默认）：
-- 以最小改动把 `ralph hats` 子命令接入 `ralph-cli`；
-- `ralph hats graph --format mermaid` 保证稳定可用；unicode/ascii/compact 先按 upstream “可用优先”的策略实现（必要时依赖 AI backend）。
-- 优点：落地快、风险小；缺点：后续 TUI 复用可能需要再做一次抽取整理。
-
-## 阶段
-- [x] 阶段1: 审阅 commit 差异与本分支差异点
-- [x] 阶段2: 移植 hats CLI（list/show/validate/graph）
-- [x] 阶段3: 处理依赖与兼容（ConfigSource/indicatif 等）
-- [x] 阶段4: `cargo test` 全量验证（含回放 smoke tests）
-- [x] 阶段5: 汇总记录（notes/WORKLOG；必要时 ERRORFIX）
-
-## 关键问题
-1. `26f236...` 依赖的 `ConfigSource::Override` 在本分支是否存在？（预期：不存在，需要在 hats CLI 内做兼容适配）
-2. diagram 输出的“最低可用闭环”是什么？（预期：Mermaid 必须稳定；ASCII/Unicode 可以先作为增强）
-3. 后续 TUI 展示更偏向哪种输出？（预期：优先 Mermaid/纯文本，避免强依赖外部 backend）
-
-## 做出的决定
-- [决定] 默认先落地“先能用”方案：先把 `ralph hats` 命令与 Mermaid 图输出合并进来，并保持代码结构可在后续抽到 `ralph-core/ralph-tui` 复用。
-  - [理由] 先把价值闭环跑通（CLI 可用 + 图可输出），再做抽象化能避免过度设计与返工。
-
-## 遇到错误
-- 暂无（实现过程中更新）
-
-## 状态
-**已完成**：`ralph hats` 命令已接入当前分支；已支持 `list/show/validate/graph`，并确保 `graph --format mermaid` 稳定输出；`cargo test` 全通过。
-
-## 日志
-### 2026-01-29 18:00 +0800
-- [计划] 开始审阅 `26f236...`（新增 `crates/ralph-cli/src/hats.rs` + `indicatif` 依赖 + main.rs 接线），并“理性移植”到当前分支。
-
-### 2026-01-29 18:10 +0800
-- [完成] 新增 `crates/ralph-cli/src/hats.rs`，落地 `ralph hats list/show/validate/graph`。
-- [完成] `crates/ralph-cli/src/main.rs` 接线新子命令 `Hats`（clap 子命令可见）。
-- [完成] 依赖补齐：workspace 增加 `indicatif`（进度 spinner），`ralph-cli` 引入 workspace 依赖。
-- [改良] `hats list` 的描述截断改为 UTF-8 安全（避免中文/emoji 下 `[..]` 切片 panic）。
-- [改良] `validate` 增加 dead-end hats 的 warning 输出（更可解释）。
-- [完成] 文档同步：README / 架构文档补充 `ralph hats` 命令说明（避免实现与文档漂移）。
-- [验证] `cargo test` ✅
-- [验证] `cargo test -p ralph-core smoke_runner` ✅
+### 2026-01-31 12:00 +0800
+- [实现] `crates/ralph-tui/src/app.rs`：
+  - 引入 `PARALLEL_PANE_GAP_WIDTH=1`，并在并行模式 main 区域横向布局中插入 gap 列：`instances | gap | output`。
+  - 同步更新所有用到该布局拆分的地方（渲染、Output 重启动画触发时的 area 计算），避免“某处改了某处没改”导致 hit-test/动画错位。
+- [验证] `cargo test -p ralph-tui` ✅；`cargo test -p ralph-core smoke_runner` ✅；`cargo test` ✅。

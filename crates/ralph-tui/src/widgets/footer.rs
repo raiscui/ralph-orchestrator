@@ -1,7 +1,8 @@
 use crate::state::TuiState;
+use crate::theme::{EXABIND_BORDER_SET, TuiTheme};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
@@ -9,18 +10,23 @@ use ratatui::{
 /// Footer widget that adapts to terminal width.
 pub struct Footer<'a> {
     state: &'a TuiState,
+    theme: TuiTheme,
 }
 
 impl<'a> Footer<'a> {
-    pub fn new(state: &'a TuiState) -> Self {
-        Self { state }
+    pub fn new(state: &'a TuiState, theme: TuiTheme) -> Self {
+        Self { state, theme }
     }
 }
 
 impl Widget for Footer<'_> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         // Render block with top border as separator
-        let block = Block::default().borders(Borders::TOP);
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_set(EXABIND_BORDER_SET)
+            .border_style(Style::default().fg(self.theme.colors().surface0))
+            .style(self.theme.app_bg());
         let inner_area = block.inner(area);
         block.render(area, buf);
 
@@ -30,7 +36,7 @@ impl Widget for Footer<'_> {
                 Span::raw(" "),
                 Span::styled(
                     format!("/{}", self.state.search_query),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(self.theme.colors().yellow),
                 ),
             ]);
             Paragraph::new(line).render(inner_area, buf);
@@ -53,9 +59,9 @@ impl Widget for Footer<'_> {
                 Span::raw(" "),
                 Span::styled(
                     format!("Search: {} ", query),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(self.theme.colors().yellow),
                 ),
-                Span::styled(match_info, Style::default().fg(Color::Cyan)),
+                Span::styled(match_info, Style::default().fg(self.theme.colors().sky)),
             ]);
 
             Paragraph::new(line).render(inner_area, buf);
@@ -72,7 +78,7 @@ impl Widget for Footer<'_> {
         {
             left_spans.push(Span::styled(
                 format!("▶ New: iter {} ", iter_num),
-                Style::default().fg(Color::Green),
+                Style::default().fg(self.theme.colors().green),
             ));
             left_spans.push(Span::raw("│ "));
         }
@@ -95,9 +101,9 @@ impl Widget for Footer<'_> {
         };
 
         let indicator_style = if self.state.loop_completed {
-            Style::default().fg(Color::Blue)
+            Style::default().fg(self.theme.colors().blue)
         } else {
-            Style::default().fg(Color::Green)
+            Style::default().fg(self.theme.colors().green)
         };
 
         // Calculate left content width for layout
@@ -113,25 +119,30 @@ impl Widget for Footer<'_> {
 
         // Render left side (alert + last event)
         let left = Line::from(left_spans);
-        Paragraph::new(left).render(chunks[0], buf);
+        Paragraph::new(left)
+            .style(self.theme.text().bg(self.theme.app_bg_color()))
+            .render(chunks[0], buf);
 
         // Render right side (indicator)
         let right = Line::from(vec![
             Span::styled(indicator_text, indicator_style),
             Span::raw(" "),
         ]);
-        Paragraph::new(right).render(chunks[2], buf);
+        Paragraph::new(right)
+            .style(self.theme.text().bg(self.theme.app_bg_color()))
+            .render(chunks[2], buf);
     }
 }
 
 /// Convenience function for rendering the footer.
-pub fn render(state: &TuiState) -> Footer<'_> {
-    Footer::new(state)
+pub fn render(state: &TuiState, theme: TuiTheme) -> Footer<'_> {
+    Footer::new(state, theme)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::TuiTheme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -146,7 +157,7 @@ mod tests {
 
         terminal
             .draw(|f| {
-                let widget = render(state);
+                let widget = render(state, TuiTheme::default());
                 f.render_widget(widget, f.area());
             })
             .unwrap();

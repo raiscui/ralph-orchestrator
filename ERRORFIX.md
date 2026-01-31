@@ -375,6 +375,270 @@
 ### 验证
 - `cargo test -p ralph-tui` ✅
 - `cargo test` ✅
+
+---
+
+## 2026-01-30 16:00 +0800｜TUI：启动进场动画“先全显示再动画”导致闪烁
+
+### 现象
+- 刚打开 TUI 时，会先看到完整的 panel/block 都出现了。
+- 随后进场动画才开始扫入，视觉上像“闪一下/抖一下”，很不自然。
+
+### 根因
+- tachyonfx 的默认 Shader 流程是：`timer.process(delta)` → `execute()`。
+- 首帧如果被输入事件拖慢，`fx_delta` 会偏大：
+  - 启动动画第一次执行时就已经处在“中途进度”
+  - 于是看起来像“先把完整 UI 画出来，再扫一遍动画”
+
+### 修复
+- `crates/ralph-tui/src/app.rs`
+  - 启动动画被添加的那一帧，强制 priming：把 `fx_delta` 归零，并重置 `last_effect_tick`。
+  - 保证启动动画首帧一定从“全隐藏起步态”开始，下一帧再正常推进时间轴。
+- `crates/ralph-tui/src/app.rs`
+  - 新增回归测试：`startup_animation_first_frame_priming_prevents_full_ui_flash`
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-01-30 20:51 +0800｜Warp：窗口 padding 外圈发灰（放弃 OSC 11/111，改为终端默认背景）
+
+### 现象
+- Warp 中 TUI 之外的 padding（圆角外圈/边缘留白）出现一圈偏灰背景。
+- 用户反馈该问题是引入 exabind 风格/主题背景后出现的，之前 Warp 半透明背景是统一的。
+
+### 根因
+- 该灰色区域本身不属于 ratatui 的 cell，无法直接通过 widget `bg` 绘制去改变它。
+- 但我们“间接制造”了对比：TUI 内容区被我们大量刷成显式 `bg`（crust/base）后变成不透明纯色，
+  而 Warp 的 padding 仍然是半透明窗口背景，二者并列时就产生“外圈灰了一圈”的强烈对比。
+- `OSC 11/111` 属于 best-effort，实测/用户反馈在 Warp padding 上不稳定或不生效，因此不能作为可靠修复。
+
+### 修复
+- `crates/ralph-tui/src/theme.rs`
+  - 新增 `use_terminal_default_bg` 背景模式，并提供 `app_bg_color()` / `panel_bg_color()`：
+    - Warp 模式：`Color::Reset`（使用终端默认背景）
+    - 默认模式：`crust` / `base`（显式主题背景）
+- `crates/ralph-tui/src/app.rs`
+  - 当 `stdout` 为 TTY 且检测到 Warp（`TERM_PROGRAM` 包含 `warp`）时，启用 `with_terminal_default_bg()`。
+- `crates/ralph-tui/src/widgets/header.rs`、`crates/ralph-tui/src/widgets/footer.rs`、`crates/ralph-tui/src/animation.rs`
+  - 背景统一改为 `theme.app_bg_color()`，确保 Warp 下不再强制刷不透明纯色背景。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-01-30 21:47 +0800｜Warp：Output 重启动画触发“全屏背景变动”
+
+### 现象
+- Warp 透明背景模式（`bg=Reset`）下，切换实例触发 Output “重启动画”时，肉眼可见全屏背景在变暗/变色。
+
+### 根因
+- tachyonfx 的 `sweep_in/out` 会对 fg/bg 做颜色插值。
+- 在 tachyonfx 内部：
+  - `Color::Reset` 的 RGB 表达是 (0,0,0)（黑色）
+  - `sweep_in/out` 的中间帧还会把 `cell.bg==Reset` 临时视作 Black 参与 lerp
+- 因此当 Output pane 面积很大时，动画遮罩会把大面积区域短暂插值成“黑底”，观感上就像全屏背景在动。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - 当 `theme.app_bg_color()==Color::Reset`（Warp 透明背景模式）时：
+    - `output_reopen_effect` 改用 `dissolve_to + coalesce_from`（带 `SweepPattern::up_to_down`）
+    - 避免颜色插值，彻底规避 Reset→Black 的副作用
+  - 增加回归测试：`output_reopen_effect_terminal_default_bg_does_not_paint_black_background`
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-31 12:00 ｜TUI：ContentPane 清空时抹掉 pane 底色（导致透明发灰/动画眩光）
+
+### 现象
+- 你希望 “block 内部有底色”，但外圈保持 Warp 的半透明（`bg=Reset`）。
+- 实际体验上会出现：
+  - pane 内部底色不稳定（看起来发灰、像透出来了 Warp 背景纹理）；
+  - Output 动画更容易出现刺眼的白条/强对比变化（甚至引发背景跟随的错觉）。
+
+### 根因
+- `panel_block(...).style(theme.panel_bg())` 先把 pane area 铺成 `base` 底色没问题。
+- 但 `ContentPane` 在逐格写入/清空时，如果使用 `Cell::reset()` 或写入 `Style::default()`：
+  - 很容易把 cell 的 `bg` 还原为 `Reset`，把外层铺好的 `base` 底色抹掉。
+- 一旦 pane 内部大量 cell 回到 `bg=Reset`，就会放大 Warp 透明模式下的视觉问题与动画副作用。
+
+### 修复
+- `crates/ralph-tui/src/widgets/content.rs`
+  - 读取当前区域左上角 cell 的 `bg` 作为 `base_bg`。
+  - 构造 `base_style = theme.text().bg(base_bg)` 并先铺满区域（清空残影，同时保留底色）。
+  - 渲染内容时用 `base_style.patch(span.style)` 合并样式，避免把 bg 写回 `Reset`。
+  - 宽字符 continuation cell 写入 `symbol==\"\"`，避免对齐异常。
+  - selection 改为末尾统一 overlay，保证空白处也能正确高亮。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-30 23:15 ｜TUI：Output 动画期间“最外圈”被染上 pane 底色（Warp 透明模式）
+
+### 现象
+- 目标体验：
+  - pane/block 内部允许有底色（Catppuccin `base`），方便阅读。
+  - 最外圈（终端默认背景 / Warp 半透明区域）保持透明（`bg=Reset`）。
+- 实际表现：
+  - Instances pane 看起来正常：周围仍透明。
+  - Output pane 触发动画时，用户能看到“最外圈”也跟着被染上同样的底色（像外圈不再透明）。
+
+### 根因
+- Ralph 的动画是后处理（shader-like）：
+  - 我们先渲染 widgets（含 exabind 边框补丁 `patch_exabind_panel_border_bg`）。
+  - 然后才由 `EffectManager::process_effects` 对 buffer 施加动画。
+- 一旦某个动画 effect 在某一帧覆盖到了边框 cell（尤其是 `bg=Reset` 的外圈），
+  它就会把我们“刚刷回去的 Reset 背景”覆盖掉，导致用户感知为“外圈被染色”。
+
+### 修复
+- `crates/ralph-tui/src/app.rs`
+  - 在 `EffectManager::process_effects(...)` 执行后（同一帧内），
+    对 Instances/Output/Bottom 三个 pane 再执行一次 `patch_exabind_panel_border_bg`。
+  - 仅在 Warp 透明背景模式（`theme.app_bg_color()==Color::Reset`）下执行，避免影响非 Warp 的动画观感。
+- `crates/ralph-tui/src/theme.rs`
+  - 新增回归测试 `patch_exabind_panel_border_bg_restores_border_after_bg_mutating_effect`：
+    - 模拟一个会改 `bg` 的 sweep effect 覆盖边框；
+    - 断言 re-patch 后边框 bg 恢复为 `Reset`，防止“外圈被染色”回归。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-31 03:05 ｜TUI：切换 Instances 时 Output 先显示后消失（闪烁）
+
+### 现象
+- 在并行模式（Supervisor TUI）切换 Instances 选中项时：
+  - Output 会先显示“新实例输出”一帧
+  - 再消失、再做入场动画
+- 观感是明显闪烁。
+
+### 根因
+- 之前 Output 重启动画是 `sweep_out + sweep_in`：
+  - `sweep_out` 的首帧是“完全可见态”（timer reversed → `alpha=1`）。
+- 同时我们在这一帧里已经用“新选中的实例”渲染了 Output 内容：
+  - 结果就是：新内容先露出一帧，然后才被 sweep_out 盖掉。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - Output 重启动画改为只做 `sweep_in + fade_from_fg`（从隐藏态揭开），避免 `sweep_out` 的“首帧可见”特性。
+- `crates/ralph-tui/src/app.rs`
+  - 在添加 Output 重启动画的那一帧执行 priming：`fx_delta=0`，确保动画从初始态起步。
+  - 该 priming 逻辑同时适用于启动入场动画与 Output 重启动画（统一处理“首帧大 delta”问题）。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+---
+
+## 2026-01-30 21:55 +0800｜Warp：启动进场动画“先显示全部再逐块出场”
+
+### 现象
+- Warp 透明背景模式（`bg=Reset`）下，启动时会先看到完整 UI，再逐块出场动画。
+- 期望是：动画开始前应为空屏（所有 block 不可见），然后逐块显示出来。
+
+### 根因
+- 原实现使用 `sweep_in + fade_from_fg` 作为启动遮罩：
+  - 该组合只改 fg/bg，不改 symbol；
+  - 在 `bg=Reset` 时，fg/bg=Reset 仍会显示终端默认前景色，导致“遮罩无效”，于是先看到完整 UI。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - `startup_open_effect`：当 `app_bg==Reset` 时改用 `slide_in`，通过把未揭开的 cell 变成空格实现真正的“空屏起步态”。
+  - `startup_open_effect_parallel`：当 `app_bg==Reset` 时改用 `slide_in + prolong_start` 编排：
+    - Instances(frame) → Instances(items) → Output → Chat/Gates 严格串行
+    - Instances(items) 延迟启动，确保“先框后字”
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+## 2026-01-30 16:30 +0800｜Warp：窗口 padding（UI 范围外）发灰，但会“跟随动画变色”
+
+### 现象
+- Warp 终端里，TUI 之外（窗口 padding / 圆角外圈）仍然发灰。
+- 用户观察到在启动/Output 动画时，这个外圈也会跟随变色。
+
+### 根因（推断 + 边界）
+- 该区域不属于 ratatui 的字符栅格（cell），无法通过“改 widget 的 bg”直接绘制。
+- 但 Warp 的 padding 背景可能与“终端默认背景色”（或透明/blur/vibrancy 的合成结果）有关，因此会在 TUI 动画改变整体观感时显得“跟随变色”。
+
+### 修复（best-effort）
+- `crates/ralph-tui/src/app.rs`
+  - 仅在 stdout 为 TTY 且检测到 Warp（`TERM_PROGRAM` 包含 `warp`）时：
+    - 进入 alternate screen 后发送 `OSC 11` 设置终端默认背景色为主题 `crust`
+    - 退出时发送 `OSC 111` 恢复终端主题默认背景色
+  - 增加单测校验转义序列格式：`osc_set_background_sequence_*` / `osc_reset_background_sequence_*`
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-01-30 16:26 +0800｜TUI：用户要求 panel 外圈“整圈深色”（补齐顶边）
+
+### 现象
+- 用户进一步明确：不仅左右侧竖边，panel 的“最外圈整圈”都要是统一的深色背景。
+
+### 根因
+- exabind 的 `▔`（顶边横线）同样属于块元素：字形只占 cell 的一部分，空白会用 cell 的 `bg` 填充。
+- 之前只修了底边/竖边，没有把顶边整行刷回外侧背景，因此顶边仍会显得偏灰。
+
+### 修复
+- `crates/ralph-tui/src/theme.rs`
+  - 扩展 `patch_exabind_panel_border_bg`：增加“顶边整行” `bg=crust` 的补丁。
+  - 更新单元测试：增加顶边整行断言，确保 border ring（四边）背景一致。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-01-30 16:23 +0800｜TUI：exabind 竖边背景偏灰（与深色分隔不一致）
+
+### 现象
+- TUI 左右两侧（竖边/分割线）背景偏灰。
+- 与 chat / output 之间的深色分隔区域观感不一致，期望统一为更深的背景（“半透明”在终端里用同一深色近似）。
+
+### 根因
+- exabind 边框集使用 `▏` / `▕` 这类“细竖条”块元素：
+  - 字形只占 cell 的一小部分，其余空白会用 **cell 的背景色** 填充。
+- panel 边框 cell 默认继承 panel 内部背景 `base`：
+  - 相比外侧/分隔区域的 `crust` 更亮 → 视觉上就像一条“发灰”的竖边。
+
+### 修复
+- `crates/ralph-tui/src/theme.rs`
+  - 扩展 `patch_exabind_panel_border_bg`：
+    - 除了“左上角 + 底边整行”，再把 **左右边框列** 的 `bg` 也刷回 `crust`。
+  - 更新单元测试：覆盖左右边框列 `bg` 为 `crust` 的断言，且内部区域不受影响。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
 
 ## 2026-01-29 16:15 +0800｜record-session：parallel 忽略 + UX 记录格式不一致导致 cassette 不可回放
@@ -414,3 +678,110 @@
     - `_meta.loop_start`
     - `bus.publish`
     - `ux.terminal.write`（含 `instance_id: "ralph#1"`）
+
+---
+
+## 2026-01-30 14:00 +0800｜TUI：exabind 边框左上角“斜切角”在本地被背景糊住（观感像锯齿）
+
+### 现象
+- `ralph-tui` 使用 exabind 风格边框（`▟▜▔▏▕`）后：
+  - 左上角的“斜切角”不够干净，看起来像锯齿/缺口被糊住。
+  - 与 exabind 网页 demo（JetBrains Mono + beamterm/ratzilla）观感有差异。
+
+### 根因
+- `▟` / `▔` 这类 Unicode 块元素字形内部存在空白区域，空白区域会使用 **cell 的背景色** 填充。
+- 我们的 panel 内部背景使用 `base`（略亮），而 panel 外侧背景是 `crust`（更暗）：
+  - 若不做额外处理，`▟` 的空白象限与 `▔` 的下方空白区域会被 `base` 填满，导致斜切角与底边“贴不住”。
+
+### 修复
+- `crates/ralph-tui/src/theme.rs`
+  - 新增 `patch_exabind_panel_border_bg`：渲染后把左上角 cell 与底边整行的 `bg` 刷回外侧背景（`crust`），对齐 exabind 的做法。
+  - 补充单元测试确保不回归。
+- `crates/ralph-tui/src/widgets/instances.rs`、`crates/ralph-tui/src/app.rs`
+  - 在 Instances / Output / Chat-Gates 面板渲染后调用 patch。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-30 22:28 ｜TUI：并行启动入场动画首帧必须为空屏（避免先全显示再动画）
+
+### 现象
+- Warp（透明背景）下启动 Supervisor TUI：
+  - 会先看到完整 UI（header/footer + Instances/Output/Chat/Gates）。
+  - 随后才开始逐块入场动画。
+- 观感像“闪了一下”，很不自然。
+
+### 根因
+- 并行模式的启动动画只覆盖了 content panes（Instances/Output/Bottom）。
+- header/footer 不在动画遮罩范围内：
+  - 首帧会被直接渲染出来。
+  - 用户就会感知到“先全显示一帧”。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - `startup_open_effect_parallel(...)` 增加 `header_area` / `footer_area` 参数。
+  - 在 `bg=Reset`（Warp 半透明）分支里，把 header/footer 也纳入 Stage 1 的 `slide_in` symbol 遮罩。
+- `crates/ralph-tui/src/app.rs`
+  - 调用 `startup_open_effect_parallel` 时传入 `chunks[0]` / `chunks[2]`。
+- 新增回归测试：
+  - `startup_open_effect_parallel_terminal_default_bg_starts_from_blank_screen`
+  - 断言：duration=0 的首帧 buffer 全部为 ``（空屏）。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-31 01:43 ｜TUI：Warp(bg=Reset) 下避免背景闪烁的同时，恢复更好看的“白条扫入”
+
+### 现象
+- 修复了 Output 动画引起的整屏背景变动后（避开 `sweep_in/out`），
+  当前动画的“白条扫入”观感变差：更像噪点溶解，不如以前干净。
+
+### 根因
+- `bg=Reset` 下不能使用 tachyonfx 的 `sweep_in/out`（会把 Reset 当作黑色插值）。
+- 之前选用的 `dissolve/coalesce` 虽然安全，但它天生是“随机噪点”风格，不是连续白条。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - `bg=Reset` 时 Output 重启动画：改为 `slide_out + slide_in`（symbol 遮罩，连续白条感更强）。
+  - 引入 `SYMBOL_SWEEP_GRADIENT_MAX=10`，收窄渐变带，避免白条过厚/过糊。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-31 02:08 ｜TUI：恢复 sweep 渐变观感（并降低 Warp 透明模式的白条眩光）
+
+### 现象
+- 为了避免 Output 动画带动整屏背景闪烁（Warp 透明模式），我们曾把动画换成更安全的方案。
+- 代价是：动画不再像原来的 `sweep` 渐变；并且出现了刺眼的“白条”观感。
+
+### 根因
+- `bg=Reset` + tachyonfx `sweep_in/out`：会触发库内部把 Reset 当作 Black/White 参与插值，导致背景变动与强对比白条。
+- 用户允许 pane 内部有底色，因此我们不必强行让 pane 背景也保持 Reset。
+
+### 修复
+- `crates/ralph-tui/src/theme.rs`
+  - Warp 模式：app bg=`Reset`，pane bg=`base`（可读性更好、动画更柔和）。
+- `crates/ralph-tui/src/animation.rs`
+  - Warp 模式下 Output 重启动画恢复 `sweep_out/sweep_in`（faded_color=base），更接近原始渐变观感。
+  - 动画只作用于 output inner area，避免边框 bg=Reset 参与插值。
+- `crates/ralph-tui/src/app.rs`
+  - 触发动画时传入 inner area。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
