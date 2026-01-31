@@ -216,3 +216,135 @@
   - 引入 `PARALLEL_PANE_GAP_WIDTH=1`，并在并行模式 main 区域横向布局中插入 gap 列：`instances | gap | output`。
   - 同步更新所有用到该布局拆分的地方（渲染、Output 重启动画触发时的 area 计算），避免“某处改了某处没改”导致 hit-test/动画错位。
 - [验证] `cargo test -p ralph-tui` ✅；`cargo test -p ralph-core smoke_runner` ✅；`cargo test` ✅。
+
+
+---
+
+# 任务计划: Warp 外圈仍被染色 + Alacritty 首帧先全显示再动画（回归修复）
+
+## 目标
+- Warp：
+  - pane 内部保留底色（`base`），提升可读性（Output/Instances 一致）
+  - **最外圈（Warp window 的半透明背景）不被染色**，不随 Output/切换实例动画而“变蓝灰”
+- Alacritty（以及其它非 Warp 终端）：
+  - 启动入场动画必须从“空屏”起步
+  - 不能出现“先显示完整 UI 一帧，再开始逐块动画”的闪烁
+
+## 阶段
+- [x] 阶段1: 证据与根因再确认（Warp vs Alacritty 行为差异）
+- [x] 阶段2: 修复实现
+  - [x] 2.1 Warp：给 UI 留出 1-cell 外边距（让 pane 与屏幕边缘脱离，保留一圈 bg=Reset）
+  - [x] 2.2 Non-Warp：并行启动动画从 sequence 改为 parallel+prolong_start（保证所有 pane 首帧隐藏）
+- [x] 阶段3: 回归测试（新增“非 Warp 并行启动动画首帧空屏”单测）
+- [x] 阶段4: 全量测试验证（包含 ralph-core replay smoke tests）
+- [x] 阶段5: 记录归档（notes/WORKLOG/ERRORFIX）
+
+## 关键问题
+1. Warp 的“外圈染色”是否来自 **pane 贴边** 导致的视觉采样/混色（而不是 buffer 真的写出了全屏 bg）？
+2. 非 Warp 并行启动动画为什么会闪？（sequence 只隐藏了第一个 stage，后续 pane 在 stage 之前是可见态）
+
+## 状态
+**已完成**：Warp 模式下 UI 不再贴边（外圈保留 bg=Reset 安全环），Non-Warp 并行启动动画首帧空屏；并通过测试验证。
+
+## 日志
+### 2026-01-31 12:40 +0800
+- [反馈] 用户确认：Warp 中 Output 动画结束后，UI 范围外的半透明背景会被染成蓝灰色；切换实例也会出现“先染色再变透明”的过程。
+- [对照] Alacritty 中没有外圈染色，但启动动画会出现“先全显示再动画”，且白色边框动画缺失。
+- [行动] 先撤回未提交改动，重新基于当前 HEAD 做系统性回归修复（本计划）。
+
+### 2026-01-31 12:45 +0800
+- [实现] Warp：`theme.app_bg_color()==Reset` 时对 UI 区域增加 1-cell 外边距（pane 不贴边），让最外圈保持 bg=Reset 的“安全环”。
+- [实现] Non-Warp：并行启动动画从 `fx::sequence` 改为 `fx::parallel + fx::prolong_start`，保证所有 pane 首帧隐藏（空屏起步）。
+- [测试] 新增回归测试：`startup_open_effect_parallel_non_terminal_default_bg_starts_from_blank_screen`。
+- [验证] `cargo test -p ralph-tui` ✅；`cargo test -p ralph-core smoke_runner` ✅；`cargo test` ✅。
+
+### 2026-01-31 18:48 +0800
+- [更正] Warp “外圈染色”问题：之前尝试过“给 UI 留 1-cell 外边距（pane 不贴边）”，但用户反馈仍会染色，因此该尝试已撤回（当前布局回到 `frame_area`）。
+- [判断] Warp 的“UI 范围外 padding 被染色”大概率属于终端窗口级渲染/混色行为（cell 绘制无法完全控制），短期先不继续深挖。
+- [继续] 聚焦解决 Alacritty 的“边框白色过渡动画缺失”（这个属于我们能稳定控制的 cell/effect 行为）。
+
+
+---
+
+# 任务计划: Alacritty 边框“白色过渡”动画缺失（补回）
+
+## 目标
+- 在 Alacritty（以及其它非 Warp 终端）中：
+  - 启动入场动画与 Output 重启动画期间，pane 的边框应出现清晰的“亮线扫过/白色过渡”反馈
+  - 动画结束后不残留白边（静态观感不变）
+  - 不影响“首帧空屏”与“切换实例不闪烁”的既有修复
+
+## 阶段
+- [x] 阶段1: 现象确认（Alacritty 边框过渡不明显/缺失）
+- [x] 阶段2: 根因分析（exabind 边框 bg 修正让纯 sweep 的反馈变弱）
+- [x] 阶段3: 修复实现（仅对 outer border 叠加高亮 sweep shader）
+- [x] 阶段4: 回归测试（单测锁定“确实会刷到 border”）
+- [x] 阶段5: 全量测试验证（含 replay smoke tests）
+
+## 状态
+**已完成（代码层）**：非 Warp 下边框高亮 sweep 已实现，并通过单测与全量 `cargo test` 验证；等待你在 Alacritty 里确认观感是否达到预期（若仍不明显再继续调参）。
+
+## 日志
+### 2026-01-31 18:48 +0800
+- [实现] `crates/ralph-tui/src/animation.rs`
+  - 新增/改良 `BorderHighlightSweep`：只作用于 pane outer border（1-cell），随 UpToDown sweep 下移一段“亮段”。
+  - 将高亮带宽从 1 行提高到 3 行，避免竖边每帧只有 2 个亮点导致肉眼难察觉。
+  - 前沿 y 位置从 `round` 改为 `floor`，减少抖动跳帧。
+- [测试] 新增单测：`border_highlight_sweep_highlights_outer_border_with_band`。
+- [验证] `cargo test -p ralph-tui` ✅；`cargo test -p ralph-core smoke_runner` ✅；`cargo test` ✅。
+
+### 2026-01-31 20:21 +0800
+- [反馈] 你在 Alacritty 里确认：`BorderHighlightSweep` 仍不够明显，并且下边框几乎看不到动画。
+- [根因] 我之前把前沿 y 的映射改成了 `floor(alpha * (height-1))`：
+  - bottom_row 只有 alpha==1.0 才会命中；
+  - 但我们为了避免尾帧残留，会在 alpha≈1 提前 return；
+  - 结果就是下边框永远不会被高亮。
+- [修复] `crates/ralph-tui/src/animation.rs`
+  - `BorderHighlightSweep` 支持可选 `highlight_bg`：动画期同时刷 fg+bg，让“细线边框”在视觉上更“粗”。
+  - 前沿 y 映射改为 `floor(alpha * height)` 并 clamp 到 `height-1`：保证在 alpha<1 的区间也能命中 bottom_row。
+  - 高亮区域从 outer 1-cell 扩到 outer 2-cells：上下边框在动画期有更明显的带宽。
+  - Non-Warp 下的高亮配色改为：`fg=White`，`bg=surface2`（更容易被肉眼捕捉）。
+- [测试] 更新单测：`border_highlight_sweep_highlights_outer_border_with_band`（适配 outer=2 与 bg 高亮）。
+- [验证] `cargo test -p ralph-tui` ✅；`cargo test -p ralph-core smoke_runner` ✅；`cargo test` ✅。
+
+### 2026-01-31 20:32 +0800
+- [反馈] 你确认新的边框高亮“太粗”，需要细一点。
+- [修复] `crates/ralph-tui/src/animation.rs`
+  - `border_highlight_sweep` 的 filter 从 outer=2 改回 outer=1（只作用于真正的 border ring）。
+  - 高亮带宽从 3 行降到 2 行（更细、更不抢屏）。
+  - 高亮 bg 从 `surface2` 调暗到 `surface1`（降低“整行亮块”的厚重感）。
+  - 保留 bottom_row 可命中的映射修复（下边框仍能看到动画）。
+- [测试] 新增回归测试：`border_highlight_sweep_can_reach_bottom_row_before_end`（锁定“下边框能动”）。
+- [验证] `cargo test -p ralph-tui` ✅；`cargo test -p ralph-core smoke_runner` ✅；`cargo test` ✅。
+
+
+---
+
+# 任务计划: 并行启动入场动画从“完全串行”改为“错峰重叠”
+
+## 目标
+- 在 Supervisor TUI 启动时（并行模式）：
+  - 不再是 Instances 完全结束后才开始 Output，再开始 Bottom
+  - 改为“上一块进行到一半时，下一块就开始”，多块并行入场
+  - 同时保留约束：Instances 条目必须晚于框体（先框后字）
+
+## 阶段
+- [x] 阶段1: 确认现状（当前是严格串行 delay）
+- [x] 阶段2: 设计节奏（每块错峰 1/2 pane 时长）
+- [x] 阶段3: 实现（调整 delay + 总时长常量）
+- [x] 阶段4: 回归测试（确保首帧空屏仍成立）
+- [x] 阶段5: 全量测试验证
+
+## 状态
+**已完成（代码层）**：并行启动入场动画已改为错峰重叠，且不破坏“首帧空屏/无闪烁”的既有修复。
+
+## 日志
+### 2026-01-31 20:21 +0800
+- [实现] `crates/ralph-tui/src/animation.rs`
+  - 将 `STARTUP_GAP_MS` 重新定义为“错峰启动间隔”：`STARTUP_PANE_MS / 2`。
+  - 更新 `STARTUP_TOTAL_MS`：由原来的“完全串行”改为适配重叠节奏的总时长。
+  - 并行启动的 delay 改为：
+    - Output: `STARTUP_GAP_MS`（Instances 进行到一半时开始）
+    - Bottom: `STARTUP_GAP_MS * 2`（Output 进行到一半时开始）
+    - Instances items: `STARTUP_PANE_MS`（框体完成后才开始）
+- [验证] `cargo test -p ralph-tui` ✅；`cargo test -p ralph-core smoke_runner` ✅；`cargo test` ✅。

@@ -460,6 +460,138 @@
 
 ---
 
+## 2026-01-31 20:32 ｜TUI：Alacritty 边框高亮太粗（回调参数，保持 bottom_row 可见）
+
+### 现象
+- 你反馈：边框高亮效果太粗，需要细一点。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - `BorderHighlightSweep`：
+    - filter outer=2 → outer=1（只刷边框 ring）
+    - band_height 3 → 2（高亮带更薄）
+    - bg 高亮 `surface2` → `surface1`（更克制）
+    - 保留 “`floor(alpha * height)` + clamp” 的前沿映射修复（下边框仍会动）
+  - 新增回归测试：
+    - `border_highlight_sweep_can_reach_bottom_row_before_end`
+    - 目的：锁定“bottom_row 在 alpha<1 也能命中”，避免再回归到“下边框不动”。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-31 20:21 ｜TUI：Alacritty 下边框高亮缺失 + 入场动画节奏需错峰重叠
+
+### 现象
+- Alacritty：
+  - 边框高亮仍不明显（太细），尤其下边框几乎看不到动画。
+- 启动入场动画：
+  - 目前是严格串行（一个 pane 完全结束后才开始下一个）。
+  - 期望是“上一块进行到一半时，下一块就开始”的错峰重叠。
+
+### 根因
+1) 下边框不动（确定性 bug）
+- 我们之前把前沿 y 的计算改成 `floor(alpha * (height-1))`，同时为了避免尾帧残留在 `alpha≈1` 提前 return。
+- 组合后导致 bottom_row 只有在 alpha==1.0 才会命中，但 alpha 接近 1.0 时已经停止绘制 → 下边框永远不会被高亮。
+
+2) 边框太细（终端渲染限制 + 视觉对比不足）
+- exabind 的横线 `▔` 本身是细线，即使改 fg 也很难“变粗”。
+- 只改 fg 的高亮在上下边框的感知带宽不够。
+
+3) 入场动画节奏（编排策略问题）
+- delay 之前是按 “pane 完全结束 + gap” 的串行编排，天然不会重叠。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - `BorderHighlightSweep`：
+    - 前沿 y 改为 `floor(alpha * height)` 并 clamp 到 `height-1`，确保 bottom_row 在 alpha<1 的区间也能命中。
+    - 支持 `highlight_bg`，动画期同时刷 fg + bg，让边框视觉上更“粗”。
+    - filter 从 outer=1 扩到 outer=2，形成更明显的高亮带宽（上下边框更容易看见）。
+  - 并行启动入场动画：
+    - `STARTUP_GAP_MS = STARTUP_PANE_MS / 2`（错峰间隔）。
+    - Output/Bottom 的 delay 按错峰重叠编排，并更新 `STARTUP_TOTAL_MS`。
+- 单测更新：
+  - `border_highlight_sweep_highlights_outer_border_with_band`（适配 outer=2 + bg 高亮）。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-31 18:48 ｜TUI：Alacritty 边框“白色过渡”动画不明显/缺失
+
+### 现象
+- 在 Alacritty（非 Warp）里：
+  - pane 的入场动画能看到内容 reveal，但边框缺少“亮线扫过/白色过渡”的反馈；
+  - 观感上像“边框没有参与动画”。
+
+### 根因（可控部分）
+- exabind 风格边框为了更贴近 demo，会把 border cell 的 bg 刷成 outside_bg（通常是 crust），
+  这会让单纯依赖 `sweep_in` 的“边框过渡反馈”变弱。
+- 另外：竖边每行只有两个字符（`▏`/`▕`），如果高亮只做 1 行，肉眼很难捕捉到“扫过”。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - 新增/改良 `BorderHighlightSweep`（tachyonfx shader）：
+    - 只作用于 pane outer border（1-cell），不污染内容区文字；
+    - 随 `Motion::UpToDown` 前沿下移，在左右竖边形成“亮段”；
+    - 起步态/结束态不改颜色，避免首帧露白/尾帧残留白边。
+  - 将高亮带宽从 1 行提升到 3 行（更容易看见）。
+  - 前沿 y 从 `round` 改为 `floor`（减少抖动跳帧）。
+- 新增回归测试：
+  - `border_highlight_sweep_highlights_outer_border_with_band`（断言：只刷 border ring，且确实出现白色高亮）。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
+## 2026-01-31 12:45 ｜TUI：Warp 外圈染色缓解 + Non-Warp 并行启动动画首帧空屏
+
+### 现象
+- Warp：
+  - Output 动画结束后，Warp window 的半透明背景（UI 范围外）会被染成蓝灰色。
+  - 切换实例时也会出现“先染色再变透明”的过程。
+- Alacritty（以及其它非 Warp 终端）：
+  - 启动入场动画会“先全显示一帧”，然后才逐块出场（明显闪烁）。
+
+### 根因
+- Non-Warp 的并行启动动画此前用 `fx::sequence`：
+  - sequence 只会对“当前 stage”的区域施加遮罩；
+  - 其它 pane 在轮到自己之前仍是可见态 → 导致首帧闪烁。
+- `fx::prolong_start` 的行为是“延长开始时间，但仍会 process(0ms) 停在初始态”：
+  - 因此延迟阶段的初始态必须是不可见态，否则也会提前露出内容。
+- Warp 外圈染色（现阶段按现象推断）更像是“pane 贴边导致 Warp padding 采样/混色”：
+  - 不是 buffer 逻辑层面“真把全屏 bg 写成 base”（否则其它终端也应一致复现）。
+
+### 修复
+- `crates/ralph-tui/src/animation.rs`
+  - Non-Warp 并行启动动画从 `fx::sequence` 改为 `fx::parallel + fx::prolong_start`。
+  - 延迟阶段统一使用 `faded_color=app_bg`（crust），保证 delay 期间初始态不可见 → 首帧空屏。
+  - 新增回归测试：`startup_open_effect_parallel_non_terminal_default_bg_starts_from_blank_screen`。
+- `crates/ralph-tui/src/app.rs`
+  - Warp（`app bg=Reset`）下对 UI 区域增加 1-cell 外边距（pane 不贴边）：
+    - 留出一圈 bg=Reset 的“安全环”，降低 Warp padding 被 pane 底色染色的概率。
+  - 关键：布局拆分、启动动画、Output 重启动画的 area 计算都改为基于 `ui_area`。
+
+### 验证
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+
+---
+
 ## 2026-01-31 12:00 ｜TUI：ContentPane 清空时抹掉 pane 底色（导致透明发灰/动画眩光）
 
 ### 现象

@@ -1180,10 +1180,20 @@ impl App {
 
                                     let output_area = horizontal[2];
                                     let output_inner = inner_block(output_area);
-                                    if output_inner.width > 0 && output_inner.height > 0 {
+                                    // 体验取舍：
+                                    // - Warp（bg=Reset）下，为了避免边框 cell 参与插值导致“外圈被带色”，
+                                    //   Output 重启动画只作用于 inner。
+                                    // - 非 Warp 下，允许动画包含边框，能看到更清晰的“边框过渡”。
+                                    let output_effect_area = if theme.app_bg_color() == Color::Reset {
+                                        output_inner
+                                    } else {
+                                        output_area
+                                    };
+
+                                    if output_effect_area.width > 0 && output_effect_area.height > 0 {
                                         manager.add_unique_effect(
                                             animation::OUTPUT_REOPEN_ANIMATION_KEY,
-                                            animation::output_reopen_effect(theme, output_inner),
+                                            animation::output_reopen_effect(theme, output_effect_area),
                                         );
 
                                         // 关键修复：

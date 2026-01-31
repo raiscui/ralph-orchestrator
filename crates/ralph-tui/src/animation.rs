@@ -5,9 +5,17 @@
 //! - 保持可用性优先：可禁用、可在小窗口自动降级
 
 use crate::theme::TuiTheme;
-use ratatui::{layout::Rect, style::Color};
+use ratatui::{
+    buffer::Buffer,
+    layout::{Margin, Rect},
+    style::Color,
+};
 use std::io::IsTerminal;
-use tachyonfx::{Effect, Interpolation, Motion, fx};
+use tachyonfx::default_shader_impl;
+use tachyonfx::{
+    CellFilter, ColorSpace, Duration, Effect, EffectTimer, FilterProcessor, Interpolation, Motion,
+    Shader, fx,
+};
 
 /// Warp 透明背景模式（`bg=Reset`）下的“symbol 遮罩”渐变宽度上限。
 ///
@@ -18,7 +26,144 @@ use tachyonfx::{Effect, Interpolation, Motion, fx};
 const SYMBOL_SWEEP_GRADIENT_MAX: u16 = 10;
 
 fn symbol_sweep_gradient(area: Rect) -> u16 {
-    area.height.max(1).min(SYMBOL_SWEEP_GRADIENT_MAX)
+    // clamp：语义更清晰，也能通过 clippy 的 `manual_clamp` 检查。
+    area.height.clamp(1, SYMBOL_SWEEP_GRADIENT_MAX)
+}
+
+// =============================================================================
+// 边框高亮：补回“白色边框过渡”的观感（主要用于 Alacritty 等非 Warp 终端）
+// =============================================================================
+//
+// 背景：
+// - 我们为了让 exabind 的 `▟/▔` 边框更“干净”，会把边框 cell 的 bg 刷成 outside_bg（见 theme.rs）。
+// - 这会让纯 `sweep_in` 的边框过渡变得不明显（缺少“亮线扫过”的反馈）。
+//
+// 目标：
+// - 只对 pane 的 outer border（1-cell）做一条“随 sweep 下移的亮线”；
+// - 起步态/结束态不改变边框颜色，避免首帧/尾帧残留“白边”。
+
+#[derive(Clone, Debug)]
+struct BorderHighlightSweep {
+    highlight_fg: Color,
+    /// 高亮带的背景色（可选）。
+    ///
+    /// 为什么需要 bg：
+    /// - exabind 的 `▔` 属于“细横线”，即使 fg 很亮，线条依然会显得很细；
+    /// - 给边框区域的 cell 同时刷一层更亮的 bg，能在终端里形成更“粗”的视觉带宽。
+    highlight_bg: Option<Color>,
+    direction: Motion,
+    /// 高亮带的厚度（以行数计）。
+    ///
+    /// 设计取舍：
+    /// - 仅 1 行时，除了顶边那一瞬间外，左右竖边每帧只亮 2 个字符，肉眼很难捕捉到“扫过”；
+    /// - 适当加厚（例如 3 行）后，在左右竖边会形成更明显的“亮段”，观感更接近原 sweep 的反馈。
+    band_height: u16,
+    timer: EffectTimer,
+    area: Option<Rect>,
+    cell_filter: Option<FilterProcessor>,
+    color_space: ColorSpace,
+}
+
+impl BorderHighlightSweep {
+    fn new(
+        direction: Motion,
+        band_height: u16,
+        highlight_fg: Color,
+        highlight_bg: Option<Color>,
+        timer: EffectTimer,
+    ) -> Self {
+        Self {
+            highlight_fg,
+            highlight_bg,
+            direction,
+            band_height: band_height.max(1),
+            timer,
+            area: None,
+            cell_filter: None,
+            color_space: ColorSpace::default(),
+        }
+    }
+}
+
+impl Shader for BorderHighlightSweep {
+    default_shader_impl!(area, timer, filter, color_space, clone);
+
+    fn name(&self) -> &'static str {
+        "border_highlight_sweep"
+    }
+
+    fn execute(&mut self, _: Duration, area: Rect, buf: &mut Buffer) {
+        let area = area.intersection(*buf.area());
+        if area.is_empty() {
+            return;
+        }
+
+        let alpha = self.timer.alpha();
+
+        // 起步态/结束态不做高亮：
+        // - 避免 duration=0 的首帧就“露白”（会破坏空屏起步）
+        // - 避免最后一帧残留白边（影响静态观感）
+        if alpha <= 0.001 || alpha >= 0.999 {
+            return;
+        }
+
+        // 目前只用在 UpToDown（启动/入场的 sweep 方向）。
+        // 其它方向先不做，避免引入没验证过的视觉副作用。
+        if self.direction != Motion::UpToDown {
+            return;
+        }
+
+        // sweep 前沿：用 alpha 映射到 [top..bottom]。
+        //
+        // 关键点：
+        // - 如果用 `(height - 1)` 做映射，bottom_row 只有在 alpha==1.0 才会命中；
+        // - 但我们为了避免“尾帧残留白边”，会在 alpha≈1 时提前 return；
+        // - 结果就是：下边框永远不会被高亮（用户反馈：下边框完全看不到动画）。
+        //
+        // 这里改为用 `height` 做映射，再 clamp 到 `height-1`：
+        // - alpha 只要进入最后一段区间（例如 >= (height-1)/height），就能命中 bottom_row；
+        // - 同时仍然可以在 alpha≈1 的时候提前停止绘制，避免残留。
+        let max_rel = f32::from(area.height);
+        // 用 floor（而不是 round）避免前沿在相邻行之间“抖动跳帧”。
+        let rel = (alpha * max_rel).floor() as u16;
+        let rel = rel.min(area.height.saturating_sub(1));
+        let front_y = area.y.saturating_add(rel);
+
+        let start_y = front_y.saturating_sub(self.band_height.saturating_sub(1));
+        let end_y = front_y;
+        let highlight_fg = self.highlight_fg;
+        let highlight_bg = self.highlight_bg;
+
+        let iter = self.cell_iter(buf, area);
+        iter.for_each_cell(|pos, cell| {
+            if pos.y >= start_y && pos.y <= end_y {
+                cell.set_fg(highlight_fg);
+                if let Some(bg) = highlight_bg {
+                    cell.set_bg(bg);
+                }
+            }
+        });
+    }
+}
+
+fn border_highlight_sweep(
+    area: Rect,
+    highlight_fg: Color,
+    highlight_bg: Option<Color>,
+    timer: EffectTimer,
+) -> Effect {
+    // 带宽：见 `BorderHighlightSweep::band_height` 的解释。
+    const BAND_HEIGHT: u16 = 2;
+    Effect::new(BorderHighlightSweep::new(
+        Motion::UpToDown,
+        BAND_HEIGHT,
+        highlight_fg,
+        highlight_bg,
+        timer,
+    ))
+    .with_area(area)
+    // 只作用于真正的 border ring（1-cell），避免高亮区域“太厚”。
+    .with_filter(CellFilter::Outer(Margin::new(1, 1)))
 }
 
 /// 启动动画的唯一 id（用于 `EffectManager::add_unique_effect`）。
@@ -33,8 +178,17 @@ pub const OUTPUT_REOPEN_ANIMATION_KEY: &str = "tui.output.reopen";
 /// - 需求是“逐块依次出场”，因此把启动动画拆成多个 stage 串行执行
 /// - 这里的总时长是一个 UX 取舍：要“看得见”，但不要拖慢进入界面太久
 pub const STARTUP_PANE_MS: u32 = 420;
-pub const STARTUP_GAP_MS: u32 = 80;
-pub const STARTUP_TOTAL_MS: u32 = STARTUP_PANE_MS * 4 + STARTUP_GAP_MS * 3;
+/// 相邻 pane 的错峰启动间隔（让入场动画重叠进行，而不是完全串行）。
+///
+/// 目标节奏（示意）：
+/// - pane1: [----]
+/// - pane2:   [----]
+/// - pane3:     [----]
+///
+/// 即：下一个 pane 在上一个 pane “进行到一半”时就开始入场。
+pub const STARTUP_GAP_MS: u32 = STARTUP_PANE_MS / 2;
+/// 启动动画总时长（以最后一个 pane 完成的时间为准）。
+pub const STARTUP_TOTAL_MS: u32 = STARTUP_PANE_MS + STARTUP_GAP_MS * 2;
 
 /// Output 重新打开动画的节奏（先消失，再出场）。
 pub const OUTPUT_REOPEN_IN_MS: u32 = 420;
@@ -104,7 +258,7 @@ pub fn startup_open_effect(theme: TuiTheme, area: Rect) -> Effect {
 
 /// 构建启动打开动画 Effect（并行 Supervisor：逐块出场）。
 ///
-/// 出场顺序（严格串行）：
+/// 出场顺序（错峰重叠）：
 /// 1) Instances 框体（左上）
 /// 2) Instances 条目（必须在框体完成后）
 /// 3) Output（右上）
@@ -119,7 +273,6 @@ pub fn startup_open_effect_parallel(
     footer_area: Rect,
 ) -> Effect {
     let app_bg = theme.app_bg_color();
-    let panel_bg = theme.panel_bg_color();
 
     // Warp 透明背景模式（bg=Reset）下：
     // - sweep_in/fade 无法把内容“藏起来”（fg/bg=Reset 仍会显示默认前景色）
@@ -129,7 +282,7 @@ pub fn startup_open_effect_parallel(
     // - 对每个 pane area 使用 slide_in（从上到下）：
     //   - 初始是“全空白”（因为 slide_in 的 timer 是 reversed，alpha=1）
     //   - 随时间推进逐步露出真实内容
-    // - 用 prolong_start 做严格串行：Instances(frame) → Instances(items) → Output → Chat/Gates
+    // - 用 prolong_start 做“错峰重叠”的编排：Instances(frame) 先出场，其它 pane 在半程/完成点开始入场
     if app_bg == Color::Reset {
         let pane_timer = (STARTUP_PANE_MS, Interpolation::QuadOut);
 
@@ -144,9 +297,13 @@ pub fn startup_open_effect_parallel(
             .with_area(area)
         };
 
-        let delay_instances_items = STARTUP_PANE_MS + STARTUP_GAP_MS;
-        let delay_output = delay_instances_items + STARTUP_PANE_MS + STARTUP_GAP_MS;
-        let delay_bottom = delay_output + STARTUP_PANE_MS + STARTUP_GAP_MS;
+        // 入场编排：错峰重叠（而非完全串行）。
+        //
+        // 约束：
+        // - Instances 条目必须晚于框体（所以 items 仍然等 frame 完成后才开始）。
+        let delay_output = STARTUP_GAP_MS; // Instances 进行到一半时，Output 开始
+        let delay_instances_items = STARTUP_PANE_MS; // Instances 框体完成后，条目开始
+        let delay_bottom = STARTUP_GAP_MS * 2; // Output 进行到一半时，Bottom 开始
 
         return fx::parallel(&[
             // Stage 1: Header/Instances 框体出场
@@ -169,71 +326,67 @@ pub fn startup_open_effect_parallel(
     let pane_timer = (STARTUP_PANE_MS, Interpolation::QuadOut);
     let pane_fade = (STARTUP_PANE_MS, Interpolation::SineOut);
 
-    // Stage 1: Instances 框体出场（同时把 inner 文本“涂掉”，实现先框后字）
-    let instances_frame = fx::parallel(&[
-        fx::sweep_in(
-            Motion::UpToDown,
-            instances_area.height.max(1),
-            0,
-            app_bg,
-            pane_timer,
-        )
-        .with_area(instances_area),
-        fx::fade_from_fg(app_bg, pane_fade).with_area(instances_area),
-        // 关键技巧：
-        // - 用 paint 把 inner 的 fg/bg 都涂成 panel_bg，让条目在框体动画阶段“不可见”
-        // - timer 设成与框体阶段一致，这样每帧都会在渲染后覆盖一次（避免下一帧又被 widget 画出来）
-        fx::paint(panel_bg, panel_bg, STARTUP_PANE_MS).with_area(instances_inner),
-    ]);
+    // ---------------------------------------------------------------------
+    // 非 Warp（显式背景色）并行启动动画：必须“首帧空屏”
+    // ---------------------------------------------------------------------
+    //
+    // 用户反馈（Alacritty 等终端）：
+    // - 之前用 `fx::sequence` 串行 stage：只有第一个 stage 在跑时会“遮住”区域；
+    //   其它 pane 在轮到自己之前会保持可见，导致“先全显示一帧 → 再开始逐块动画”的闪烁。
+    //
+    // 解决策略：
+    // - 改为 `fx::parallel + fx::prolong_start`：
+    //   - 每个 pane 的 effect 从 0ms 起就“常驻”在自己的初始隐藏态；
+    //   - 到达 delay 后才开始推进 timer，从隐藏态逐步 reveal。
+    //
+    // 关键点（非常重要）：
+    // - prolong_start 在 delay 期间也会执行 inner.process(0ms)，因此：
+    //   - “初始态”必须是不可见态；
+    //   - 对非 Warp 来说，最安全的不可见态是 `faded_color=app_bg`（与整屏背景一致）。
+    let sweep_fade = |area: Rect, faded: Color| {
+        fx::parallel(&[
+            fx::sweep_in(Motion::UpToDown, area.height.max(1), 0, faded, pane_timer)
+                .with_area(area),
+            fx::fade_from_fg(faded, pane_fade).with_area(area),
+        ])
+    };
 
-    // Stage 2: Instances 条目出场（只作用于 inner，逐行 sweep-in）
-    let instances_items = fx::parallel(&[
-        fx::sweep_in(
-            Motion::UpToDown,
-            instances_inner.height.max(1),
-            0,
-            panel_bg,
-            pane_timer,
-        )
-        .with_area(instances_inner),
-        fx::fade_from_fg(panel_bg, pane_fade).with_area(instances_inner),
-    ]);
+    let sweep_fade_panel = |area: Rect, faded: Color| {
+        fx::parallel(&[
+            fx::sweep_in(Motion::UpToDown, area.height.max(1), 0, faded, pane_timer)
+                .with_area(area),
+            fx::fade_from_fg(faded, pane_fade).with_area(area),
+            // 只给边框加一条“亮线扫过”的反馈：
+            // - 不改变 pane 的底色策略
+            // - 也不影响“首帧空屏”（我们的 shader 在 alpha≈0 时不做任何事）
+            border_highlight_sweep(
+                area,
+                Color::White,
+                Some(theme.colors().surface1),
+                EffectTimer::from_ms(STARTUP_PANE_MS, Interpolation::QuadOut),
+            ),
+        ])
+    };
 
-    // Stage 3: Output 出场（右上）
-    let output_pane = fx::parallel(&[
-        fx::sweep_in(
-            Motion::UpToDown,
-            output_area.height.max(1),
-            0,
-            app_bg,
-            pane_timer,
-        )
-        .with_area(output_area),
-        fx::fade_from_fg(app_bg, pane_fade).with_area(output_area),
-    ]);
+    // 入场编排：错峰重叠（而非完全串行）。
+    //
+    // 约束：
+    // - Instances 条目必须晚于框体（所以 items 仍然等 frame 完成后才开始）。
+    let delay_output = STARTUP_GAP_MS; // Instances 进行到一半时，Output 开始
+    let delay_instances_items = STARTUP_PANE_MS; // Instances 框体完成后，条目开始
+    let delay_bottom = STARTUP_GAP_MS * 2; // Output 进行到一半时，Bottom 开始
 
-    // Stage 4: Chat/Gates 出场（下方）
-    let bottom_pane = fx::parallel(&[
-        fx::sweep_in(
-            Motion::UpToDown,
-            bottom_area.height.max(1),
-            0,
-            app_bg,
-            pane_timer,
-        )
-        .with_area(bottom_area),
-        fx::fade_from_fg(app_bg, pane_fade).with_area(bottom_area),
-    ]);
-
-    // 串行编排：一个 stage 结束后才进入下一个（符合“逐个进行”的要求）。
-    fx::sequence(&[
-        instances_frame,
-        fx::sleep(STARTUP_GAP_MS),
-        instances_items,
-        fx::sleep(STARTUP_GAP_MS),
-        output_pane,
-        fx::sleep(STARTUP_GAP_MS),
-        bottom_pane,
+    fx::parallel(&[
+        // Stage 1: Header/Footer + Instances 框体出场
+        sweep_fade(header_area, app_bg),
+        sweep_fade(footer_area, app_bg),
+        sweep_fade_panel(instances_area, app_bg),
+        // Stage 2: Instances 条目出场（注意：faded_color 仍用 app_bg，保证 delay 期间首帧不可见）
+        fx::prolong_start(delay_instances_items, sweep_fade(instances_inner, app_bg)),
+        // Stage 3: Output 出场
+        fx::prolong_start(delay_output, sweep_fade_panel(output_area, app_bg)),
+        // Stage 4: Chat/Gates 出场
+        fx::prolong_start(delay_bottom, sweep_fade_panel(bottom_area, app_bg)),
     ])
 }
 
@@ -254,6 +407,24 @@ pub fn output_reopen_effect(theme: TuiTheme, output_area: Rect) -> Effect {
         theme.app_bg_color()
     };
 
+    // Warp（bg=Reset）下不做边框高亮：
+    // - 边框 cell 的 bg 我们会刷回 Reset（保持半透明），参与插值更容易触发终端差异；
+    // - 用户也明确表示 Warp 的外圈染色“先不管”，这里先稳住最小影响面。
+    if theme.app_bg_color() == Color::Reset {
+        return fx::parallel(&[
+            fx::sweep_in(
+                Motion::UpToDown,
+                output_area.height.max(1),
+                0,
+                faded,
+                in_timer,
+            )
+            .with_area(output_area),
+            fx::fade_from_fg(faded, (OUTPUT_REOPEN_IN_MS, Interpolation::SineOut))
+                .with_area(output_area),
+        ]);
+    }
+
     fx::parallel(&[
         fx::sweep_in(
             Motion::UpToDown,
@@ -265,6 +436,12 @@ pub fn output_reopen_effect(theme: TuiTheme, output_area: Rect) -> Effect {
         .with_area(output_area),
         fx::fade_from_fg(faded, (OUTPUT_REOPEN_IN_MS, Interpolation::SineOut))
             .with_area(output_area),
+        border_highlight_sweep(
+            output_area,
+            Color::White,
+            Some(theme.colors().surface1),
+            EffectTimer::from_ms(OUTPUT_REOPEN_IN_MS, Interpolation::QuadOut),
+        ),
     ])
 }
 
@@ -272,6 +449,114 @@ pub fn output_reopen_effect(theme: TuiTheme, output_area: Rect) -> Effect {
 mod tests {
     use super::*;
     use ratatui::buffer::Buffer;
+
+    #[test]
+    fn border_highlight_sweep_highlights_outer_border_with_band() {
+        // 这个测试锁定“边框高亮 sweep”确实会对 outer border 生效，
+        // 且带宽>1 时，会在竖边形成可见的“亮段”（而不是每帧只有 2 个点太难察觉）。
+        let frame = Rect::new(0, 0, 20, 10);
+        let area = Rect::new(2, 2, 10, 6);
+        let mut buf = Buffer::empty(frame);
+
+        // 初始化：整屏先填一个底色，避免出现“未初始化 cell”导致的偶然性。
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                let cell = &mut buf[(x, y)];
+                cell.set_char('x');
+                cell.fg = Color::Blue;
+                cell.bg = Color::Black;
+            }
+        }
+
+        // 先把“边框 ring”与“内容区”设成不同 fg，便于断言过滤范围正确。
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.x.saturating_add(area.width) {
+                // 这里的“边框区域”按 `Outer(Margin::new(1,1))` 的语义来理解：
+                // - outer=1 意味着只有最外侧一圈属于“边框区域”（避免高亮太厚）。
+                let core = area.inner(Margin::new(1, 1));
+                let in_core = x >= core.x
+                    && x < core.x.saturating_add(core.width)
+                    && y >= core.y
+                    && y < core.y.saturating_add(core.height);
+                let is_border = !in_core;
+                let cell = &mut buf[(x, y)];
+                cell.fg = if is_border { Color::Red } else { Color::Green };
+            }
+        }
+
+        let mut effect = border_highlight_sweep(
+            area,
+            Color::White,
+            Some(Color::DarkGray),
+            EffectTimer::from_ms(100, Interpolation::Linear),
+        );
+        // 取一半进度：front_y 落在中间附近，带宽=3 时应覆盖 3 行的边框。
+        effect.process(std::time::Duration::from_millis(50).into(), &mut buf, frame);
+
+        // 断言：核心内容区不应被影响（仍是 Green）。
+        let core = area.inner(Margin::new(1, 1));
+        assert_eq!(buf[(core.x, core.y)].fg, Color::Green);
+
+        // 断言：至少存在一个竖边 cell 被刷成 White（高亮）。
+        //
+        // 我们不写死具体 y（避免未来调参导致测试脆弱），只检查“边框里确实有白点”即可。
+        let mut any_white_on_border = false;
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.x.saturating_add(area.width) {
+                let core = area.inner(Margin::new(1, 1));
+                let in_core = x >= core.x
+                    && x < core.x.saturating_add(core.width)
+                    && y >= core.y
+                    && y < core.y.saturating_add(core.height);
+                let is_border = !in_core;
+                if is_border && buf[(x, y)].fg == Color::White {
+                    any_white_on_border = true;
+                }
+            }
+        }
+        assert!(any_white_on_border);
+    }
+
+    #[test]
+    fn border_highlight_sweep_can_reach_bottom_row_before_end() {
+        // 这个测试锁定一个真实踩坑：
+        // - 如果 y 前沿用 `(height - 1)` 映射，再加上“尾帧提前 return”，
+        //   bottom_row 会永远命中不到 → 下边框看不到动画。
+        //
+        // 这里用接近结束（但还没到最后一帧）的进度，确保能命中 bottom_row。
+        let frame = Rect::new(0, 0, 20, 10);
+        let area = Rect::new(2, 2, 10, 6);
+        let mut buf = Buffer::empty(frame);
+
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                let cell = &mut buf[(x, y)];
+                cell.set_char('x');
+                cell.fg = Color::Red;
+                cell.bg = Color::Black;
+            }
+        }
+
+        let mut effect = border_highlight_sweep(
+            area,
+            Color::White,
+            None,
+            EffectTimer::from_ms(100, Interpolation::Linear),
+        );
+
+        // 99% 进度：仍应当处于“可绘制阶段”（避开 alpha>=0.999 的尾帧禁绘）。
+        effect.process(std::time::Duration::from_millis(99).into(), &mut buf, frame);
+
+        let bottom_y = area.y.saturating_add(area.height.saturating_sub(1));
+        let mut any_white_on_bottom = false;
+        for x in area.x..area.x.saturating_add(area.width) {
+            if buf[(x, bottom_y)].fg == Color::White {
+                any_white_on_bottom = true;
+                break;
+            }
+        }
+        assert!(any_white_on_bottom);
+    }
 
     #[test]
     fn startup_open_effect_parallel_terminal_default_bg_starts_from_blank_screen() {
@@ -316,6 +601,55 @@ mod tests {
         for y in 0..frame.height {
             for x in 0..frame.width {
                 assert_eq!(buf[(x, y)].symbol(), " ");
+            }
+        }
+    }
+
+    #[test]
+    fn startup_open_effect_parallel_non_terminal_default_bg_starts_from_blank_screen() {
+        // 非 Warp（显式背景色）下也必须做到“首帧空屏”：
+        // - 不能出现“先全显示一帧，再开始逐块动画”的闪烁。
+        let theme = TuiTheme::default();
+        let frame = Rect::new(0, 0, 80, 24);
+
+        let header = Rect::new(0, 0, 80, 2);
+        let footer = Rect::new(0, 22, 80, 2);
+        let instances = Rect::new(0, 2, 30, 8);
+        let instances_inner = Rect::new(1, 3, 28, 6);
+        let output = Rect::new(30, 2, 50, 8);
+        let bottom = Rect::new(0, 10, 80, 12);
+
+        let mut buf = Buffer::empty(frame);
+
+        // 先填满“可见内容”，确保如果动画没有把首帧遮住，测试能立刻发现。
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                let cell = &mut buf[(x, y)];
+                cell.set_char('x');
+                cell.fg = theme.colors().text;
+                cell.bg = theme.colors().base;
+            }
+        }
+
+        let mut effect = startup_open_effect_parallel(
+            theme,
+            header,
+            instances,
+            instances_inner,
+            output,
+            bottom,
+            footer,
+        );
+        effect.process(std::time::Duration::from_millis(0).into(), &mut buf, frame);
+
+        // 非 Warp 分支用“颜色遮罩”隐藏：
+        // - 符号不一定是空格（它仍可能是 'x'），
+        // - 但只要 fg/bg 都被刷成 app_bg（crust），就应当是“肉眼不可见”的空屏。
+        let app_bg = theme.app_bg_color();
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                assert_eq!(buf[(x, y)].fg, app_bg);
+                assert_eq!(buf[(x, y)].bg, app_bg);
             }
         }
     }
