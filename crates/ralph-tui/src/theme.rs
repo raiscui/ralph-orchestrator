@@ -56,37 +56,50 @@ pub struct CatppuccinMocha {
 impl CatppuccinMocha {
     pub const fn new() -> Self {
         Self {
-            rosewater: Color::from_u32(0xf5e0dc),
-            flamingo: Color::from_u32(0xf2cdcd),
-            pink: Color::from_u32(0xf5c2e7),
-            mauve: Color::from_u32(0xcba6f7),
-            red: Color::from_u32(0xf38ba8),
-            maroon: Color::from_u32(0xeba0ac),
-            peach: Color::from_u32(0xfab387),
-            yellow: Color::from_u32(0xf9e2af),
-            green: Color::from_u32(0xa6e3a1),
-            teal: Color::from_u32(0x94e2d5),
-            sky: Color::from_u32(0x89dceb),
-            sapphire: Color::from_u32(0x74c7ec),
-            blue: Color::from_u32(0x89b4fa),
-            lavender: Color::from_u32(0xb4befe),
-            text: Color::from_u32(0xcdd6f4),
-            subtext1: Color::from_u32(0xbac2de),
-            subtext0: Color::from_u32(0xa6adc8),
-            overlay2: Color::from_u32(0x9399b2),
-            overlay1: Color::from_u32(0x7f849c),
-            overlay0: Color::from_u32(0x6c7086),
-            surface2: Color::from_u32(0x585b70),
-            surface1: Color::from_u32(0x45475a),
-            surface0: Color::from_u32(0x313244),
-            base: Color::from_u32(0x1e1e2e),
-            mantle: Color::from_u32(0x181825),
-            crust: Color::from_u32(0x11111b),
+            rosewater: Color::from_u32(0xF5_E0_DC),
+            flamingo: Color::from_u32(0xF2_CD_CD),
+            pink: Color::from_u32(0xF5_C2_E7),
+            mauve: Color::from_u32(0xCB_A6_F7),
+            red: Color::from_u32(0xF3_8B_A8),
+            maroon: Color::from_u32(0xEB_A0_AC),
+            peach: Color::from_u32(0xFA_B3_87),
+            yellow: Color::from_u32(0xF9_E2_AF),
+            green: Color::from_u32(0xA6_E3_A1),
+            teal: Color::from_u32(0x94_E2_D5),
+            sky: Color::from_u32(0x89_DC_EB),
+            sapphire: Color::from_u32(0x74_C7_EC),
+            blue: Color::from_u32(0x89_B4_FA),
+            lavender: Color::from_u32(0xB4_BE_FE),
+            text: Color::from_u32(0xCD_D6_F4),
+            subtext1: Color::from_u32(0xBA_C2_DE),
+            subtext0: Color::from_u32(0xA6_AD_C8),
+            overlay2: Color::from_u32(0x93_99_B2),
+            overlay1: Color::from_u32(0x7F_84_9C),
+            overlay0: Color::from_u32(0x6C_70_86),
+            surface2: Color::from_u32(0x58_5B_70),
+            surface1: Color::from_u32(0x45_47_5A),
+            surface0: Color::from_u32(0x31_32_44),
+            base: Color::from_u32(0x1E_1E_2E),
+            mantle: Color::from_u32(0x18_18_25),
+            crust: Color::from_u32(0x11_11_1B),
         }
     }
 }
 
+impl Default for CatppuccinMocha {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub const CATPPUCCIN_MOCHA: CatppuccinMocha = CatppuccinMocha::new();
+
+/// 兼容常量：弱化前景色（用于历史代码里 `Style::fg(MUTED_FG)` 的调用点）。
+///
+/// 说明：
+/// - 新主题体系里更推荐用 `theme.muted()`（Style role）。
+/// - 但 state 层/少量 widget 仍会用到一个纯 Color 常量做快速弱化。
+pub const MUTED_FG: Color = CATPPUCCIN_MOCHA.overlay0;
 
 // =============================================================================
 // TuiTheme (semantic roles)
@@ -305,7 +318,7 @@ pub fn patch_exabind_panel_border_bg(buf: &mut Buffer, area: Rect, theme: &TuiTh
     }
 
     // 2) 底边整行：让 `▔` 的空白区域用外侧背景填充。
-    let bottom_row = area.rows().last().unwrap_or_default();
+    let bottom_row = area.rows().next_back().unwrap_or_default();
     for pos in bottom_row.positions() {
         if let Some(cell) = buf.cell_mut(pos) {
             let style = cell.style();
@@ -327,7 +340,7 @@ pub fn patch_exabind_panel_border_bg(buf: &mut Buffer, area: Rect, theme: &TuiTh
         }
     }
 
-    let right_col = area.columns().last().unwrap_or_default();
+    let right_col = area.columns().next_back().unwrap_or_default();
     for pos in right_col.positions() {
         if let Some(cell) = buf.cell_mut(pos) {
             let style = cell.style();

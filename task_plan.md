@@ -613,3 +613,66 @@
   - `cargo test`
   - `cargo test -p ralph-core smoke_runner`
   - `cargo test -p ralph-core kiro`
+
+---
+
+# 任务计划：合并 `for_marge` 分支
+
+## 目标
+
+- 将 `for_marge` 分支合并到当前分支（当前为 `main`）。
+- 合并后保证工作区干净，并完成背压验证（fmt/clippy/test + replay smoke tests）。
+
+## 方案（至少二选一）
+
+### 方案 A：标准 merge（推荐，我将采用）
+
+- 直接在 `main` 上执行 `git merge for_marge`（避免改写历史）。
+- 如果需要产生 merge commit，则接受它（可追溯、协作成本最低）。
+
+### 方案 B：rebase 后快进（更“线性”，但默认不采用）
+
+- 把 `for_marge` rebase 到 `main`，再快进 `main`。
+- 这会改写 commit SHA；如果分支已共享/已推送，通常不划算。
+
+## 阶段
+
+- [x] 阶段1：合并前检查（工作区/分支存在/差异预览）
+- [x] 阶段2：执行合并（含冲突处理）
+- [x] 阶段3：验证（fmt/clippy/test/smoke）
+- [x] 阶段4：四文件记录（notes/WORKLOG/ERRORFIX）
+
+## 状态
+
+**已完成**：
+已完成 `for_marge` → `main` 的合并、冲突解决、验证（fmt/clippy/test/smoke）以及四文件记录。
+
+## 日志
+
+### 2026-01-31 22:18 +0800
+
+- [启动] 你要求：合并 `for_marge` 分支。
+- [确认] 当前在 `main`，工作区干净；`for_marge` 分支存在（且在另一个 worktree 中检出）。
+- [预览] `for_marge` 相对 `merge-base` 有 2 个提交：
+  - `68ccc0d`：`ui 调整`
+  - `3ccf9eb`：`fix(tui): Alacritty 边框高亮 + 入场动画错峰`
+- [风险] 两边在 `task_plan.md / notes.md / WORKLOG.md / ERRORFIX.md` 等文件上都有改动，合并时可能需要手工解决冲突并保证记录可读。
+
+### 2026-01-31 22:38 +0800
+
+- [执行] 为避免未提交的 `notes.md/task_plan.md` 阻塞 merge，我先做了 stash，再执行 `git merge for_marge --no-edit`，冲突解决后完成 merge commit。
+- [完成] merge commit：`5f8f58c`（`Merge branch 'for_marge'`）。
+- [处理] 关键冲突解决策略：
+  - 会话记录类文件（`notes.md/task_plan.md/WORKLOG.md/ERRORFIX.md`）优先保留 `main` 的版本，避免把两边日志搅在一起；同时保留 `for_marge` 新增的历史文件（如 `*_2026-01-30_*.md`）。
+  - TUI 相关：采纳 `for_marge` 的 `TuiTheme` + exabind border 方案，并修复/对齐并行输出仍使用 `ParallelOutputPane`（因为 `main` 的并行输出 buffer 类型不同）。
+- [下一步] 进入验证阶段（fmt/clippy/test/smoke），用测试做背压保证合并质量。
+
+### 2026-01-31 22:45 +0800
+
+- [验证] 已通过：
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test`
+  - `cargo test -p ralph-core smoke_runner`
+  - `cargo test -p ralph-core kiro`
+- [收尾] 已完成四文件记录：更新 `notes.md` / `WORKLOG.md` / `task_plan.md`（本节）。

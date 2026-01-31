@@ -113,6 +113,28 @@
 - `cargo test -p ralph-core smoke_runner` ✅
 - `cargo test -p ralph-core kiro` ✅
 
+## 2026-01-31 22:45 +0800｜合并 `for_marge` 分支（冲突解决 + TUI theme/exabind 整合）
+
+### 我做了什么
+- 完成 `for_marge` → `main` 合并，并产出 merge commit：`5f8f58c`（`Merge branch 'for_marge'`）。
+- 冲突解决策略：
+  - `notes.md/task_plan.md/WORKLOG.md/ERRORFIX.md` 这类“会话记录文件”优先保留 `main`，避免内容搅在一起难读；同时保留 `for_marge` 新增的历史文件（例如 `notes_2026-01-30_1623.md` 等）。
+  - TUI 相关冲突以“让主线可继续演进”为原则：保留 `main` 的并行输出 buffer/渲染链路，并采纳 `for_marge` 的主题与 exabind 边框修正。
+
+### 关键代码改动（摘要）
+- `crates/ralph-tui/src/theme.rs`：引入 `TuiTheme`（Catppuccin Mocha）+ `panel_block` + `patch_exabind_panel_border_bg`。
+- `crates/ralph-tui/src/widgets/header.rs` / `crates/ralph-tui/src/widgets/footer.rs` / `crates/ralph-tui/src/widgets/instances.rs`：
+  - 统一使用主题与 exabind 边框风格，并在需要处补 “外侧背景刷回” 的细节修正。
+- `crates/ralph-tui/src/widgets/content.rs`：渲染前先铺底，避免 bg=Reset 污染与动画/透明背景下闪烁。
+- `crates/ralph-tui/src/app.rs`：对齐新的主题/ContentPane 接口，并保持并行输出继续使用 `ParallelOutputPane`。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
 ## 2026-01-31 17:08 +0800｜并行 TUI：输出缓冲默认 10000 行 + ralph.yml 可配置
 
 ### 目标回顾

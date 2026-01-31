@@ -477,7 +477,7 @@ fn extract_output_selection_text(
     // 复用实际渲染器，保证“所见即所得”（含 soft wrap / scroll offset）。
     match buffer {
         crate::state::CurrentOutputBuffer::Serial(buffer) => {
-            let mut widget = ContentPane::new(buffer);
+            let mut widget = ContentPane::new(buffer, TuiTheme::default());
             if let Some(q) = search_query {
                 widget = widget.with_search(q);
             }
@@ -2280,7 +2280,9 @@ mod tests {
         let mut effect_primed = animation::startup_open_effect(theme, area);
 
         let mut fx_delta = FxDuration::from_millis(200);
-        let mut last_effect_tick = Instant::now() - Duration::from_millis(200);
+        let mut last_effect_tick = Instant::now()
+            .checked_sub(Duration::from_millis(200))
+            .unwrap();
         prime_animation_first_frame(&mut fx_delta, &mut last_effect_tick);
 
         effect_primed.process(fx_delta, &mut buf_primed, area);

@@ -394,3 +394,54 @@ tui:
 - 由于该字段变成可配置项，理论上用户可能设置 `0`。
 - 我在 `crates/ralph-tui/src/state/parallel.rs` 里补了保护：
   - `max_buffer_lines == 0` 时不再累积 `raw_lines`，避免“看起来不保留输出，但实际 raw_lines 无限增长”的反直觉内存占用。
+
+---
+
+## 2026-01-31 22:18 +0800｜合并 `for_marge` 分支：合并前侦察（preflight）
+
+### 当前分支与工作区
+- 当前在 `main`，工作区干净（无未提交修改）。
+
+### `for_marge` 分支状态
+- `for_marge` 是本地分支，并且被另一个 worktree 检出：
+  - `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-orchestrator-for_marge`
+
+### 分支分叉点与提交概览
+- `merge-base(main, for_marge) = 005e1230...`
+- `for_marge` 领先的提交只有 2 个（但其中 1 个提交体量很大）：
+  - `68ccc0d`：`ui 调整`（包含 TUI 代码、以及大量四文件/档案文件改动）
+  - `3ccf9eb`：`fix(tui): Alacritty 边框高亮 + 入场动画错峰`
+
+### 风险点（需要特别留意）
+- `68ccc0d` 修改了 `task_plan.md / notes.md / WORKLOG.md / ERRORFIX.md` 等“会话记录类文件”。
+- `main` 这两天也在同一批文件上频繁追加内容。
+- 因此合并时大概率会在这些文件上产生冲突，需要我手动做一次“合并日志”整理。
+
+---
+
+## 2026-01-31 22:45 +0800｜合并 `for_marge` 分支：结果与验证
+
+### 合并结果（落地状态）
+- 已完成 `for_marge` → `main` 合并，并产生 merge commit：`5f8f58c`（`Merge branch 'for_marge'`）。
+- 会话记录类文件的冲突处理采用“保留 main，新增文件照收”的策略：
+  - 这样避免把两边的日志内容强行揉在一起，导致阅读体验下降。
+  - `for_marge` 带来的历史文件（例如 `notes_2026-01-30_1623.md` / `task_plan_2026-01-30_2147.md` / `WORKLOG_2026-01-30_1525.md`）仍保留在仓库中。
+
+### 代码层面的关键整合点（我认为最重要的）
+- `ralph-tui` 引入并落地 `TuiTheme`（Catppuccin Mocha）与 exabind 风格面板：
+  - 统一 `panel_block(...)` 构造面板外观。
+  - 通过 `patch_exabind_panel_border_bg(...)` 修正边框块元素在部分终端（如 Alacritty/Warp）下的外圈背景细节。
+- `ContentPane` 升级为显式接收 `TuiTheme`：
+  - 重点是“先铺底，再渲染”，避免渲染逻辑把 panel 的底色刷回 `Reset`，从而在透明背景/动画下出现闪烁或外圈被污染。
+- 并行输出仍使用 `ParallelOutputPane`（未切换为 `IterationBuffer`）：
+  - 原因是 `main` 的并行输出 buffer 类型与 `for_marge` 不同（`ParallelOutputBuffer` + raw_lines 重渲染链路）。
+- 为了让旧调用点先不炸，我在主题模块里补了兼容常量：
+  - `crates/ralph-tui/src/theme.rs`：`pub const MUTED_FG: Color = ...`（建议后续逐步替换为 `theme.muted()`）。
+
+### 验证（背压）
+- 全量验证已通过：
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test`
+  - `cargo test -p ralph-core smoke_runner`
+  - `cargo test -p ralph-core kiro`

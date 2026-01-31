@@ -457,6 +457,37 @@
 - `cargo fmt` ✅
 - `cargo test` ✅（包含 replay smoke tests）
 
+---
+
+## 2026-01-31 22:45 +0800｜合并 `for_marge` 后的 clippy/编译收口
+
+### 现象
+- 合并 `for_marge` 后运行 `cargo clippy --all-targets --all-features -- -D warnings`：
+  - `ralph-tui` 出现编译错误（`MUTED_FG` 不存在、`ContentPane::new` 参数不匹配）。
+  - `clippy` 触发多处 deny 警告（`unreadable_literal` / `new_without_default` / `double_ended_iterator_last` / `unchecked_time_subtraction`）。
+
+### 根因
+- `for_marge` 引入新的主题体系（`TuiTheme`）并替换了原本的 `MUTED_FG` 常量，但仍有少量旧调用点未迁移完成。
+- `ContentPane` 构造函数升级为显式接收 `TuiTheme`，而复制提取逻辑仍在用旧签名。
+- `clippy -D warnings` 对“可读性/性能/时间安全性”类 lint 也会强制失败，需要逐个修正。
+
+### 修复
+- `crates/ralph-tui/src/theme.rs`：
+  - 补 `pub const MUTED_FG` 作为兼容常量（并行 state/help 等旧调用点先不炸）。
+  - 颜色字面量加分隔符（`0xF5_E0_DC` 形式），通过 `unreadable_literal`。
+  - `CatppuccinMocha` 补 `Default` 实现，通过 `new_without_default`。
+  - `rows()/columns()` 的末尾元素读取改用 `next_back()`，通过 `double_ended_iterator_last`。
+- `crates/ralph-tui/src/app.rs`：
+  - 复制提取路径改为 `ContentPane::new(buffer, TuiTheme::default())`，通过参数检查。
+  - 测试里 `Instant` 的减法改用 `checked_sub(...).unwrap()`，通过 `unchecked_time_subtraction`。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
 ## 2026-01-31 12:20 +0800｜E2E mock-mode：parallel 下 ralph#1 多 job 导致回放提前终止
 
 ### 现象

@@ -1901,10 +1901,10 @@ tui:
 
     #[test]
     fn test_tui_config_max_buffer_lines_override() {
-        let yaml = r#"
+        let yaml = r"
 tui:
   max_buffer_lines: 12345
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.tui.prefix_key, "ctrl-a");
         assert_eq!(config.tui.max_buffer_lines, 12345);
