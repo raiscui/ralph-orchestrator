@@ -4,11 +4,12 @@
 //! formatted output from the Ralph orchestrator, with iteration navigation,
 //! scroll, and search functionality.
 
+use crate::animation;
 use crate::chat::{ChatSubmit, parse_chat_submit};
 use crate::external_event_writer::ExternalEventWriter;
 use crate::input::{Action, map_key};
 use crate::state::{GateStatus, ParallelFocus, TuiMode, TuiState, TuiUpdate};
-use crate::theme::MUTED_FG;
+use crate::theme::{TuiTheme, panel_block, patch_exabind_panel_border_bg};
 use crate::widgets::{
     content::{ContentPane, SelectionBounds},
     footer, header, help, instances,
@@ -26,18 +27,21 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ralph_core::truncate_with_ellipsis;
-use ralph_proto::{GateResolve, GateResolvedBy, TOPIC_GATE_RESOLVE};
+use ralph_proto::{GateResolve, GateResolvedBy, HatInstanceId, TOPIC_GATE_RESOLVE};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Paragraph},
 };
 use scopeguard::defer;
 use std::io;
+use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tachyonfx::{Duration as FxDuration, EffectManager};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::{Duration, interval};
@@ -69,11 +73,54 @@ enum GateActionChip {
     Resolve,
 }
 
+// =============================================================================
+// Warp：保留“半透明窗口背景”效果
+// =============================================================================
+//
+// 用户反馈（Warp）：
+// - 窗口 padding（字符栅格之外）仍然发灰；
+// - 且在动画时能观察到“外圈”也会随之变色。
+//
+// 解释：
+// - ratatui 只能控制“字符栅格(cell)”的 fg/bg；
+// - Warp 的“半透明/blur”通常是窗口级效果：它会作用在终端默认背景上（以及 UI 范围外的 padding）。
+// - 如果我们在 cell 上大量绘制显式 bg（crust/base），内容区会变成纯色不透明，
+//   与 padding 的半透明背景脱钩，视觉上就像外圈发灰一圈。
+//
+// 策略：
+// - 在 Warp + TTY 下，启用 `TuiTheme::with_terminal_default_bg()`：
+//   - app 背景用 `bg=Reset`（使用终端默认背景），让“非 pane 区域”与 padding 共享同一套半透明背景
+//   - pane 内部仍保留主题底色（base），提升可读性，并避免动画出现刺眼的纯白条
+
+fn is_warp_terminal() -> bool {
+    std::env::var("TERM_PROGRAM")
+        .ok()
+        .map(|v| v.to_ascii_lowercase())
+        .is_some_and(|v| v.contains("warp"))
+}
+
 fn contains_point(area: ratatui::layout::Rect, x: u16, y: u16) -> bool {
     x >= area.x
         && x < area.x.saturating_add(area.width)
         && y >= area.y
         && y < area.y.saturating_add(area.height)
+}
+
+/// 动画首帧 priming：强制从“初始态”起步，避免闪烁。
+///
+/// 背景：
+/// - tachyonfx 的默认 Shader::process 流程是：先推进 timer，再 execute。
+/// - 如果 TUI 首帧渲染被输入事件拖慢（或首次 tick 间隔偏大），`fx_delta` 可能很大。
+/// - 若直接用大 delta 处理“刚添加的动画”，动画会从中途开始：
+///   - 启动进场：观感像“先把全部面板画出来 → 再扫一遍动画”，会非常怪且闪。
+///   - Output 重启：观感像“先显示新内容一帧 → 再消失 → 再入场”，会闪烁。
+///
+/// 策略：
+/// - 在“动画刚被添加”的那一帧，把 delta 强制归零，让第一帧先渲染出纯粹的起步态。
+/// - 下一帧开始再用正常的 delta 推进时间轴。
+fn prime_animation_first_frame(fx_delta: &mut FxDuration, last_effect_tick: &mut Instant) {
+    *fx_delta = FxDuration::from_millis(0);
+    *last_effect_tick = Instant::now();
 }
 
 fn inner_block(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
@@ -689,6 +736,18 @@ impl App {
 
     /// Runs the TUI event loop.
     pub async fn run(mut self) -> Result<()> {
+        // 默认主题（Catppuccin Mocha）。
+        //
+        // Warp 特殊处理：
+        // - 用户希望保留 Warp 的半透明窗口背景效果（包括 UI 范围外的 padding）。
+        // - 因此在 Warp + TTY 下使用终端默认背景（app bg=Reset），让“pane 之外”与 padding 共享背景。
+        // - 同时 pane 内部仍使用主题底色（base），让文字更稳、更不刺眼。
+        let theme = if std::io::stdout().is_terminal() && is_warp_terminal() {
+            TuiTheme::default().with_terminal_default_bg()
+        } else {
+            TuiTheme::default()
+        };
+
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -709,9 +768,6 @@ impl App {
             )
         );
 
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
         // CRITICAL: Ensure terminal cleanup on ANY exit path (normal, abort, or panic).
         // When cleanup_tui() calls handle.abort(), the task is cancelled immediately
         // at its current await point, skipping all code after the loop. This defer!
@@ -727,6 +783,9 @@ impl App {
             );
         }
 
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
         // Event-driven architecture: input polling is the primary driver
         // Render is throttled to ~60fps via interval tick
         let mut events = EventStream::new();
@@ -739,6 +798,11 @@ impl App {
         // 说明：先用固定高度满足“多行输入 + gate 列表可见”的最小需求，后续可再做自适应。
         const PARALLEL_BOTTOM_PANEL_HEIGHT: u16 = 12;
         const PARALLEL_CHAT_INPUT_HEIGHT: u16 = 3;
+        // 并行模式：左侧 Instances 面板的固定宽度（保持稳定布局，避免随窗口伸缩导致跳动）。
+        const PARALLEL_INSTANCES_PANEL_WIDTH: u16 = 30;
+        // 并行模式：Instances 与 Output 之间留一列间隙。
+        // 目的：取消“边框贴合/看起来像 collapsing borders”的观感，让两个 pane 更清晰分离。
+        const PARALLEL_PANE_GAP_WIDTH: u16 = 1;
 
         // 并行模式的 state 更新通道（由 App 消费）
         let mut update_rx = self.update_rx.take();
@@ -747,6 +811,30 @@ impl App {
         let mut parallel_layout: Option<ParallelLayoutSnapshot> = None;
         // 并行模式：Chat 区域的鼠标拖拽选择锚点（Down→Drag→Up）。
         let mut chat_drag_anchor: Option<crate::state::TextPos> = None;
+
+        // =========================================================================
+        // 动画（启动打开动画）
+        // =========================================================================
+        //
+        // 说明：
+        // - 动画是“锦上添花”，必须保证随时可降级为无动画
+        // - 使用 tachyonfx：先渲染 UI，再对 buffer 应用 effect（与 exabind 的实现范式一致）
+        let animations_enabled = animation::animations_enabled();
+        let mut effects = if animations_enabled {
+            Some(EffectManager::<&'static str>::default())
+        } else {
+            None
+        };
+        let mut last_effect_tick = Instant::now();
+        let mut startup_animation_attempted = false;
+        let mut startup_animation_started_at: Option<Instant> = None;
+
+        // 并行模式：用于检测“选中实例发生变化”，从而触发 Output 的重启动画。
+        //
+        // 说明：
+        // - 这不是 state 的一部分（避免 reducer 污染），仅用于 UI 层的动画触发
+        // - 只要 selected_instance_id 变了，就认为需要让 Output “重新打开”
+        let mut last_selected_instance_id: Option<HatInstanceId> = None;
 
         loop {
             // Use biased select to prioritize input over render ticks
@@ -1308,10 +1396,20 @@ impl App {
                     }
                 }
 
-                // Priority 2: Render at throttled rate (~60fps)
-                _ = render_tick.tick() => {
-                    let frame_size = terminal.size()?;
-                    let frame_area = ratatui::layout::Rect::new(0, 0, frame_size.width, frame_size.height);
+                    // Priority 2: Render at throttled rate (~60fps)
+                    _ = render_tick.tick() => {
+                        let frame_size = terminal.size()?;
+                        let frame_area = ratatui::layout::Rect::new(0, 0, frame_size.width, frame_size.height);
+
+                        // 动画 delta：只在启用动画时推进 EffectManager 的时间轴。
+                        let mut fx_delta = if effects.is_some() {
+                            let elapsed = last_effect_tick.elapsed();
+                            last_effect_tick = Instant::now();
+                            FxDuration::from_millis(elapsed.as_millis().min(u128::from(u32::MAX)) as u32)
+                        } else {
+                            FxDuration::from_millis(0)
+                        };
+
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([
@@ -1321,16 +1419,151 @@ impl App {
                         ])
                         .split(frame_area);
 
-                    let content_area = chunks[1];
-                    // viewport_height 代表“当前可滚动输出视图”的高度（串行=content， 并行=output inner）
-                    // 注意：并行模式下 output 还有边框与底部 chat panel，因此需要做一次保守估计。
-                    viewport_height = content_area.height as usize;
+                        let content_area = chunks[1];
+                        // viewport_height 代表“当前可滚动输出视图”的高度（串行=content， 并行=output inner）
+                        // 注意：并行模式下 output 还有边框与底部 chat panel，因此需要做一次保守估计。
+                        viewport_height = content_area.height as usize;
 
-                    let mut state = self.state.lock().unwrap();
+                        let mut state = self.state.lock().unwrap();
 
-                    // Autoscroll（串行/并行）：如果用户没离开底部，就跟随输出
-                    let effective_viewport_height = match state.mode {
-                        TuiMode::Serial => content_area.height as usize,
+                        // 启动打开动画只尝试一次：进入 alternate screen 的第一帧。
+                        //
+                        // 说明：
+                        // - 串行模式：允许用全屏 sweep 作为轻量“打开”
+                        // - 并行模式：按需求做“逐块出场”，并且 Instances 条目必须晚于框体
+                        if !startup_animation_attempted {
+                            startup_animation_attempted = true;
+                            if let Some(manager) = effects.as_mut()
+                                && animation::should_run_startup_animation(frame_area)
+                            {
+                                let effect = match state.mode {
+                                    TuiMode::Parallel => {
+                                        let vertical = Layout::default()
+                                            .direction(Direction::Vertical)
+                                            .constraints([
+                                                Constraint::Min(0), // main
+                                                Constraint::Length(PARALLEL_BOTTOM_PANEL_HEIGHT), // bottom panel
+                                            ])
+                                            .split(content_area);
+
+                                        let main_area = vertical[0];
+                                        let bottom_area = vertical[1];
+
+                                        let horizontal = Layout::default()
+                                            .direction(Direction::Horizontal)
+                                            .constraints([
+                                                Constraint::Length(PARALLEL_INSTANCES_PANEL_WIDTH), // instances
+                                                Constraint::Length(PARALLEL_PANE_GAP_WIDTH),        // gap
+                                                Constraint::Min(0),                                  // output
+                                            ])
+                                            .split(main_area);
+
+                                        let instances_area = horizontal[0];
+                                        let output_area = horizontal[2];
+
+                                        let instances_inner =
+                                            panel_block("Instances", false, &theme).inner(instances_area);
+
+                                        animation::startup_open_effect_parallel(
+                                            theme,
+                                            chunks[0],
+                                            instances_area,
+                                            instances_inner,
+                                            output_area,
+                                            bottom_area,
+                                            chunks[2],
+                                        )
+                                    }
+                                    TuiMode::Serial => animation::startup_open_effect(theme, frame_area),
+                                };
+
+                                manager.add_unique_effect(animation::STARTUP_ANIMATION_KEY, effect);
+                                startup_animation_started_at = Some(Instant::now());
+
+                                // 关键修复：
+                                // - tachyonfx 的 Shader 默认实现是“先推进 timer，再 execute”
+                                // - 如果首帧渲染被输入事件拖慢，fx_delta 可能很大
+                                //   → 启动动画会从中途开始，导致“先全显示，再扫一遍”的闪烁观感
+                                // - 因此：启动动画被添加的这一帧，强制用 0 delta 先渲染一次“全隐藏起步态”
+                                prime_animation_first_frame(&mut fx_delta, &mut last_effect_tick);
+                            }
+                        }
+
+                        // Output 重启动画：当选中实例变化时，让 Output “先消失再打开”。
+                        //
+                        // 关键规则：
+                        // - 启动出场期间不触发（避免和 pane-level startup 编排打架）
+                        // - reduced-motion / 小窗口下不触发（可用性优先）
+                        if matches!(state.mode, TuiMode::Parallel) {
+                            let current_selected = state.parallel.selected_instance_id().cloned();
+
+                            if last_selected_instance_id.is_none() {
+                                // 第一次记录：避免在启动阶段或首次渲染时误触发重启动画。
+                                last_selected_instance_id = current_selected;
+                            } else if last_selected_instance_id != current_selected {
+                                last_selected_instance_id = current_selected;
+
+                                let startup_done = match startup_animation_started_at {
+                                    None => true,
+                                    Some(t) => t.elapsed()
+                                        >= Duration::from_millis(u64::from(animation::STARTUP_TOTAL_MS)),
+                                };
+
+                                if startup_done
+                                    && animation::should_run_startup_animation(frame_area)
+                                    && let Some(manager) = effects.as_mut()
+                                {
+                                    let vertical = Layout::default()
+                                        .direction(Direction::Vertical)
+                                        .constraints([
+                                            Constraint::Min(0), // main
+                                            Constraint::Length(PARALLEL_BOTTOM_PANEL_HEIGHT), // bottom panel
+                                        ])
+                                        .split(content_area);
+
+                                    let main_area = vertical[0];
+                                    let horizontal = Layout::default()
+                                        .direction(Direction::Horizontal)
+                                        .constraints([
+                                            Constraint::Length(PARALLEL_INSTANCES_PANEL_WIDTH), // instances
+                                            Constraint::Length(PARALLEL_PANE_GAP_WIDTH),        // gap
+                                            Constraint::Min(0),                                  // output
+                                        ])
+                                        .split(main_area);
+
+                                    let output_area = horizontal[2];
+                                    let output_inner = inner_block(output_area);
+                                    // 体验取舍：
+                                    // - Warp（bg=Reset）下，为了避免边框 cell 参与插值导致“外圈被带色”，
+                                    //   Output 重启动画只作用于 inner。
+                                    // - 非 Warp 下，允许动画包含边框，能看到更清晰的“边框过渡”。
+                                    let output_effect_area = if theme.app_bg_color() == Color::Reset {
+                                        output_inner
+                                    } else {
+                                        output_area
+                                    };
+
+                                    if output_effect_area.width > 0 && output_effect_area.height > 0 {
+                                        manager.add_unique_effect(
+                                            animation::OUTPUT_REOPEN_ANIMATION_KEY,
+                                            animation::output_reopen_effect(theme, output_effect_area),
+                                        );
+
+                                        // 关键修复：
+                                        // - Output 重启动画必须从“隐藏态”首帧起步，
+                                        //   否则会出现“先显示新内容一帧再消失”的闪烁。
+                                        prime_animation_first_frame(
+                                            &mut fx_delta,
+                                            &mut last_effect_tick,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        // Autoscroll（串行/并行）：如果用户没离开底部，就跟随输出
+                        let effective_viewport_height = match state.mode {
+                            TuiMode::Serial => content_area.height as usize,
                         TuiMode::Parallel => {
                             // content = main + bottom_panel(PARALLEL_BOTTOM_PANEL_HEIGHT)
                             // output inner = main - borders(2)
@@ -1375,15 +1608,26 @@ impl App {
                     }
 
                     let state = state; // Rebind as immutable for rendering
-                    terminal.draw(|f| {
+                        terminal.draw(|f| {
+                            // 说明：
+                            // - exabind 风格边框需要对“边框 cell 的背景色”做二次修正（见 theme.rs）。
+                            // - 但动画是后处理（effects 在最后执行），会覆盖掉我们在 widget 阶段刷回去的 bg。
+                            // - 因此：这里先收集各 pane 的 Rect，便于在应用 effects 之后再修正一次。
+                            let mut exabind_instances_area: Option<ratatui::layout::Rect> = None;
+                            let mut exabind_output_area: Option<ratatui::layout::Rect> = None;
+                            let mut exabind_bottom_area: Option<ratatui::layout::Rect> = None;
+
+                            // 统一背景：先铺一层 app 级背景色，避免切换视图时出现“旧帧残影”或颜色不一致。
+                            f.render_widget(Block::new().style(theme.app_bg()), f.area());
+
                         // Render header
-                        f.render_widget(header::render(&state, chunks[0].width), chunks[0]);
+                        f.render_widget(header::render(&state, theme, chunks[0].width), chunks[0]);
 
                         match state.mode {
                             TuiMode::Serial => {
                                 // Render content using ContentPane
                                 if let Some(buffer) = state.current_iteration() {
-                                    let mut content_widget = ContentPane::new(buffer);
+                                    let mut content_widget = ContentPane::new(buffer, theme);
                                     if let Some(query) = &state.search_state.query {
                                         content_widget = content_widget.with_search(query);
                                     }
@@ -1406,24 +1650,23 @@ impl App {
                                 let horizontal = Layout::default()
                                     .direction(Direction::Horizontal)
                                     .constraints([
-                                        Constraint::Length(30), // instances
-                                        Constraint::Min(0),     // output
+                                        Constraint::Length(PARALLEL_INSTANCES_PANEL_WIDTH), // instances
+                                        Constraint::Length(PARALLEL_PANE_GAP_WIDTH),        // gap
+                                        Constraint::Min(0),                                  // output
                                     ])
                                     .split(main_area);
 
                                 let instances_area = horizontal[0];
-                                let output_area = horizontal[1];
+                                let output_area = horizontal[2];
+                                exabind_instances_area = Some(instances_area);
+                                exabind_output_area = Some(output_area);
+                                exabind_bottom_area = Some(bottom_area);
 
                                 // 左：实例列表
-                                f.render_widget(instances::render(&state.parallel), instances_area);
+                                f.render_widget(instances::render(&state.parallel, theme), instances_area);
 
                                 // 右：输出（选中实例的当前 job）
                                 let output_focused = state.parallel.focus == crate::state::ParallelFocus::Output;
-                                let output_border_style = if output_focused {
-                                    Style::default().fg(Color::Cyan)
-                                } else {
-                                    Style::default()
-                                };
 
                                 let title = if let Some(id) = state.parallel.selected_instance_id() {
                                     if let Some(instance) = state.parallel.selected_instance() {
@@ -1441,12 +1684,11 @@ impl App {
                                 } else {
                                     "Output".to_string()
                                 };
-                                let block = Block::default()
-                                    .title(title)
-                                    .borders(Borders::ALL)
-                                    .border_style(output_border_style);
+                                let block = panel_block(title, output_focused, &theme);
                                 let inner = block.inner(output_area);
                                 f.render_widget(block, output_area);
+                                // exabind 风格边框：需要把“外侧背景”刷回 crust，才能让左上斜切角与底边贴边。
+                                patch_exabind_panel_border_bg(f.buffer_mut(), output_area, &theme);
 
                                 // 更新可滚动视图高度（给鼠标滚动/键盘滚动用）
                                 viewport_height = inner.height as usize;
@@ -1470,24 +1712,18 @@ impl App {
                                 } else {
                                     let empty = Paragraph::new(Line::from(vec![
                                         Span::raw(" "),
-                                        Span::styled("No instance selected", Style::default().fg(MUTED_FG)),
+                                        Span::styled("No instance selected", theme.muted()),
                                     ]));
                                     f.render_widget(empty, inner);
                                 }
 
                                 // 下：chat + gate（human async chat + gate 面板）
                                 let bottom_focused = state.parallel.focus == crate::state::ParallelFocus::Chat;
-                                let bottom_border_style = if bottom_focused {
-                                    Style::default().fg(Color::Cyan)
-                                } else {
-                                    Style::default()
-                                };
-                                let bottom_block = Block::default()
-                                    .title("Chat / Gates")
-                                    .borders(Borders::ALL)
-                                    .border_style(bottom_border_style);
+                                let bottom_block = panel_block("Chat / Gates", bottom_focused, &theme);
                                 let bottom_inner = bottom_block.inner(bottom_area);
                                 f.render_widget(bottom_block, bottom_area);
+                                // exabind 风格边框：需要把“外侧背景”刷回 crust，才能让左上斜切角与底边贴边。
+                                patch_exabind_panel_border_bg(f.buffer_mut(), bottom_area, &theme);
 
                                 if bottom_inner.width > 0 && bottom_inner.height > 0 {
                                     // 上：输入框 / Targets / 状态提示 / gate（详情 + 列表）
@@ -1545,12 +1781,12 @@ impl App {
 
                                     // 1) chat 输入行
                                     let prompt_style = if bottom_focused {
-                                        Style::default().fg(Color::Cyan)
+                                        theme.accent()
                                     } else {
-                                        Style::default().fg(MUTED_FG)
+                                        theme.muted()
                                     };
 
-                                    let selection_style = Style::default().bg(Color::Blue);
+                                    let selection_style = Style::default().bg(theme.selection_bg());
 
                                     // 约定：prompt 占 3 个 cell（" " + ">" + " "）
                                     let prefix_cells: u16 = 3;
@@ -1575,7 +1811,7 @@ impl App {
                                             Span::raw(" "),
                                             Span::styled(
                                                 "Type: msg (-> selected) | @instance msg | !approve/!deny/!resolve ...",
-                                                Style::default().fg(MUTED_FG),
+                                                theme.muted(),
                                             ),
                                         ]));
                                     } else {
@@ -1728,13 +1964,13 @@ impl App {
                                     let selected_id = state.parallel.selected_instance_id();
                                     let mut targets_spans: Vec<Span> = vec![
                                         Span::raw(" "),
-                                        Span::styled("Targets:", Style::default().fg(MUTED_FG)),
+                                        Span::styled("Targets:", theme.muted()),
                                         Span::raw(" "),
                                     ];
                                     if state.parallel.instance_order.is_empty() {
                                         targets_spans.push(Span::styled(
                                             "(none)",
-                                            Style::default().fg(MUTED_FG),
+                                            theme.muted(),
                                         ));
                                     } else {
                                         for id in &state.parallel.instance_order {
@@ -1742,11 +1978,11 @@ impl App {
                                             let is_selected = selected_id == Some(id);
                                             let chip_style = if is_selected {
                                                 Style::default()
-                                                    .fg(Color::Black)
-                                                    .bg(Color::Cyan)
+                                                    .fg(theme.colors().crust)
+                                                    .bg(theme.selection_bg())
                                                     .add_modifier(ratatui::style::Modifier::BOLD)
                                             } else {
-                                                Style::default().fg(Color::Cyan)
+                                                Style::default().fg(theme.colors().sky)
                                             };
                                             targets_spans.push(Span::styled(label, chip_style));
                                             targets_spans.push(Span::raw(" "));
@@ -1767,7 +2003,7 @@ impl App {
                                         });
                                     let status_line = Line::from(vec![
                                         Span::raw(" "),
-                                        Span::styled(status.to_string(), Style::default().fg(MUTED_FG)),
+                                        Span::styled(status.to_string(), theme.muted()),
                                     ]);
                                     f.render_widget(Paragraph::new(status_line), status_area);
 
@@ -1783,24 +2019,24 @@ impl App {
                                         if gate_info_area.height > 0 {
                                             let info_line = Line::from(vec![
                                                 Span::raw(" "),
-                                                Span::styled("Gate:", Style::default().fg(MUTED_FG)),
+                                                Span::styled("Gate:", theme.muted()),
                                                 Span::raw(" "),
                                                 Span::styled(
                                                     gate_id.to_string(),
                                                     Style::default()
-                                                        .fg(Color::Magenta)
+                                                        .fg(theme.colors().mauve)
                                                         .add_modifier(ratatui::style::Modifier::BOLD),
                                                 ),
                                                 Span::raw(" "),
                                                 Span::styled(
                                                     format!("[{kind}]"),
-                                                    Style::default().fg(Color::Magenta),
+                                                    Style::default().fg(theme.colors().mauve),
                                                 ),
                                                 Span::raw(" "),
-                                                Span::styled("by=", Style::default().fg(MUTED_FG)),
+                                                Span::styled("by=", theme.muted()),
                                                 Span::styled(
                                                     g.request.requested_by.to_string(),
-                                                    Style::default().fg(Color::Cyan),
+                                                    Style::default().fg(theme.colors().sky),
                                                 ),
                                             ]);
                                             f.render_widget(Paragraph::new(info_line), gate_info_area);
@@ -1817,20 +2053,20 @@ impl App {
 
                                             let prompt_line = Line::from(vec![
                                                 Span::raw(" "),
-                                                Span::styled("Prompt:", Style::default().fg(MUTED_FG)),
+                                                Span::styled("Prompt:", theme.muted()),
                                                 Span::raw(" "),
-                                                Span::raw(prompt),
+                                                Span::styled(prompt, theme.text()),
                                             ]);
                                             f.render_widget(Paragraph::new(prompt_line), gate_prompt_area);
                                         }
 
                                         if gate_actions_area.height > 0 {
                                             let action_style = Style::default()
-                                                .fg(Color::Cyan)
+                                                .fg(theme.colors().sky)
                                                 .add_modifier(ratatui::style::Modifier::BOLD);
                                             let actions_line = Line::from(vec![
                                                 Span::raw(" "),
-                                                Span::styled("Actions:", Style::default().fg(MUTED_FG)),
+                                                Span::styled("Actions:", theme.muted()),
                                                 Span::raw(" "),
                                                 Span::styled("!approve", action_style),
                                                 Span::raw(" "),
@@ -1864,19 +2100,19 @@ impl App {
                                         let (status_text, status_style) = match g.status_at(now) {
                                             GateStatus::Resolved => (
                                                 "resolved".to_string(),
-                                                Style::default().fg(Color::Green),
+                                                Style::default().fg(theme.colors().green),
                                             ),
                                             GateStatus::Timeout => (
                                                 "timeout".to_string(),
-                                                Style::default().fg(Color::Yellow),
+                                                Style::default().fg(theme.colors().yellow),
                                             ),
                                             GateStatus::Waiting { remaining_seconds } => (
                                                 format!("T-{remaining_seconds}s"),
-                                                Style::default().fg(Color::Cyan),
+                                                Style::default().fg(theme.colors().sky),
                                             ),
                                             GateStatus::Open => (
                                                 "open".to_string(),
-                                                Style::default().fg(Color::Cyan),
+                                                Style::default().fg(theme.colors().sky),
                                             ),
                                         };
 
@@ -1885,8 +2121,8 @@ impl App {
                                             state.parallel.selected_gate.as_deref() == Some(gate_id.as_str());
                                         let marker = if is_selected_gate { ">" } else { " " };
                                         let marker_style = if is_selected_gate {
-                                            Style::default()
-                                                .fg(Color::Cyan)
+                                            theme
+                                                .accent()
                                                 .add_modifier(ratatui::style::Modifier::BOLD)
                                         } else {
                                             Style::default()
@@ -1894,11 +2130,15 @@ impl App {
 
                                         gate_lines.push(Line::from(vec![
                                             Span::styled(marker, marker_style),
-                                            Span::styled(format!("[{kind}]"), Style::default().fg(Color::Magenta)),
+                                            Span::styled(
+                                                format!("[{kind}]"),
+                                                Style::default().fg(theme.colors().mauve),
+                                            ),
                                             Span::raw(" "),
                                             Span::styled(
                                                 gate_id.clone(),
                                                 Style::default()
+                                                    .fg(theme.colors().text)
                                                     .add_modifier(ratatui::style::Modifier::BOLD),
                                             ),
                                             Span::raw(" "),
@@ -1906,17 +2146,17 @@ impl App {
                                             Span::raw(" "),
                                             Span::styled(
                                                 g.request.requested_by.to_string(),
-                                                Style::default().fg(MUTED_FG),
+                                                theme.muted(),
                                             ),
                                             Span::raw(" "),
-                                            Span::raw(prompt),
+                                            Span::styled(prompt, theme.text()),
                                         ]));
                                     }
 
                                     if gate_lines.is_empty() {
                                         gate_lines.push(Line::from(vec![
                                             Span::raw(" "),
-                                            Span::styled("No gates", Style::default().fg(MUTED_FG)),
+                                            Span::styled("No gates", theme.muted()),
                                         ]));
                                     }
 
@@ -1926,12 +2166,35 @@ impl App {
                         }
 
                         // Render footer
-                        f.render_widget(footer::render(&state), chunks[2]);
+                        f.render_widget(footer::render(&state, theme), chunks[2]);
 
                         // Render help overlay if active
                         if state.show_help {
                             help::render(f, f.area());
                         }
+
+                            // Effects：在 widget 渲染完成后，对 buffer 施加后处理（shader-like）。
+                            if let Some(manager) = effects.as_mut() {
+                                // 先取出 area，再借用 buffer_mut，避免同一表达式里出现可变/不可变借用冲突。
+                                let area = f.area();
+                                manager.process_effects(fx_delta, f.buffer_mut(), area);
+
+                                // Warp 透明背景模式（bg=Reset）下：
+                                // - Output 的 sweep 动画可能会覆盖边框 cell 的 bg，
+                                //   让“最外圈”看起来也被染上 panel 底色（用户感知为外圈不透明/发灰）。
+                                // - 因此在 effects 之后再刷一遍 exabind 边框外侧背景，确保外圈始终是 Reset。
+                                if theme.app_bg_color() == Color::Reset {
+                                    if let Some(area) = exabind_instances_area {
+                                        patch_exabind_panel_border_bg(f.buffer_mut(), area, &theme);
+                                    }
+                                    if let Some(area) = exabind_output_area {
+                                        patch_exabind_panel_border_bg(f.buffer_mut(), area, &theme);
+                                    }
+                                    if let Some(area) = exabind_bottom_area {
+                                        patch_exabind_panel_border_bg(f.buffer_mut(), area, &theme);
+                                    }
+                                }
+                            }
                     })?;
                 }
 
@@ -1975,8 +2238,64 @@ mod tests {
     use ralph_proto::{
         Event, GateKind, GateRequest, HatInstanceId, HatInstanceState, TOPIC_GATE_REQUEST,
     };
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::prelude::Widget;
     use ratatui::text::Line;
     use tokio::sync::watch;
+
+    // =========================================================================
+    // 启动动画：首帧 priming（避免“先全显示再动画”的闪烁）
+    // =========================================================================
+
+    #[test]
+    fn startup_animation_first_frame_priming_prevents_full_ui_flash() {
+        let theme = TuiTheme::default();
+        let area = Rect::new(0, 0, 20, 6);
+
+        // 基础面板：我们用 border 的 fg 是否变成 crust 来判断“是否被隐藏”。
+        // 注意：tachyonfx 的 sweep/fade 不会改 symbol，只会改 fg/bg，所以测试必须看 style。
+        let render_panel = |buf: &mut Buffer| {
+            let block = panel_block("Output", false, &theme);
+            block.render(area, buf);
+        };
+
+        // Case A（未 priming）：如果首帧 delta 很大，启动动画会从中途开始，
+        // 顶部区域会几乎“已经是可见态”，导致观感像“先全显示，再扫一遍”。
+        let mut buf_unprimed = Buffer::empty(area);
+        render_panel(&mut buf_unprimed);
+        let mut effect_unprimed = animation::startup_open_effect(theme, area);
+        effect_unprimed.process(FxDuration::from_millis(200), &mut buf_unprimed, area);
+
+        assert_ne!(
+            buf_unprimed[(0, 0)].style().fg,
+            Some(theme.colors().crust),
+            "未 priming 的首帧（大 delta）不应把左上角 border 彻底隐藏"
+        );
+
+        // Case B（priming）：把“启动动画刚添加的那一帧”的 delta 强制归零，
+        // 让第一帧落在“全隐藏起步态”，下一帧再开始推进时间轴。
+        let mut buf_primed = Buffer::empty(area);
+        render_panel(&mut buf_primed);
+        let mut effect_primed = animation::startup_open_effect(theme, area);
+
+        let mut fx_delta = FxDuration::from_millis(200);
+        let mut last_effect_tick = Instant::now() - Duration::from_millis(200);
+        prime_animation_first_frame(&mut fx_delta, &mut last_effect_tick);
+
+        effect_primed.process(fx_delta, &mut buf_primed, area);
+
+        assert_eq!(
+            buf_primed[(0, 0)].style().fg,
+            Some(theme.colors().crust),
+            "priming 后首帧应把左上角 border 的 fg 刷成 crust（不可见）"
+        );
+        assert_eq!(
+            buf_primed[(0, 0)].style().bg,
+            Some(theme.colors().crust),
+            "priming 后首帧应把左上角 border 的 bg 刷成 crust（与外侧一致）"
+        );
+    }
 
     // =========================================================================
     // AC1: Events Reach State — TuiStreamHandler → IterationBuffer

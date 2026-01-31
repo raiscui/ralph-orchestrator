@@ -7,12 +7,13 @@
 //! - Real-time display of agent messages and state
 //! - Keyboard navigation and search
 
+mod animation;
 mod app;
 mod chat;
 mod external_event_writer;
 pub mod input;
 pub mod state;
-mod theme;
+pub mod theme;
 pub mod widgets;
 
 use anyhow::Result;

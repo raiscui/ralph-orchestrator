@@ -1,10 +1,19 @@
 //! Outputs header and footer widgets to files for TUI validation.
 //!
 //! Run with: cargo run -p ralph-tui --example validate_widgets
+//!
+//! 建议用法（视觉回归）：
+//! - 生成输出：`cargo run -p ralph-tui --example validate_widgets`
+//! - 输出位置：`target/tui-validation/*.txt`（避免污染 git 工作区）
+//! - 然后用项目内的 `/tui-validate` 技能校验：
+//!   - `file:target/tui-validation/header.txt criteria:ralph-header`
+//!   - `file:target/tui-validation/footer_active.txt criteria:ralph-footer`
+//!   - `file:target/tui-validation/parallel_full_layout.txt criteria:ralph-full`
 
 use ralph_core::{HatJobOutputChunk, OutputStream};
 use ralph_proto::{Event, HatId};
 use ralph_tui::TuiState;
+use ralph_tui::theme::{TuiTheme, panel_block};
 use ralph_tui::widgets::{instances, parallel_output::ParallelOutputPane};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -28,8 +37,15 @@ fn render_to_string(terminal: &Terminal<TestBackend>) -> String {
 }
 
 fn main() {
-    let output_dir = std::env::current_dir().unwrap().join("tui-validation");
+    // 输出写到 `target/`，避免在仓库根目录产生未跟踪文件。
+    let output_dir = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join("tui-validation");
     fs::create_dir_all(&output_dir).unwrap();
+
+    // 统一使用 TUI 默认主题（Catppuccin Mocha），确保输出可作为视觉回归基线。
+    let theme = TuiTheme::default();
 
     // Create a fully populated state for validation
     let mut state = TuiState::new();
@@ -52,13 +68,13 @@ fn main() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::header::render(&state, 80);
+            let widget = ralph_tui::header::render(&state, theme, 80);
             f.render_widget(widget, f.area());
         })
         .unwrap();
     let header_output = render_to_string(&terminal);
     fs::write(output_dir.join("header.txt"), &header_output).unwrap();
-    println!("Header output written to tui-validation/header.txt");
+    println!("Header output written to target/tui-validation/header.txt");
     println!("{}", header_output);
     println!();
 
@@ -68,13 +84,13 @@ fn main() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::header::render(&state, 80);
+            let widget = ralph_tui::header::render(&state, theme, 80);
             f.render_widget(widget, f.area());
         })
         .unwrap();
     let header_scroll_output = render_to_string(&terminal);
     fs::write(output_dir.join("header_scroll.txt"), &header_scroll_output).unwrap();
-    println!("Header (scroll mode) output written to tui-validation/header_scroll.txt");
+    println!("Header (scroll mode) output written to target/tui-validation/header_scroll.txt");
     println!("{}", header_scroll_output);
     println!();
     state.in_scroll_mode = false;
@@ -85,13 +101,13 @@ fn main() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::header::render(&state, 80);
+            let widget = ralph_tui::header::render(&state, theme, 80);
             f.render_widget(widget, f.area());
         })
         .unwrap();
     let header_idle_output = render_to_string(&terminal);
     fs::write(output_dir.join("header_idle.txt"), &header_idle_output).unwrap();
-    println!("Header (idle countdown) output written to tui-validation/header_idle.txt");
+    println!("Header (idle countdown) output written to target/tui-validation/header_idle.txt");
     println!("{}", header_idle_output);
     println!();
     state.idle_timeout_remaining = None;
@@ -101,13 +117,13 @@ fn main() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::footer::render(&state);
+            let widget = ralph_tui::footer::render(&state, theme);
             f.render_widget(widget, f.area());
         })
         .unwrap();
     let footer_output = render_to_string(&terminal);
     fs::write(output_dir.join("footer_active.txt"), &footer_output).unwrap();
-    println!("Footer (active) output written to tui-validation/footer_active.txt");
+    println!("Footer (active) output written to target/tui-validation/footer_active.txt");
     println!("{}", footer_output);
     println!();
 
@@ -121,13 +137,13 @@ fn main() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::footer::render(&state);
+            let widget = ralph_tui::footer::render(&state, theme);
             f.render_widget(widget, f.area());
         })
         .unwrap();
     let footer_idle_output = render_to_string(&terminal);
     fs::write(output_dir.join("footer_idle.txt"), &footer_idle_output).unwrap();
-    println!("Footer (idle) output written to tui-validation/footer_idle.txt");
+    println!("Footer (idle) output written to target/tui-validation/footer_idle.txt");
     println!("{}", footer_idle_output);
     println!();
 
@@ -137,13 +153,13 @@ fn main() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::footer::render(&state);
+            let widget = ralph_tui::footer::render(&state, theme);
             f.render_widget(widget, f.area());
         })
         .unwrap();
     let footer_done_output = render_to_string(&terminal);
     fs::write(output_dir.join("footer_done.txt"), &footer_done_output).unwrap();
-    println!("Footer (done) output written to tui-validation/footer_done.txt");
+    println!("Footer (done) output written to target/tui-validation/footer_done.txt");
     println!("{}", footer_done_output);
     println!();
 
@@ -164,22 +180,17 @@ fn main() {
                 .split(f.area());
 
             f.render_widget(
-                ralph_tui::header::render(&state, chunks[0].width),
+                ralph_tui::header::render(&state, theme, chunks[0].width),
                 chunks[0],
             );
             // Middle content area (just empty for this test)
-            f.render_widget(
-                ratatui::widgets::Block::default()
-                    .borders(ratatui::widgets::Borders::ALL)
-                    .title(" Terminal Output "),
-                chunks[1],
-            );
-            f.render_widget(ralph_tui::footer::render(&state), chunks[2]);
+            f.render_widget(panel_block("Terminal Output", false, &theme), chunks[1]);
+            f.render_widget(ralph_tui::footer::render(&state, theme), chunks[2]);
         })
         .unwrap();
     let full_output = render_to_string(&terminal);
     fs::write(output_dir.join("full_layout.txt"), &full_output).unwrap();
-    println!("Full layout output written to tui-validation/full_layout.txt");
+    println!("Full layout output written to target/tui-validation/full_layout.txt");
     println!("{}", full_output);
 
     // ------------------------------------------------------------------------
@@ -241,7 +252,7 @@ fn main() {
                 .split(f.area());
 
             f.render_widget(
-                ralph_tui::header::render(&parallel_state, chunks[0].width),
+                ralph_tui::header::render(&parallel_state, theme, chunks[0].width),
                 chunks[0],
             );
 
@@ -261,18 +272,20 @@ fn main() {
                 .direction(Direction::Horizontal)
                 .constraints([
                     Constraint::Length(30), // instances
+                    Constraint::Length(1),  // gap（避免边框贴合）
                     Constraint::Min(0),     // output
                 ])
                 .split(main_area);
 
             // 左：实例列表
-            f.render_widget(instances::render(&parallel_state.parallel), horizontal[0]);
+            f.render_widget(
+                instances::render(&parallel_state.parallel, theme),
+                horizontal[0],
+            );
 
             // 右：输出（选中实例的当前 job）
-            let output_area = horizontal[1];
-            let block = ratatui::widgets::Block::default()
-                .title("Output")
-                .borders(ratatui::widgets::Borders::ALL);
+            let output_area = horizontal[2];
+            let block = panel_block("Output", false, &theme);
             let inner = block.inner(output_area);
             f.render_widget(block, output_area);
 
@@ -284,9 +297,7 @@ fn main() {
             }
 
             // 下：chat/gates
-            let bottom_block = ratatui::widgets::Block::default()
-                .title("Chat / Gates")
-                .borders(ratatui::widgets::Borders::ALL);
+            let bottom_block = panel_block("Chat / Gates", false, &theme);
             let bottom_inner = bottom_block.inner(bottom_area);
             f.render_widget(bottom_block, bottom_area);
 
@@ -358,7 +369,7 @@ fn main() {
                 f.render_widget(ratatui::widgets::Paragraph::new(gate_lines), gates_area);
             }
 
-            f.render_widget(ralph_tui::footer::render(&parallel_state), chunks[2]);
+            f.render_widget(ralph_tui::footer::render(&parallel_state, theme), chunks[2]);
         })
         .unwrap();
 
@@ -368,8 +379,8 @@ fn main() {
         &parallel_output,
     )
     .unwrap();
-    println!("Parallel full layout written to tui-validation/parallel_full_layout.txt");
+    println!("Parallel full layout written to target/tui-validation/parallel_full_layout.txt");
     println!("{}", parallel_output);
 
-    println!("\n=== All validation outputs written to tui-validation/ ===");
+    println!("\n=== All validation outputs written to target/tui-validation/ ===");
 }

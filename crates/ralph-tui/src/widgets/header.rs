@@ -1,7 +1,7 @@
 use crate::state::TuiState;
-use crate::theme::MUTED_FG;
+use crate::theme::{EXABIND_BORDER_SET, TuiTheme};
 use ratatui::{
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
@@ -31,7 +31,7 @@ const WIDTH_MINIMAL: u16 = 40; // Hide idle countdown
 ///
 /// At narrower terminal widths, lower-priority components are hidden or compressed
 /// to ensure critical information (iteration, mode) remains visible.
-pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
+pub fn render(state: &TuiState, theme: TuiTheme, width: u16) -> Paragraph<'static> {
     let mut spans = vec![];
 
     // Priority 1: Iteration counter - ALWAYS shown
@@ -75,39 +75,52 @@ pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
     spans.push(Span::raw(" | "));
     let mode = if state.following_latest {
         if width > WIDTH_COMPRESS {
-            Span::styled("[LIVE]", Style::default().fg(Color::Green))
+            Span::styled("[LIVE]", Style::default().fg(theme.colors().green))
         } else {
-            Span::styled("▶", Style::default().fg(Color::Green))
+            Span::styled("▶", Style::default().fg(theme.colors().green))
         }
     } else if width > WIDTH_COMPRESS {
-        Span::styled("[REVIEW]", Style::default().fg(Color::Yellow))
+        Span::styled("[REVIEW]", Style::default().fg(theme.colors().yellow))
     } else {
-        Span::styled("◀", Style::default().fg(Color::Yellow))
+        Span::styled("◀", Style::default().fg(theme.colors().yellow))
     };
     spans.push(mode);
 
     // Priority 3: Scroll indicator - compressed at WIDTH_COMPRESS and below
     if state.in_scroll_mode {
         if width > WIDTH_COMPRESS {
-            spans.push(Span::styled(" [SCROLL]", Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(
+                " [SCROLL]",
+                Style::default().fg(theme.colors().sky),
+            ));
         } else {
-            spans.push(Span::styled(" [S]", Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(
+                " [S]",
+                Style::default().fg(theme.colors().sky),
+            ));
         }
     }
 
     // Priority 6: Help hint - shown only at WIDTH_FULL (80+)
     if width >= WIDTH_FULL {
-        spans.push(Span::styled(" | ? help", Style::default().fg(MUTED_FG)));
+        spans.push(Span::styled(" | ? help", theme.muted()));
     }
 
     let line = Line::from(spans);
-    let block = Block::default().borders(Borders::BOTTOM);
-    Paragraph::new(line).block(block)
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_set(EXABIND_BORDER_SET)
+        .border_style(Style::default().fg(theme.colors().surface0))
+        .style(theme.app_bg());
+    Paragraph::new(line)
+        .style(theme.text().bg(theme.app_bg_color()))
+        .block(block)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::TuiTheme;
     use ralph_proto::{Event, HatId};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -124,7 +137,7 @@ mod tests {
 
         terminal
             .draw(|f| {
-                let widget = render(state, width);
+                let widget = render(state, TuiTheme::default(), width);
                 f.render_widget(widget, f.area());
             })
             .unwrap();

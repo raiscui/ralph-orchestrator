@@ -25,6 +25,7 @@ serde_json.workspace = true
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
 base64 = "0.22"
+tachyonfx = { version = "0.23.0", default-features = false, features = ["std", "sendable"] }
 
 [dev-dependencies]
 insta = { version = "1.40", features = ["yaml", "filters"] }

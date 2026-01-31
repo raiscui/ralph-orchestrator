@@ -5,6 +5,7 @@
 
 use ralph_proto::Event;
 use ralph_tui::state::{TuiMode, TuiState, TuiUpdate};
+use ralph_tui::theme::{TuiTheme, panel_block};
 use ralph_tui::widgets::{
     content::ContentPane, footer, header, instances, parallel_output::ParallelOutputPane,
 };
@@ -245,12 +246,13 @@ impl TuiTestHarness {
     /// Height is 2: content + bottom border.
     pub fn render_header(&self) -> String {
         let state = self.state.lock().unwrap();
+        let theme = TuiTheme::default();
         let backend = TestBackend::new(self.terminal_width, 2);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
             .draw(|f| {
-                let widget = header::render(&state, self.terminal_width);
+                let widget = header::render(&state, theme, self.terminal_width);
                 f.render_widget(widget, f.area());
             })
             .unwrap();
@@ -262,12 +264,13 @@ impl TuiTestHarness {
     /// Height is 2: top border + content.
     pub fn render_footer(&self) -> String {
         let state = self.state.lock().unwrap();
+        let theme = TuiTheme::default();
         let backend = TestBackend::new(self.terminal_width, 2);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
             .draw(|f| {
-                let widget = footer::render(&state);
+                let widget = footer::render(&state, theme);
                 f.render_widget(widget, f.area());
             })
             .unwrap();
@@ -279,11 +282,18 @@ impl TuiTestHarness {
     /// Layout: header (2 lines: content + border) | content (flexible) | footer (2 lines: border + content)
     pub fn render_full(&self) -> String {
         let state = self.state.lock().unwrap();
+        let theme = TuiTheme::default();
         let backend = TestBackend::new(self.terminal_width, self.terminal_height);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
             .draw(|f| {
+                // 背景先铺一层，避免快照里残留旧帧内容。
+                f.render_widget(
+                    ratatui::widgets::Block::new().style(theme.app_bg()),
+                    f.area(),
+                );
+
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
@@ -294,13 +304,13 @@ impl TuiTestHarness {
                     .split(f.area());
 
                 // Render header
-                f.render_widget(header::render(&state, chunks[0].width), chunks[0]);
+                f.render_widget(header::render(&state, theme, chunks[0].width), chunks[0]);
 
                 // Render content (serial vs parallel)
                 match state.mode {
                     TuiMode::Serial => {
                         if let Some(buffer) = state.current_iteration() {
-                            let content = ContentPane::new(buffer);
+                            let content = ContentPane::new(buffer, theme);
                             f.render_widget(content, chunks[1]);
                         }
                     }
@@ -323,18 +333,17 @@ impl TuiTestHarness {
                             .direction(Direction::Horizontal)
                             .constraints([
                                 Constraint::Length(30), // instances
+                                Constraint::Length(1),  // gap（避免边框贴合）
                                 Constraint::Min(0),     // output
                             ])
                             .split(main_area);
 
                         // 左：实例列表
-                        f.render_widget(instances::render(&state.parallel), horizontal[0]);
+                        f.render_widget(instances::render(&state.parallel, theme), horizontal[0]);
 
                         // 右：输出（选中实例的当前 job）
-                        let output_area = horizontal[1];
-                        let block = ratatui::widgets::Block::default()
-                            .title("Output")
-                            .borders(ratatui::widgets::Borders::ALL);
+                        let output_area = horizontal[2];
+                        let block = panel_block("Output", false, &theme);
                         let inner = block.inner(output_area);
                         f.render_widget(block, output_area);
 
@@ -349,9 +358,7 @@ impl TuiTestHarness {
                         }
 
                         // 下：chat/gates（尽量贴近真实渲染，便于回归）
-                        let bottom_block = ratatui::widgets::Block::default()
-                            .title("Chat / Gates")
-                            .borders(ratatui::widgets::Borders::ALL);
+                        let bottom_block = panel_block("Chat / Gates", false, &theme);
                         let bottom_inner = bottom_block.inner(bottom_area);
                         f.render_widget(bottom_block, bottom_area);
 
@@ -481,7 +488,7 @@ impl TuiTestHarness {
                 }
 
                 // Render footer
-                f.render_widget(footer::render(&state), chunks[2]);
+                f.render_widget(footer::render(&state, theme), chunks[2]);
             })
             .unwrap();
 
@@ -497,13 +504,12 @@ impl Default for TuiTestHarness {
 
 /// Convert a ratatui Buffer to a single-line string.
 fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
-    buffer
+    let raw = buffer
         .content()
         .iter()
         .map(|cell| cell.symbol())
-        .collect::<String>()
-        .trim_end()
-        .to_string()
+        .collect::<String>();
+    normalize_snapshot_text(raw.trim_end())
 }
 
 /// Convert a ratatui Buffer to a multi-line string.
@@ -511,14 +517,36 @@ fn buffer_to_multiline_string(buffer: &ratatui::buffer::Buffer, height: u16) -> 
     let width = buffer.area().width as usize;
     let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
 
-    content
+    let raw = content
         .chars()
         .collect::<Vec<_>>()
         .chunks(width)
         .take(height as usize)
         .map(|chunk| chunk.iter().collect::<String>().trim_end().to_string())
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+
+    normalize_snapshot_text(&raw)
+}
+
+/// 规范化快照文本，避免“仅边框字符变化”导致大量无意义的快照 churn。
+///
+/// 背景：
+/// - 本次引入了 exabind 风格边框字符集（例如 `▟▜▔▏▕`）。
+/// - 但我们的快照测试主要关注布局与关键文本，不希望被边框 glyph 绑死。
+fn normalize_snapshot_text(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            // exabind：horizontal/bottom/corner 统一用 `▔`，快照里归一化成 box-drawing 的横线。
+            '▔' => '─',
+            // exabind：左右边框更“锐利”，快照里归一化成 box-drawing 的竖线。
+            '▏' | '▕' => '│',
+            // exabind：上角使用斜切角，快照里归一化成 box-drawing 的角。
+            '▟' => '┌',
+            '▜' => '┐',
+            _ => ch,
+        })
+        .collect()
 }
 
 /// Snapshot-friendly representation of TUI state.

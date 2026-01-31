@@ -1,44 +1,39 @@
 //! 并行模式：实例列表面板（HatInstance 列表）。
 
 use crate::state::{ParallelFocus, ParallelTuiState};
-use crate::theme::MUTED_FG;
+use crate::theme::{TuiTheme, panel_block, patch_exabind_panel_border_bg};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Widget},
+    widgets::{List, ListItem, ListState, Widget},
 };
 
 /// 左侧实例列表面板。
 pub struct InstancesPane<'a> {
     parallel: &'a ParallelTuiState,
     focused: bool,
+    theme: TuiTheme,
 }
 
 impl<'a> InstancesPane<'a> {
-    pub fn new(parallel: &'a ParallelTuiState) -> Self {
+    pub fn new(parallel: &'a ParallelTuiState, theme: TuiTheme) -> Self {
         Self {
             parallel,
             focused: parallel.focus == ParallelFocus::Instances,
+            theme,
         }
     }
 }
 
 impl Widget for InstancesPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let border_style = if self.focused {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        };
-
-        let block = Block::default()
-            .title("Instances")
-            .borders(Borders::ALL)
-            .border_style(border_style);
+        let block = panel_block("Instances", self.focused, &self.theme);
         let inner = block.inner(area);
         block.render(area, buf);
+        // exabind 风格边框：需要把“外侧背景”刷回 crust，才能让左上斜切角与底边贴边。
+        patch_exabind_panel_border_bg(buf, area, &self.theme);
 
         if inner.width == 0 || inner.height == 0 {
             return;
@@ -74,7 +69,7 @@ impl Widget for InstancesPane<'_> {
                     Span::raw(" "),
                     Span::raw(state),
                     Span::raw(" "),
-                    Span::styled(age, Style::default().fg(MUTED_FG)),
+                    Span::styled(age, self.theme.muted()),
                 ]);
                 ListItem::new(line)
             })
@@ -87,14 +82,15 @@ impl Widget for InstancesPane<'_> {
 
         let list = List::new(items).highlight_style(
             Style::default()
-                .add_modifier(Modifier::REVERSED)
-                .fg(Color::Yellow),
+                .bg(self.theme.selection_bg())
+                .fg(self.theme.colors().crust)
+                .add_modifier(Modifier::BOLD),
         );
         ratatui::widgets::StatefulWidget::render(list, inner, buf, &mut state);
     }
 }
 
 /// Convenience helper.
-pub fn render(parallel: &ParallelTuiState) -> InstancesPane<'_> {
-    InstancesPane::new(parallel)
+pub fn render(parallel: &ParallelTuiState, theme: TuiTheme) -> InstancesPane<'_> {
+    InstancesPane::new(parallel, theme)
 }
