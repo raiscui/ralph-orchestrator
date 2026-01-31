@@ -11,8 +11,8 @@ use ralph_adapters::{
     QuietStreamHandler, TuiStreamHandler,
 };
 use ralph_core::{
-    EventLogger, EventLoop, EventParser, EventRecord, RalphConfig, Record, SessionRecorder,
-    SummaryWriter, TerminationReason,
+    EventLogger, EventLoop, EventParser, EventRecord, HatBackend, RalphConfig, Record,
+    SessionRecorder, SummaryWriter, TerminationReason,
 };
 use ralph_proto::{Event, HatId, TerminalWrite, UxEvent};
 use ralph_tui::Tui;
@@ -35,6 +35,25 @@ pub(crate) struct ExecutionOutcome {
     pub termination: Option<TerminationReason>,
 }
 
+fn backend_name_for_timeout(hat_backend: &HatBackend) -> String {
+    match hat_backend {
+        HatBackend::Named(name) => name.clone(),
+        HatBackend::NamedWithArgs { backend_type, .. } => backend_type.clone(),
+        HatBackend::KiroAgent { .. } => "kiro".to_string(),
+        HatBackend::Custom { command, .. } => {
+            // 兼容两类输入：
+            // 1) 路径形式："/usr/bin/codex" -> "codex"
+            // 2) 带参数的命令： "ollama run llama3" -> "ollama"
+            let base_command = command.split_whitespace().next().unwrap_or(command);
+            std::path::Path::new(base_command)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("custom")
+                .to_string()
+        }
+    }
+}
+
 /// Core loop implementation supporting both fresh start and continue modes.
 ///
 /// `resume`: If true, publishes `task.resume` instead of `task.start`,
@@ -49,6 +68,7 @@ pub async fn run_loop_impl(
     verbosity: Verbosity,
     plain: bool,
     record_session: Option<PathBuf>,
+    custom_args: Vec<String>,
 ) -> Result<TerminationReason> {
     // Set up process group leadership per spec
     // "The orchestrator must run as a process group leader"
@@ -106,6 +126,32 @@ pub async fn run_loop_impl(
             .context("Failed to write .ralph/current-events marker file")?;
 
         debug!("Created events file for this run: {}", events_path);
+
+        // Fresh run：清理旧 scratchpad，避免历史残留误导本次 objective。
+        // 注意：resume/continue 模式下必须保留 scratchpad（作为恢复上下文的一部分）。
+        let scratchpad_path = std::path::PathBuf::from(&config.core.scratchpad);
+        let resolved_scratchpad_path = if scratchpad_path.is_relative() {
+            config.core.workspace_root.join(&scratchpad_path)
+        } else {
+            scratchpad_path
+        };
+        if resolved_scratchpad_path.exists() {
+            if let Some(parent) = resolved_scratchpad_path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create scratchpad parent directory: {:?}", parent)
+                })?;
+            }
+            fs::write(&resolved_scratchpad_path, "").with_context(|| {
+                format!(
+                    "Failed to clear scratchpad for fresh run: {:?}",
+                    resolved_scratchpad_path
+                )
+            })?;
+            debug!(
+                "Cleared scratchpad for fresh run: {:?}",
+                resolved_scratchpad_path
+            );
+        }
     }
 
     // Initialize event loop
@@ -148,12 +194,15 @@ pub async fn run_loop_impl(
     // Initialize event logger for debugging
     let mut event_logger = EventLogger::default_path();
 
-    // Log initial event (task.start or task.resume)
-    let (start_topic, start_triggered) = if resume {
-        ("task.resume", "planner")
-    } else {
-        ("task.start", "planner")
-    };
+    // Log initial event for debugging.
+    //
+    // 说明：
+    // - fresh run 的初始化握手事件始终是 `task.start`
+    // - `event_loop.starting_event` 不是“第一个事件”，而是“协调后 workflow entry event”（可选）：
+    //   - 若配置了 starting_event：协调者（parallel 时为 ralph#1） MUST 优先发布该 topic 作为入口事件
+    //   - 若未配置：协调者（parallel 时为 ralph#1）需要基于目标与 hats 拓扑自行决定入口事件
+    let start_topic = if resume { "task.resume" } else { "task.start" };
+    let start_triggered = "planner"; // Backward-compatible default for display/logging
     let start_event = Event::new(start_topic, &prompt_content);
     let start_record =
         EventRecord::new(0, "loop", &start_event, Some(&HatId::new(start_triggered)));
@@ -163,7 +212,8 @@ pub async fn run_loop_impl(
 
     // Create backend from config - TUI mode uses the same backend as non-TUI
     // The TUI is an observation layer that displays output, not a different mode
-    let backend = CliBackend::from_config(&config.cli).map_err(|e| anyhow::Error::new(e))?;
+    let default_backend =
+        CliBackend::from_config(&config.cli).map_err(|e| anyhow::Error::new(e))?;
 
     // Create PTY executor if using interactive mode
     let mut pty_executor = if use_pty {
@@ -178,7 +228,7 @@ pub async fn run_loop_impl(
             workspace_root: config.core.workspace_root.clone(),
             ..PtyConfig::from_env()
         };
-        Some(PtyExecutor::new(backend.clone(), pty_config))
+        Some(PtyExecutor::new(default_backend.clone(), pty_config))
     } else {
         None
     };
@@ -484,9 +534,52 @@ pub async fn run_loop_impl(
             eprintln!("{}\n", "=".repeat(80));
         }
 
+        // ------------------------------------------------------------------
+        // 选择本轮实际使用的 backend（hat-level backend 优先于全局 cli.backend）。
+        //
+        // 关键点：
+        // - 串行/PTY 模式下，PtyExecutor 会被复用；因此每轮必须能切换 backend。
+        // - timeout 必须与“真正使用的 backend”一致，否则会出现误杀或不生效。
+        // - `ralph run -- <custom args>` 视为“按次追加”，应当追加到最终 backend args 的末尾。
+        // ------------------------------------------------------------------
+        let hat_backend_opt = event_loop.get_hat_backend(&display_hat);
+
+        let (mut effective_backend, backend_name_for_timeout): (CliBackend, String) =
+            match hat_backend_opt {
+                Some(hat_backend) => match CliBackend::from_hat_backend(hat_backend) {
+                    Ok(hat_backend_instance) => {
+                        debug!(
+                            hat = %display_hat.as_str(),
+                            backend = ?hat_backend,
+                            "Using hat-level backend"
+                        );
+                        (hat_backend_instance, backend_name_for_timeout(hat_backend))
+                    }
+                    Err(e) => {
+                        warn!(
+                            hat = %display_hat.as_str(),
+                            "Failed to create backend from hat configuration: {e}. Falling back to global backend."
+                        );
+                        (default_backend.clone(), config.cli.backend.clone())
+                    }
+                },
+                None => {
+                    debug!(
+                        hat = %display_hat.as_str(),
+                        backend = %config.cli.backend,
+                        "Using global backend"
+                    );
+                    (default_backend.clone(), config.cli.backend.clone())
+                }
+            };
+
+        if !custom_args.is_empty() {
+            effective_backend.args.extend(custom_args.iter().cloned());
+        }
+
         // Execute the prompt (interactive or autonomous mode)
-        // Get per-adapter timeout from config
-        let adapter_settings = config.adapter_settings(&config.cli.backend);
+        // Get per-adapter timeout from config (based on the actual backend used).
+        let adapter_settings = config.adapter_settings(&backend_name_for_timeout);
         let timeout =
             (adapter_settings.timeout > 0).then(|| Duration::from_secs(adapter_settings.timeout));
         let output_stale_timeout = (adapter_settings.output_stale_timeout_secs > 0)
@@ -518,7 +611,7 @@ pub async fn run_loop_impl(
             if use_pty {
                 execute_pty(
                     pty_executor.as_mut(),
-                    &backend,
+                    &effective_backend,
                     &config,
                     &prompt,
                     user_interactive,
@@ -529,7 +622,7 @@ pub async fn run_loop_impl(
                 )
                 .await
             } else {
-                let executor = CliExecutor::new(backend.clone());
+                let executor = CliExecutor::new(effective_backend.clone());
                 let result = executor
                     .execute(
                         &prompt,
@@ -721,6 +814,9 @@ async fn execute_pty(
     let tui_connected = executor.is_some();
     let mut temp_executor;
     let exec = if let Some(e) = executor {
+        // 复用同一个 PTY executor 时，必须在每轮执行前更新 backend，
+        // 否则 hat-level backend/args 在 PTY 模式下会被“首轮 backend”锁死。
+        e.set_backend(backend.clone());
         e
     } else {
         let idle_timeout_secs = if interactive {

@@ -32,6 +32,12 @@ use crate::{ColorMode, Verbosity};
 #[derive(Debug, Clone)]
 struct CliHatJobExecutor {
     default_backend: CliBackend,
+    /// `ralph run -- <custom args>`：按次追加到实际执行的 backend args。
+    ///
+    /// 说明：
+    /// - 这对并行模式同样重要（否则行为与串行不一致）。
+    /// - 追加顺序：backend 默认 args / hat-level args 在前，custom_args 在后（更像“命令行最终覆盖”）。
+    custom_args: Vec<String>,
 }
 
 #[async_trait::async_trait]
@@ -42,11 +48,15 @@ impl HatJobExecutor for CliHatJobExecutor {
         output_tx: tokio::sync::mpsc::Sender<HatJobOutputChunk>,
         mut cancel_rx: tokio::sync::watch::Receiver<bool>,
     ) -> anyhow::Result<HatJobResult> {
-        let backend = match &job.backend {
+        let mut backend = match &job.backend {
             JobBackend::Default => self.default_backend.clone(),
             JobBackend::Hat(hat_backend) => CliBackend::from_hat_backend(hat_backend)
                 .map_err(|e| anyhow::anyhow!("Invalid hat backend config: {e}"))?,
         };
+
+        if !self.custom_args.is_empty() {
+            backend.args.extend(self.custom_args.iter().cloned());
+        }
 
         let (cmd, args, stdin_input, _temp_file) = backend.build_command(&job.prompt, false);
 
@@ -328,6 +338,7 @@ pub async fn run_parallel_loop_impl(
     verbosity: Verbosity,
     record_session: Option<PathBuf>,
     instance_filters: Vec<String>,
+    custom_args: Vec<String>,
 ) -> Result<TerminationReason> {
     process_management::setup_process_group();
 
@@ -381,12 +392,39 @@ pub async fn run_parallel_loop_impl(
         std::fs::create_dir_all(".ralph").context("Failed to create .ralph directory")?;
         std::fs::write(".ralph/current-events", &events_path)
             .context("Failed to write .ralph/current-events marker file")?;
+
+        // Fresh run：清理旧 scratchpad，避免历史残留误导本次 objective。
+        // 注意：resume/continue 模式下必须保留 scratchpad（作为恢复上下文的一部分）。
+        let scratchpad_path = config.core.resolve_path(&config.core.scratchpad);
+        if scratchpad_path.exists() {
+            if let Some(parent) = scratchpad_path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "Failed to create scratchpad parent directory (parallel): {:?}",
+                        parent
+                    )
+                })?;
+            }
+            std::fs::write(&scratchpad_path, "").with_context(|| {
+                format!(
+                    "Failed to clear scratchpad for fresh run (parallel): {:?}",
+                    scratchpad_path
+                )
+            })?;
+            debug!(
+                "Cleared scratchpad for fresh run (parallel): {:?}",
+                scratchpad_path
+            );
+        }
     }
 
     let default_backend = CliBackend::from_config(&config.cli)
         .map_err(|e| anyhow::anyhow!("Failed to create backend from config: {e}"))?;
 
-    let executor = Arc::new(CliHatJobExecutor { default_backend });
+    let executor = Arc::new(CliHatJobExecutor {
+        default_backend,
+        custom_args,
+    });
 
     let instance_filter_set: std::collections::HashSet<String> =
         instance_filters.into_iter().collect();
@@ -406,6 +444,7 @@ pub async fn run_parallel_loop_impl(
     let (mut tui_handle, tui_update_tx) = if enable_tui {
         let tui = Tui::new_parallel()
             .with_parallel_markdown_rendering(!plain)
+            .with_parallel_max_buffer_lines(config.tui.max_buffer_lines)
             .with_termination_signal(terminated_rx)
             .with_interrupt_tx(interrupt_tx.clone());
 

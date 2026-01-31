@@ -70,7 +70,7 @@ pub use memory::{
     MemoryRapidWriteScenario, MemorySearchScenario,
 };
 pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
-pub use parallel::ParallelHatInstancesScenario;
+pub use parallel::{ParallelHatInstancesScenario, ParallelStartingEventInferenceScenario};
 pub use parallel_trigger_routing_example::ParallelTriggerRoutingExampleScenario;
 pub use tasks::{TaskAddScenario, TaskCloseScenario, TaskCompletionScenario, TaskReadyScenario};
 

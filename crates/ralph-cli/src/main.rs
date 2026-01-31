@@ -380,6 +380,14 @@ struct RunArgs {
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
 
+    /// Custom backend command and arguments (use after --)
+    ///
+    /// 示例：
+    /// - `ralph run -b codex -- --model gpt-5.1-codex-max`
+    /// - `ralph run -b claude -- --no-cache`
+    #[arg(last = true)]
+    custom_args: Vec<String>,
+
     /// (Parallel mode) Hide stderr (`:err:`) streaming lines (shown by default).
     ///
     /// Why: In parallel mode, stderr is often backend/CLI logs and echoes.
@@ -675,6 +683,7 @@ async fn main() -> Result<()> {
                 verbose: false,
                 quiet: false,
                 record_session: None,
+                custom_args: Vec::new(),
                 show_stderr: true,
                 instance: Vec::new(),
             };
@@ -875,6 +884,7 @@ async fn run_command(
     // TUI is enabled by default (unless --no-tui or --autonomous is specified)
     let enable_tui = !args.no_tui && !args.autonomous;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
+    let custom_args = args.custom_args.clone();
     let reason = if config.parallel.enabled {
         parallel_runner::run_parallel_loop_impl(
             config,
@@ -888,6 +898,7 @@ async fn run_command(
             verbosity,
             args.record_session,
             args.instance.clone(),
+            custom_args.clone(),
         )
         .await?
     } else {
@@ -899,6 +910,7 @@ async fn run_command(
             verbosity,
             args.plain,
             args.record_session,
+            custom_args,
         )
         .await?
     };
@@ -1029,6 +1041,7 @@ async fn resume_command(
             verbosity,
             args.record_session,
             args.instance.clone(),
+            Vec::new(), // resume 不支持 `-- <custom args>`
         )
         .await?
     } else {
@@ -1040,6 +1053,7 @@ async fn resume_command(
             verbosity,
             args.plain,
             args.record_session,
+            Vec::new(), // resume 不支持 `-- <custom args>`
         )
         .await?
     };

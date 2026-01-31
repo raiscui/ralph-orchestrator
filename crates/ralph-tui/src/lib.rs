@@ -88,6 +88,19 @@ impl Tui {
         self
     }
 
+    /// 设置并行 Supervisor TUI：每个 job 的输出缓冲上限（按“逻辑行”计数）。
+    ///
+    /// 说明：
+    /// - 该值只影响 TUI 的回看/搜索窗口，不影响 `.ralph/events*.jsonl` 或 `--record-session` 的落盘内容。
+    /// - 设为 0 表示不保留输出（极端省内存/降噪场景）。
+    #[must_use]
+    pub fn with_parallel_max_buffer_lines(self, max_buffer_lines: usize) -> Self {
+        if let Ok(mut state) = self.state.lock() {
+            state.parallel.max_buffer_lines = max_buffer_lines;
+        }
+        self
+    }
+
     /// 旧接口/兼容接口：是否在并行 TUI 中启用 Markdown 渲染。
     ///
     /// 说明：

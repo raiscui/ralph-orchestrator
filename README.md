@@ -269,18 +269,20 @@ cli:
 event_loop:
   completion_promise: "LOOP_COMPLETE"
   max_iterations: 100
-  starting_event: "task.start"
+  # Optional: workflow entry event published AFTER coordination (not the first event)
+  # If omitted, ralph#1 will decide based on objective + hat topology.
+  starting_event: "work.start"
 
 hats:
   my_hat:
     name: "🎯 My Hat"
-    triggers: ["task.start"]        # Events that activate this hat
+    triggers: ["work.start"]        # Events that activate this hat
     publishes: ["work.done"]        # Events this hat can emit
     instructions: |
       Your instructions here...
 ```
 
-With hats, Ralph publishes a starting event, which triggers the matching hat. That hat does its work and publishes an event, potentially triggering other hats. This event-driven handoff continues until completion.
+With hats, Ralph always begins with `task.start` (coordination). After coordination, ralph#1 publishes `event_loop.starting_event` (if configured) or decides an entry event from the topology. That event triggers the matching hat. Hats publish events as they complete work, and ralph#1 coordinates the handoff until completion.
 
 > **Tip:** Use `ralph init --preset <name>` to get pre-configured hat workflows. See [Presets](#presets) for ready-made patterns like TDD, spec-driven development, and more.
 
@@ -363,7 +365,7 @@ event_loop:
   max_iterations: 100                   # Maximum orchestration loops
   max_runtime_seconds: 14400            # 4 hours max runtime
   idle_timeout_secs: 1800               # 30 min idle timeout
-  starting_event: "task.start"          # First event published
+  starting_event: "work.start"          # Workflow entry event after coordination (not the first event)
 
 # CLI backend settings
 cli:
@@ -1035,6 +1037,7 @@ tests: pass, lint: pass, typecheck: pass
 | `--record-session <FILE>` | Record session to JSONL |
 | `-q, --quiet` | Suppress output (for CI) |
 | `--continue` | Resume from existing scratchpad |
+| `-- <BACKEND_ARGS...>` | Pass extra trailing args to the backend command |
 
 ### `ralph init` Options
 
@@ -1069,8 +1072,9 @@ ralph hats validate
 # Diagrams (Mermaid is deterministic and easy to render elsewhere)
 ralph hats graph --format mermaid
 
-# AI-generated diagram (requires a working backend)
-ralph hats graph --format unicode --backend kiro
+# Deterministic text renderings (no backend required)
+ralph hats graph --format ascii
+ralph hats graph --format unicode
 ```
 
 ### `ralph tools` Subcommands

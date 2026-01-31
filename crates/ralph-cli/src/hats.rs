@@ -8,20 +8,17 @@
 //! - `list`: 列出所有 hats（名称 + 简要描述）
 //! - `show`: 显示某个 hat 的详细配置（订阅/发布/指令）
 //! - `validate`: 基础拓扑校验（starting_event 是否有订阅者、孤儿事件、dead-end 等）
-//! - `graph`: 输出拓扑图（mermaid 稳定可用；其他格式可选依赖 AI backend）
+//! - `graph`: 输出拓扑图（mermaid / ASCII / Unicode，确定性渲染）
 
 use crate::ConfigSource;
 use crate::display::colors;
 use crate::presets;
 use anyhow::{Context, Result};
+use beautiful_mermaid_rs::{AsciiRenderOptions, render_mermaid_ascii};
 use clap::{Parser, Subcommand, ValueEnum};
-use indicatif::{ProgressBar, ProgressStyle};
-use ralph_adapters::{CliBackend, detect_backend_default};
 use ralph_core::{HatRegistry, RalphConfig};
 use std::collections::HashSet;
 use std::io::Write;
-use std::process::{Command, Stdio};
-use std::time::Duration;
 use tracing::warn;
 
 /// Manage configured hats.
@@ -40,9 +37,6 @@ pub enum HatsCommands {
         /// Output format (unicode, ascii, compact, mermaid)
         #[arg(long, default_value = "unicode")]
         format: GraphFormat,
-        /// Backend to use for AI-generated diagrams (claude, kiro, gemini, codex, amp, copilot, opencode)
-        #[arg(short = 'b', long = "backend")]
-        backend: Option<String>,
     },
     /// List all configured hats (default if no subcommand)
     List {
@@ -101,9 +95,7 @@ pub fn execute(config_path: &std::path::Path, args: HatsArgs, use_colors: bool) 
             show_hat(&mut stdout, &registry, &show_args.name, use_colors)
         }
         Some(HatsCommands::Validate) => validate_hats(&mut stdout, &config, &registry, use_colors),
-        Some(HatsCommands::Graph { format, backend }) => {
-            graph_hats(&mut stdout, &config, &registry, format, backend.as_deref())
-        }
+        Some(HatsCommands::Graph { format }) => graph_hats(&mut stdout, &registry, format),
     }
 }
 
@@ -349,253 +341,53 @@ fn print_check<W: Write>(
     Ok(())
 }
 
-fn graph_hats<W: Write>(
-    writer: &mut W,
-    config: &RalphConfig,
-    registry: &HatRegistry,
-    format: GraphFormat,
-    backend_override: Option<&str>,
-) -> Result<()> {
+fn graph_hats<W: Write>(writer: &mut W, registry: &HatRegistry, format: GraphFormat) -> Result<()> {
     match format {
         GraphFormat::Mermaid => {
             writeln!(writer, "```mermaid")?;
             write!(writer, "{}", generate_mermaid_string(registry))?;
             writeln!(writer, "```")?;
         }
-        other_format => {
-            // Generate diagram via AI backend (optional enhancement path).
-            let rendered =
-                render_hat_dag_via_ai(config, registry, backend_override, &other_format)?;
-            write!(writer, "{}", rendered)?;
+        GraphFormat::Unicode | GraphFormat::Ascii | GraphFormat::Compact => {
+            let rendered = render_hat_dag_via_mermaid(registry, format)?;
+            write!(writer, "{rendered}")?;
         }
     }
     Ok(())
 }
 
-/// Render hat topology as ASCII DAG by calling an AI backend.
-///
-/// Shows the logical flow: task.start -> Ralph -> Hats.
-fn render_hat_dag_via_ai(
-    config: &RalphConfig,
-    registry: &HatRegistry,
-    backend_override: Option<&str>,
-    format: &GraphFormat,
-) -> Result<String> {
+fn render_hat_dag_via_mermaid(registry: &HatRegistry, format: GraphFormat) -> Result<String> {
     if registry.is_empty() {
         return Ok("No hats configured.\n".to_string());
     }
 
-    // Resolve backend: CLI flag > config > auto-detect
-    let backend_name = resolve_backend(backend_override, config)?;
+    let diagram = generate_mermaid_string(registry);
+    let options = match format {
+        GraphFormat::Unicode => AsciiRenderOptions {
+            use_ascii: Some(false),
+            ..Default::default()
+        },
+        GraphFormat::Ascii => AsciiRenderOptions {
+            use_ascii: Some(true),
+            ..Default::default()
+        },
+        GraphFormat::Compact => AsciiRenderOptions {
+            use_ascii: Some(false),
+            padding_x: Some(0),
+            padding_y: Some(0),
+            box_border_padding: Some(0),
+        },
+        GraphFormat::Mermaid => AsciiRenderOptions::default(),
+    };
 
-    // Build the prompt describing the graph
-    let prompt = build_diagram_prompt(registry, format);
+    let mut rendered = render_mermaid_ascii(&diagram, &options)
+        .with_context(|| "Failed to render Mermaid topology as ASCII/Unicode".to_string())?;
 
-    // Create backend and generate diagram
-    let backend = CliBackend::from_name(&backend_name)
-        .map_err(|e| anyhow::anyhow!("Failed to create backend '{backend_name}': {e}"))?;
-
-    // Show spinner while generating
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg}")
-            .expect("valid template"),
-    );
-    spinner.set_message(format!("Generating diagram via {backend_name}..."));
-    spinner.enable_steady_tick(Duration::from_millis(100));
-
-    // Build command for non-interactive mode
-    let (command, args, stdin_input, _temp_file) = backend.build_command(&prompt, false);
-
-    // Spawn and capture output
-    let mut child = Command::new(&command)
-        .args(&args)
-        .stdin(if stdin_input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("Failed to spawn backend command: {command}"))?;
-
-    // Send stdin if needed
-    if let Some(input) = stdin_input
-        && let Some(mut stdin) = child.stdin.take()
-    {
-        stdin.write_all(input.as_bytes())?;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
     }
 
-    // Wait for completion
-    let output = child
-        .wait_with_output()
-        .context("Failed to wait for backend")?;
-
-    spinner.finish_and_clear();
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "Backend '{backend_name}' failed (exit code: {:?}):\n{stderr}",
-            output.status.code(),
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim().is_empty() {
-        return Err(anyhow::anyhow!(
-            "Backend '{backend_name}' returned empty output"
-        ));
-    }
-
-    // Extract just the ASCII diagram from the response
-    Ok(extract_diagram(&stdout))
-}
-
-/// Resolves which backend to use for diagram generation.
-///
-/// Precedence (highest to lowest):
-/// 1. CLI flag (`--backend`)
-/// 2. Config file (`cli.backend` in ralph.yml)
-/// 3. Auto-detect (first available from claude → kiro → gemini → codex → amp)
-fn resolve_backend(flag_override: Option<&str>, config: &RalphConfig) -> Result<String> {
-    // 1. CLI flag takes precedence
-    if let Some(backend) = flag_override {
-        validate_backend_name(backend)?;
-        return Ok(backend.to_string());
-    }
-
-    // 2. Check config (if not "auto")
-    if config.cli.backend != "auto" {
-        return Ok(config.cli.backend.clone());
-    }
-
-    // 3. Auto-detect
-    detect_backend_default().map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-/// Validates a backend name.
-fn validate_backend_name(name: &str) -> Result<()> {
-    match name {
-        "claude" | "kiro" | "gemini" | "codex" | "amp" | "copilot" | "opencode" => Ok(()),
-        _ => Err(anyhow::anyhow!(
-            "Unknown backend: {name}\n\nValid backends: claude, kiro, gemini, codex, amp, copilot, opencode",
-        )),
-    }
-}
-
-/// Builds the prompt for diagram generation.
-fn build_diagram_prompt(registry: &HatRegistry, format: &GraphFormat) -> String {
-    let mut prompt = String::from(
-        "Generate a diagram showing this directed acyclic graph.\n\
-         Show clear arrows between nodes.\n\
-         Nodes and edges:\n",
-    );
-
-    match format {
-        GraphFormat::Unicode => {
-            prompt.push_str("Use Unicode box-drawing characters when helpful.\n\n");
-        }
-        GraphFormat::Ascii => {
-            prompt.push_str(
-                "Use ONLY pure ASCII characters (+-|>< and basic punctuation). Do NOT use any Unicode.\n\n",
-            );
-        }
-        GraphFormat::Compact => {
-            prompt.push_str(
-                "Make the output compact: minimal whitespace, short node boxes, still readable.\n\n",
-            );
-        }
-        GraphFormat::Mermaid => {
-            // Mermaid handled elsewhere; keep this for completeness.
-            prompt.push_str("Output Mermaid flowchart syntax.\n\n");
-        }
-    }
-
-    prompt.push_str("- task.start -> Ralph\n");
-
-    // Collect all hats sorted for deterministic output
-    let mut hats: Vec<_> = registry.all().collect();
-    hats.sort_by(|a, b| a.name.cmp(&b.name));
-
-    // Ralph -> Hats (based on subscriptions)
-    for hat in &hats {
-        for sub in &hat.subscriptions {
-            prompt.push_str(&format!(
-                "- Ralph -> {} (triggers on: {})\n",
-                hat.name,
-                sub.as_str()
-            ));
-        }
-    }
-
-    // Hats -> Ralph (based on publishes)
-    for hat in &hats {
-        for pub_event in &hat.publishes {
-            prompt.push_str(&format!(
-                "- {} -> Ralph (publishes: {})\n",
-                hat.name,
-                pub_event.as_str()
-            ));
-        }
-    }
-
-    // Hat -> Hat (direct flows)
-    for source in &hats {
-        for pub_event in &source.publishes {
-            for target in &hats {
-                if target.id == source.id {
-                    continue;
-                }
-                if target
-                    .subscriptions
-                    .iter()
-                    .any(|s| s.as_str() == pub_event.as_str())
-                {
-                    prompt.push_str(&format!(
-                        "- {} -> {} (via event: {})\n",
-                        source.name,
-                        target.name,
-                        pub_event.as_str()
-                    ));
-                }
-            }
-        }
-    }
-
-    prompt.push_str("\nOutput ONLY the diagram, no explanation or markdown fences.");
-    prompt
-}
-
-/// Extracts the diagram from the AI response.
-/// Removes any markdown fences or explanatory text.
-fn extract_diagram(response: &str) -> String {
-    let mut lines: Vec<&str> = response.lines().collect();
-
-    // Remove leading/trailing markdown fences
-    if lines.first().is_some_and(|l| l.starts_with("```")) {
-        lines.remove(0);
-    }
-    if lines.last().is_some_and(|l| l.starts_with("```")) {
-        lines.pop();
-    }
-
-    // Remove any leading blank lines or "Here is" type intros
-    while lines
-        .first()
-        .is_some_and(|l| l.trim().is_empty() || l.to_lowercase().starts_with("here"))
-    {
-        lines.remove(0);
-    }
-
-    let result = lines.join("\n");
-    if result.ends_with('\n') {
-        result
-    } else {
-        format!("{result}\n")
-    }
+    Ok(rendered)
 }
 
 /// Generate Mermaid flowchart syntax for the hat topology.
@@ -794,10 +586,9 @@ mod tests {
         registry.register(mock_hat("A", &["start"], &["mid"]));
         registry.register(mock_hat("B", &["mid"], &["end"]));
 
-        let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &registry, GraphFormat::Mermaid, None).unwrap();
+        graph_hats(&mut buf, &registry, GraphFormat::Mermaid).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("flowchart LR"));
@@ -807,18 +598,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires live AI backend"]
     fn test_graph_hats_ascii() {
         let mut registry = HatRegistry::new();
         registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
 
-        let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &registry, GraphFormat::Ascii, None).unwrap();
+        graph_hats(&mut buf, &registry, GraphFormat::Ascii).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        // AI-generated output should contain the node names
+        // deterministic output should contain key node names
         assert!(output.contains("Builder") || output.contains("Ralph"));
     }
 
@@ -984,80 +773,5 @@ mod tests {
         let config = result.unwrap();
         // confession-loop preset has hats defined
         assert!(!config.hats.is_empty());
-    }
-
-    #[test]
-    fn test_build_diagram_prompt() {
-        let mut registry = HatRegistry::new();
-        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
-        registry.register(mock_hat("Tester", &["test.task"], &["test.done"]));
-
-        let prompt = build_diagram_prompt(&registry, &GraphFormat::Unicode);
-
-        // Should contain the key elements
-        assert!(prompt.contains("task.start -> Ralph"));
-        assert!(prompt.contains("Ralph -> Builder"));
-        assert!(prompt.contains("build.task"));
-        assert!(prompt.contains("build.done"));
-        assert!(prompt.contains("Ralph -> Tester"));
-        assert!(prompt.contains("Output ONLY the diagram"));
-    }
-
-    #[test]
-    fn test_extract_diagram_plain() {
-        let response = "┌─────┐\n│Ralph│\n└─────┘";
-        let diagram = extract_diagram(response);
-        assert!(diagram.contains("Ralph"));
-        assert!(diagram.ends_with('\n'));
-    }
-
-    #[test]
-    fn test_extract_diagram_with_markdown_fences() {
-        let response = "```\n┌─────┐\n│Ralph│\n└─────┘\n```";
-        let diagram = extract_diagram(response);
-        assert!(diagram.contains("Ralph"));
-        assert!(!diagram.contains("```"));
-    }
-
-    #[test]
-    fn test_extract_diagram_with_intro() {
-        let response = "Here is the diagram:\n\n┌─────┐\n│Ralph│\n└─────┘";
-        let diagram = extract_diagram(response);
-        assert!(diagram.contains("Ralph"));
-        assert!(!diagram.to_lowercase().contains("here"));
-    }
-
-    #[test]
-    fn test_validate_backend_name_valid() {
-        assert!(validate_backend_name("claude").is_ok());
-        assert!(validate_backend_name("kiro").is_ok());
-        assert!(validate_backend_name("gemini").is_ok());
-        assert!(validate_backend_name("codex").is_ok());
-        assert!(validate_backend_name("amp").is_ok());
-    }
-
-    #[test]
-    fn test_validate_backend_name_invalid() {
-        let result = validate_backend_name("unknown-backend");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown backend"));
-    }
-
-    #[test]
-    fn test_resolve_backend_flag_override() {
-        let config = RalphConfig::default();
-        let result = resolve_backend(Some("kiro"), &config);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "kiro");
-    }
-
-    #[test]
-    fn test_resolve_backend_from_config() {
-        let mut config = RalphConfig::default();
-        config.cli.backend = "gemini".to_string();
-
-        let result = resolve_backend(None, &config);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "gemini");
     }
 }

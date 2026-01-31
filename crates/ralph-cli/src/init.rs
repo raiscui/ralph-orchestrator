@@ -57,6 +57,13 @@ event_loop:
 #   scratchpad: ".agent/scratchpad.md"
 #   specs_dir: "./specs/"
 
+# TUI：
+# tui:
+#   # 前缀键组合（例如 "ctrl-a" / "ctrl-b"）
+#   prefix_key: "ctrl-a"
+#   # 并行 Supervisor TUI：单个 job 输出缓冲最大行数（超过即丢弃最旧的行）
+#   max_buffer_lines: 10000
+
 # Custom hats for multi-agent workflows:
 # hats:
 #   builder:

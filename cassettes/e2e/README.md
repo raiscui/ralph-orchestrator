@@ -12,6 +12,8 @@ cassettes/e2e/
 ├── completion.jsonl    # LOOP_COMPLETE detection test
 ├── single-iter.jsonl   # Single iteration orchestration
 ├── multi-iter.jsonl    # Multi-iteration orchestration
+├── parallel-starting-event-inference-codex.jsonl  # Parallel starting_event inference (Codex)
+├── parallel-starting-event-inference-multi-candidate-codex.jsonl  # Parallel starting_event inference (multi-candidate, Codex)
 └── ...
 ```
 
@@ -24,10 +26,14 @@ cassettes/e2e/
 | `completion.jsonl` | LOOP_COMPLETE | ✅ Passes all backends |
 | `single-iter.jsonl` | Single iteration | ⚠️ Scratchpad assertion fails (no file writes) |
 | `multi-iter.jsonl` | Multi-iteration | ⚠️ Iteration count fails (architecture limitation) |
+| `parallel-starting-event-inference-codex.jsonl` | Parallel starting_event inference | ✅ Passes Codex |
+| `parallel-starting-event-inference-multi-candidate-codex.jsonl` | Parallel starting_event inference (multi-candidate) | ✅ Passes Codex |
 
 ## Known Limitations
 
-1. **Multi-iteration scenarios**: Mock-cli replays entire cassette in one invocation, so Ralph sees only one iteration
+1. **Multi-iteration scenarios**:
+   - mock-cli 会把同一个 cassette 分段回放到多次调用里（顺序模式按 `_meta.iteration`；并行模式按 `bus.publish.source_instance` 的“经验边界”）
+   - 如果 cassette 缺少这些分段信号，则仍可能退化为“一次性回放”
 2. **File write assertions**: Scenarios checking scratchpad/artifact content fail unless whitelisted commands execute
 3. **Task/Memory scenarios**: Require cassettes with `bus.publish` events containing whitelisted commands
 

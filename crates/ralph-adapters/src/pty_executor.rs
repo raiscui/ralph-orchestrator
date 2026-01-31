@@ -228,6 +228,15 @@ impl PtyExecutor {
         self.tui_mode = enabled;
     }
 
+    /// Updates the backend configuration for this executor.
+    ///
+    /// 说明：
+    /// - 串行/PTY 模式下，为了支持 “每个 hat 使用不同 backend/args”，需要在每轮执行前切换 backend。
+    /// - 这样可以复用同一个 PtyExecutor（避免频繁重建 PTY 资源），同时让 hat-level backend 生效。
+    pub fn set_backend(&mut self, backend: CliBackend) {
+        self.backend = backend;
+    }
+
     /// Returns a handle for TUI integration.
     ///
     /// Can only be called once - panics if called multiple times.

@@ -115,9 +115,6 @@ termimad = "0.34.1"
 # Terminal colors
 colored = "3"
 
-# Progress indicators
-indicatif = "0.17"
-
 # PTY support
 portable-pty = "0.9"
 nix = { version = "0.29", features = ["signal", "term"] }

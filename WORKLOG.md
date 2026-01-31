@@ -113,6 +113,182 @@
 - `cargo test -p ralph-core smoke_runner` ✅
 - `cargo test -p ralph-core kiro` ✅
 
+## 2026-01-31 17:08 +0800｜并行 TUI：输出缓冲默认 10000 行 + ralph.yml 可配置
+
+### 目标回顾
+- 并行 instance/job 输出回看窗口不要太快丢历史：
+  - 默认上限从 5000 行提升到 10000 行
+- 把 `max_buffer_lines` 做成 `ralph.yml` 配置项（无需改代码即可调整）
+
+### 我做了什么
+- 默认值提升：
+  - `crates/ralph-tui/src/state/parallel.rs`：`ParallelTuiState::default().max_buffer_lines = 10_000`
+- 配置项落地：
+  - `crates/ralph-core/src/config.rs`：新增 `tui.max_buffer_lines`（默认 10_000）
+- 配置注入到并行 TUI：
+  - `crates/ralph-tui/src/lib.rs`：新增 `Tui::with_parallel_max_buffer_lines(...)`
+  - `crates/ralph-cli/src/parallel_runner.rs`：创建并行 TUI 时注入 `config.tui.max_buffer_lines`
+- `ralph init` 生成模板补充示例：
+  - `crates/ralph-cli/src/init.rs`：在注释区新增 `tui.max_buffer_lines` 示例
+- 顺手做了一个边界值修正：
+  - `max_buffer_lines == 0` 时不再累积 `raw_lines`，避免“UI 不保留输出但内存仍无限增长”的反直觉情况。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-01-31 15:40 +0800｜澄清：starting_event 语义 + 解释 parallel instance 显示 `failed`
+
+### 你问的点
+1. 你认为 `starting_event` 被忽略（指向 `crates/ralph-core/src/event_loop/mod.rs:270`）。
+2. 你在 `examples/parallel-trigger-routing` 跑 parallel demo 时看到 instance 状态为 `failed`，想确认含义。
+
+### 我做了什么（最小改良，避免改核心行为）
+- 澄清并固化 `starting_event` 的“可选语义”（避免误读为“初始化事件”）：
+  - `crates/ralph-core/src/event_loop/mod.rs`：更新注释，明确 “starting_event 有/无配置” 两种分支语义。
+  - `crates/ralph-cli/src/loop_runner.rs`：同步更新注释，避免 CLI 层再出现相反描述。
+- 给 parallel 协调者（`ralph#1`）增加更明确的 prompt 语义锚点（减少模型漂移导致的误解）：
+  - `crates/ralph-core/src/parallel/supervisor.rs`：在 `KEY SEMANTICS` 里显式写出：
+    - starting_event set → MUST publish it
+    - starting_event unset → MUST decide entry (prefer derived candidates)
+
+### 说明：instance 状态 `failed` 的代码口径
+- `failed` 对应 `HatInstanceState::Failed`，含义是：该实例“最近一次 job 执行失败”（exit code 非 0 / timeout / cancel）。
+- 它不等价于“整个 run 必然失败”，但通常意味着该实例需要排查后端/超时/中断原因。
+
+### 我做了一个最接近你现场的复现
+- 在 `examples/parallel-trigger-routing` 目录下跑了一次：
+  - `../../target/release/ralph run -c ralph.yml --no-tui --plain --verbose`
+- 观察到最终输出：
+  - `[supervisor] final states: ... done`（未出现 failed）
+
+### 更正（避免误导未来阅读）
+- 之前 WORKLOG 中“fresh run 使用 starting_event（默认 task.start）”这句容易被理解成“starting_event 是初始化事件”。
+- 更准确的表述是：
+  - 初始化握手 topic 固定 `task.start`/`task.resume`
+  - starting_event 是协调后的 workflow entry（可选；未配置时由 `ralph#1` 推测/决定）
+
+### 验证（证据）
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+- mock E2E ✅：
+  - `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference --verbose`
+
+## 2026-01-31 13:40 +0800｜重构：拆分 `ralph-e2e` Tier8 `parallel.rs`（模块目录化，降低维护成本）
+
+### 目标回顾
+- `crates/ralph-e2e/src/scenarios/parallel.rs` 行数过长（>1000 行），后续继续扩展会加剧冲突与维护成本。
+- 目标是“纯重构”：不改变任何场景语义、断言口径与对外 API。
+
+### 我做了什么
+- 将 `parallel` 改为目录模块，并拆分为 4 个文件：
+  - `crates/ralph-e2e/src/scenarios/parallel/mod.rs`
+  - `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
+  - `crates/ralph-e2e/src/scenarios/parallel/starting_event_inference.rs`
+  - `crates/ralph-e2e/src/scenarios/parallel/job_run_counts.rs`
+- 维持原有导出路径：
+  - `ParallelHatInstancesScenario` / `ParallelStartingEventInferenceScenario` 仍由 `scenarios::parallel` 导出
+  - `JobRunCounts` / `parse_parallel_job_line` 仍可被 `parallel_trigger_routing_example` 通过 `super::parallel::{...}` 复用（可见性限制在 `crate::scenarios`）
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+- mock E2E ✅：
+  - `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference --verbose`
+
+## 2026-01-31 13:25 +0800｜新增 E2E 变体：starting_event 推测（多入口候选）
+
+### 目标回顾
+- 为 `starting_event` 未配置（由 `ralph#1` 自行推测入口事件）的语义，再补一个更贴近真实的 E2E 变体：
+  - 拓扑里存在多个 derived entry candidates（例如 `spec.start` 与 `docs.start`）
+  - prompt 给出明确 workflow 顺序（Planner 必须先跑），因此入口选择变得可判定、可做强断言
+
+### 我做了什么
+- 扩展 `ParallelStartingEventInferenceScenario` 为“多变体”：
+  - 现有场景（单入口候选）：`parallel-starting-event-inference`
+  - 新增变体（多入口候选）：`parallel-starting-event-inference-multi-candidate`
+- 变体拓扑引入 `docs` 干扰 hat：
+  - `docs.start → docs.done`（不在 `complete_publishes` 内）
+  - 期望 `ralph#1` 仍选择触发 Planner 的入口（`spec.start`），并完成 `spec.start → build.task → build.done` 闭环
+- 录制并登记 mock cassette：
+  - `cassettes/e2e/parallel-starting-event-inference-multi-candidate-codex.jsonl`
+
+### 变更文件
+- `crates/ralph-e2e/src/scenarios/parallel.rs`：新增 `MultiCandidate` 变体与断言（含 `docs.*` 未使用断言）
+- `crates/ralph-e2e/src/main.rs`：注册新变体场景
+- `specs/e2e-starting-event-inference.spec.md`：补充变体需求与 cassette 约定
+- `crates/ralph-e2e/README.md`：Tier8 场景列表补充变体说明
+- `cassettes/e2e/README.md`：登记新 cassette
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+- live E2E（Codex）✅：
+  - `cargo run -p ralph-e2e -- codex --filter parallel-starting-event-inference-multi-candidate --skip-analysis --keep-workspace --verbose`
+- mock E2E（cassette）✅：
+  - `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference-multi-candidate --verbose`
+
+## 2026-01-31 12:20 +0800｜新增 E2E：starting_event 未配置时 ralph#1 入口推测（parallel）
+
+### 目标回顾
+- 当 `event_loop.starting_event` 未设置时，应由 `ralph#1` 基于 hats 拓扑推测并发布 workflow entry event。
+- 需要一个端到端回归场景，覆盖“入口推测 + 触发链路 + 收敛到 LOOP_COMPLETE”。
+
+### 我做了什么
+- 新增 spec：`specs/e2e-starting-event-inference.spec.md`（定义可测口径与验收标准）。
+- 新增 ralph-e2e 场景：
+  - `ParallelStartingEventInferenceScenario`（id：`parallel-starting-event-inference`，Codex only）
+  - 断言点：
+    - `task.start` 后 `ralph#1` 的第一个 workflow entry event 必须是 `spec.start`
+    - 事件链路包含 `spec.start` → `build.task` → `build.done`
+    - 检测到 `LOOP_COMPLETE`
+- 录制 cassette + 打通 mock-mode：
+  - 新增 `cassettes/e2e/parallel-starting-event-inference-codex.jsonl`
+  - 修复 `ralph-e2e mock-cli`：支持“按调用次数分段回放”（否则 parallel 下 `ralph#1` 多 job 会导致 `LOOP_COMPLETE` 提前回放、workflow 中断）。
+
+### 验证（证据）
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- live E2E（Codex）✅：
+  - `cargo run -p ralph-e2e -- codex --filter parallel-starting-event-inference --skip-analysis --verbose --keep-workspace`
+- mock E2E（cassette）✅：
+  - `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference --verbose`
+
+## 2026-01-31 03:02 +0800｜按你的反馈回退 starting_event 语义：初始化固定 task.start，入口事件由 ralph#1 决策
+
+### 你指出的问题
+- 我之前把 `event_loop.starting_event` 当成了 fresh run 的“初始化事件 topic”（并在 `EventLoop::initialize()` 里使用它）。
+- 你明确要求：`starting_event` 未设置时，就由 `ralph#1` 自行决定；而不是默认替你选 `task.start` 或把它当作“第一事件”。
+
+### 我做了什么
+- 语义回退（按设计对齐）：
+  - `EventLoop::initialize()` fresh run 始终发布 `task.start`（`starting_event` 不再影响初始化事件 topic）。
+  - `loop_runner` 的 debug event logger 同步修正：fresh run 记录的初始事件也固定为 `task.start`。
+- prompt 增强（让 ralph#1 更清楚如何处理）：
+  - `starting_event` 已设置：提示 ralph#1 “协调后优先发布该入口事件启动 workflow”。
+  - `starting_event` 未设置：提示 ralph#1 “必须自行决定第一次 delegation 的入口事件”，并给出启发式候选入口事件列表（订阅但未被任何 hat 发布的事件）。
+- README 同步：
+  - 把 `starting_event` 从“First event published”改为“协调后入口事件（不是 first event）”，并修正示例配置。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
 ## 2026-01-30 23:03 +0800｜continuous-learning：四文件摘要 + 归档清理（保持工作区干净）
 
 ### 我做了什么
@@ -162,6 +338,58 @@
   - `Cargo.toml`：`workspace.package.license = "MIT"`
   - 根目录 `LICENSE`：替换为 MIT License 文本
   - README/docs：许可证 badge 与说明同步改为 MIT
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-01-31 02:35 +0800｜理性整合上游提交：backend args / hats graph / presets / events / scratchpad（Mermaid ASCII 改用 beautiful-mermaid-rs）
+
+### 目标回顾
+- 将你指定的多个 commit 的“高价值行为”整合进当前主线，避免原样搬运上游实现细节。
+- `ralph hats graph` 的 ascii/unicode/compact 必须使用 `/Users/cuiluming/local_doc/l_dev/my/rust/beautiful-mermaid-rs` 做确定性渲染。
+- 通过全量验证（fmt/clippy/test + replay smoke tests），用测试做背压门。
+
+### 我做了什么（按能力分组）
+
+- backend args（run 级别 + per-hat 级别）：
+  - `ralph run -- <BACKEND_ARGS...>`：支持把 trailing args 追加到 backend 命令行。
+  - `HatBackend` 扩展为支持 args：
+    - `NamedWithArgs { backend_type, args }`
+    - `KiroAgent { type, agent, args }`
+    - `Custom { command, args }`
+  - 串行 PTY 模式支持“每轮切换 backend”（避免 backend 在首轮锁死）。
+  - 统一 hat-level backend 生效优先级：优先使用 hat backend，失败回退全局 backend，并保持 timeout 配置按 backend 名生效。
+
+- starting_event 修复：
+  - `event_loop.starting_event` 不再被忽略：
+    - fresh run：使用 `starting_event`（默认 `task.start`）
+    - resume：固定为 `task.resume`
+
+- events JSONL 正确性改良：
+  - `events.jsonl` 写入改为“整行 JSON + 换行一次性追加写入”，降低半行 JSON 的概率。
+
+- scratchpad 行为组（清理 + 自动注入）：
+  - fresh run 会清理旧 scratchpad 内容（truncate 为空，而不是删除文件），避免 stale state 误导本轮目标。
+  - scratchpad 内容会自动注入 prompt（带字符预算 + tail 保留），减少 agent 每轮自行读取 scratchpad 的重复动作。
+
+- hats 可视化（确定性、可测试、离线可用）：
+  - 新增/完善 `ralph hats`：list/show/validate/graph。
+  - `graph --format ascii/unicode/compact`：从 Mermaid 文本生成，再用 `beautiful-mermaid-rs` 渲染（去掉 AI backend 画图逻辑）。
+
+- presets 镜像同步：
+  - `scripts/sync-embedded-files.sh` 支持把 `/presets/**` 镜像到 `crates/ralph-cli/presets/**`，保证 `cargo install` 也能拿到相同 presets。
+
+- prompt 省 token（active hat 场景）：
+  - 当存在 active hat 时，Ralph prompt 输出 `## ACTIVE HAT` + `### Event Publishing Guide`，跳过 `## HATS` 全量拓扑与 Mermaid（更聚焦、更省 token）。
+
+### 文档同步
+- `README.md`：
+  - 更新 `ralph hats graph` 示例：移除 `--backend`（现在不需要 backend 也能渲染 ascii/unicode）。
+  - 补充 `ralph run -- <BACKEND_ARGS...>` 的说明。
 
 ### 验证
 - `cargo fmt --check` ✅

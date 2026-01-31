@@ -14,6 +14,9 @@ cargo run -p ralph-e2e -- claude
 # List available scenarios
 cargo run -p ralph-e2e -- --list
 
+# Run only scenarios matching a filter (case-insensitive substring match)
+cargo run -p ralph-e2e -- codex --filter parallel-starting-event-inference-multi-candidate
+
 # Run with detailed output
 cargo run -p ralph-e2e -- claude --verbose
 
@@ -99,6 +102,8 @@ Graceful failure modes.
 ### Tier 8: Parallel Runtime (experimental)
 Validates the **parallel hat instances** runtime against real backends.
 - `ParallelHatInstancesScenario` - Fanout routing + multi-instance attributed output
+- `ParallelStartingEventInferenceScenario` - starting_event unset → ralph#1 infers workflow entry event
+- `ParallelStartingEventInferenceScenario` (multi-candidate variant) - multiple entry candidates → ralph#1 chooses correct entry for required workflow
 
 ## Reports
 

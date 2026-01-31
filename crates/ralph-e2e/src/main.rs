@@ -58,6 +58,7 @@ use ralph_e2e::{
     MultiIterScenario,
     // Tier 8: Parallel Runtime
     ParallelHatInstancesScenario,
+    ParallelStartingEventInferenceScenario,
     ParallelTriggerRoutingExampleScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
@@ -272,6 +273,8 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         // Tier 8: Parallel Runtime (experimental)
         Box::new(ParallelHatInstancesScenario::new()),
         Box::new(ParallelHatInstancesScenario::new_zh()),
+        Box::new(ParallelStartingEventInferenceScenario::new()),
+        Box::new(ParallelStartingEventInferenceScenario::new_multi_candidate()),
         Box::new(ParallelTriggerRoutingExampleScenario::new()),
     ]
 }

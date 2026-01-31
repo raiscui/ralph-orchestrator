@@ -551,6 +551,10 @@ fn test_custom_hat_topology_visible_to_ralph() {
     // Per "Hatless Ralph" architecture: Custom hats define topology,
     // but Ralph handles all iterations. This test verifies hat topology
     // is visible in Ralph's prompt.
+    //
+    // 说明：
+    // - 当存在 active hat 时，为了减少 token，Ralph 的 prompt 会优先展示
+    //   `## ACTIVE HAT`（含 instructions + Event Publishing Guide），而不是完整 `## HATS` 拓扑表。
     let yaml = r#"
 hats:
   deployer:
@@ -585,18 +589,22 @@ hats:
         "Ralph's prompt should include the event topic"
     );
 
-    // 2. The HATS section documenting the topology
+    // 2. Active hat section (token-saving mode)
     assert!(
-        prompt.contains("## HATS"),
-        "Ralph's prompt should include hat topology"
+        prompt.contains("## ACTIVE HAT"),
+        "Ralph's prompt should include ACTIVE HAT section when a hat is active"
     );
     assert!(
         prompt.contains("Deployment Manager"),
         "Hat topology should include hat name"
     );
     assert!(
-        prompt.contains("deploy.request"),
-        "Hat triggers should be in topology"
+        prompt.contains("### Event Publishing Guide"),
+        "Ralph's prompt should include Event Publishing Guide"
+    );
+    assert!(
+        prompt.contains("deploy.done"),
+        "Event Publishing Guide should include published events"
     );
 }
 
@@ -1171,6 +1179,10 @@ fn test_always_hatless_solo_mode_unchanged() {
 #[test]
 fn test_always_hatless_topology_preserved_in_prompt() {
     // Per acceptance criteria #2 and #4: Hat topology preserved for coordination
+    //
+    // 说明：
+    // - 当存在 active hat 时，Ralph 的 prompt 会展示 `## ACTIVE HAT` + Event Publishing Guide，
+    //   通过“发布事件 -> 接收者”来表达拓扑关系，避免每轮重复输出完整拓扑表。
     let yaml = r#"
 hats:
   planner:
@@ -1188,29 +1200,22 @@ hats:
 
     let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
 
-    // Verify ## HATS section with topology table
-    assert!(prompt.contains("## HATS"), "Should have HATS section");
+    // Verify ACTIVE HAT section + publishing guide
     assert!(
-        prompt.contains("Delegate via events"),
-        "Should explain delegation"
+        prompt.contains("## ACTIVE HAT"),
+        "Should show ACTIVE HAT section"
     );
     assert!(
-        prompt.contains("| Hat | Triggers On | Publishes |"),
-        "Should have topology table"
+        prompt.contains("### Event Publishing Guide"),
+        "Should include Event Publishing Guide"
     );
-
-    // Verify both hats are documented
-    assert!(prompt.contains("Planner"), "Should include Planner hat");
-    assert!(prompt.contains("Builder"), "Should include Builder hat");
-
-    // Verify trigger and publish information
     assert!(
         prompt.contains("build.task"),
-        "Should document build.task event"
+        "Should mention build.task event"
     );
     assert!(
-        prompt.contains("build.done"),
-        "Should document build.done event"
+        prompt.contains("Builder"),
+        "Should include Builder hat as receiver"
     );
 }
 
@@ -1375,5 +1380,136 @@ hats:
         active_hat_id.as_str(),
         "ralph",
         "Should return ralph when no pending events"
+    );
+}
+
+#[test]
+fn test_scratchpad_injection_with_content() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let scratchpad_path = temp_dir.path().join(".agent/scratchpad.md");
+    std::fs::create_dir_all(scratchpad_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &scratchpad_path,
+        "## Progress\n- [x] Step 1\n- [ ] Step 2\n",
+    )
+    .unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+
+    let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
+
+    assert!(
+        prompt.contains("## Scratchpad"),
+        "Prompt should contain scratchpad header when file has content"
+    );
+    assert!(
+        prompt.contains("## Progress"),
+        "Prompt should include scratchpad file content"
+    );
+}
+
+#[test]
+fn test_scratchpad_injection_skips_empty_file() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let scratchpad_path = temp_dir.path().join(".agent/scratchpad.md");
+    std::fs::create_dir_all(scratchpad_path.parent().unwrap()).unwrap();
+    std::fs::write(&scratchpad_path, "   \n\n  ").unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+
+    let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
+
+    assert!(
+        !prompt.contains("## Scratchpad"),
+        "Prompt should NOT contain scratchpad header when file is empty/whitespace"
+    );
+}
+
+#[test]
+fn test_scratchpad_injection_ordering() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let scratchpad_path = temp_dir.path().join(".agent/scratchpad.md");
+    std::fs::create_dir_all(scratchpad_path.parent().unwrap()).unwrap();
+    std::fs::write(&scratchpad_path, "scratchpad marker content").unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+
+    let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
+
+    let scratchpad_pos = prompt
+        .find("## Scratchpad")
+        .expect("Should contain scratchpad");
+    let orientation_pos = prompt
+        .find("### 0a. ORIENTATION")
+        .expect("Should contain orientation");
+
+    assert!(
+        scratchpad_pos < orientation_pos,
+        "Scratchpad should appear before ORIENTATION in the prompt"
+    );
+}
+
+#[test]
+fn test_scratchpad_injection_tail_truncation() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let scratchpad_path = temp_dir.path().join(".agent/scratchpad.md");
+    std::fs::create_dir_all(scratchpad_path.parent().unwrap()).unwrap();
+
+    // Create content exceeding 16000 chars (4000 tokens * 4 chars/token)
+    let mut large_content = String::new();
+    for i in 0..2000 {
+        large_content.push_str(&format!("Line {}: some padding content here\n", i));
+    }
+    assert!(
+        large_content.len() > 16000,
+        "Test content should exceed budget"
+    );
+    std::fs::write(&scratchpad_path, &large_content).unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+
+    let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
+
+    assert!(
+        prompt.contains("## Scratchpad"),
+        "Prompt should contain scratchpad header even when truncated"
+    );
+    assert!(
+        prompt.contains("earlier content truncated"),
+        "Prompt should indicate truncation occurred"
+    );
+    // The tail (most recent lines) should be kept
+    assert!(
+        prompt.contains("Line 1999"),
+        "Last line should be preserved (tail kept)"
+    );
+    // Early lines should be truncated
+    assert!(
+        !prompt.contains("Line 0:"),
+        "First line should be truncated (head removed)"
     );
 }

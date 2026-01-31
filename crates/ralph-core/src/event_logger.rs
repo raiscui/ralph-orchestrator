@@ -192,8 +192,22 @@ impl EventLogger {
     /// Logs an event record.
     pub fn log(&mut self, record: &EventRecord) -> std::io::Result<()> {
         let file = self.ensure_open()?;
-        let json = serde_json::to_string(record)?;
-        writeln!(file, "{}", json)?;
+
+        // ---------------------------------------------------------------------
+        // 说明：events.jsonl 需要“尽量原子”的按行追加写入
+        //
+        // 背景：
+        // - JSONL 的基本不变量是：每一行都是一条完整 JSON。
+        // - 如果在写入过程中进程被打断（崩溃/强杀/断电），就可能出现“半行 JSON”，
+        //   这会导致 `ralph events` 或 replay 读取时解析失败。
+        //
+        // 策略：
+        // - 先把整行内容组装成一个 String（JSON + '\n'），再一次性写入。
+        // - 这样至少可以避免 `writeln!` 在格式化过程中产生多次写入导致的行破损概率。
+        // ---------------------------------------------------------------------
+        let mut json_line = serde_json::to_string(record)?;
+        json_line.push('\n');
+        file.write_all(json_line.as_bytes())?;
         file.flush()?;
         debug!(topic = %record.topic, iteration = record.iteration, "Event logged");
         Ok(())

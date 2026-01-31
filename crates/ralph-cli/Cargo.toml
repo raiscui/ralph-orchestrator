@@ -37,15 +37,15 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 regex.workspace = true
 
+# Mermaid → ASCII/Unicode 渲染（本机 path 依赖）
+beautiful-mermaid-rs = { path = "/Users/cuiluming/local_doc/l_dev/my/rust/beautiful-mermaid-rs" }
+
 # For raw mode handling in PTY mode
 crossterm.workspace = true
 scopeguard.workspace = true
 
 # For TUI stream handler line types
 ratatui.workspace = true
-
-# For progress spinners
-indicatif.workspace = true
 
 # For Unix process group and signal handling
 [target.'cfg(unix)'.dependencies]

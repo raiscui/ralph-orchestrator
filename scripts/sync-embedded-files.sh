@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Sync embedded files for crates.io packaging
+# Sync mirrored files for crates.io packaging and consistency
 #
 # Files referenced via include_str!() must be inside the crate directory to be
-# included when publishing. This script syncs source files to their crate-local
-# copies.
+# included when publishing. Additionally, presets are mirrored from /presets/
+# to /crates/ralph-cli/presets/ so cargo install users get the same presets.
+# This script syncs source files to their crate-local copies.
 #
 # Usage:
 #   ./scripts/sync-embedded-files.sh        # Sync files
@@ -19,6 +20,46 @@ EMBEDDED_FILES=(
     # SOPs for ralph plan/task commands
     ".claude/skills/pdd/SKILL.md:crates/ralph-cli/sops/pdd.md"
     ".claude/skills/code-task-generator/SKILL.md:crates/ralph-cli/sops/code-task-generator.md"
+
+    # Presets (canonical -> mirror for cargo install)
+    "presets/adversarial-review.yml:crates/ralph-cli/presets/adversarial-review.yml"
+    "presets/api-design.yml:crates/ralph-cli/presets/api-design.yml"
+    "presets/bugfix.yml:crates/ralph-cli/presets/bugfix.yml"
+    "presets/code-archaeology.yml:crates/ralph-cli/presets/code-archaeology.yml"
+    "presets/code-assist.yml:crates/ralph-cli/presets/code-assist.yml"
+    "presets/confession-loop.yml:crates/ralph-cli/presets/confession-loop.yml"
+    "presets/debug.yml:crates/ralph-cli/presets/debug.yml"
+    "presets/deploy.yml:crates/ralph-cli/presets/deploy.yml"
+    "presets/docs.yml:crates/ralph-cli/presets/docs.yml"
+    "presets/documentation-first.yml:crates/ralph-cli/presets/documentation-first.yml"
+    "presets/feature-minimal.yml:crates/ralph-cli/presets/feature-minimal.yml"
+    "presets/feature.yml:crates/ralph-cli/presets/feature.yml"
+    "presets/gap-analysis.yml:crates/ralph-cli/presets/gap-analysis.yml"
+    "presets/hatless-baseline.yml:crates/ralph-cli/presets/hatless-baseline.yml"
+    "presets/incident-response.yml:crates/ralph-cli/presets/incident-response.yml"
+    "presets/migration-safety.yml:crates/ralph-cli/presets/migration-safety.yml"
+    "presets/minimal/amp.yml:crates/ralph-cli/presets/minimal/amp.yml"
+    "presets/minimal/builder.yml:crates/ralph-cli/presets/minimal/builder.yml"
+    "presets/minimal/claude.yml:crates/ralph-cli/presets/minimal/claude.yml"
+    "presets/minimal/code-assist.yml:crates/ralph-cli/presets/minimal/code-assist.yml"
+    "presets/minimal/codex.yml:crates/ralph-cli/presets/minimal/codex.yml"
+    "presets/minimal/gemini.yml:crates/ralph-cli/presets/minimal/gemini.yml"
+    "presets/minimal/kiro.yml:crates/ralph-cli/presets/minimal/kiro.yml"
+    "presets/minimal/opencode.yml:crates/ralph-cli/presets/minimal/opencode.yml"
+    "presets/minimal/preset-evaluator.yml:crates/ralph-cli/presets/minimal/preset-evaluator.yml"
+    "presets/minimal/smoke.yml:crates/ralph-cli/presets/minimal/smoke.yml"
+    "presets/minimal/test.yml:crates/ralph-cli/presets/minimal/test.yml"
+    "presets/mob-programming.yml:crates/ralph-cli/presets/mob-programming.yml"
+    "presets/pdd-to-code-assist.yml:crates/ralph-cli/presets/pdd-to-code-assist.yml"
+    "presets/performance-optimization.yml:crates/ralph-cli/presets/performance-optimization.yml"
+    "presets/pr-review.yml:crates/ralph-cli/presets/pr-review.yml"
+    "presets/refactor.yml:crates/ralph-cli/presets/refactor.yml"
+    "presets/research.yml:crates/ralph-cli/presets/research.yml"
+    "presets/review.yml:crates/ralph-cli/presets/review.yml"
+    "presets/scientific-method.yml:crates/ralph-cli/presets/scientific-method.yml"
+    "presets/socratic-learning.yml:crates/ralph-cli/presets/socratic-learning.yml"
+    "presets/spec-driven.yml:crates/ralph-cli/presets/spec-driven.yml"
+    "presets/tdd-red-green.yml:crates/ralph-cli/presets/tdd-red-green.yml"
 )
 
 # Colors for output

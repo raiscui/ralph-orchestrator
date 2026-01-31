@@ -133,16 +133,24 @@ impl CliBackend {
     /// Creates the Kiro backend with a specific agent.
     ///
     /// Uses kiro-cli with --agent flag to select a specific agent.
-    pub fn kiro_with_agent(agent: String) -> Self {
+    pub fn kiro_with_agent(agent: String, extra_args: Vec<String>) -> Self {
+        // ------------------------------------------------------------------
+        // 说明：
+        // - 这里集中构建 Kiro 的基础命令参数。
+        // - hat/backend 级别的 args 会作为 extra_args 追加到末尾。
+        // ------------------------------------------------------------------
+        let mut args = vec![
+            "chat".to_string(),
+            "--no-interactive".to_string(),
+            "--trust-all-tools".to_string(),
+            "--agent".to_string(),
+            agent,
+        ];
+        args.extend(extra_args);
+
         Self {
             command: "kiro-cli".to_string(),
-            args: vec![
-                "chat".to_string(),
-                "--no-interactive".to_string(),
-                "--trust-all-tools".to_string(),
-                "--agent".to_string(),
-                agent,
-            ],
+            args,
             prompt_mode: PromptMode::Arg,
             prompt_flag: None,
             output_format: OutputFormat::Text,
@@ -166,6 +174,23 @@ impl CliBackend {
         }
     }
 
+    /// Creates a backend from a named backend string, then appends extra args.
+    ///
+    /// 用于 “命名 backend + 参数” 的配置形式，例如：
+    /// ```yaml
+    /// backend:
+    ///   type: "claude"
+    ///   args: ["--model", "claude-sonnet-4"]
+    /// ```
+    pub fn from_name_with_args(
+        name: &str,
+        extra_args: &[String],
+    ) -> Result<Self, CustomBackendError> {
+        let mut backend = Self::from_name(name)?;
+        backend.args.extend(extra_args.iter().cloned());
+        Ok(backend)
+    }
+
     /// Creates a backend from a HatBackend configuration.
     ///
     /// # Errors
@@ -173,7 +198,12 @@ impl CliBackend {
     pub fn from_hat_backend(hat_backend: &HatBackend) -> Result<Self, CustomBackendError> {
         match hat_backend {
             HatBackend::Named(name) => Self::from_name(name),
-            HatBackend::KiroAgent { agent, .. } => Ok(Self::kiro_with_agent(agent.clone())),
+            HatBackend::NamedWithArgs { backend_type, args } => {
+                Self::from_name_with_args(backend_type, args)
+            }
+            HatBackend::KiroAgent { agent, args, .. } => {
+                Ok(Self::kiro_with_agent(agent.clone(), args.clone()))
+            }
             HatBackend::Custom { command, args } => Ok(Self {
                 command: command.clone(),
                 args: args.clone(),
@@ -820,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_kiro_with_agent() {
-        let backend = CliBackend::kiro_with_agent("my-agent".to_string());
+        let backend = CliBackend::kiro_with_agent("my-agent".to_string(), Vec::new());
         let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
 
         assert_eq!(cmd, "kiro-cli");
@@ -894,12 +924,27 @@ mod tests {
         let hat_backend = HatBackend::KiroAgent {
             backend_type: "kiro".to_string(),
             agent: "my-agent".to_string(),
+            args: Vec::new(),
         };
         let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
         let (cmd, args, _, _) = backend.build_command("test", false);
         assert_eq!(cmd, "kiro-cli");
         assert!(args.contains(&"--agent".to_string()));
         assert!(args.contains(&"my-agent".to_string()));
+    }
+
+    #[test]
+    fn test_from_hat_backend_named_with_args() {
+        let hat_backend = HatBackend::NamedWithArgs {
+            backend_type: "claude".to_string(),
+            args: vec!["--model".to_string(), "claude-sonnet-4".to_string()],
+        };
+        let backend = CliBackend::from_hat_backend(&hat_backend).unwrap();
+        let (cmd, args, _, _) = backend.build_command("test", false);
+
+        assert_eq!(cmd, "claude");
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"claude-sonnet-4".to_string()));
     }
 
     #[test]

@@ -24,7 +24,7 @@ use ralph_core::{PlayerConfig, SessionPlayer, TimestampedRecord};
 use ralph_proto::TerminalWrite;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
@@ -85,6 +85,14 @@ pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockC
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // 2.2) mock-cli 是“按 job/迭代”被重复调用的：
+    // - 顺序模式：每次调用对应一次 iteration
+    // - 并行模式：每次调用对应某个 hat instance 的一次 job
+    //
+    // 为了让同一个 cassette 能回放多轮调用，我们在 workspace 内维护一个轻量计数器：
+    // - 同一 instance 第 N 次被调用 → 回放第 N 段输出
+    let invocation_index = next_invocation_index(instance_filter.as_deref())?;
+
     // 3) 回放前先提取命令（避免边回放边扫描）
     let commands = if allow.is_some() {
         extract_commands_from_bus_events(player.bus_events())
@@ -92,18 +100,20 @@ pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockC
         Vec::new()
     };
 
-    // 4) 回放 terminal writes（按 instance_id 过滤 + 近似 timing）
+    // 4) 选择本次调用要回放的 terminal writes（按 instance_id + invocation_index 分段）
+    let selected_writes = select_terminal_writes_for_invocation(
+        &player,
+        instance_filter.as_deref(),
+        invocation_index,
+    )?;
+
+    // 5) 回放 terminal writes（近似 timing）
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
-    replay_terminal_writes(
-        &player,
-        &mut handle,
-        effective_speed,
-        instance_filter.as_deref(),
-    )?;
+    replay_terminal_write_records(&selected_writes, &mut handle, effective_speed)?;
 
-    // 5) 如启用 allowlist，则执行白名单命令
+    // 6) 如启用 allowlist，则执行白名单命令
     if let Some(whitelist) = allow {
         execute_whitelisted_commands(&commands, whitelist)?;
     }
@@ -111,28 +121,24 @@ pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockC
     Ok(())
 }
 
-/// 回放 terminal writes（可选按 instance_id 过滤）。
-fn replay_terminal_writes<W: Write>(
-    player: &SessionPlayer,
+/// 回放选中的 terminal writes（已经按 instance/分段筛选过）。
+fn replay_terminal_write_records<W: Write>(
+    records: &[&TimestampedRecord],
     mut writer: W,
     speed: f32,
-    instance_filter: Option<&str>,
 ) -> Result<(), MockCliError> {
-    let mut last_offset_ms: u64 = 0;
+    // 说明：
+    // - offset_ms 是“相对整段 session 的时间”，如果我们只回放某一段（第 N 次调用），
+    //   第一条记录的 offset_ms 可能非常大。
+    // - 这里把 last_offset_ms 初始化为第一条记录的 offset_ms，避免无意义的首次 sleep。
+    let mut last_offset_ms: u64 = records.first().map(|r| r.offset_ms).unwrap_or(0);
 
-    for record in player.terminal_writes() {
+    for record in records {
         // 解析 TerminalWrite（record.data 即 TerminalWrite 的序列化结果）
         let write: TerminalWrite =
             serde_json::from_value(record.record.data.clone()).map_err(|e| {
                 MockCliError::CassetteParse(format!("invalid ux.terminal.write payload: {e}"))
             })?;
-
-        // instance_id 过滤（并行模式回放分流）
-        if let Some(filter) = instance_filter
-            && write.instance_id.as_deref() != Some(filter)
-        {
-            continue;
-        }
 
         // timing：只基于“被选中的记录”计算 delay（避免过滤后 still sleep 太久）
         let delay_ms = record.offset_ms.saturating_sub(last_offset_ms);
@@ -160,6 +166,155 @@ fn replay_terminal_writes<W: Write>(
     }
 
     Ok(())
+}
+
+/// 为本次 mock-cli 调用生成一个“分段索引”（0-based）。
+///
+/// 说明：
+/// - mock-cli 会被 `ralph run` 反复调用（每个 job/迭代都会 spawn 一次 backend）。
+/// - 我们用 workspace 内的 `.ralph/mock-cli/*.count` 文件记录“已被调用次数”，
+///   从而把一个 cassette 回放成多段，逐次消费。
+fn next_invocation_index(instance_filter: Option<&str>) -> Result<usize, MockCliError> {
+    let state_dir = PathBuf::from(".ralph/mock-cli");
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|e| MockCliError::ReplayError(format!("failed to create mock state dir: {e}")))?;
+
+    let key = instance_filter.unwrap_or("default");
+    // 文件名中允许 `#`，但为了更稳妥，仍然做一次轻量 sanitize。
+    let file_key = key.replace('/', "_");
+    let counter_path = state_dir.join(format!("{file_key}.count"));
+
+    let current = std::fs::read_to_string(&counter_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+
+    std::fs::write(&counter_path, format!("{}", current.saturating_add(1))).map_err(|e| {
+        MockCliError::ReplayError(format!(
+            "failed to persist mock invocation counter {counter_path:?}: {e}"
+        ))
+    })?;
+
+    Ok(current)
+}
+
+/// 为本次调用选择要回放的 terminal write 记录集合。
+fn select_terminal_writes_for_invocation<'a>(
+    player: &'a SessionPlayer,
+    instance_filter: Option<&str>,
+    invocation_index: usize,
+) -> Result<Vec<&'a TimestampedRecord>, MockCliError> {
+    let segments = build_terminal_write_segments(player, instance_filter)?;
+    Ok(segments.get(invocation_index).cloned().unwrap_or_default())
+}
+
+/// 将一个 cassette 切分成“多次调用可消费的段”。
+///
+/// 分段策略：
+/// - 顺序模式（instance_filter=None）：按 `_meta.iteration` 分段（一段≈一轮 iteration）
+/// - 并行模式（instance_filter=Some）：按 `bus.publish.source_instance==instance` 分段
+///   - 该规则利用“每个 job 通常会 publish 一个事件然后退出”的惯例
+fn build_terminal_write_segments<'a>(
+    player: &'a SessionPlayer,
+    instance_filter: Option<&str>,
+) -> Result<Vec<Vec<&'a TimestampedRecord>>, MockCliError> {
+    match instance_filter {
+        Some(instance_id) => segment_parallel_by_bus_publish(player, instance_id),
+        None => Ok(segment_cli_by_meta_iteration(player)),
+    }
+}
+
+fn segment_cli_by_meta_iteration(player: &SessionPlayer) -> Vec<Vec<&TimestampedRecord>> {
+    let mut segments: Vec<Vec<&TimestampedRecord>> = Vec::new();
+    let mut current: Vec<&TimestampedRecord> = Vec::new();
+
+    for record in player.records() {
+        if record.record.event == "ux.terminal.write" {
+            current.push(record);
+            continue;
+        }
+
+        if record.record.event == "_meta.iteration" {
+            // `_meta.iteration` 代表上一段输出已完成，推入 segment。
+            if !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    // 没有 `_meta.iteration` 的 cassette：整个输出作为单段。
+    if segments.is_empty() {
+        let writes = player.terminal_writes();
+        if !writes.is_empty() {
+            segments.push(writes);
+        }
+    }
+
+    segments
+}
+
+fn segment_parallel_by_bus_publish<'a>(
+    player: &'a SessionPlayer,
+    instance_id: &str,
+) -> Result<Vec<Vec<&'a TimestampedRecord>>, MockCliError> {
+    let mut segments: Vec<Vec<&TimestampedRecord>> = Vec::new();
+    let mut current: Vec<&TimestampedRecord> = Vec::new();
+
+    // 并行 cassette 的记录里通常会包含 instance_id；这里按 instance 过滤并分段。
+    for record in player.records() {
+        if record.record.event == "ux.terminal.write" {
+            let write: TerminalWrite =
+                serde_json::from_value(record.record.data.clone()).map_err(|e| {
+                    MockCliError::CassetteParse(format!("invalid ux.terminal.write payload: {e}"))
+                })?;
+
+            if write.instance_id.as_deref() == Some(instance_id) {
+                current.push(record);
+            }
+            continue;
+        }
+
+        if record.record.event == "bus.publish"
+            && record
+                .record
+                .data
+                .get("source_instance")
+                .and_then(|v| v.as_str())
+                == Some(instance_id)
+        {
+            // 经验法则：publish 之后通常就会 stop，因此将其视作 job 边界。
+            if !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    // 兜底：如果没切出任何段，则直接回放该 instance 的所有 writes（兼容“无 bus.publish”的 cassette）。
+    if segments.is_empty() {
+        let mut writes = Vec::new();
+        for record in player.terminal_writes() {
+            let write: TerminalWrite =
+                serde_json::from_value(record.record.data.clone()).map_err(|e| {
+                    MockCliError::CassetteParse(format!("invalid ux.terminal.write payload: {e}"))
+                })?;
+            if write.instance_id.as_deref() == Some(instance_id) {
+                writes.push(record);
+            }
+        }
+        if !writes.is_empty() {
+            segments.push(writes);
+        }
+    }
+
+    Ok(segments)
 }
 
 /// 从 `bus.*` 事件中提取命令字符串。

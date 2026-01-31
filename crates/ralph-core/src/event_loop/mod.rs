@@ -267,6 +267,16 @@ impl EventLoop {
 
     /// Initializes the loop by publishing the start event.
     pub fn initialize(&mut self, prompt_content: &str) {
+        // ---------------------------------------------------------------------
+        // 说明：fresh run 的初始化握手事件始终是 task.start
+        //
+        // - `event_loop.starting_event` 不是“第一个事件”，而是“协调后工作流入口事件”（可选）：
+        //   - 若配置了 starting_event：协调者（parallel 时为 ralph#1） MUST 优先发布该 topic 作为入口事件
+        //   - 若未配置：协调者（parallel 时为 ralph#1）需要基于目标与 hats 拓扑自行决定入口事件
+        // - 如果把 starting_event 当作初始化事件，会造成概念混乱：
+        //   - 任务目标会失去 <top-level-prompt> 标记（format_event 只对 task.start/resume 包裹）
+        //   - 配置/文档语义与实际行为不一致
+        // ---------------------------------------------------------------------
         self.initialize_with_topic("task.start", prompt_content);
     }
 
@@ -275,6 +285,7 @@ impl EventLoop {
     /// Per spec: "User can run `ralph resume` to restart reading existing scratchpad."
     /// The planner should read the existing scratchpad rather than doing fresh gap analysis.
     pub fn initialize_resume(&mut self, prompt_content: &str) {
+        // resume 始终使用 task.resume（不受 starting_event 影响）。
         self.initialize_with_topic("task.resume", prompt_content);
     }
 
@@ -376,7 +387,8 @@ impl EventLoop {
     /// prompt documents the topology for coordination awareness.
     ///
     /// If memories are configured with `inject: auto`, this method also prepends
-    /// primed memories to the prompt context.
+    /// primed memories to the prompt context. If a scratchpad file exists and is
+    /// non-empty, its content is also prepended (before memories).
     pub fn build_prompt(&mut self, hat_id: &HatId) -> Option<String> {
         // Handle "ralph" hat - the constant coordinator
         // Per spec: "Hatless Ralph is constant — Cannot be replaced, overwritten, or configured away"
@@ -390,9 +402,10 @@ impl EventLoop {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                // Build base prompt and prepend memories if enabled
+                // Build base prompt and prepend memories + scratchpad if available
                 let base_prompt = self.ralph.build_prompt(&events_context, &[]);
-                let final_prompt = self.prepend_memories(base_prompt);
+                let with_memories = self.prepend_memories(base_prompt);
+                let final_prompt = self.prepend_scratchpad(with_memories);
 
                 debug!("build_prompt: routing to HatlessRalph (solo mode)");
                 return Some(final_prompt);
@@ -442,9 +455,10 @@ impl EventLoop {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                // Build base prompt and prepend memories if enabled
+                // Build base prompt and prepend memories + scratchpad if available
                 let base_prompt = self.ralph.build_prompt(&events_context, &active_hats);
-                let final_prompt = self.prepend_memories(base_prompt);
+                let with_memories = self.prepend_memories(base_prompt);
+                let final_prompt = self.prepend_scratchpad(with_memories);
 
                 // Build prompt with active hats - filters instructions to only active hats
                 debug!(
@@ -570,6 +584,60 @@ impl EventLoop {
         final_prompt.push_str("\n\n");
         final_prompt.push_str(&prompt);
 
+        final_prompt
+    }
+
+    /// Prepends scratchpad content to the prompt if the file exists and is non-empty.
+    ///
+    /// 说明：
+    /// - scratchpad 是“当前 objective 的工作记忆”（会话级，不跨目标自动继承）。
+    /// - 自动注入可以减少每轮“读文件”类的 tool call。
+    /// - 当内容超过预算时，保留 TAIL（最近内容），避免旧状态挤占上下文窗口。
+    fn prepend_scratchpad(&self, prompt: String) -> String {
+        let resolved_path = self.config.core.resolve_path(&self.config.core.scratchpad);
+        if !resolved_path.exists() {
+            debug!(
+                "Scratchpad not found at {:?}, skipping injection",
+                resolved_path
+            );
+            return prompt;
+        }
+
+        let content = match std::fs::read_to_string(&resolved_path) {
+            Ok(c) => c,
+            Err(e) => {
+                info!("Failed to read scratchpad for injection: {}", e);
+                return prompt;
+            }
+        };
+
+        if content.trim().is_empty() {
+            debug!("Scratchpad is empty, skipping injection");
+            return prompt;
+        }
+
+        // 预算：4000 tokens ≈ 16000 chars。保留尾部（最近内容）。
+        let char_budget = 4000 * 4;
+        let content = if content.len() > char_budget {
+            let start = content.len() - char_budget;
+            // 选择一个“换行边界”，避免从半行开始截断导致可读性差。
+            let line_start = content[start..].find('\n').map_or(start, |n| start + n + 1);
+            format!(
+                "<!-- earlier content truncated ({} chars omitted) -->\n\n{}",
+                line_start,
+                &content[line_start..]
+            )
+        } else {
+            content
+        };
+
+        info!("Injecting scratchpad ({} chars) into prompt", content.len());
+
+        let mut final_prompt = format!(
+            "## Scratchpad\n\nCurrent contents of `{}`:\n\n{}\n\n",
+            self.config.core.scratchpad, content
+        );
+        final_prompt.push_str(&prompt);
         final_prompt
     }
 

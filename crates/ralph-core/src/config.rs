@@ -917,6 +917,14 @@ pub struct TuiConfig {
     /// Prefix key combination (e.g., "ctrl-a", "ctrl-b").
     #[serde(default = "default_prefix_key")]
     pub prefix_key: String,
+
+    /// 并行 Supervisor TUI：单个 job 输出缓冲的最大行数（超过即丢弃最旧的行）。
+    ///
+    /// 说明：
+    /// - 该值只影响 TUI 的“回看/搜索窗口”，不会影响 `.ralph/events*.jsonl` 或 `--record-session` 的落盘内容。
+    /// - 默认值偏保守：避免长时间运行导致内存无限增长。
+    #[serde(default = "default_tui_max_buffer_lines")]
+    pub max_buffer_lines: usize,
 }
 
 /// Memory injection mode.
@@ -1044,10 +1052,15 @@ fn default_prefix_key() -> String {
     "ctrl-a".to_string()
 }
 
+fn default_tui_max_buffer_lines() -> usize {
+    10_000
+}
+
 impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             prefix_key: default_prefix_key(),
+            max_buffer_lines: default_tui_max_buffer_lines(),
         }
     }
 }
@@ -1128,16 +1141,34 @@ pub struct EventMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum HatBackend {
-    /// Named backend (e.g., "claude", "gemini", "kiro").
-    Named(String),
-    /// Kiro agent with custom agent name.
+    // 注意：`serde(untagged)` 的匹配顺序很关键，应当把“更具体”的结构放在前面。
+    // 否则像 `type: "gemini"` 这种 map 结构可能会被更宽泛的 variant 抢先匹配。
+    /// Kiro agent with custom agent name and optional args.
     KiroAgent {
         #[serde(rename = "type")]
         backend_type: String,
         agent: String,
+        /// 额外 CLI 参数（例如 model/flags）。
+        #[serde(default)]
+        args: Vec<String>,
     },
+    /// Named backend with args (has `type` but no `agent`).
+    NamedWithArgs {
+        #[serde(rename = "type")]
+        backend_type: String,
+        /// 额外 CLI 参数（例如 `["--model", "claude-sonnet-4"]`）。
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// Named backend (string form, e.g., "claude", "gemini", "kiro").
+    Named(String),
     /// Custom backend with command and args.
-    Custom { command: String, args: Vec<String> },
+    Custom {
+        command: String,
+        /// 额外 CLI 参数；允许缺省为空数组，避免老配置没有 args 时解析失败。
+        #[serde(default)]
+        args: Vec<String>,
+    },
 }
 
 impl HatBackend {
@@ -1145,6 +1176,7 @@ impl HatBackend {
     pub fn to_cli_backend(&self) -> String {
         match self {
             HatBackend::Named(name) => name.clone(),
+            HatBackend::NamedWithArgs { backend_type, .. } => backend_type.clone(),
             HatBackend::KiroAgent { .. } => "kiro".to_string(),
             HatBackend::Custom { .. } => "custom".to_string(),
         }
@@ -1850,6 +1882,7 @@ event_loop:
     fn test_tui_config_default() {
         let config = RalphConfig::default();
         assert_eq!(config.tui.prefix_key, "ctrl-a");
+        assert_eq!(config.tui.max_buffer_lines, 10_000);
     }
 
     #[test]
@@ -1867,9 +1900,21 @@ tui:
     }
 
     #[test]
+    fn test_tui_config_max_buffer_lines_override() {
+        let yaml = r#"
+tui:
+  max_buffer_lines: 12345
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.tui.prefix_key, "ctrl-a");
+        assert_eq!(config.tui.max_buffer_lines, 12345);
+    }
+
+    #[test]
     fn test_tui_config_parse_invalid_format() {
         let tui_config = TuiConfig {
             prefix_key: "invalid".to_string(),
+            max_buffer_lines: TuiConfig::default().max_buffer_lines,
         };
         let result = tui_config.parse_prefix();
         assert!(result.is_err());
@@ -1880,6 +1925,7 @@ tui:
     fn test_tui_config_parse_invalid_modifier() {
         let tui_config = TuiConfig {
             prefix_key: "alt-a".to_string(),
+            max_buffer_lines: TuiConfig::default().max_buffer_lines,
         };
         let result = tui_config.parse_prefix();
         assert!(result.is_err());
@@ -1890,6 +1936,7 @@ tui:
     fn test_tui_config_parse_invalid_key() {
         let tui_config = TuiConfig {
             prefix_key: "ctrl-abc".to_string(),
+            max_buffer_lines: TuiConfig::default().max_buffer_lines,
         };
         let result = tui_config.parse_prefix();
         assert!(result.is_err());
@@ -1919,11 +1966,70 @@ agent: "builder"
             HatBackend::KiroAgent {
                 backend_type,
                 agent,
+                args,
             } => {
                 assert_eq!(backend_type, "kiro");
                 assert_eq!(agent, "builder");
+                assert!(args.is_empty());
             }
             _ => panic!("Expected KiroAgent variant"),
+        }
+    }
+
+    #[test]
+    fn test_hat_backend_kiro_agent_with_args() {
+        let yaml = r#"
+type: "kiro"
+agent: "builder"
+args: ["--verbose", "--debug"]
+"#;
+        let backend: HatBackend = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backend.to_cli_backend(), "kiro");
+        match backend {
+            HatBackend::KiroAgent {
+                backend_type,
+                agent,
+                args,
+            } => {
+                assert_eq!(backend_type, "kiro");
+                assert_eq!(agent, "builder");
+                assert_eq!(args, vec!["--verbose", "--debug"]);
+            }
+            _ => panic!("Expected KiroAgent variant"),
+        }
+    }
+
+    #[test]
+    fn test_hat_backend_named_with_args() {
+        let yaml = r#"
+type: "claude"
+args: ["--model", "claude-sonnet-4"]
+"#;
+        let backend: HatBackend = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backend.to_cli_backend(), "claude");
+        match backend {
+            HatBackend::NamedWithArgs { backend_type, args } => {
+                assert_eq!(backend_type, "claude");
+                assert_eq!(args, vec!["--model", "claude-sonnet-4"]);
+            }
+            _ => panic!("Expected NamedWithArgs variant"),
+        }
+    }
+
+    #[test]
+    fn test_hat_backend_named_with_args_empty() {
+        // `type: ...` 但不带 args，也应当能解析（args 默认空数组）。
+        let yaml = r#"
+type: "gemini"
+"#;
+        let backend: HatBackend = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backend.to_cli_backend(), "gemini");
+        match backend {
+            HatBackend::NamedWithArgs { backend_type, args } => {
+                assert_eq!(backend_type, "gemini");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected NamedWithArgs variant"),
         }
     }
 
@@ -2033,9 +2139,11 @@ hats:
             HatBackend::KiroAgent {
                 backend_type,
                 agent,
+                args,
             } => {
                 assert_eq!(backend_type, "kiro");
                 assert_eq!(agent, "builder");
+                assert!(args.is_empty());
             }
             _ => panic!("Expected KiroAgent backend for builder"),
         }

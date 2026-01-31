@@ -441,6 +441,7 @@ impl ParallelSupervisor {
         // 2) 继承 adapters.<backend>.timeout（按 hat.backend 或 cli.backend 推导）
         let backend = match hat_config.and_then(|c| c.backend.as_ref()) {
             Some(HatBackend::Named(name)) => name.as_str(),
+            Some(HatBackend::NamedWithArgs { backend_type, .. }) => backend_type.as_str(),
             Some(HatBackend::KiroAgent { backend_type, .. }) => backend_type.as_str(),
             // custom backend：尽可能按 command 推导到已知 adapter（避免走 fallback）
             Some(HatBackend::Custom { command, .. }) if command == "codex" => "codex",
@@ -469,6 +470,7 @@ impl ParallelSupervisor {
     fn resolve_output_stale_timeout(&self, hat_config: Option<&HatConfig>) -> Option<Duration> {
         let backend = match hat_config.and_then(|c| c.backend.as_ref()) {
             Some(HatBackend::Named(name)) => name.as_str(),
+            Some(HatBackend::NamedWithArgs { backend_type, .. }) => backend_type.as_str(),
             Some(HatBackend::KiroAgent { backend_type, .. }) => backend_type.as_str(),
             // custom backend：尽可能按 command 推导到已知 adapter（避免走 fallback）
             Some(HatBackend::Custom { command, .. }) if command == "codex" => "codex",
@@ -652,6 +654,8 @@ impl ParallelSupervisor {
         out.push_str("## KEY SEMANTICS (OFFICIAL)\n");
         out.push_str("- Runtime handshake start topics are always: `task.start` (fresh) / `task.resume` (resume).\n");
         out.push_str("- `event_loop.starting_event` is an OPTIONAL workflow entry event after coordination.\n");
+        out.push_str("  - If set: you MUST publish it as the workflow entry topic.\n");
+        out.push_str("  - If not set: you MUST decide a workflow entry topic from the hats topology (prefer derived candidates).\n");
         out.push_str("- `event_loop.complete_publishes` is an OPTIONAL workflow completion candidate event topic.\n");
         out.push_str(&format!(
             "- The ONLY hard shutdown signal is the completion promise: `{completion_promise}`.\n\n"

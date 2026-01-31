@@ -84,3 +84,313 @@
   2. 渲染一致性：stdout 与 TUI 必须复用同一套 skin builder，避免“一个左对齐一个仍居中”的体验分裂。
 - 是否需要固化到 docs/specs：否（属于局部 UI 行为改良，已有回归测试锁定）。
 - 是否提取/更新 skill：是（提取 `self-learning.termimad-h1-left-align`，作为 termimad 的常见坑/默认行为备忘）。
+
+---
+
+# 笔记：多提交理性整合（backend args / hats 拓扑图 / presets / per-hat backend args / scratchpad）
+
+## 2026-01-31 01:30 +0800｜提交盘点（按你给的 hash）
+
+### 988541883f328b897b034cbb0f8dbc8bc6046a9c（feat(cli): ralph run 支持自定义 backend args）
+- 价值点：
+  - `ralph run -b <backend> -- <custom args...>` 这种“按次覆盖参数”的能力，很实用。
+  - 逻辑简单：把 `custom_args` 追加到 `CliBackend.args` 后再创建 executor。
+- 风险/注意：
+  - 该改动与后续 `887ea99`（per-hat backend args）会发生“功能重叠”，需要避免重复实现/重复字段。
+- 我的整合策略：
+  - 保留该行为，但最终以“统一后的 backend args 合成逻辑”为准（run 级别 custom_args + hat/backend 级别 args + config 默认 args 的优先级/拼接顺序要可测）。
+
+### 26f2364566fbe1d35880d889b836e5b55d343301（feat: ralph hats CLI + topology 可视化）
+- 价值点：
+  - 增加 `ralph hats` 命令：list/show/validate/graph，属于高价值的可观测性工具。
+  - 提供 Mermaid 拓扑输出（`--format mermaid`）便于外部渲染。
+- 明显不合适的点（需要改写）：
+  - `ascii/unicode/compact` 竟然通过“调用 AI backend”生成 ASCII 图，并且测试被 `#[ignore]`（需要 live backend）。
+  - 这会导致：不可复现、CI 无法稳定测试、离线不可用。
+- 你的明确要求：
+  - Mermaid ASCII 绘制必须改用 `/Users/cuiluming/local_doc/l_dev/my/rust/beautiful-mermaid-rs`。
+- 我的整合策略：
+  - 保留 Mermaid 生成（deterministic），再用 `beautiful_mermaid_rs::render_mermaid_ascii()` 做 ascii/unicode/compact。
+  - `compact` 先用更小 padding 的渲染参数实现（至少可用 + 可测）。
+  - 删除/避免 “AI 画图” 逻辑与 `#[ignore]` 测试（让测试可在 CI 稳定跑）。
+
+### ec58e14bb6f95aa8b705f478881a9d754315219e（feat(presets): 新预设 + 工作流改良）
+- 价值点：
+  - 增补 `bugfix` / `code-assist` / `pdd-to-code-assist` 等预设；并同步脚本 `sync-embedded-files.sh`。
+  - 属于“内容型改良”，对 CLI 用户体验提升大。
+- 风险/注意：
+  - 变更量大但主要是 YAML/文档；冲突多半来自我们本地 README/docs 改动，需要小心合并。
+
+### 887ea9972c9877f72e20f3e60a821d32b5a249c7（feat(config): per-hat backend 支持 args）
+- 价值点：
+  - `HatBackend` 支持对象形式 `type + args`，并保持字符串形式兼容。
+  - KiroAgent 支持 `args`；新增 `NamedWithArgs` 以支持 `claude/gemini/...` 这类命名 backend 的额外参数。
+- 风险/注意：
+  - 该提交同时改了 `.agent/memories.md`、`.agent/tasks.jsonl`（属于“状态类内容”，不一定要跟上游同步）。
+- 我的整合策略：
+  - 重点合入 `HatBackend` 的结构与解析测试、`CliBackend` 的构造支持。
+  - 对 `.agent/*` 的改动：默认不引入（除非它们对行为/测试有刚性依赖）。
+
+### 70f224b4f61bfa6e6862236ce5ccb7b006765886（fix: 真正 honor hat-level backend 配置 + starting_event bug）
+- 价值点（强烈建议采用）：
+  - 修复“hat-level backend 配置完全不生效”的关键 bug，尤其是 PTY 模式下需要能动态切换 backend（`PtyExecutor::set_backend()`）。
+  - 修复 `event_loop.starting_event` 被忽略的问题（initialize 硬编码 `task.start`）。
+- 噪音/不建议原样引入：
+  - `.reviews/**`、`BUG_ANALYSIS.md`、`BUG_EXAMPLE.md` 这类大文档会显著污染仓库根目录（除非你明确要保留）。
+- 我的整合策略：
+  - 合入代码层面的 fix（loop_runner / event_loop / pty_executor）。
+  - 文档类产物先不合入；把关键结论（根因/修复点）在本仓库 `ERRORFIX.md` 里记录即可。
+
+### eb1f7e0e4ea585bbefd895b70c2a0959bcc0c02d（fix(events): JSONL 原子写）
+- 价值点：
+  - 多进程并发 append 时避免 JSONL 行破损，属于“正确性修复”。
+- 我的整合策略：
+  - 直接合入（低风险高价值）。
+
+### 413dae5675a91fa7b3cdf5479accc9f747480c75（fix(loop): fresh run 清理 scratchpad）
+- 价值点：
+  - `ralph run` 新目标启动时清掉旧 scratchpad，避免 stale state。
+- 注意：
+  - 与 `e1727dc` 的“scratchpad 自动注入 prompt”是强相关的一组行为，需要一起校验。
+
+### 0fc152cf6a8ec53e4f0f25d3259905ae36d94d29（feat(hats): Event Publishing Guide + hat active 时跳过 topology）
+- 初步判断：有价值，建议采用。
+  - Event Publishing Guide 能用更少 token 解释“publish 会触发谁”，减少 hats 对 Mermaid 图的依赖。
+  - hat active 时跳过全 topology，能显著省 token（并且更聚焦）。
+- 需要确认：
+  - 与我们本地 prompt 改动（尤其是 scratchpad 章节）是否有冲突；以“结构清晰 + 测试覆盖”作为合并标准。
+
+### e1727dcb39c4f389d2137bb11694665a6487aaac（feat: scratchpad 内容自动注入 prompt）
+- 价值点：
+  - 每轮少一次 tool call，减少 agent 自行读取 scratchpad 的重复动作。
+  - 有预算截断逻辑，且保留 tail（最近内容），符合“状态应以最新为准”的直觉。
+- 风险/注意：
+  - 如果配合 `fresh run 清理 scratchpad`，要保证：
+    - `run` 清理后 prompt 不会插入空 scratchpad section
+    - `resume` 不清理，并能正确注入已有 scratchpad
+
+## 2026-01-31 02:35 +0800｜整合落地结果（最终）
+
+### 已落地的价值点（按主题归类）
+
+- backend args（`9885418` + `887ea99` + `70f224b`）：
+  - `ralph run -- <BACKEND_ARGS...>`：支持“按次追加”backend 参数。
+  - per-hat backend 支持 args：`NamedWithArgs` / `KiroAgent.args` / `Custom.args`。
+  - 串行 PTY 模式下每轮可切换 backend（避免首轮锁死）。
+  - `starting_event` 现在会被 honor（fresh run），resume 固定 `task.resume`。
+
+- hats 拓扑可视化（`26f2364`，按你要求改写）：
+  - `ralph hats graph` 的 ascii/unicode/compact 现在是“Mermaid → beautiful-mermaid-rs”的确定性渲染。
+  - 不再依赖 AI backend 画图（CI 可测、离线可用）。
+
+- presets（`ec58e14`）：
+  - `scripts/sync-embedded-files.sh` 已支持把 `/presets/**` 镜像到 `crates/ralph-cli/presets/**`。
+  - 新增预设（例如 `bugfix.yml` / `code-assist.yml` / `pdd-to-code-assist.yml`）已同步进 `crates/ralph-cli/presets/`。
+
+- events（`eb1f7e0`）：
+  - events.jsonl 写入改为“整行 JSON + 换行一次性追加”，降低半行 JSON 的概率。
+
+- scratchpad（`413dae5` + `e1727dc`）：
+  - fresh run 会清理旧 scratchpad 内容（truncate 为空，而不是删除文件）。
+  - scratchpad 内容会自动注入到 prompt（带预算截断 + tail 保留）。
+
+- hatless prompt 省 token（采纳 `0fc152c` 的价值点）：
+  - 当存在 active hat 时，输出 `## ACTIVE HAT` + `### Event Publishing Guide`，跳过 `## HATS` 全量拓扑与 Mermaid。
+
+### 已同步文档
+- README：更新 `ralph hats graph` 示例（移除 `--backend`），并补充 `ralph run -- <BACKEND_ARGS...>`。
+
+### 已知风险/待决策
+- `beautiful-mermaid-rs` 当前以本机绝对路径依赖接入：
+  - 优点：你本机立刻可用、实现简单。
+  - 风险：CI/他人环境无法编译。
+  - 后续如果要“团队/CI 可编译”，建议把它改为：git 依赖 / submodule / 或 vendoring 到本仓库 workspace。
+
+## 2026-01-31 03:02 +0800｜starting_event 语义澄清与回退（按你的要求）
+
+- 你指出我之前把 `starting_event` 当作“初始化事件 topic”的改动不符合你的设计。
+- 我重新对齐了项目文档/注释语义（`EventLoopConfig.starting_event` 的注释本身就写了：未设置时由 ralph 决定）。
+
+### 最终语义（我已按此实现）
+- fresh run：
+  - 初始化事件固定为 `task.start`（用于把用户目标作为 top-level prompt 注入上下文）
+  - `starting_event` 仅用于提示 ralph#1 “协调后优先发布哪个工作流入口事件”
+- `starting_event` 未设置：
+  - 明确由 ralph#1 自行决定第一次 delegation 的入口事件
+  - prompt 中增加了明确指引（并提供启发式候选入口事件列表，帮助快速决策）
+
+## 2026-01-31 11:27 +0800｜四文件摘要（用于 continuous-learning）
+
+- 任务目标（task_plan.md）：
+  - 理性整合多提交价值点（backend args / hats graph / presets / events / scratchpad），并强制 Mermaid ASCII 使用 `beautiful-mermaid-rs`。
+  - 按你的反馈回退 starting_event 语义：starting_event 未设置时由 ralph#1 决策；不能把 starting_event 当初始化事件。
+- 关键决定（task_plan.md）：
+  - “价值整合而非代码搬运”，并用全量测试背压（fmt/clippy/test/smoke）。
+  - 初始化事件语义固定：fresh run 永远 `task.start`；starting_event 只是协调后入口提示。
+- 关键发现（notes.md）：
+  - 任何依赖 AI 生成的“图/输出”都会带来不可复现与 CI 不稳定；必须改成确定性渲染。
+  - fresh run 如果删除 scratchpad 文件，会直接破坏 `run --continue`（尤其在 mock backend/无 agent 产物时）。
+  - starting_event 语义最容易被误读：它不是 first event，而是 workflow entry event after coordination。
+- 实际变更（WORKLOG.md）：
+  - 增强 hats 可视化与确定性渲染；per-hat backend args；events JSONL 原子写；scratchpad 自动注入与清理策略；starting_event 语义回退 + prompt 指引 + README 同步。
+- 错误与根因（ERRORFIX.md，如有）：
+  - “starting_event 被当作初始化事件”的语义错误（概念混淆）。
+  - “fresh run 删除 scratchpad 导致 continue 失败”的行为错误（清理策略不当）。
+- 可复用点候选（1-3 条）：
+  1. **starting_event 语义**：fresh run 初始化必须是 `task.start`；starting_event 仅是协调后入口提示；未设置时由 ralph#1 从拓扑/目标自行选择入口事件。
+  2. **scratchpad 清理策略**：fresh run 要“清空内容而不是删除文件”，否则会破坏 continue/resume 流程与测试稳定性。
+  3. **确定性渲染优先**：CLI 工具输出（尤其 diagram）必须 deterministic，避免引入“需要 live backend 才能跑”的测试。
+- 是否需要固化到 docs/specs：否（本次已把最关键的语义纠偏写进 README；更完整的语义已有 `docs/concepts/hats-and-events.md`）
+- 是否提取/更新 skill：是（项目级 skills，避免以后再次误改语义/重复踩坑）
+
+---
+
+## 2026-01-31 12:20 +0800｜E2E：starting_event 未配置时的入口推测（parallel）+ mock 回放分段
+
+### 目标回顾
+
+- `event_loop.starting_event` 未设置时，不应该由程序“替 LLM 选入口事件”。
+- 应该由 `ralph#1` 基于 hats 拓扑推测入口事件并发布，从而启动 workflow。
+
+### 本次落地内容（可复用点）
+
+1. 新增 parallel E2E 场景（Codex）
+   - id：`parallel-starting-event-inference`
+   - 核心断言：`task.start` 之后，`ralph#1` 的第一个 workflow entry event 必须是 `spec.start`（候选集退化为单元素，稳定可测）。
+2. 录制 cassette 并验证 mock-mode
+   - cassette：`cassettes/e2e/parallel-starting-event-inference-codex.jsonl`
+   - mock：`cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference`
+3. 修复 mock-cli 的“多轮调用回放”能力（关键）
+   - 问题：parallel 下 `ralph#1` 会有多个 job；旧 mock-cli 会把同一 instance 的全部输出一次性回放，导致 `LOOP_COMPLETE` 提前出现，workflow 中断。
+   - 修复：mock-cli 引入“按调用次数分段回放”
+     - 顺序模式：按 `_meta.iteration` 分段
+     - 并行模式：按 `bus.publish.source_instance==instance` 的经验边界分段
+   - 状态存储：workspace 内 `.ralph/mock-cli/*.count`（每个 instance 单独计数）
+
+---
+
+## 2026-01-31 13:25 +0800｜E2E 变体：starting_event 推测（多入口候选，仍可判定）
+
+### 为什么要做这个变体
+- 之前的 `parallel-starting-event-inference` 把 derived entry candidates 退化为单元素（`spec.start`），非常稳定，但也偏“理想化”。
+- 真实项目里经常会存在：
+  - 多个入口候选（多个 trigger 未被任何 hat publish）
+  - 以及一些“不是本次 workflow 需要”的 hat
+- 这个变体的目标是：**让入口选择更贴近真实，但仍然保持可判定、可做强断言**。
+
+### 变体设计（核心点）
+- 新增一个 `docs` 干扰 hat：
+  - `docs.start → docs.done`
+  - 它不是 `complete_publishes`，因此不应成为本次 workflow 的入口
+- prompt 明确 workflow 顺序：
+  - Planner 必须先跑，再跑 Builder
+  - 因此 `ralph#1` 必须选择能触发 Planner 的入口（也就是 `spec.start`）
+
+### 录制 cassette 的实用流程（本次采用）
+1. 先跑 live E2E，生成并保留 workspace（便于复用 `ralph.yml`）：
+   - `cargo run -p ralph-e2e -- codex --filter parallel-starting-event-inference-multi-candidate --skip-analysis --keep-workspace --verbose`
+2. 在该 workspace 下写一个 `prompt.md`（避免命令行转义换行）
+3. 用 `ralph run --record-session` 直接录制到 `cassettes/e2e/`：
+   - `../../target/release/ralph run -c ralph.yml --no-tui --max-iterations 20 --record-session ../../cassettes/e2e/parallel-starting-event-inference-multi-candidate-codex.jsonl -p @prompt.md`
+
+### 小提醒：filter 是子串匹配
+- `ralph-e2e --filter parallel-starting-event-inference` 会同时匹配：
+  - `parallel-starting-event-inference`
+  - `parallel-starting-event-inference-multi-candidate`
+  这在一次性复核两个场景时很方便，但如果你只想跑其中一个，要把 filter 写得更精确。
+
+---
+
+## 2026-01-31 13:40 +0800｜重构记录：Rust 模块拆分时的可见性与 re-export 约束
+
+### 现象
+- 我们把 `crates/ralph-e2e/src/scenarios/parallel.rs` 拆成了目录模块（`parallel/mod.rs + 子模块`）。
+- 拆分后仍希望保持：
+  - 场景对外导出路径不变（`scenarios::parallel::ParallelHatInstancesScenario` 等）
+  - `parallel_trigger_routing_example.rs` 继续能 `use super::parallel::{JobRunCounts, parse_parallel_job_line};`
+
+### 关键点（容易踩坑）
+- 当 helper 被移动到 `parallel/job_run_counts.rs` 这类“子模块”后：
+  - 原先的 `pub(super)` 语义会发生变化（`super` 变成 `parallel`，而不是 `scenarios`）。
+- 为了避免 helper 可见性泄露到整个 crate，同时又能让 `scenarios` 内部复用：
+  - 使用 `pub(in crate::scenarios)` 是一个很稳的折中。
+  - 然后在 `parallel/mod.rs` 里用同样的可见性做 re-export，保持原 import 路径不变。
+
+### 本次结论
+- 这类“纯重构”优先保证：
+  - import 路径不变（减少改动扩散）
+  - 可见性不扩大（避免把内部 helper 意外变成公共 API）
+
+---
+
+## 2026-01-31 15:40 +0800｜语义对齐：starting_event + parallel instance=failed
+
+### starting_event：对齐后的语义（用于排除“被忽略”的误读）
+
+- 控制面握手事件（runtime handshake）固定：
+  - fresh run：`task.start`
+  - resume run：`task.resume`
+- `event_loop.starting_event` 是 **可选** 的 “协调后 workflow entry event”：
+  - **配置了 starting_event**：协调者（parallel 时为 `ralph#1`）必须优先发布该 topic 作为 workflow entry
+  - **未配置 starting_event**：由协调者（parallel 时为 `ralph#1`）基于目标与 hats 拓扑自行决定 workflow entry
+
+### parallel instance 显示 `failed`：代码口径
+
+- `failed` 是 `HatInstanceState::Failed`（协议层：`crates/ralph-proto/src/hat.rs`）。
+- 触发条件是“该 instance 最近一次 job 执行失败”，常见原因包括：
+  - 后端 CLI 进程 exit code 非 0
+  - job 超时（timed_out=true）
+  - job 被取消（canceled=true）
+- 映射逻辑在 `crates/ralph-core/src/parallel/instance.rs`：
+  - `HatJobResult.success == true` → state=Idle
+  - `HatJobResult.success == false` → state=Failed
+  - 说明：`failed` 不是“整个 run 已失败”的同义词，而是“该实例上一轮 job 失败”的状态标签。
+
+### 本机复现（用于你问的 demo）
+
+- 我在 `examples/parallel-trigger-routing` 下跑了一次 demo：
+  - `../../target/release/ralph run -c ralph.yml --no-tui --plain --verbose`
+  - 该次 run 最终输出了 `[supervisor] final states: ... done`（未出现 failed）
+  - 结论：如果你看到 `failed`，更像是“某次 job 实际失败（exit/timeout/cancel）”，而不是 starting_event 语义导致的必现问题
+
+### 是否需要提取 skill（continuous-learning 决策）
+
+- 暂不提取新的 `self-learning.*`：
+  - 这次属于“语义澄清 + prompt 文案更明确”，可复用点较少且不够“踩坑级别”。
+  - 但我们已把关键信息追加到四文件，后续如果同类问题频繁出现，再考虑提炼为 skill 或补充到 docs。
+
+---
+
+## 2026-01-31 17:08 +0800｜并行 TUI：max_buffer_lines（输出回看窗口）默认值与配置注入点
+
+### 结论（我最终采用的语义）
+- `max_buffer_lines` 是 **并行 Supervisor TUI** 的“每个 job 输出回看窗口上限（按逻辑行）”。
+- 它只影响 TUI 内存窗口（回看/搜索），不会影响：
+  - `.ralph/events*.jsonl`（事件日志）
+  - `--record-session`（cassette / 回放录制文件）
+
+### 默认值在哪里
+- `crates/ralph-tui/src/state/parallel.rs`：
+  - `ParallelTuiState::default().max_buffer_lines = 10_000`
+
+### 配置项在哪里（ralph.yml）
+- `crates/ralph-core/src/config.rs`：
+  - `tui.max_buffer_lines`（`TuiConfig::max_buffer_lines`）
+  - 默认值：`10_000`
+
+示例（ralph.yml）：
+```yaml
+tui:
+  max_buffer_lines: 10000
+```
+
+### 配置如何注入到 TUI（关键链路）
+- `crates/ralph-cli/src/parallel_runner.rs`：
+  - 创建 `Tui::new_parallel()` 时调用：`with_parallel_max_buffer_lines(config.tui.max_buffer_lines)`
+- `crates/ralph-tui/src/lib.rs`：
+  - 新增 `Tui::with_parallel_max_buffer_lines(...)`，把值写入 `state.parallel.max_buffer_lines`
+
+### 边界值（0）的安全性
+- 由于该字段变成可配置项，理论上用户可能设置 `0`。
+- 我在 `crates/ralph-tui/src/state/parallel.rs` 里补了保护：
+  - `max_buffer_lines == 0` 时不再累积 `raw_lines`，避免“看起来不保留输出，但实际 raw_lines 无限增长”的反直觉内存占用。

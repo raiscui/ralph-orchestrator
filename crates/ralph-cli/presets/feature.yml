@@ -38,11 +38,6 @@ hats:
       4. **Commit.** One task, one commit.
       5. **Exit.** Publish event with evidence.
 
-      ### Event Format
-      ```bash
-      ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass"
-      ```
-
       ### Backpressure
       ```bash
       cargo check && cargo test && cargo clippy -- -D warnings
@@ -53,10 +48,6 @@ hats:
       - ❌ Output the completion promise
       - ❌ Skip tests
 
-      ### STUCK?
-      ```bash
-      ralph emit "build.blocked" "what you tried and why it failed"
-      ```
 
   reviewer:
     name: "Reviewer"
@@ -75,17 +66,6 @@ hats:
       - [ ] **Patterns:** Does it follow existing codebase patterns?
       - [ ] **Errors:** Is error handling appropriate?
       - [ ] **Security:** Any obvious vulnerabilities?
-
-      ### If Approved
-      ```bash
-      ralph emit "review.approved"
-      ```
-      Ralph will coordinate next steps.
-
-      ### If Changes Needed
-      ```bash
-      ralph emit "review.changes_requested" "Issues: file:line - [specific issue]. Required: [what needs to change]"
-      ```
 
       ### DON'T
       - ❌ Make code changes yourself

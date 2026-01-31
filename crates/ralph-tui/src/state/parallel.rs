@@ -735,7 +735,7 @@ impl Default for ParallelTuiState {
             selected_gate: None,
             output_render_mode: MarkdownRenderMode::Rendered,
             output_render_width: 80,
-            max_buffer_lines: 5_000,
+            max_buffer_lines: 10_000,
         }
     }
 }
@@ -1014,6 +1014,15 @@ impl ParallelTuiState {
         if let Some(job) = instance.jobs.last_mut() {
             if job.first_output_at.is_none() {
                 job.first_output_at = Some(Instant::now());
+            }
+
+            // 特殊值：0 表示不保留输出（极端省内存/降噪）。
+            // 关键点：不仅 buffer 要清空，raw_lines 也必须保持为空，
+            // 否则会导致 raw_lines 无限增长，反而更耗内存。
+            if max_buffer_lines == 0 {
+                job.raw_lines.clear();
+                job.buffer.replace_content_capped(Vec::new(), 0);
+                return;
             }
 
             // 先保存原始行，再统一渲染（支持跨行 Markdown 语义，例如 fenced code block）。

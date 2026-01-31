@@ -457,6 +457,105 @@
 - `cargo fmt` ✅
 - `cargo test` ✅（包含 replay smoke tests）
 
+## 2026-01-31 12:20 +0800｜E2E mock-mode：parallel 下 ralph#1 多 job 导致回放提前终止
+
+### 现象
+- 新增的并行 E2E 场景在 live 后端（Codex）通过，但在 mock-mode 下失败：
+  - 断言里缺少 `build.done`（workflow 被提前打断）
+  - 实际表现为：`ralph#1` 在第一轮就“回放”出了 `LOOP_COMPLETE`，导致 supervisor 提前收敛
+
+### 根因
+- mock-mode 的 backend 是 `ralph-e2e mock-cli`。
+- 旧实现只做了 `instance_id` 过滤，但**每次调用都会回放该 instance 的全部输出**：
+  - parallel 下 `ralph#1` 往往会有多个 job（例如：job1 发入口事件，job2 才输出 `LOOP_COMPLETE`）
+  - 于是 job1 的 mock 回放里就混入了 job2 的 `LOOP_COMPLETE`，导致 workflow 未跑完就退出
+
+### 修复
+- `crates/ralph-e2e/src/mock_cli.rs`：
+  - 引入“按调用次数分段回放”机制（让一个 cassette 支撑多次 backend spawn）：
+    - 顺序模式：按 `_meta.iteration` 分段（每次调用≈一轮 iteration）
+    - 并行模式：按 `bus.publish.source_instance==instance` 的经验边界分段（每次调用≈一个 job）
+  - 用 workspace 内的 `.ralph/mock-cli/*.count` 记录各 instance 的调用次数（0-based），每次调用消费下一段。
+
+### 验证
+- `cargo test -p ralph-e2e` ✅
+- `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference --verbose` ✅
+
+## 2026-01-31 02:35 +0800｜理性整合提交收口：修复测试失败（scratchpad 清理策略 + ACTIVE HAT prompt 断言）
+
+### 现象
+1) `cargo test` 失败：`crates/ralph-cli/tests/integration_resume.rs::test_continue_vs_run_event_difference`
+   - 期望 `ralph run` 之后再 `ralph run --continue`，`.ralph/events.jsonl` 里能新增 `task.resume`。
+   - 实际没有 `task.resume`，导致断言失败。
+
+2) `cargo test` 失败：`crates/ralph-core/src/event_loop/tests.rs` 中两条断言仍然要求 `## HATS`。
+   - 但我们已采纳 “active hat 时输出 `## ACTIVE HAT` + Event Publishing Guide、跳过全量 topology” 的新行为。
+
+3) `cargo clippy` 失败：`crates/ralph-cli/src/hats.rs` 中残留 “AI 生成图表” 相关测试。
+   - 函数已被删除（改为 `beautiful-mermaid-rs` 确定性渲染），测试仍在调用旧函数导致编译失败。
+
+### 根因
+1) fresh run 清理 scratchpad 时使用了 `remove_file`：
+   - 在测试环境中 backend 是 `command: "true"`，不会生成新的 scratchpad。
+   - 因此 `ralph run` 之后 scratchpad 不存在，`ralph run --continue` 在 CLI 层直接报错退出，
+     自然也不会写入 `task.resume` 到 `.ralph/events.jsonl`。
+
+2) prompt 结构变更后，旧测试仍按 “总是输出 `## HATS`” 的预期断言。
+
+3) hats 图表从 “AI 生成” 改为 “Mermaid → 渲染器” 后，旧测试没有同步清理。
+
+### 修复
+1) scratchpad 清理策略改良（保持目标，但更稳健）：
+   - 将 fresh run 的清理从“删除文件”改为“truncate 为空”（仍是清理旧状态，但保留文件存在性）。
+   - 串行与并行 runner 都同步改了这一点：
+     - `crates/ralph-cli/src/loop_runner.rs`
+     - `crates/ralph-cli/src/parallel_runner.rs`
+
+2) 同步测试到新 prompt 结构：
+   - `crates/ralph-core/src/event_loop/tests.rs`：
+     - active hat 场景改断言 `## ACTIVE HAT` + `### Event Publishing Guide`。
+
+3) 清理 hats.rs 中已失效的旧测试：
+   - 删除对 `build_diagram_prompt` / `extract_diagram` / `resolve_backend` 等已删除函数的引用测试。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-01-31 03:02 +0800｜语义修复：starting_event 不应作为初始化事件（未设置时由 ralph#1 决策）
+
+### 现象
+- `EventLoop::initialize()` 在 fresh run 时把 `event_loop.starting_event` 当作“初始化事件 topic”发布。
+- 这与你的约定冲突：`starting_event` 不设置时，应该由 `ralph#1` 自行决定入口事件，而不是代码替你默认成 `task.start` 或直接改变初始化 topic。
+
+### 根因
+- 我把 `starting_event` 误解成了“第一个事件（initial event）”，并将它接入了初始化发布逻辑。
+- 但项目的配置注释/文档语义实际是：
+  - `task.start` 永远是 fresh run 的初始化事件（承载 top-level prompt）
+  - `starting_event` 是“协调后工作流入口事件提示”（可选；未设置时由 ralph#1 决策）
+
+### 修复
+- `crates/ralph-core/src/event_loop/mod.rs`：
+  - `initialize()` 固定发布 `task.start`，不再读取 `starting_event` 作为 topic。
+- `crates/ralph-cli/src/loop_runner.rs`：
+  - debug event logger 的“初始事件记录”同步修正为固定 `task.start`（fresh run）。
+- `crates/ralph-core/src/hatless_ralph.rs`：
+  - prompt 增强：
+    - `starting_event` 未配置：明确提示 ralph#1 必须自行决定入口事件，并给出启发式候选列表。
+    - `starting_event` 已配置：提示 ralph#1 协调后优先发布该入口事件。
+- `README.md`：
+  - 修正 `starting_event` 的说明（不是 first event），并修正示例配置。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
 ## 2026-01-30 13:34 +0800｜并行 Output：移除左侧红色 E + 撤回 Big Headers/图片渲染 + 许可证回退 MIT
 
 ### 现象

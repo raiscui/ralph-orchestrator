@@ -5,6 +5,7 @@
 use crate::config::CoreConfig;
 use crate::hat_registry::HatRegistry;
 use ralph_proto::Topic;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Hatless Ralph - the constant coordinator.
@@ -26,6 +27,7 @@ pub struct HatTopology {
 
 /// Information about a hat for prompt generation.
 pub struct HatInfo {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub subscribes_to: Vec<String>,
@@ -36,9 +38,10 @@ pub struct HatInfo {
 impl HatTopology {
     /// Creates topology from registry.
     pub fn from_registry(registry: &HatRegistry) -> Self {
-        let hats = registry
+        let mut hats: Vec<HatInfo> = registry
             .all()
             .map(|hat| HatInfo {
+                id: hat.id.as_str().to_string(),
                 name: hat.name.clone(),
                 description: hat.description.clone(),
                 subscribes_to: hat
@@ -54,6 +57,8 @@ impl HatTopology {
                 instructions: hat.instructions.clone(),
             })
             .collect();
+        // 稳定输出：避免 HashMap 迭代顺序导致 prompt 不可复现。
+        hats.sort_by(|a, b| a.name.cmp(&b.name));
 
         Self { hats }
     }
@@ -232,12 +237,15 @@ You MUST NOT assume features aren't implemented — search first.
         if self.include_scratchpad {
             prompt.push_str(&format!(
                 r"### 0b. SCRATCHPAD
-You MUST study `{scratchpad}`. It is shared state and memory across iterations.
+`{scratchpad}` is your working memory for THIS objective.
+Its content is auto-injected at the top of your context each iteration.
 
-Task markers:
-- `[ ]` pending
-- `[x]` done
-- `[~]` cancelled (with reason)
+**Always append** new entries to the end of the file (most recent = bottom).
+
+**Use for:**
+- Current objective understanding
+- Notes and reasoning for current work
+- Progress tracking and next steps
 
 ",
                 scratchpad = self.core.scratchpad,
@@ -454,6 +462,16 @@ The next iteration will continue with fresh context.
     }
 
     fn hats_section(&self, topology: &HatTopology, active_hats: &[&ralph_proto::Hat]) -> String {
+        // 省 token：当某个具体 hat 被触发时，它只需要自己的指令 + publish 路由说明。
+        // 全量拓扑表 + Mermaid 图会浪费大量上下文窗口（而且对“执行中 hat”帮助有限）。
+        if active_hats.is_empty() {
+            return self.hats_topology_section(topology);
+        }
+
+        self.active_hat_section(topology, active_hats)
+    }
+
+    fn hats_topology_section(&self, topology: &HatTopology) -> String {
         let mut section = String::from("## HATS\n\nDelegate via events.\n\n");
 
         // Include starting_event instruction if configured
@@ -462,6 +480,58 @@ The next iteration will continue with fresh context.
                 "**After coordination, publish `{}` to start the workflow.**\n\n",
                 starting_event
             ));
+        } else {
+            // -----------------------------------------------------------------
+            // 说明：starting_event 未配置时，需要由 ralph#1 自行决定“工作流入口事件”
+            //
+            // 这不是“初始化事件”（fresh run 初始化永远是 task.start），而是协调完成后，
+            // 你准备把工作交给某个具体 hat 执行时，应当发布的第一个事件。
+            // -----------------------------------------------------------------
+            section.push_str(
+                "**`starting_event` is not configured. You MUST decide which workflow entry event to publish.**\n\
+Pick a hat trigger from the topology below that best advances the objective.\n\n",
+            );
+
+            // 给出一个“启发式候选列表”：被订阅但从未被任何 hat 发布的事件，更像入口事件。
+            // 注意：这只是辅助信息，最终由 ralph#1 根据 objective 做选择。
+            let mut subscribed = BTreeSet::new();
+            let mut published = BTreeSet::new();
+            for hat in &topology.hats {
+                for topic in &hat.subscribes_to {
+                    let t = topic.trim();
+                    if !t.is_empty() {
+                        subscribed.insert(t.to_string());
+                    }
+                }
+                for topic in &hat.publishes {
+                    let t = topic.trim();
+                    if !t.is_empty() {
+                        published.insert(t.to_string());
+                    }
+                }
+            }
+
+            let mut entry_candidates: Vec<String> =
+                subscribed.difference(&published).cloned().collect();
+            entry_candidates.retain(|t| t != "task.start" && t != "task.resume");
+
+            if !entry_candidates.is_empty() {
+                let preview = entry_candidates
+                    .iter()
+                    .take(10)
+                    .map(|t| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                section.push_str(&format!(
+                    "Candidate entry events (heuristic): {preview}\n\n"
+                ));
+                if entry_candidates.len() > 10 {
+                    section.push_str(&format!(
+                        "(showing first 10 of {})\n\n",
+                        entry_candidates.len()
+                    ));
+                }
+            }
         }
 
         // Derive Ralph's triggers and publishes from topology
@@ -513,8 +583,16 @@ The next iteration will continue with fresh context.
         // Validate topology and log warnings for unreachable hats
         self.validate_topology_reachability(topology);
 
-        // Add instructions sections ONLY for active hats
-        // If the slice is empty, no instructions are added (no active hats)
+        section
+    }
+
+    fn active_hat_section(
+        &self,
+        topology: &HatTopology,
+        active_hats: &[&ralph_proto::Hat],
+    ) -> String {
+        let mut section = String::from("## ACTIVE HAT\n\n");
+
         for active_hat in active_hats {
             if !active_hat.instructions.trim().is_empty() {
                 section.push_str(&format!("### {} Instructions\n\n", active_hat.name));
@@ -524,9 +602,83 @@ The next iteration will continue with fresh context.
                 }
                 section.push('\n');
             }
+
+            let guide = self.event_publishing_guide(topology, active_hat);
+            if !guide.is_empty() {
+                section.push_str(&guide);
+                section.push('\n');
+            }
         }
 
         section
+    }
+
+    fn event_publishing_guide(
+        &self,
+        topology: &HatTopology,
+        active_hat: &ralph_proto::Hat,
+    ) -> String {
+        if active_hat.publishes.is_empty() {
+            return String::new();
+        }
+
+        let active_id = active_hat.id.as_str();
+
+        let mut out = String::from("### Event Publishing Guide\n\n");
+
+        // ---------------------------------------------------------------------
+        // 说明：starting_event 的语义是“协调后入口事件”，不是初始化事件。
+        //
+        // - 如果配置了 starting_event：优先遵循它来启动 workflow。
+        // - 如果未配置：由 ralph#1 自行决定第一次 delegation 的事件。
+        // ---------------------------------------------------------------------
+        if let Some(ref starting_event) = self.starting_event {
+            out.push_str(&format!(
+                "Workflow entry hint: `starting_event` is set to `{}`.\n\
+After coordination, prefer publishing it to start the workflow.\n\n",
+                starting_event
+            ));
+        } else {
+            out.push_str(
+                "Workflow entry hint: `starting_event` is not configured.\n\
+You MUST decide the first delegation event based on the objective and hat topology.\n\n",
+            );
+        }
+
+        out.push_str("When you publish:\n");
+
+        for topic in &active_hat.publishes {
+            let event = topic.as_str();
+
+            // 找到订阅该事件的 hats（排除 self）。
+            let mut receivers: Vec<&HatInfo> = topology
+                .hats
+                .iter()
+                .filter(|h| h.id != active_id)
+                .filter(|h| h.subscribes_to.iter().any(|t| t.as_str() == event))
+                .collect();
+            receivers.sort_by(|a, b| a.name.cmp(&b.name));
+
+            let receiver_text = if receivers.is_empty() {
+                "Ralph (coordinates next steps)".to_string()
+            } else {
+                receivers
+                    .iter()
+                    .map(|h| {
+                        if h.description.trim().is_empty() {
+                            h.name.clone()
+                        } else {
+                            format!("{} ({})", h.name, h.description)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            out.push_str(&format!("- `{}` → Received by: {}\n", event, receiver_text));
+        }
+
+        out
     }
 
     /// Generates a Mermaid flowchart showing event flow between hats.
@@ -722,12 +874,10 @@ mod tests {
         assert!(prompt.contains("MUST study"));
         assert!(prompt.contains("MUST NOT assume features aren't implemented"));
 
-        // Scratchpad section with task markers
+        // Scratchpad section with auto-inject and append instructions
         assert!(prompt.contains("### 0b. SCRATCHPAD"));
-        assert!(prompt.contains("Task markers:"));
-        assert!(prompt.contains("- `[ ]` pending"));
-        assert!(prompt.contains("- `[x]` done"));
-        assert!(prompt.contains("- `[~]` cancelled"));
+        assert!(prompt.contains("auto-injected"));
+        assert!(prompt.contains("**Always append**"));
 
         // Workflow with numbered steps (solo mode) using RFC2119
         assert!(prompt.contains("## WORKFLOW"));
@@ -857,17 +1007,16 @@ hats:
     }
 
     #[test]
-    fn test_scratchpad_format_documented() {
+    fn test_scratchpad_auto_injection_documented() {
         let config = RalphConfig::default();
         let registry = HatRegistry::new();
         let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
 
         let prompt = ralph.build_prompt("", &[]);
 
-        // Task marker format is documented
-        assert!(prompt.contains("- `[ ]` pending"));
-        assert!(prompt.contains("- `[x]` done"));
-        assert!(prompt.contains("- `[~]` cancelled (with reason)"));
+        // Auto-injection + append instructions are documented
+        assert!(prompt.contains("auto-injected"));
+        assert!(prompt.contains("**Always append**"));
     }
 
     #[test]
@@ -1311,8 +1460,8 @@ hats:
     }
 
     #[test]
-    fn test_topology_table_always_present() {
-        // Scenario 7 from plan.md: Full hat topology table always shown
+    fn test_topology_skipped_when_hat_active() {
+        // 当某个 hat 正在执行时，应当跳过全量拓扑表+Mermaid，节省 token。
         let yaml = r#"
 hats:
   security_reviewer:
@@ -1336,22 +1485,198 @@ hats:
 
         let prompt = ralph.build_prompt("Events", &active_hats);
 
-        // Topology table should show ALL hats (not just active ones)
         assert!(
-            prompt.contains("| Security Reviewer |"),
-            "Topology table should include Security Reviewer"
+            prompt.contains("## ACTIVE HAT"),
+            "Should show ACTIVE HAT section"
         );
         assert!(
-            prompt.contains("| Architecture Reviewer |"),
-            "Topology table should include Architecture Reviewer even though inactive"
+            prompt.contains("### Security Reviewer Instructions"),
+            "Should include active hat instructions"
         );
         assert!(
-            prompt.contains("review.security"),
-            "Topology table should show triggers"
+            !prompt.contains("## HATS"),
+            "Should NOT include full HATS topology when hat is active"
         );
         assert!(
-            prompt.contains("review.architecture"),
-            "Topology table should show all triggers"
+            !prompt.contains("| Hat | Triggers On | Publishes |"),
+            "Should NOT include topology table when hat is active"
+        );
+        assert!(
+            !prompt.contains("```mermaid"),
+            "Should NOT include Mermaid diagram when hat is active"
+        );
+    }
+
+    // === Event Publishing Guide Tests ===
+
+    #[test]
+    fn test_event_publishing_guide_single_receiver() {
+        let yaml = r#"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    publishes: ["build.done"]
+    instructions: "Build the thing."
+  reviewer:
+    name: "Reviewer"
+    description: "Reviews code"
+    triggers: ["build.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let builder = registry.get(&ralph_proto::HatId::new("builder")).unwrap();
+        let prompt = ralph.build_prompt("[build.task] Go", &[builder]);
+
+        assert!(
+            prompt.contains("### Event Publishing Guide"),
+            "Should include Event Publishing Guide"
+        );
+        assert!(
+            prompt.contains("`build.done` → Received by: Reviewer (Reviews code)"),
+            "Should show receiver hat and description"
+        );
+    }
+
+    #[test]
+    fn test_event_publishing_guide_orphan_event_falls_back_to_ralph() {
+        let yaml = r#"
+hats:
+  solo:
+    name: "Solo"
+    triggers: ["solo.start"]
+    publishes: ["solo.done"]
+    instructions: "Do the work."
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let solo = registry.get(&ralph_proto::HatId::new("solo")).unwrap();
+        let prompt = ralph.build_prompt("[solo.start] Go", &[solo]);
+
+        assert!(
+            prompt.contains("`solo.done` → Received by: Ralph (coordinates next steps)"),
+            "Orphan events should be routed to Ralph"
+        );
+    }
+
+    #[test]
+    fn test_event_publishing_guide_multiple_receivers() {
+        let yaml = r#"
+hats:
+  broadcaster:
+    name: "Broadcaster"
+    triggers: ["broadcast.start"]
+    publishes: ["signal.sent"]
+    instructions: "Broadcast the signal."
+  listener1:
+    name: "Listener1"
+    description: "First listener"
+    triggers: ["signal.sent"]
+  listener2:
+    name: "Listener2"
+    description: "Second listener"
+    triggers: ["signal.sent"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let broadcaster = registry
+            .get(&ralph_proto::HatId::new("broadcaster"))
+            .unwrap();
+        let prompt = ralph.build_prompt("[broadcast.start] Go", &[broadcaster]);
+
+        assert!(
+            prompt.contains("### Event Publishing Guide"),
+            "Should include guide"
+        );
+        assert!(
+            prompt.contains("Listener1 (First listener)"),
+            "Should list Listener1 as receiver"
+        );
+        assert!(
+            prompt.contains("Listener2 (Second listener)"),
+            "Should list Listener2 as receiver"
+        );
+    }
+
+    #[test]
+    fn test_event_publishing_guide_excludes_self() {
+        let yaml = r#"
+hats:
+  looper:
+    name: "Looper"
+    triggers: ["loop.start", "loop.continue"]
+    publishes: ["loop.continue"]
+    instructions: "Loop."
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let looper = registry.get(&ralph_proto::HatId::new("looper")).unwrap();
+        let prompt = ralph.build_prompt("[loop.start] Start", &[looper]);
+
+        // Self-subscription should be excluded, so should fall back to Ralph
+        assert!(
+            prompt.contains("`loop.continue` → Received by: Ralph (coordinates next steps)"),
+            "Self-subscription should be excluded, falling back to Ralph"
+        );
+    }
+
+    #[test]
+    fn test_event_publishing_guide_no_publishes() {
+        let yaml = r#"
+hats:
+  observer:
+    name: "Observer"
+    triggers: ["events.*"]
+    instructions: "Observe only."
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let observer = registry.get(&ralph_proto::HatId::new("observer")).unwrap();
+        let prompt = ralph.build_prompt("[events.start] Start", &[observer]);
+
+        assert!(
+            !prompt.contains("### Event Publishing Guide"),
+            "Should NOT include Event Publishing Guide when hat has no publishes"
+        );
+    }
+
+    #[test]
+    fn test_event_publishing_guide_receiver_without_description() {
+        let yaml = r#"
+hats:
+  sender:
+    name: "Sender"
+    triggers: ["send.start"]
+    publishes: ["message.sent"]
+    instructions: "Send."
+  receiver:
+    name: "NoDescReceiver"
+    triggers: ["message.sent"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = HatRegistry::from_config(&config);
+        let ralph = HatlessRalph::new("LOOP_COMPLETE", config.core.clone(), &registry, None);
+
+        let sender = registry.get(&ralph_proto::HatId::new("sender")).unwrap();
+        let prompt = ralph.build_prompt("[send.start] Go", &[sender]);
+
+        assert!(
+            prompt.contains("`message.sent` → Received by: NoDescReceiver"),
+            "Should show receiver name without parentheses when no description"
+        );
+        assert!(
+            !prompt.contains("NoDescReceiver ()"),
+            "Should NOT have empty parentheses for receiver without description"
         );
     }
 
@@ -1371,12 +1696,16 @@ hats:
             "Scratchpad section should be included by default"
         );
         assert!(
-            prompt.contains("You MUST study `.agent/scratchpad.md`"),
-            "Scratchpad path should be referenced with MUST"
+            prompt.contains("`.agent/scratchpad.md`"),
+            "Scratchpad path should be referenced"
         );
         assert!(
-            prompt.contains("Task markers:"),
-            "Task markers should be documented"
+            prompt.contains("auto-injected"),
+            "Auto-injection should be documented"
+        );
+        assert!(
+            prompt.contains("**Always append**"),
+            "Append instruction should be documented"
         );
     }
 
@@ -1395,8 +1724,8 @@ hats:
             "Scratchpad section should NOT be included when disabled"
         );
         assert!(
-            !prompt.contains("Task markers:"),
-            "Task markers should NOT be documented when scratchpad disabled"
+            !prompt.contains("auto-injected"),
+            "Auto-injection should NOT be documented when scratchpad disabled"
         );
 
         // But orientation should still be present

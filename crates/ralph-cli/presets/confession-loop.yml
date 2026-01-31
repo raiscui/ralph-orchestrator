@@ -53,8 +53,15 @@ hats:
       - Do not output the completion promise.
       - Do not skip backpressure.
 
-      Publish `<event topic="build.done">` with evidence.
-      If stuck, publish `<event topic="build.blocked">` with what you tried and why.
+      ### Event Format
+      ```bash
+      ralph emit "build.done" "tests: pass, lint: pass. Summary of what was done"
+      ```
+
+      If stuck:
+      ```bash
+      ralph emit "build.blocked" "what you tried and why it failed"
+      ```
 
   confessor:
     name: "Confessor"
@@ -105,10 +112,14 @@ hats:
       - If you found ANY issues OR confidence < 80 -> publish `confession.issues_found`.
       - If genuinely nothing (rare) AND confidence >= 80 -> publish `confession.clean`.
 
-      `<event topic="confession.issues_found">` (or `confession.clean`) must include:
-      - `confidence` (0-100)
-      - `summary`
-      - `easiest_verification`
+      ### Event Format
+      ```bash
+      ralph emit "confession.issues_found" --json '{"confidence": 65, "summary": "...", "easiest_verification": "..."}'
+      ```
+      Or for clean:
+      ```bash
+      ralph emit "confession.clean" --json '{"confidence": 90, "summary": "..."}'
+      ```
 
   confession_handler:
     name: "Confession Handler"

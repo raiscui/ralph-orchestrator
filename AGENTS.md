@@ -30,6 +30,15 @@
 - Work step-by-step: spec → dogfood spec → implement → dogfood implementation → done
 - The bar: A new team member should implement using only the spec and codebase
 
+## Event Semantics (Important)
+
+- Fresh run always begins with `task.start` (control-plane start event; carries the top-level prompt/objective).
+- Resume run begins with `task.resume`.
+- `event_loop.starting_event` is **not** the first event:
+  - It is a workflow entry hint published **after coordination** (by `ralph#1`).
+  - If it is not set, `ralph#1` decides the workflow entry event based on the objective + hat topology.
+- `task.start` / `task.resume` are reserved triggers for Ralph (config validation rejects hats subscribing to them).
+
 ## OpenSpec
 
 - OpenSpec changes live in `openspec/changes/<change-name>/` and are archived under `openspec/changes/archive/`.

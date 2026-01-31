@@ -36,12 +36,7 @@ hats:
       3. Write clear, concise content
       4. Include code examples where helpful
       5. Commit the changes
-      6. Publish event
-
-      ### Event Format
-      ```bash
-      ralph emit "write.done" "section: [section name], file: [path/to/doc.md]"
-      ```
+      6. Publish `write.done` event with section name and file path
 
       ### Style Guidelines
       - Use active voice
@@ -73,12 +68,3 @@ hats:
       - [ ] Consistent terminology
       - [ ] Grammar and spelling
 
-      ### If Issues Found
-      ```bash
-      ralph emit "review.revision" "specific feedback here"
-      ```
-
-      ### If Approved
-      ```bash
-      ralph emit "review.done"
-      ```

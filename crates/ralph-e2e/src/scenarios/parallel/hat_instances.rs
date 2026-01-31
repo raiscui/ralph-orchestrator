@@ -1,17 +1,10 @@
-//! Tier 8: Parallel Runtime (experimental) test scenarios.
-//!
-//! 说明：
-//! - 这些场景用于验证 **parallel hat instances** 在“真实后端”上的端到端行为。
-//! - 与 replay smoke tests 的差异：
-//!   - E2E 会覆盖真实 CLI、真实认证、真实网络与真实模型漂移带来的风险
-//!   - 代价更高、速度更慢，因此场景应尽量“短、稳、可排障”
-
-use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
+use super::super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
+use super::{JobRunCounts, parse_parallel_job_line};
 use crate::Backend;
 use crate::executor::{ExecutionResult, PromptSource, RalphExecutor, ScenarioConfig};
 use crate::models::TestResult;
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -37,117 +30,10 @@ pub struct ParallelHatInstancesScenario {
     locale: ParallelScenarioLocale,
 }
 
-// =============================================================================
-// 并行 stdout 解析：统计“每个 instance 实际跑了多少个 job”
-// =============================================================================
-
-/// 从并行日志模式 stdout 中提取“实例→job_id 集合”。
-///
-/// 说明：
-/// - 并行 runner 的日志行形如：`[writer#1:out:job=12] ...`
-/// - 同一个 job 会输出多行，因此必须按 job_id 去重。
-/// - 这里不依赖 `.ralph/events*.jsonl`，因为很多 hat 不一定会 publish 事件，但仍可能运行 job。
-#[derive(Debug, Default, Clone)]
-pub(super) struct JobRunCounts {
-    jobs_by_instance: HashMap<String, HashSet<u64>>,
-}
-
-impl JobRunCounts {
-    pub(super) fn from_stdout(stdout: &str) -> Self {
-        let mut out = Self::default();
-
-        for line in stdout.lines() {
-            if let Some((instance_id, job_id)) = parse_parallel_job_line(line) {
-                out.jobs_by_instance
-                    .entry(instance_id)
-                    .or_default()
-                    .insert(job_id);
-            }
-        }
-
-        out
-    }
-
-    pub(super) fn runs_for_instance(&self, instance_id: &str) -> usize {
-        self.jobs_by_instance
-            .get(instance_id)
-            .map(|s| s.len())
-            .unwrap_or(0)
-    }
-
-    /// 按“hat 名称”聚合的运行次数（跨 instance 汇总）。
-    ///
-    /// 说明：
-    /// - 并行 autoscale 可能产生动态实例（例如 `spec_writer#2`）。
-    /// - 因此在断言“某个 hat 总共跑了多少次”时，应按 hat 名聚合，而不是只盯某个固定实例号。
-    pub(super) fn runs_for_hat(&self, hat_name: &str) -> usize {
-        let prefix = format!("{hat_name}#");
-
-        self.jobs_by_instance
-            .iter()
-            .filter(|(instance_id, _)| instance_id.starts_with(&prefix))
-            .map(|(_, jobs)| jobs.len())
-            .sum()
-    }
-
-    pub(super) fn summary(&self) -> String {
-        // 稳定排序：便于在失败时阅读（避免 HashMap 顺序抖动）
-        let mut pairs = self
-            .jobs_by_instance
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.len()))
-            .collect::<Vec<_>>();
-        pairs.sort_by(|a, b| a.0.cmp(b.0));
-
-        pairs
-            .into_iter()
-            .map(|(k, n)| format!("{k}={n}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    pub(super) fn hat_summary(&self) -> String {
-        let mut by_hat: HashMap<String, usize> = HashMap::new();
-
-        for (instance_id, jobs) in &self.jobs_by_instance {
-            let hat = instance_id.split('#').next().unwrap_or(instance_id);
-            *by_hat.entry(hat.to_string()).or_default() += jobs.len();
-        }
-
-        let mut pairs = by_hat.into_iter().collect::<Vec<_>>();
-        pairs.sort_by(|a, b| a.0.cmp(&b.0));
-
-        pairs
-            .into_iter()
-            .map(|(k, n)| format!("{k}={n}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-pub(super) fn parse_parallel_job_line(line: &str) -> Option<(String, u64)> {
-    // 期望格式：
-    // - [writer#1:out:job=12] ...
-    // - [writer#1:err:job=12] ...
-    let line = line.trim_start();
-    if !line.starts_with('[') {
-        return None;
-    }
-
-    let end = line.find(']')?;
-    let inside = &line[1..end];
-
-    let mut parts = inside.split(':');
-    let instance_id = parts.next()?;
-    let stream = parts.next()?;
-    let job_part = parts.next()?;
-
-    if stream != "out" && stream != "err" {
-        return None;
-    }
-
-    let job_id = job_part.strip_prefix("job=")?.parse::<u64>().ok()?;
-    Some((instance_id.to_string(), job_id))
+#[derive(Clone, Copy, Debug)]
+enum ParallelScenarioLocale {
+    English,
+    Chinese,
 }
 
 impl ParallelHatInstancesScenario {
@@ -376,12 +262,6 @@ impl ParallelHatInstancesScenario {
             builder.failed().build()
         }
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ParallelScenarioLocale {
-    English,
-    Chinese,
 }
 
 impl Default for ParallelHatInstancesScenario {
@@ -621,20 +501,20 @@ hats:
       status: ok
       </event>
 
-      3) 发出一个 build.task 事件，target=writer（这应该触发 autoscale -> writer#2）：
+      3) 发出一个 build.task 事件，目标是 writer（应该触发 autoscale -> writer#2）：
 
       <event topic="build.task" target="writer">
       task_id: 2
       Task: Second task to exercise autoscale (writer#2)
       </event>
 
-      不要发出任何其它事件。
+      本次 job 不要发出任何其他事件。
 
       不要输出 LOOP_COMPLETE。
 
   collector:
     name: "收集员"
-    description: "消费 build/test 事件，避免 ralph#1 被非收敛事件打扰。"
+    description: "消费 build/test 事件，并通过触发严格投递失败来关闭工作流。"
     instances: 1
     triggers: ["build.done", "test.done"]
     publishes: ["build.task"]
@@ -643,38 +523,32 @@ hats:
 
       重要（E2E harness 约束）：
       - 不要运行测试，不要运行任何 shell 命令/工具，不要编辑文件。
-      - 每次 job 只输出 1 行 stdout（让 harness 能统计 job 运行次数）。
+      - 每次 job 只输出 1 行短 stdout。
 
       规则：
-      - 对每个输入事件，只输出一行短文本，内容里要包含 topic。
-      - 如果你收到 build.done 且 payload 里包含一行 "task_id: 2"，则发出一个 build.task 事件，target=ghost_hat
-        （必须被拒绝，并触发 routing.escalate）：
+      - 对每个输入事件，输出 1 行短文本，包含该 topic。
+      - 如果你收到 build.done 且 payload 包含一行 "task_id: 2"，发出一个 build.task，target 为 ghost_hat
+        （该投递必须被拒绝，并触发 routing.escalate）：
 
         <event topic="build.task" target="ghost_hat">
         Task: This must be rejected and should trigger routing.escalate
         </event>
 
-      - 否则，不要发出任何事件。
+      - 否则，不发出任何事件。
 "#,
                 backend = backend,
                 cli_backend = backend.as_config_str(),
             ),
         };
-
-        let config_path = workspace.join("ralph.yml");
-        std::fs::write(&config_path, config_content)
+        std::fs::write(workspace.join("ralph.yml"), config_content)
             .map_err(|e| ScenarioError::SetupError(format!("failed to write ralph.yml: {e}")))?;
 
-        // Prompt 目标（稳定性优先）：
-        // - 顶层 prompt 只表达“目标”，不去覆盖/对抗 ralph#1 的并行协调语义（fresh context + 1 event then stop）。
-        // - 入口/收敛由 ralph.yml 固化（starting_event / complete_publishes）。
+        // 说明：
+        // - 并行模式下，Coordinator（ralph#1）会持续多轮被调用。
+        // - 这里支持用环境变量切换 prompt 变体，以覆盖“prompt 自身包含 <event> 示例文本”时的误解析风险。
         //
-        // 允许通过环境变量切换 prompt 变体，用于“多跑几次 + 稍微变化内容”的稳定性/鲁棒性测试：
-        // - baseline: 原始版本（默认）
-        // - variant1: prompt 内额外加入一个“示例事件”（不应被回显/复述）
-        // - variant2: prompt 内加入 fenced code block（包含 <event ...>，不应被回显/复述）
-        //
-        // 注意：
+        // 用法：
+        // - RALPH_E2E_PARALLEL_PROMPT_VARIANT=baseline|variant1|variant2
         // - 这只影响 prompt 文本，不影响 ralph.yml 配置与断言逻辑。
         // - 目的：覆盖“prompt 自身包含 `<event ...>` 文本”时，模型是否会错误回显导致误解析。
         let prompt_variant = std::env::var("RALPH_E2E_PARALLEL_PROMPT_VARIANT")

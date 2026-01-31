@@ -35,16 +35,4 @@ hats:
 
       This SOP defines a TDD-based workflow: Explore → Plan → Code → Commit
 
-      ## Event Publishing (CRITICAL)
-      You MUST publish events using `ralph emit`. Ralph parses these from JSONL.
-
-      When task is complete with passing tests:
-      ```bash
-      ralph emit "build.done" "tests: pass. Summary of what was implemented"
-      ```
-
-      When blocked and unable to proceed:
-      ```bash
-      ralph emit "build.blocked" "Explanation of what's blocking progress"
-      ```
-      If the plan has already been created, work on a single, highest priority single, atomic task.
+      If the plan has already been created, work on a single, highest priority, atomic task.

@@ -1,0 +1,14 @@
+{"ts":1769836660838,"event":"_meta.loop_start","data":{"max_iterations":20,"prompt_file":"","ux_mode":"parallel-cli"}}
+{"ts":1769836660839,"event":"bus.publish","data":{"id":"supervisor:1","payload":"@prompt.md","source":null,"target":null,"target_instance":"ralph#1","topic":"task.start"}}
+{"ts":1769836680174,"event":"ux.terminal.write","data":{"bytes":"PGV2ZW50IHRvcGljPSJzcGVjLnN0YXJ0Ij5zdGFydDwvZXZlbnQ+Cg==","instance_id":"ralph#1","offset_ms":19338,"stdout":true}}
+{"ts":1769836686655,"event":"bus.publish","data":{"id":"ralph#1:1","payload":"start","source":null,"source_instance":"ralph#1","target":null,"topic":"spec.start"}}
+{"ts":1769836696660,"event":"ux.terminal.write","data":{"bytes":"PGV2ZW50IHRvcGljPSJidWlsZC50YXNrIj4K","instance_id":"planner#1","offset_ms":35825,"stdout":true}}
+{"ts":1769836696660,"event":"ux.terminal.write","data":{"bytes":"ZnJvbTogcGxhbm5lcgo=","instance_id":"planner#1","offset_ms":35825,"stdout":true}}
+{"ts":1769836696660,"event":"ux.terminal.write","data":{"bytes":"PC9ldmVudD4K","instance_id":"planner#1","offset_ms":35825,"stdout":true}}
+{"ts":1769836702676,"event":"bus.publish","data":{"id":"planner#1:1","payload":"from: planner","source":null,"source_instance":"planner#1","target":null,"topic":"build.task"}}
+{"ts":1769836710388,"event":"ux.terminal.write","data":{"bytes":"PGV2ZW50IHRvcGljPSJidWlsZC5kb25lIj4K","instance_id":"builder#1","offset_ms":49552,"stdout":true}}
+{"ts":1769836710388,"event":"ux.terminal.write","data":{"bytes":"c3RhdHVzOiBvawo=","instance_id":"builder#1","offset_ms":49552,"stdout":true}}
+{"ts":1769836710388,"event":"ux.terminal.write","data":{"bytes":"PC9ldmVudD4K","instance_id":"builder#1","offset_ms":49553,"stdout":true}}
+{"ts":1769836716409,"event":"bus.publish","data":{"id":"builder#1:1","payload":"status: ok","source":null,"source_instance":"builder#1","target":null,"topic":"build.done"}}
+{"ts":1769836735248,"event":"ux.terminal.write","data":{"bytes":"TE9PUF9DT01QTEVURQo=","instance_id":"ralph#1","offset_ms":74413,"stdout":true}}
+{"ts":1769836741841,"event":"_meta.termination","data":{"elapsed_secs":81.006497584,"iterations":0,"reason":"CompletionPromise","ux_writes":8}}

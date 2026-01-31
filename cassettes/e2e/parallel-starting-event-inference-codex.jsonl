@@ -1,0 +1,14 @@
+{"ts":1769832093222,"event":"_meta.loop_start","data":{"max_iterations":20,"prompt_file":"","ux_mode":"parallel-cli"}}
+{"ts":1769832093228,"event":"bus.publish","data":{"id":"supervisor:1","payload":"@prompt.md","source":null,"target":null,"target_instance":"ralph#1","topic":"task.start"}}
+{"ts":1769832133576,"event":"ux.terminal.write","data":{"bytes":"PGV2ZW50IHRvcGljPSJzcGVjLnN0YXJ0Ij7lubbooYzlnLrmma/lkK/liqjvvJpzdGFydGluZ19ldmVudCDmnKrorr7nva7jgILor7fpgInmi6kgc3BlYy5zdGFydCDkvZzkuLrlpJbpg6jlhaXlj6PvvIznlJ/miJDlkI7nu60gYnVpbGQudGFza++8jOebtOWIsOS6p+WHuiBidWlsZC5kb25l44CCPC9ldmVudD4K","instance_id":"ralph#1","offset_ms":40354,"stdout":true}}
+{"ts":1769832139616,"event":"bus.publish","data":{"id":"ralph#1:1","payload":"并行场景启动：starting_event 未设置。请选择 spec.start 作为外部入口，生成后续 build.task，直到产出 build.done。","source":null,"source_instance":"ralph#1","target":null,"topic":"spec.start"}}
+{"ts":1769832149795,"event":"ux.terminal.write","data":{"bytes":"PGV2ZW50IHRvcGljPSJidWlsZC50YXNrIj4K","instance_id":"planner#1","offset_ms":56573,"stdout":true}}
+{"ts":1769832149795,"event":"ux.terminal.write","data":{"bytes":"ZnJvbTogcGxhbm5lcgo=","instance_id":"planner#1","offset_ms":56573,"stdout":true}}
+{"ts":1769832149795,"event":"ux.terminal.write","data":{"bytes":"PC9ldmVudD4K","instance_id":"planner#1","offset_ms":56573,"stdout":true}}
+{"ts":1769832155423,"event":"bus.publish","data":{"id":"planner#1:1","payload":"from: planner","source":null,"source_instance":"planner#1","target":null,"topic":"build.task"}}
+{"ts":1769832165231,"event":"ux.terminal.write","data":{"bytes":"PGV2ZW50IHRvcGljPSJidWlsZC5kb25lIj4K","instance_id":"builder#1","offset_ms":72008,"stdout":true}}
+{"ts":1769832165231,"event":"ux.terminal.write","data":{"bytes":"c3RhdHVzOiBvawo=","instance_id":"builder#1","offset_ms":72008,"stdout":true}}
+{"ts":1769832165231,"event":"ux.terminal.write","data":{"bytes":"PC9ldmVudD4K","instance_id":"builder#1","offset_ms":72008,"stdout":true}}
+{"ts":1769832171230,"event":"bus.publish","data":{"id":"builder#1:1","payload":"status: ok","source":null,"source_instance":"builder#1","target":null,"topic":"build.done"}}
+{"ts":1769832183047,"event":"ux.terminal.write","data":{"bytes":"TE9PUF9DT01QTEVURQo=","instance_id":"ralph#1","offset_ms":89824,"stdout":true}}
+{"ts":1769832189637,"event":"_meta.termination","data":{"elapsed_secs":96.415233333,"iterations":0,"reason":"CompletionPromise","ux_writes":8}}
