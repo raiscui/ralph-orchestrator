@@ -445,3 +445,248 @@ tui:
   - `cargo test`
   - `cargo test -p ralph-core smoke_runner`
   - `cargo test -p ralph-core kiro`
+
+---
+
+## 2026-02-01 00:34 +0800｜Markdown 内部配色：Monokai Pro（termimad）
+
+### 结论：配色落点应该在 `default_markdown_skin()`
+- Ralph 的 Markdown 渲染（stdout 与 TUI）都复用 `crates/ralph-adapters/src/stream_handler.rs` 的 `default_markdown_skin()`：
+  - stdout：`PrettyStreamHandler::flush_text_buffer()` → `skin.text(...).to_string()`
+  - TUI：`render_markdown_to_lines()` → `skin.text(...).to_string()` → `ansi_to_tui`
+- 因此把主题收敛到 `MadSkin` 是“最小改动且两端一致”的实现路径。
+
+### termimad 可配置项（关键引用/要点）
+- `MadSkin` 里直接暴露了常用 Markdown 元素样式：
+  - `paragraph` / `inline_code` / `code_block` / `headers` / `bullet` / `quote_mark` / `horizontal_rule` / `table` 等。
+- 常用 API：
+  - `set_fg(color)`、`set_bg(color)`、`set_fgbg(fg, bg)`
+  - `StyledChar::set_fg(color)`（用于 bullet/quote_mark/hr）
+
+### 实现中的“坑”：同时存在两个版本的 crossterm
+- workspace 里直接依赖的是 `crossterm 0.28`，但 `termimad 0.34.1` 依赖的是 `crossterm 0.29`。
+- 一旦对 `MadSkin` 调 `set_fg/set_fgbg` 传入 `crossterm::style::Color`，会触发 E0308 类型不匹配。
+- 解决：palette 常量使用 `termimad::crossterm::style::Color`（与 termimad 内部类型一致）。
+
+### 测试中的“坑”：`NO_COLOR=1` 会让 ANSI 颜色被抑制
+- 当前环境变量：`NO_COLOR=1`。
+- crossterm 在这种情况下会把颜色参数输出为空，导致渲染结果里出现 `\x1b[m` 但没有 `38;2;...` / `48;2;...`。
+- 因此“基于渲染后的 ANSI 再解析 Span 样式”的断言不稳定。
+- 解决：回归测试直接断言 `default_markdown_skin()` 内部配置（fg/bg），与环境无关。
+
+---
+
+## 2026-02-01 00:59 +0800｜Markdown 内部配色：sublime-monokai-extended（Monokai Extended）
+
+### 为什么改
+- 你反馈 Monokai Pro 的配色“不好看”。
+- 目标改为使用 `jonschlinkert/sublime-monokai-extended` 的 **Monokai Extended** 配色（更接近经典 Monokai + Sublime 的手感）。
+
+### 关键色提取（来自 `Monokai Extended.tmTheme` 的 Markdown/markup scope）
+- Heading：`#fd971f`
+- Quote：`#66d9ef`
+- Bold：`#f92672`
+- Italic：`#e42e70`
+- Strike：`#cc4273`
+- Raw inline：`#ec3533`
+- Base foreground：`#f8f8f2`
+- lineHighlight：`#333333`
+- selection：`#444444`
+- dimmed：`#636050` / `#565656`
+- list punctuation：`#777777`
+
+### 映射到 termimad 的落点
+- 仍然只改 `crates/ralph-adapters/src/stream_handler.rs` 的 `default_markdown_skin()`：
+  - stdout 与 TUI 两条路径自动同步（复用同一个 `MadSkin`）。
+- code block / inline code 的背景色选择：
+  - code block：用 `lineHighlight (#333333)` 做背景，让代码区域明确但不刺眼；
+  - inline code：用 `selection (#444444)` 做背景，让行内代码更突出。
+
+### 额外取舍（终端体验）
+- table 不再强制设置背景色：
+  - 避免在不同终端/不同面板底色下出现“边框块状底色不一致”的视觉噪音。
+
+---
+
+## 2026-02-01 01:10 +0800｜Markdown 配色微调：代码块取消背景 + 标题改为 #ffd866
+
+### 需求
+- 代码块（fenced code block）取消背景色（不要铺底）。
+- 标题颜色统一改为 `#ffd866`。
+
+### 实现要点
+- 修改点仍然只落在 `default_markdown_skin()`：
+  - stdout/TUI 两条渲染路径复用同一套 `termimad::MadSkin`，改动范围最小且一致性最好。
+- code block 取消背景的关键实现：
+  - `skin.code_block.set_fg(...)` 保留前景色
+  - `skin.code_block.compound_style.object_style.background_color = None` 直接清掉背景（覆盖 termimad 默认铺底）
+- heading 改色：
+  - `sublime_monokai_extended::HEADING` 改为 `#ffd866`（RGB: 255, 216, 102）
+
+### 测试策略
+- 由于 `NO_COLOR=1` 会抑制 ANSI 色彩输出，测试继续采用“断言 skin 内部配置”：
+  - code block bg 必须为 `None`
+  - heading fg 必须为 `#ffd866`
+
+---
+
+## 2026-02-01 11:23 +0800｜Markdown 配色微调：inline code 取消背景 + 红色改为 #ff6188
+
+### 需求
+- inline code（行内代码）取消背景色。
+- Markdown 红色改为 `#ff6188`。
+
+### 落地策略（保持“单入口”一致性）
+- 仍然只改 `crates/ralph-adapters/src/stream_handler.rs` 的 `default_markdown_skin()`：
+  - stdout/TUI 两条渲染路径复用同一个 `termimad::MadSkin`，因此一处修改两端一致。
+
+### 关键实现点
+- inline code：
+  - 保留前景色（改为 `#ff6188`）
+  - 清空背景：`skin.inline_code.object_style.background_color = None`
+- “红色系”统一：
+  - 目前把 `RAW_INLINE` 与 `BOLD` 的前景色都统一为 `#ff6188`（减少主题里红/粉的分裂感）。
+
+### 测试策略（延续 NO_COLOR 兼容）
+- 继续直接断言 `MadSkin` 内部配置：
+  - inline code fg 必须为 `#ff6188`
+  - inline code bg 必须为 `None`
+
+---
+
+## 2026-02-01｜并行 TUI：`LOOP_COMPLETE` 暂停语义 + 禁用实例回收
+
+### 现象
+
+- 并行 TUI 里，hat instance 可能显示为 `done`。
+- 默认 human message 会定向到“当前选中实例”（避免 broadcast）。
+  - 若选中实例已经 `done`（或已从 Supervisor 的 registry 移除），消息虽然能写入外部 JSONL，但实际投递会失败，导致“看起来发出但没有响应”。
+
+### 关键代码点（定位实现落点）
+
+1) `HatInstanceState::Done` 的含义（协议层）
+- 定义：`done = 已完成（不再接收新任务，等待回收/归档）`
+- 位置：`crates/ralph-proto/src/hat.rs`
+
+2) completion promise（默认 `LOOP_COMPLETE`）当前会让 Supervisor “收敛并退出”
+- 在 `HatInstanceEvent::JobCompleted` 检测到 `LOOP_COMPLETE` 后设置 termination，并进入 drain + shutdown
+- tick 分支在 completion 后停止接收/派发新事件（包括 external / gate.timeout）
+- 位置：`crates/ralph-core/src/parallel/supervisor.rs`
+
+3) completion 之后“禁止继续路由新事件”的护栏必须保留
+- 现有回归测试覆盖：completion 后 writer 延迟发出的 `build.done` 不应再触发 collector（避免假活跃/无限派生）
+- 位置：`crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+
+4) “动态实例 idle 回收”是 `done` 的主要来源之一
+- 动态实例在 truly-idle 超过 TTL 后 self-shutdown 并进入 `Done`
+- TTL 来自 `config.parallel.autoscale.dynamic_idle_ttl_secs`（默认 30s）
+- 位置：
+  - TTL 配置：`crates/ralph-core/src/config.rs`
+  - 回收判定：`crates/ralph-core/src/parallel/instance.rs`
+  - spawn 传参：`crates/ralph-core/src/parallel/supervisor.rs`、`crates/ralph-core/src/parallel/supervisor/routing.rs`
+
+### 结论（方案 A 的实现原则）
+
+- 在 **TUI 模式**：把 completion promise 从“退出信号”改成“进入暂停态（仍消费 external events）”
+- 同时保留 completion 的“收敛护栏”：暂停态下不继续路由内部延迟事件派生新 job
+- 在 **TUI 模式**：禁用动态实例 idle 回收，避免 `done`，保证可继续对话
+
+---
+
+## 2026-02-01 12:02 +0800｜Markdown 配色微调：bold（强调/标签类）改为 #a9dc76
+
+### 现象
+- 你反馈类似 `"1. 初 始 化 ： 入 口 命 令 启 动"` 这种 Markdown：
+  - “初始化”作为强调/标签类文本（通常用 `**bold**` 表达）
+  - 当前渲染颜色偏红，观感不符合你希望的“可执行步骤/标签”语义。
+
+### 目标
+- 把 `**bold**` 的前景色从红色系改为 `#a9dc76`（绿色）。
+
+### 落地位置（单入口）
+- 仍然只改 `crates/ralph-adapters/src/stream_handler.rs` 的 `default_markdown_skin()`：
+  - stdout/TUI 两条渲染路径复用同一个 `termimad::MadSkin`，因此一处修改两端一致。
+
+### 关键实现点
+- `sublime_monokai_extended::BOLD` 改为 `#a9dc76`（RGB: 169, 220, 118）。
+- 新增回归测试：直接断言 `MadSkin` 内部 `bold` 的 fg 配置（避免 `NO_COLOR=1` 抑制 ANSI 导致不稳定）。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-01 12:19 +0800｜Markdown 配色微调：全色混入 3% #4493f8（白色不变）
+
+### 需求
+- 你希望 Markdown 的“所有颜色”统一轻微偏蓝：
+  - 对所有颜色混入 3% 的 `#4493f8`
+  - 但白色（正文）保持不变
+
+### 为什么用“统一混合”而不是逐个改色
+- 逐个手调每个颜色会很难保持一致性，而且以后你想改 2%/5% 会很痛苦。
+- 用统一混合可以把“偏色”变成一个可控参数，改动更小，也更容易回归测试锁定。
+
+### 落地位置（单入口）
+- 仍然只改 `crates/ralph-adapters/src/stream_handler.rs` 的 `default_markdown_skin()` 与 palette 常量：
+  - stdout/TUI 两条渲染路径复用同一个 `termimad::MadSkin`，因此一处修改两端一致。
+
+### 关键实现点
+- 在 `sublime_monokai_extended` palette 内新增 const 混合函数：
+  - `new = base * 97% + mix * 3%`（四舍五入）
+  - `mix = #4493f8`
+- “白色正文不变”：
+  - `FOREGROUND` 不做混合，保持 `#f8f8f2`
+
+### 回归测试更新点
+- 由于颜色经过混合，测试期望值更新为“混合后的最终 RGB”：
+  - inline code / code block：基色 `#78dce8` → 最终约 `#76dae8`
+  - heading（H2+）：基色 `#fc9867` → 最终约 `#f6986b`
+  - H1：基色 `#ffd866` → 最终约 `#f9d66a`
+  - bold：基色 `#a9dc76` → 最终约 `#a6da7a`
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-01 11:44 +0800｜Markdown 配色微调：H1 #ffd866 + code #78dce8（无背景）+ heading #fc9867 + red #ff6188
+
+### 需求（最新）
+- code block：取消背景色；前景 `#78dce8`
+- inline code：取消背景色；前景 `#78dce8`
+- H1（标题）：`#ffd866`
+- H2-H6（heading）：`#fc9867`
+- Markdown 红色：`#ff6188`
+
+### 落地位置（单入口）
+- 仍然只改 `crates/ralph-adapters/src/stream_handler.rs` 的 `default_markdown_skin()`：
+  - stdout/TUI 两条渲染路径复用同一个 `termimad::MadSkin`，因此一处修改两端一致。
+
+### 关键实现点
+- palette：
+  - 新增 `sublime_monokai_extended::TITLE = #ffd866`
+  - `HEADING = #fc9867`（保持）
+  - `RAW_INLINE = #78dce8`（保持）
+  - `BOLD = #ff6188`（保持）
+- header 映射：
+  - `skin.headers[0]` 用 `TITLE`
+  - `skin.headers[1..]` 用 `HEADING`
+- 测试：
+  - 新增 `markdown_h1_uses_custom_yellow`
+  - `markdown_heading_uses_custom_orange` 调整为断言 `H2`（`headers[1]`）
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅

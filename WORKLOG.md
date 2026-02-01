@@ -113,6 +113,205 @@
 - `cargo test -p ralph-core smoke_runner` ✅
 - `cargo test -p ralph-core kiro` ✅
 
+## 2026-02-01 12:19 +0800｜Markdown 配色微调：全色混入 3% #4493f8（白色不变）
+
+### 目标回顾
+- 你希望 Markdown 内部颜色整体“略微偏蓝”：
+  - 所有颜色混入 3% `#4493f8`
+  - 白色（正文）保持不变
+
+### 我做了什么
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - 在 `sublime_monokai_extended` palette 内增加“统一混合”函数（const + 整数权重）：
+    - `new = base * 97% + #4493f8 * 3%`（四舍五入）
+  - 除 `FOREGROUND` 外，其余 Markdown palette 颜色统一走混合（DIMMED/DIMMED2/TITLE/HEADING/QUOTE/RAW_INLINE/BOLD/ITALIC/STRIKE/LIST_PUNCT）。
+  - `FOREGROUND` 保持不变（确保正文白色不被污染）。
+- 回归测试同步更新：
+  - 锁定混合后的最终 RGB 值，避免未来误改混合权重或漏混某个颜色。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-02-01 12:02 +0800｜Markdown 配色微调：bold（强调/标签类）改为 #a9dc76
+
+### 目标回顾
+- 你指出类似 `"1. 初 始 化 ： 入 口 命 令 启 动"` 这种 Markdown 里：
+  - “初始化”这类强调/标签文本当前是红色
+  - 你希望它改成绿色 `#a9dc76`（更像“步骤标签”的语义）。
+
+### 我做了什么
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - 将 `sublime_monokai_extended::BOLD` 改为 `#a9dc76`，并继续用于 `skin.bold`（也就是 `**bold**` 的渲染）。
+  - 新增回归测试 `markdown_bold_uses_custom_green`，锁定 bold 的 fg，避免未来回退。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-02-01 11:44 +0800｜Markdown 配色微调：H1 #ffd866 + heading #fc9867 + code #78dce8（无背景）
+
+### 目标回顾
+- 你希望 Markdown 内部配色使用 `sublime-monokai-extended`，并按最新偏好微调：
+  - code block：取消背景；前景 `#78dce8`
+  - inline code：取消背景；前景 `#78dce8`
+  - 标题（H1）：`#ffd866`
+  - heading（H2-H6）：`#fc9867`
+  - Markdown 红色：`#ff6188`
+
+### 我做了什么
+- `task_plan.md`：
+  - 按“四文件上下文模式”新开本次任务计划。
+  - 历史计划归档为 `task_plan_2026-02-01_1140.md`（避免继续膨胀到 1000 行以上）。
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - Sublime Monokai Extended palette 新增 `TITLE = #ffd866`，用于 H1（标题）。
+  - `default_markdown_skin()` 把标题分层：
+    - H1：`#ffd866`
+    - H2-H6：`#fc9867`
+  - 回归测试新增/调整：
+    - `markdown_h1_uses_custom_yellow`
+    - `markdown_heading_uses_custom_orange` 改为断言 `H2`（`headers[1]`）
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-01 11:34 +0800｜并行 TUI：`LOOP_COMPLETE` 暂停不退出 + 禁用实例回收
+
+### 背景
+
+- 目标是让并行 TUI 在 `LOOP_COMPLETE` 之后进入“暂时停歇”，而不是结束进程。
+- 这样你可以继续发送 human message 来驱动下一轮对话/继续推进任务。
+- 同时禁用实例回收，避免实例进入 `done` 后 human message 变得不可达。
+
+### 核心改动
+
+- completion promise 在 **parallel-tui** 下改为“暂停语义”：
+  - `LOOP_COMPLETE` 触发后进入暂停态（Supervisor 不退出）。
+  - 暂停态保留 completion 的“收敛护栏”：不再路由内部延迟事件去派生新 job。
+  - 暂停态仍持续消费 external events（human.message 等），一旦收到外部事件就解除暂停并恢复正常路由。
+- **parallel-tui** 下禁用动态实例 idle TTL 回收：
+  - 通过将 dynamic idle TTL 等价设置为“极大值”，避免 dynamic instance 自动进入 `done`。
+
+### 变更文件
+
+- `crates/ralph-core/src/parallel/supervisor.rs`
+- `crates/ralph-core/src/parallel/supervisor/routing.rs`
+- `crates/ralph-cli/src/parallel_runner.rs`
+- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+- `specs/parallel-hat-instances.spec.md`
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-02-01 11:23 +0800｜Markdown 配色微调：inline code 取消背景 + 红色改为 #ff6188
+
+### 目标回顾
+- inline code 取消背景色（不铺底）。
+- Markdown 红色改为 `#ff6188`。
+
+### 我做了什么
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - inline code：改为只设置前景色，并显式清空 background（`background_color = None`）。
+  - Markdown 红色系：将 inline code / bold 的前景色统一改为 `#ff6188`。
+  - 更新回归测试，锁定 inline code 的 fg/bg 配置。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-02-01 01:10 +0800｜Markdown 配色微调：代码块取消背景 + 标题改为 #ffd866
+
+### 目标回顾
+- fenced code block 取消背景色（不铺底）。
+- 标题统一使用 `#ffd866`。
+
+### 我做了什么
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - code block：保留前景色，但将背景清空（`background_color = None`）。
+  - heading：统一改为 `#ffd866`。
+  - 新增回归测试：锁定 heading fg 与 code block bg 行为，避免回归。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-02-01 00:59 +0800｜Markdown 内部配色：切换为 sublime-monokai-extended（Monokai Extended）
+
+### 目标回顾
+- 你希望把 Markdown 的内部配色从 Monokai Pro 改成 `sublime-monokai-extended`（Monokai Extended）。
+- 要求 stdout 与 TUI 保持一致（同一套 skin 生效）。
+
+### 我做了什么
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - 将 Markdown 主题从 Monokai Pro 改为 **Sublime Monokai Extended**：
+    - 参考 `Monokai Extended.tmTheme` 的 Markdown/markup scope 颜色，映射到 `termimad::MadSkin`：
+      - heading / quote / bold / italic / strike / raw inline
+    - code block / inline code 使用 selection/lineHighlight 作为背景，让代码区域更清晰。
+  - 更新回归测试：
+    - `markdown_inline_code_uses_sublime_monokai_extended_palette`
+    - `markdown_fenced_code_block_uses_sublime_monokai_extended_palette`
+    - 注：测试直接断言 `MadSkin` 的 fg/bg，避免 `NO_COLOR=1` 抑制 ANSI 输出导致不稳定。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-02-01 00:34 +0800｜Markdown 内部配色：Monokai Pro（termimad）
+
+### 目标回顾
+- 让 Ralph 的 Markdown 渲染（stdout + TUI）使用你提供的 Monokai Pro 调色板。
+- 保持 Markdown 语义不变，只调整内部配色与可读性。
+
+### 我做了什么
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - 新增 `monokai_pro` palette（hex → RGB），并将它映射到 `default_markdown_skin()`：
+    - 正文：设置前景色（不强制背景色）。
+    - inline code：设置前景/背景（accent3 + dark2）。
+    - fenced code block：设置前景/背景（dimmed1 + dark1）。
+    - 标题：H1..H6 使用 accent6..accent1 的“彩虹阶梯”。
+    - 结构符号（bullet/quote/hr/table/ellipsis/strikeout）使用 dimmed/低饱和色。
+  - 为避免 workspace `crossterm`（0.28）与 `termimad` 的 `crossterm`（0.29）类型冲突，palette 常量使用 `termimad::crossterm::style::Color`。
+
+### 回归测试
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - 新增测试：
+    - `markdown_inline_code_uses_monokai_pro_palette`
+    - `markdown_fenced_code_block_uses_monokai_pro_palette`
+  - 注：测试直接断言 `MadSkin` 内部 fg/bg，避免 `NO_COLOR=1` 抑制 ANSI 输出导致不稳定。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
 ## 2026-01-31 22:45 +0800｜合并 `for_marge` 分支（冲突解决 + TUI theme/exabind 整合）
 
 ### 我做了什么

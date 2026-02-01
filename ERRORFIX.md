@@ -457,6 +457,36 @@
 - `cargo fmt` ✅
 - `cargo test` ✅（包含 replay smoke tests）
 
+## 2026-02-01 00:34 +0800｜termimad Monokai Pro 配色：crossterm 版本冲突 + `NO_COLOR=1` 导致测试误判
+
+### 现象
+- `cargo clippy` / `cargo test` 编译失败（E0308）：
+  - `expected ratatui::crossterm::style::Color, found crossterm::style::Color`
+- 单元测试里 termimad 渲染出的 ANSI 只有 `\x1b[m`，没有 `38;2;...` / `48;2;...`：
+  - 导致“解析后的 span fg/bg 应为 RGB”的断言失败。
+
+### 根因
+1) **依赖图里同时存在两套 crossterm：**
+   - workspace 直接依赖 `crossterm 0.28`
+   - `termimad 0.34.1` 依赖 `crossterm 0.29`
+   - `MadSkin/LineStyle/CompoundStyle` 的方法参数使用的是 termimad 依赖的 `Color` 类型，所以直接传 workspace 的 `crossterm::style::Color` 会类型不匹配。
+
+2) **环境变量 `NO_COLOR=1`：**
+   - crossterm 会抑制彩色输出（`SetForegroundColor/SetBackgroundColor` 的 ANSI 参数变为空），于是渲染结果只剩 `\x1b[m`。
+   - 这会让“基于渲染后 ANSI → 再解析”的颜色测试变得不稳定或恒失败。
+
+### 修复
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - Monokai Pro palette 常量改用 `termimad::crossterm::style::Color`，避免 crossterm 版本冲突。
+  - 回归测试改为直接断言 `default_markdown_skin()` 的 fg/bg 配置（不再依赖 ANSI 实际输出）。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
 ---
 
 ## 2026-01-31 22:45 +0800｜合并 `for_marge` 后的 clippy/编译收口
