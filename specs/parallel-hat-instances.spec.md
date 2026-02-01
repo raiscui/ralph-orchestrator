@@ -87,6 +87,37 @@
   - 校验失败：拒绝投递并发出 `routing.escalate`（可观测信号）
   - 控制面 topic（默认 `gate.*`）允许特例绕过（避免控制信号被拓扑阻断）
 
+### 3.2 Completion Promise（`LOOP_COMPLETE`）在 TUI 下的“暂停语义”
+
+并行模式下的 completion promise（默认字符串为 `LOOP_COMPLETE`）需要区分两种 UX：
+
+1) **parallel-cli / CI / E2E（无 TUI）**
+- `LOOP_COMPLETE` MUST 作为“自然结束信号”：
+  - Supervisor 进入收敛态（不再派生新 job）
+  - 做短暂 drain（让同轮输出解析出的事件能落盘/完成）
+  - 最终 shutdown 并退出进程
+
+2) **parallel-tui（有 TUI）**
+- `LOOP_COMPLETE` MUST 作为“暂停/停歇信号”，而不是退出信号：
+  - Supervisor 进入“暂停态”：不再因为内部延迟事件继续派生新 job（保留收敛护栏）
+  - Supervisor 仍 MUST 持续消费外部事件（human.message / gate.resolve 等）
+  - 一旦收到外部事件，Supervisor MUST 退出暂停态并恢复正常路由（用于继续对话/继续工作）
+
+> 直觉解释：`LOOP_COMPLETE` 表示“此刻无事可做”，而不是“程序生命周期结束”。
+> 退出由 human（`q`/Ctrl+C）触发，避免交互式会话被强行切断。
+
+### 3.3 并行 TUI 下禁用动态实例 idle 回收（避免 `done` 断对话）
+
+并行 autoscale 的 dynamic instance 默认会在 idle TTL 后回收，这在交互式对话场景会带来负面体验：
+
+- instance 被回收后会进入 `done`（并可能从 registry 移除）
+- human message 默认定向到“选中实例”时，容易出现“消息发出但无人接收”的断对话
+
+因此在 **parallel-tui** 下：
+
+- 动态实例 idle 回收 MUST 被禁用（不因为 TTL 自动进入 `done`）。
+- 实例生命周期由 human 退出会话时统一 shutdown（`q`/Ctrl+C）来收尾。
+
 ---
 
 ## 4. 核心架构（推荐：HatInstance Actor 模型）

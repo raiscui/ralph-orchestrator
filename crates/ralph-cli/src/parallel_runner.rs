@@ -659,7 +659,11 @@ pub async fn run_parallel_loop_impl(
     // Supervisor
     let mut supervisor = ParallelSupervisor::new(config, prompt_content, executor)?
         .with_output_observer(observer)
-        .with_instance_state_observer(state_observer);
+        .with_instance_state_observer(state_observer)
+        // 并行 TUI：completion promise（LOOP_COMPLETE）进入“暂停”而不是“退出”，并禁用动态实例回收，
+        // 这样 human message 可以在会话中持续驱动下一轮对话/工作，而不会被 done/回收打断。
+        .with_pause_on_completion_promise(enable_tui)
+        .with_disable_dynamic_instance_reap(enable_tui);
     if let Some(event_observer) = event_observer {
         supervisor = supervisor.with_event_observer(event_observer);
     }

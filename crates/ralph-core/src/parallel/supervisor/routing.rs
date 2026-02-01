@@ -938,8 +938,7 @@ Candidates:\n\
             return Ok(());
         }
 
-        let dynamic_idle_ttl =
-            Duration::from_secs(self.config.parallel.autoscale.dynamic_idle_ttl_secs.max(1));
+        let dynamic_idle_ttl = self.effective_dynamic_idle_ttl();
 
         let output_tx = self
             .output_tx

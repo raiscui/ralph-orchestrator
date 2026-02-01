@@ -5,6 +5,7 @@
 //! - 通过 Fake HatJobExecutor 验证：并行、missing 行为、require_delivery escalate、queue 决策 replay。
 
 use super::ParallelSupervisor;
+use crate::TerminationReason;
 use crate::config::{HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig};
 use crate::event_logger::EventLogger;
 use crate::parallel::{
@@ -16,6 +17,8 @@ use ralph_proto::{
     MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TopicContract,
 };
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -31,6 +34,52 @@ struct NotifyExecutor {
     started: Arc<AtomicUsize>,
     notify: Arc<Notify>,
     seen: Arc<tokio::sync::Mutex<Vec<String>>>,
+}
+
+#[derive(Debug, Clone)]
+struct PauseOnCompletionExecutor {
+    started: Arc<AtomicUsize>,
+    first: Arc<Notify>,
+    second: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for PauseOnCompletionExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<HatJobResult> {
+        // 说明：
+        // - 该 executor 专门用于验证：parallel-tui 下 `LOOP_COMPLETE` 不会让 Supervisor 退出，
+        //   并且 external events（human.message）仍然可以驱动下一次 job。
+
+        if job.instance_id.as_str() == "ralph#1" {
+            let now = self.started.fetch_add(1, Ordering::SeqCst) + 1;
+            if now == 1 {
+                self.first.notify_waiters();
+            } else if now == 2 {
+                self.second.notify_waiters();
+            }
+
+            return Ok(HatJobResult {
+                output: "LOOP_COMPLETE\n".to_string(),
+                success: true,
+                exit_code: Some(0),
+                timed_out: false,
+                canceled: false,
+            });
+        }
+
+        Ok(HatJobResult {
+            output: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -137,6 +186,95 @@ async fn wait_for_starts(executor: &BlockingExecutor, expected: usize) {
     })
     .await
     .expect("Timed out waiting for executor to observe job starts");
+}
+
+#[tokio::test]
+async fn supervisor_pause_on_completion_promise_continues_consuming_external_events_in_tui_mode() {
+    // =====================================================================
+    // 目的：
+    // - 并行 TUI 里，`LOOP_COMPLETE` 不应直接结束 Supervisor（只“暂停停歇”）。
+    // - 暂停态仍需持续消费 external events（human.message），从而让会话可继续对话。
+    //
+    // 策略：
+    // 1) ralph#1 第一次 job 输出 `LOOP_COMPLETE`
+    // 2) 往 external events 文件写入一条 human.message
+    // 3) 断言 ralph#1 会再次被触发执行（说明 external events 仍在被消费/路由）
+    // 4) 最终由 max_runtime 兜底结束，避免测试卡死
+    // =====================================================================
+
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // external events（human 注入）：
+    // - Supervisor 会读 `.ralph/current-events`，若不存在则回退到 `.ralph/events.jsonl`
+    // - 这里走 fallback 路径即可（测试更简单、且 workspace_root 已隔离）。
+    let external_dir = temp_dir.path().join(".ralph");
+    fs::create_dir_all(&external_dir).unwrap();
+    let external_events_path = external_dir.join("events.jsonl");
+    fs::write(&external_events_path, "").unwrap();
+
+    // 内部事件日志（debug/replay）写到另一个文件，避免与 external events 混在一起被误读。
+    let internal_events_path = temp_dir.path().join("internal-events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.max_runtime_seconds = 3;
+    config.core = config.core.with_workspace_root(temp_dir.path());
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let first = Arc::new(Notify::new());
+    let second = Arc::new(Notify::new());
+
+    let executor = PauseOnCompletionExecutor {
+        started,
+        first: Arc::clone(&first),
+        second: Arc::clone(&second),
+    };
+
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed")
+        .with_pause_on_completion_promise(true)
+        .with_disable_dynamic_instance_reap(true);
+
+    // 断言：禁用回收后，dynamic TTL 应当被“等价无限大”化。
+    assert_eq!(
+        supervisor.effective_dynamic_idle_ttl(),
+        Duration::from_secs(u64::MAX)
+    );
+
+    supervisor.event_logger = EventLogger::new(internal_events_path);
+
+    let handle = tokio::spawn(async move { supervisor.run(false).await });
+
+    // 等待第一次 ralph#1（输出 LOOP_COMPLETE）
+    tokio::time::timeout(Duration::from_secs(2), first.notified())
+        .await
+        .expect("Timed out waiting for first ralph#1 execution");
+
+    // 注入 human.message（外部事件）
+    let line = serde_json::json!({
+        "topic": "human.message",
+        "payload": "hello",
+        "ts": "2026-02-01T00:00:00Z",
+    });
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(&external_events_path)
+        .unwrap();
+    writeln!(f, "{}", serde_json::to_string(&line).unwrap()).unwrap();
+
+    // 断言：external events 驱动了第二次 ralph#1 执行
+    tokio::time::timeout(Duration::from_secs(2), second.notified())
+        .await
+        .expect("Timed out waiting for second ralph#1 execution");
+
+    // 收尾：由 max_runtime 兜底结束
+    let result = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("Timed out waiting for supervisor.run() to return")
+        .expect("JoinHandle should succeed")
+        .expect("supervisor run should succeed");
+
+    assert_eq!(result.termination, Some(TerminationReason::MaxRuntime));
 }
 
 #[tokio::test]

@@ -77,6 +77,14 @@ pub struct ParallelSupervisor {
     next_supervisor_event_seq: u64,
     next_decision_job_id: u64,
 
+    // UX/运行策略（由 ralph-cli 在启动时注入；不落盘到配置文件）
+    //
+    // 说明：
+    // - 这些开关用于区分 parallel-cli（无人值守）与 parallel-tui（交互式会话）。
+    // - 我们刻意不把它们做成 config 字段，避免用户 YAML 复杂度上升，也避免 CI/E2E 行为漂移。
+    pause_on_completion_promise: bool,
+    disable_dynamic_instance_reap: bool,
+
     output_observer: Option<Arc<dyn Fn(&HatJobOutputChunk) + Send + Sync>>,
     instance_state_observer: Option<Arc<dyn Fn(&HatInstanceId, HatInstanceState) + Send + Sync>>,
     /// 事件观察者（用于并行 TUI 展示 gate/chat 等控制面事件）。
@@ -130,6 +138,8 @@ impl ParallelSupervisor {
             gates: gate::GateManager::new(),
             next_supervisor_event_seq: 1,
             next_decision_job_id: 1,
+            pause_on_completion_promise: false,
+            disable_dynamic_instance_reap: false,
             output_observer: None,
             instance_state_observer: None,
             event_observer: None,
@@ -160,6 +170,44 @@ impl ParallelSupervisor {
         self
     }
 
+    /// 并行 TUI：将 completion promise（默认 `LOOP_COMPLETE`）视为“暂停信号”，而不是“退出信号”。
+    ///
+    /// 说明：
+    // - 仅影响并行 Supervisor（parallel mode）。
+    // - 典型用法：ralph-cli 在 enable_tui=true 时开启，避免交互式会话被 `LOOP_COMPLETE` 强制中断。
+    #[must_use]
+    pub fn with_pause_on_completion_promise(mut self, enabled: bool) -> Self {
+        self.pause_on_completion_promise = enabled;
+        self
+    }
+
+    /// 并行 TUI：禁用动态实例 idle TTL 回收（避免 instance 进入 `done` 断对话）。
+    ///
+    /// 说明：
+    // - 只影响 autoscale 动态实例（is_dynamic=true）。
+    // - 静态实例本来就不会因 TTL 自动回收。
+    #[must_use]
+    pub fn with_disable_dynamic_instance_reap(mut self, disabled: bool) -> Self {
+        self.disable_dynamic_instance_reap = disabled;
+        self
+    }
+
+    fn effective_dynamic_idle_ttl(&self) -> Duration {
+        // 说明：
+        // - 动态实例的 idle 回收是为了“无人值守”场景降低资源占用；
+        // - 但在交互式 TUI 会话里，回收会造成 instance 进入 `done`，
+        //   从而让 human message（默认定向到 selected instance）变得不可达。
+        //
+        // 因此：
+        // - parallel-tui：用一个极大 TTL 达到“等价禁用回收”的效果。
+        // - parallel-cli：保持配置值（默认 30s），避免实例无限增长。
+        if self.disable_dynamic_instance_reap {
+            Duration::from_secs(u64::MAX)
+        } else {
+            Duration::from_secs(self.config.parallel.autoscale.dynamic_idle_ttl_secs.max(1))
+        }
+    }
+
     /// 启动并运行，直到收到完成信号或被打断。
     pub async fn run(mut self, resume: bool) -> anyhow::Result<ParallelRunResult> {
         let (output_tx, mut output_rx) = mpsc::channel::<HatJobOutputChunk>(256);
@@ -188,6 +236,16 @@ impl ParallelSupervisor {
         // - 如果窗口太短，会导致“ralph 提前输出 completion -> 下游 job 还没来得及产出事件就被 cancel”
         let completion_drain_max = Duration::from_secs(60);
         let mut completion_promise_seen_at: Option<std::time::Instant> = None;
+
+        // completion lock（并行 TUI 暂停态）：
+        //
+        // 说明：
+        // - 目的不是“退出”，而是把并行运行时停在一个稳定点：
+        //   - 不再因为内部延迟事件继续派生新 job（保留收敛护栏）
+        //   - 仍然允许 human 通过 external events 恢复继续对话/继续工作
+        //
+        // - parallel-cli：不会使用该锁（看到 completion 直接走 termination+drain）。
+        let mut completion_lockdown = false;
 
         // 保存通道句柄，后续 missing_instance_policy=spawn 需要动态创建实例。
         self.output_tx = Some(output_tx.clone());
@@ -269,6 +327,9 @@ impl ParallelSupervisor {
                                     &self.config.event_loop.completion_promise,
                                 );
 
+                            let stop_spawning = matches!(termination, Some(TerminationReason::CompletionPromise))
+                                || completion_lockdown;
+
                             // 将新事件继续路由
                             //
                             // 说明：
@@ -277,14 +338,19 @@ impl ParallelSupervisor {
                             //   （尽管按规范 ralph 在输出 completion 时不应再发事件，这里仍做防御性处理）。
                             // - 在顺序路由这些事件时，我们无法同时消费 `StateChanged`，
                             //   因此需要在 batch 内维护一份“乐观运行态”，避免后续事件误判实例仍然空闲。
-                            let stop_spawning = matches!(termination, Some(TerminationReason::CompletionPromise));
                             if !stop_spawning || completion_promise {
                                 self.route_events_batch(events).await?;
                             }
 
-                            if completion_promise && completion_promise_seen_at.is_none() {
-                                termination = Some(TerminationReason::CompletionPromise);
-                                completion_promise_seen_at = Some(std::time::Instant::now());
+                            if completion_promise {
+                                if self.pause_on_completion_promise {
+                                    // TUI：进入暂停态（但不退出）。
+                                    completion_lockdown = true;
+                                } else if completion_promise_seen_at.is_none() {
+                                    // CLI/CI：进入收敛退出态。
+                                    termination = Some(TerminationReason::CompletionPromise);
+                                    completion_promise_seen_at = Some(std::time::Instant::now());
+                                }
                             }
 
                             // 迭代上限：以 ralph#1 的 job 完成次数为准（见上方说明）。
@@ -310,8 +376,11 @@ impl ParallelSupervisor {
                                 .event_logger
                                 .log_event(0, hat_id.as_str(), &event, triggered);
 
-                            // completion promise 之后不再派生新 job（但仍可落盘，便于排障）。
-                            if !matches!(termination, Some(TerminationReason::CompletionPromise)) {
+                            // completion promise（或 TUI 暂停态）之后不再派生新 job（但仍可落盘，便于排障）。
+                            let stop_spawning =
+                                matches!(termination, Some(TerminationReason::CompletionPromise))
+                                    || completion_lockdown;
+                            if !stop_spawning {
                                 self.route_event(event).await?;
                             }
                         }
@@ -356,6 +425,11 @@ impl ParallelSupervisor {
                     // 1) 读取外部事件（human/工具写入的 JSONL）
                     match external_event_reader.read_new_events() {
                         Ok(parse) => {
+                            // 暂停态：只要 human 注入了外部事件，就视为“继续对话/继续工作”，解除 lockdown。
+                            if completion_lockdown && !parse.events.is_empty() {
+                                completion_lockdown = false;
+                            }
+
                             for raw in parse.events {
                                 let payload = raw.payload.unwrap_or_default();
                                 let mut event = Event::new(raw.topic, payload);
@@ -393,6 +467,15 @@ impl ParallelSupervisor {
                                 "Failed to read external events file"
                             );
                         }
+                    }
+
+                    // 暂停态：冻结自动推进（例如 gate.timeout），避免“无人输入但系统又自己动起来”。
+                    //
+                    // 说明：
+                    // - 正常情况下 completion 后不应存在 open gate；
+                    // - 若确实存在，human 仍可以显式输入 `!approve/!deny/!resolve` 来推进。
+                    if completion_lockdown && self.pause_on_completion_promise {
+                        continue;
                     }
 
                     // 2) gate timeout：超时后发布 gate.timeout（后续应由决策型 job 产出 gate.resolve）
@@ -505,8 +588,7 @@ impl ParallelSupervisor {
             .clone()
             .expect("instance_tx must be set before spawn_instances()");
 
-        let dynamic_idle_ttl =
-            Duration::from_secs(self.config.parallel.autoscale.dynamic_idle_ttl_secs.max(1));
+        let dynamic_idle_ttl = self.effective_dynamic_idle_ttl();
 
         // 先注册 config 里定义的 hats
         for hat in self.registry.all() {
