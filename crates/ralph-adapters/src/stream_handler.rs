@@ -58,6 +58,87 @@ fn terminal_wrap_width() -> u16 {
         .unwrap_or(DEFAULT_MARKDOWN_WRAP_WIDTH)
 }
 
+// ============================================================================
+// Markdown Theme: Sublime Monokai Extended
+//
+// 说明：
+// - 这套颜色来自 `jonschlinkert/sublime-monokai-extended`（Monokai Extended.tmTheme）。
+// - 我们把它限制在 termimad 的 `MadSkin` 里，只影响 Markdown 的“语义样式”渲染：
+//   - stdout（Pretty 输出）
+//   - TUI（转为 `ratatui::Line`）
+// - 这样 stdout 与 TUI 两条渲染路径会自然保持一致（都复用同一个 skin），
+//   同时不会把全局 TUI 主题（面板底色/边框/标题栏）也一起改掉，避免范围膨胀。
+// ============================================================================
+mod sublime_monokai_extended {
+    // 注意：这里必须使用 `termimad` 自己依赖的 `crossterm::Color` 类型，
+    // 而不是工作区直接依赖的 `crossterm::Color`。
+    //
+    // 原因：
+    // - `termimad` 的 `MadSkin`/`LineStyle`/`CompoundStyle` 方法参数使用的是它的 `Color`；
+    // - 工作区里同时存在两个不同版本的 crossterm（例如 0.28 vs 0.29），
+    //   直接用 `crossterm::style::Color` 会触发类型不匹配（E0308）。
+    use termimad::crossterm::style::Color;
+
+    // =====================================================================
+    // 全局色彩微调：统一混入 3% 的 #4493f8
+    //
+    // 你希望所有 Markdown 颜色都“带一点点蓝调”，因此我们对调色板做一个统一的轻微偏色：
+    // - 对每个 RGB 通道：new = base * 97% + mix * 3%（四舍五入）
+    // - 但“白色正文”保持不变（我们不对 `FOREGROUND` 做混合）
+    //
+    // 说明：
+    // - 这样做比“逐个手调每个颜色”更稳定：你以后想把 3% 改成 2%/5%，只改这一处权重。
+    // - 使用整数权重而非浮点，保证 const 下可编译且结果确定。
+    // =====================================================================
+    const MIX_R: u8 = 0x44;
+    const MIX_G: u8 = 0x93;
+    const MIX_B: u8 = 0xf8;
+
+    const MIX_WEIGHT_PERCENT: u16 = 3;
+    const BASE_WEIGHT_PERCENT: u16 = 100 - MIX_WEIGHT_PERCENT;
+
+    const fn mix_channel(base: u8, mix: u8) -> u8 {
+        // 四舍五入：+50 再 /100
+        ((base as u16 * BASE_WEIGHT_PERCENT + mix as u16 * MIX_WEIGHT_PERCENT + 50) / 100) as u8
+    }
+
+    const fn mix_rgb(r: u8, g: u8, b: u8) -> Color {
+        Color::Rgb {
+            r: mix_channel(r, MIX_R),
+            g: mix_channel(g, MIX_G),
+            b: mix_channel(b, MIX_B),
+        }
+    }
+
+    pub const FOREGROUND: Color = Color::Rgb {
+        r: 0xf8,
+        g: 0xf8,
+        b: 0xf2,
+    };
+
+    // 主要结构色（从 tmTheme 的 base 等提取）
+    pub const DIMMED: Color = mix_rgb(0x63, 0x60, 0x50);
+    pub const DIMMED2: Color = mix_rgb(0x56, 0x56, 0x56);
+
+    // Markdown scope 色（从 tmTheme 的 markup/markdown scope 提取）
+    //
+    // 注意：Monokai Extended.tmTheme 里 heading 更偏橙（#fd971f）。
+    // 这里按你的偏好把 heading 的“基色”覆盖为 #fc9867（随后会统一叠加 3% 的 #4493f8 混合）。
+    //
+    // 另外：你希望“标题（H1）”更偏亮黄一些，因此 H1 的“基色”单独用 #ffd866（同样会叠加混合）。
+    pub const TITLE: Color = mix_rgb(0xff, 0xd8, 0x66);
+    pub const HEADING: Color = mix_rgb(0xfc, 0x98, 0x67);
+    pub const QUOTE: Color = mix_rgb(0x66, 0xd9, 0xef);
+    pub const RAW_INLINE: Color = mix_rgb(0x78, 0xdc, 0xe8);
+    // 说明：
+    // - 主题原始 bold（Monokai Extended）更偏粉红（例如 #f92672）。
+    // - 但你希望“初始化/步骤标签”这类强调文本更偏“完成/可执行”的绿色，因此这里把 bold 的“基色”覆盖为 #a9dc76（同样会叠加混合）。
+    pub const BOLD: Color = mix_rgb(0xa9, 0xdc, 0x76);
+    pub const ITALIC: Color = mix_rgb(0xe4, 0x2e, 0x70);
+    pub const STRIKE: Color = mix_rgb(0xcc, 0x42, 0x73);
+    pub const LIST_PUNCT: Color = mix_rgb(0x77, 0x77, 0x77);
+}
+
 fn default_markdown_skin() -> MadSkin {
     // =========================================================================
     // termimad 默认 skin 会把 H1（headers[0]）设置为居中：
@@ -71,6 +152,50 @@ fn default_markdown_skin() -> MadSkin {
     // =========================================================================
     let mut skin = MadSkin::default();
     skin.headers[0].align = Alignment::Left;
+
+    // =========================================================================
+    // Sublime Monokai Extended 配色映射（Markdown 内部配色）
+    //
+    // 设计取舍：
+    // - 正文：只设置前景色，不强制背景色，避免覆盖用户终端/TUI 面板底色。
+    // - 行内代码：取消背景色，减少“色块噪音”，通过前景色进行区分即可。
+    // - 代码块：取消背景色，减少大段输出时的“色块噪音”，同时避免与面板底色冲突。
+    // - 标题：H1 与 H2+ 分层配色，但仍保持“少数强调色”，避免彩虹标题过于花哨。
+    // =========================================================================
+    skin.paragraph.set_fg(sublime_monokai_extended::FOREGROUND);
+
+    skin.inline_code
+        .set_fg(sublime_monokai_extended::RAW_INLINE);
+    // termimad 默认会给 inline code 设置背景色；这里按你的要求取消背景（不铺底）。
+    skin.inline_code.object_style.background_color = None;
+    skin.code_block.set_fg(sublime_monokai_extended::RAW_INLINE);
+    // termimad 默认会给 code block 设置背景色；这里按你的要求取消背景（不铺底）。
+    skin.code_block.compound_style.object_style.background_color = None;
+
+    // 标题分层（统一叠加 3% 的 #4493f8 微调；下列为“基色”）：
+    // - H1（标题）：#ffd866（混合后约为 #f9d66a）
+    // - H2-H6（heading）：#fc9867（混合后约为 #f6986b）
+    skin.headers[0].set_fg(sublime_monokai_extended::TITLE);
+    for header in &mut skin.headers[1..] {
+        header.set_fg(sublime_monokai_extended::HEADING);
+    }
+
+    // 结构符号（项目符号/引用竖线/分割线/表格）采用“更弱或更低饱和”的颜色，
+    // 目的是让它们提供结构信息，但不抢正文与代码的视觉注意力。
+    skin.bullet.set_fg(sublime_monokai_extended::LIST_PUNCT);
+    skin.quote_mark.set_fg(sublime_monokai_extended::QUOTE);
+    skin.horizontal_rule
+        .set_fg(sublime_monokai_extended::DIMMED2);
+    skin.table.set_fg(sublime_monokai_extended::DIMMED2);
+
+    // 行内语义（bold/italic/strike）按主题的 markup scope 配色。
+    skin.bold.set_fg(sublime_monokai_extended::BOLD);
+    skin.italic.set_fg(sublime_monokai_extended::ITALIC);
+    skin.strikeout.set_fg(sublime_monokai_extended::STRIKE);
+
+    // 这些符号在输出里出现频率不高，但出现时仍希望“看起来像同一套主题”。
+    skin.ellipsis.set_fg(sublime_monokai_extended::DIMMED);
+
     skin
 }
 
@@ -1322,6 +1447,112 @@ mod tests {
                 has_code_style,
                 "Should have styled 'code' span. Lines: {:?}",
                 lines
+            );
+        }
+
+        #[test]
+        fn markdown_inline_code_uses_sublime_monokai_extended_palette() {
+            // 目的：锁定 “sublime-monokai-extended” 的关键配色不会被未来改回 termimad 默认灰度。
+            //
+            // 说明：
+            // - 由于此仓库测试环境默认设置了 `NO_COLOR=1`，crossterm 会抑制彩色 ANSI 输出。
+            // - 因此这里不通过“渲染后的 ANSI → 解析后的 Span 样式”来断言颜色，
+            //   而是直接断言 `MadSkin` 内部配置，保证主题映射本身不会回归。
+            //
+            // - 前景：#78dce8（基色；叠加 3% #4493f8 后约为 #76dae8）
+            // - 背景：None（按需求取消铺底）
+            use termimad::crossterm::style::Color as TermimadColor;
+            let skin = default_markdown_skin();
+
+            assert_eq!(
+                skin.inline_code.get_fg(),
+                Some(TermimadColor::Rgb {
+                    r: 0x76,
+                    g: 0xda,
+                    b: 0xe8
+                }),
+                "Inline code fg should be ~#76dae8 (after 3% #4493f8 mix)"
+            );
+            assert_eq!(
+                skin.inline_code.get_bg(),
+                None,
+                "Inline code bg should be None (no background)"
+            );
+        }
+
+        #[test]
+        fn markdown_fenced_code_block_uses_sublime_monokai_extended_palette() {
+            // 目的：确保 fenced code block 的“前景色正确 + 背景被取消”，避免回退到 termimad 默认铺底。
+            //
+            // - 前景：#78dce8（基色；叠加 3% #4493f8 后约为 #76dae8）
+            // - 背景：None（按需求取消铺底）
+            use termimad::crossterm::style::Color as TermimadColor;
+            let skin = default_markdown_skin();
+
+            assert_eq!(
+                skin.code_block.compound_style.get_fg(),
+                Some(TermimadColor::Rgb {
+                    r: 0x76,
+                    g: 0xda,
+                    b: 0xe8
+                }),
+                "Code block fg should be ~#76dae8 (after 3% #4493f8 mix)"
+            );
+            assert_eq!(
+                skin.code_block.compound_style.get_bg(),
+                None,
+                "Code block bg should be None (no background)"
+            );
+        }
+
+        #[test]
+        fn markdown_heading_uses_custom_orange() {
+            // 目的：锁定 heading（H2+）基色为你指定的 #fc9867，并验证 3% #4493f8 混合后的最终值。
+            use termimad::crossterm::style::Color as TermimadColor;
+            let skin = default_markdown_skin();
+
+            assert_eq!(
+                skin.headers[1].compound_style.get_fg(),
+                Some(TermimadColor::Rgb {
+                    r: 0xf6,
+                    g: 0x98,
+                    b: 0x6b
+                }),
+                "Heading fg should be ~#f6986b (after 3% #4493f8 mix)"
+            );
+        }
+
+        #[test]
+        fn markdown_h1_uses_custom_yellow() {
+            // 目的：锁定标题（H1）基色为你指定的 #ffd866，并验证 3% #4493f8 混合后的最终值。
+            use termimad::crossterm::style::Color as TermimadColor;
+            let skin = default_markdown_skin();
+
+            assert_eq!(
+                skin.headers[0].compound_style.get_fg(),
+                Some(TermimadColor::Rgb {
+                    r: 0xf9,
+                    g: 0xd6,
+                    b: 0x6a
+                }),
+                "H1 fg should be ~#f9d66a (after 3% #4493f8 mix)"
+            );
+        }
+
+        #[test]
+        fn markdown_bold_uses_custom_green() {
+            // 目的：锁定“强调/标签类（**bold**）”基色为你指定的 #a9dc76，并验证 3% #4493f8 混合后的最终值。
+            use termimad::crossterm::style::Color as TermimadColor;
+            let skin = default_markdown_skin();
+
+            assert_eq!(
+                skin.bold.get_fg(),
+                Some(TermimadColor::Rgb {
+                    r: 0xa6,
+                    g: 0xda,
+                    b: 0x7a
+                }),
+                "Bold fg should be ~#a6da7a (after 3% #4493f8 mix)"
             );
         }
 
