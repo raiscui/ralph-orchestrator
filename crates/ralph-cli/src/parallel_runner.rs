@@ -450,11 +450,11 @@ pub async fn run_parallel_loop_impl(
             .with_termination_signal(terminated_rx)
             .with_interrupt_tx(interrupt_tx.clone());
 
-        // 右上角 Radar：best-effort 渲染 hats graph（失败不影响主流程）
+        // 右上角 Radar：best-effort 生成 hats graph 文本（失败不影响主流程）
         let registry = HatRegistry::from_config(&config);
-        match crate::hats::render_hat_graph_radar_ascii(&config, &registry) {
-            Ok((ascii_compact, ascii_full)) => {
-                tui = tui.with_hat_graph_radar(ascii_compact, ascii_full);
+        match crate::hats::render_hat_graph_radar_text(&config, &registry) {
+            Ok((compact, full)) => {
+                tui = tui.with_hat_graph_radar(compact, full);
             }
             Err(e) => {
                 warn!("Failed to render hat graph radar for parallel TUI: {e:#}");
