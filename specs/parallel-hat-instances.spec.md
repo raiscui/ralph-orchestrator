@@ -102,6 +102,10 @@
   - Supervisor 进入“暂停态”：不再因为内部延迟事件继续派生新 job（保留收敛护栏）
   - Supervisor 仍 MUST 持续消费外部事件（human.message / gate.resolve 等）
   - 一旦收到外部事件，Supervisor MUST 退出暂停态并恢复正常路由（用于继续对话/继续工作）
+- 并行 TUI 的 `max_runtime_seconds` MUST 采用“活跃运行窗口”的计时语义：
+  - 当进入暂停态时，`event_loop.max_runtime_seconds` 的计时 MUST 重置并暂停。
+  - 在暂停态期间 MUST 不计时（允许会话长时间等待 human 输入）。
+  - 直到任意 HatInstance 进入 `Running`（新的 job 启动）时，MUST 才重新开始计时。
 
 > 直觉解释：`LOOP_COMPLETE` 表示“此刻无事可做”，而不是“程序生命周期结束”。
 > 退出由 human（`q`/Ctrl+C）触发，避免交互式会话被强行切断。

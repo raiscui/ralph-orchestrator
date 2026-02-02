@@ -82,6 +82,71 @@ impl HatJobExecutor for PauseOnCompletionExecutor {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PauseMaxRuntimeExecutor {
+    ralph_runs: Arc<AtomicUsize>,
+    first_done: Arc<Notify>,
+    second_started: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for PauseMaxRuntimeExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<HatJobResult> {
+        if job.instance_id.as_str() != "ralph#1" {
+            return Ok(HatJobResult {
+                output: String::new(),
+                success: true,
+                exit_code: Some(0),
+                timed_out: false,
+                canceled: false,
+            });
+        }
+
+        let now = self.ralph_runs.fetch_add(1, Ordering::SeqCst) + 1;
+        match now {
+            1 => {
+                // 第一次：立刻输出 completion promise，让 Supervisor 进入暂停态。
+                self.first_done.notify_waiters();
+                Ok(HatJobResult {
+                    output: "LOOP_COMPLETE\n".to_string(),
+                    success: true,
+                    exit_code: Some(0),
+                    timed_out: false,
+                    canceled: false,
+                })
+            }
+            _ => {
+                // 第二次：保持 Running 足够久，让 max_runtime 能触发（由 Supervisor cancel/shutdown 收尾）。
+                self.second_started.notify_waiters();
+
+                loop {
+                    tokio::select! {
+                        changed = cancel_rx.changed() => {
+                            if changed.is_ok() && *cancel_rx.borrow() {
+                                break;
+                            }
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(3600)) => {}
+                    }
+                }
+
+                Ok(HatJobResult {
+                    output: String::new(),
+                    success: true,
+                    exit_code: Some(0),
+                    timed_out: false,
+                    canceled: true,
+                })
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl HatJobExecutor for NotifyExecutor {
     async fn execute(
@@ -199,7 +264,7 @@ async fn supervisor_pause_on_completion_promise_continues_consuming_external_eve
     // 1) ralph#1 第一次 job 输出 `LOOP_COMPLETE`
     // 2) 往 external events 文件写入一条 human.message
     // 3) 断言 ralph#1 会再次被触发执行（说明 external events 仍在被消费/路由）
-    // 4) 最终由 max_runtime 兜底结束，避免测试卡死
+    // 4) 最终用 max_iterations 兜底结束，避免测试卡死（parallel-tui 下 max_runtime 会在暂停态被重置/暂停）
     // =====================================================================
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -218,6 +283,7 @@ async fn supervisor_pause_on_completion_promise_continues_consuming_external_eve
     let mut config = RalphConfig::default();
     config.parallel = base_parallel_config();
     config.event_loop.max_runtime_seconds = 3;
+    config.event_loop.max_iterations = 2;
     config.core = config.core.with_workspace_root(temp_dir.path());
 
     let started = Arc::new(AtomicUsize::new(0));
@@ -267,8 +333,92 @@ async fn supervisor_pause_on_completion_promise_continues_consuming_external_eve
         .await
         .expect("Timed out waiting for second ralph#1 execution");
 
-    // 收尾：由 max_runtime 兜底结束
+    // 收尾：由 max_iterations 兜底结束
     let result = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("Timed out waiting for supervisor.run() to return")
+        .expect("JoinHandle should succeed")
+        .expect("supervisor run should succeed");
+
+    assert_eq!(result.termination, Some(TerminationReason::MaxIterations));
+}
+
+#[tokio::test]
+async fn supervisor_pause_on_completion_promise_resets_and_pauses_max_runtime_until_next_running() {
+    // =====================================================================
+    // 目的：
+    // - parallel-tui 下，`LOOP_COMPLETE` 进入暂停态后：
+    //   1) max_runtime 计时会重置并暂停（暂停期不应触发 MaxRuntime）
+    //   2) 直到任意实例再次 Running 才开始重新计时
+    //
+    // 验证策略：
+    // 1) ralph#1 第一次 job 输出 LOOP_COMPLETE -> 进入暂停态
+    // 2) 等待超过 max_runtime_seconds，断言 Supervisor 仍未退出（说明暂停期不计时）
+    // 3) 注入 human.message，触发 ralph#1 第二次 job，并保持 Running
+    // 4) 断言 Supervisor 最终以 MaxRuntime 终止（说明恢复后重新计时生效）
+    // =====================================================================
+
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // external events：走 fallback `.ralph/events.jsonl`
+    let external_dir = temp_dir.path().join(".ralph");
+    fs::create_dir_all(&external_dir).unwrap();
+    let external_events_path = external_dir.join("events.jsonl");
+    fs::write(&external_events_path, "").unwrap();
+
+    let internal_events_path = temp_dir.path().join("internal-events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.max_runtime_seconds = 1;
+    config.core = config.core.with_workspace_root(temp_dir.path());
+
+    let first_done = Arc::new(Notify::new());
+    let second_started = Arc::new(Notify::new());
+
+    let executor = PauseMaxRuntimeExecutor {
+        ralph_runs: Arc::new(AtomicUsize::new(0)),
+        first_done: Arc::clone(&first_done),
+        second_started: Arc::clone(&second_started),
+    };
+
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed")
+        .with_pause_on_completion_promise(true)
+        .with_disable_dynamic_instance_reap(true);
+
+    supervisor.event_logger = EventLogger::new(internal_events_path);
+
+    let handle = tokio::spawn(async move { supervisor.run(false).await });
+
+    tokio::time::timeout(Duration::from_secs(2), first_done.notified())
+        .await
+        .expect("Timed out waiting for first LOOP_COMPLETE to enter pause mode");
+
+    // 暂停态期间等待超过 max_runtime：不应退出
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !handle.is_finished(),
+        "Supervisor should remain alive while paused, even if wall time exceeds max_runtime"
+    );
+
+    // 注入 human.message：解除暂停并触发第二次 ralph#1（保持 Running）
+    let line = serde_json::json!({
+        "topic": "human.message",
+        "payload": "hello",
+        "ts": "2026-02-01T00:00:00Z",
+    });
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(&external_events_path)
+        .unwrap();
+    writeln!(f, "{}", serde_json::to_string(&line).unwrap()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), second_started.notified())
+        .await
+        .expect("Timed out waiting for second ralph#1 execution after external event");
+
+    let result = tokio::time::timeout(Duration::from_secs(6), handle)
         .await
         .expect("Timed out waiting for supervisor.run() to return")
         .expect("JoinHandle should succeed")

@@ -225,7 +225,15 @@ impl ParallelSupervisor {
         // 迭代语义（并行模式的当前版本）：
         // - 先用“ralph#1 job 完成次数”作为 iteration 计数的近似。
         // - 这能覆盖绝大多数无人值守场景：ralph#1 负责协调与收敛，迭代次数也主要由它驱动。
-        let start_time = std::time::Instant::now();
+        // max_runtime 计时（并行模式硬退出护栏）：
+        //
+        // 说明：
+        // - parallel-cli/CI：从 run 启动开始计时（与串行一致）。
+        // - parallel-tui：当进入 `LOOP_COMPLETE` 暂停态后，计时会重置并暂停；
+        //   直到任意实例再次进入 Running（新的 job 启动）才重新开始计时（见 specs）。
+        let mut max_runtime_started_at = std::time::Instant::now();
+        let mut max_runtime_counting = true;
+        let mut max_runtime_waiting_for_running = false;
         let mut ralph_iterations: u32 = 0;
         // completion_promise 属于“软退出信号”：
         // - 不应当立刻 break，否则同一轮输出里解析出的事件可能还没来得及路由/触发下游 job。
@@ -303,6 +311,16 @@ impl ParallelSupervisor {
                                 observer(&instance_id, state);
                             }
 
+                            // parallel-tui：`LOOP_COMPLETE` 暂停态下，max_runtime 直到看到任意实例 Running 才重新开始计时。
+                            if self.pause_on_completion_promise
+                                && max_runtime_waiting_for_running
+                                && state == HatInstanceState::Running
+                            {
+                                max_runtime_started_at = std::time::Instant::now();
+                                max_runtime_counting = true;
+                                max_runtime_waiting_for_running = false;
+                            }
+
                             // 3.5：动态实例 idle 回收后会 self-shutdown 并进入 Done。
                             // Supervisor 负责把它从“可投递 registry”里移除，避免后续路由继续选中。
                             if state == HatInstanceState::Done
@@ -346,6 +364,13 @@ impl ParallelSupervisor {
                                 if self.pause_on_completion_promise {
                                     // TUI：进入暂停态（但不退出）。
                                     completion_lockdown = true;
+
+                                    // 同时重置并暂停 max_runtime 计时：
+                                    // - 暂停态期间不计时（允许长时间等待 human 输入）
+                                    // - 直到任意实例再次 Running 才恢复计时
+                                    max_runtime_started_at = std::time::Instant::now();
+                                    max_runtime_counting = false;
+                                    max_runtime_waiting_for_running = true;
                                 } else if completion_promise_seen_at.is_none() {
                                     // CLI/CI：进入收敛退出态。
                                     termination = Some(TerminationReason::CompletionPromise);
@@ -388,7 +413,10 @@ impl ParallelSupervisor {
                 }
                 _ = tick.tick() => {
                     // max_runtime：超时后直接退出（并触发 cancel/shutdown），避免无人值守卡死。
-                    if start_time.elapsed() >= Duration::from_secs(self.config.event_loop.max_runtime_seconds) {
+                    if max_runtime_counting
+                        && max_runtime_started_at.elapsed()
+                            >= Duration::from_secs(self.config.event_loop.max_runtime_seconds)
+                    {
                         termination = Some(TerminationReason::MaxRuntime);
                         break;
                     }
@@ -428,6 +456,22 @@ impl ParallelSupervisor {
                             // 暂停态：只要 human 注入了外部事件，就视为“继续对话/继续工作”，解除 lockdown。
                             if completion_lockdown && !parse.events.is_empty() {
                                 completion_lockdown = false;
+
+                                // 说明：
+                                // - 解除暂停态并不意味着“立刻开始计时”：
+                                //   你要求必须等到任意实例进入 Running 才开始重新计时。
+                                // - 但如果此时已经存在 Running（极端竞态/实现差异），我们就直接开始计时，避免永久暂停。
+                                if self.pause_on_completion_promise
+                                    && max_runtime_waiting_for_running
+                                    && self
+                                        .instance_states
+                                        .values()
+                                        .any(|s| *s == HatInstanceState::Running)
+                                {
+                                    max_runtime_started_at = std::time::Instant::now();
+                                    max_runtime_counting = true;
+                                    max_runtime_waiting_for_running = false;
+                                }
                             }
 
                             for raw in parse.events {
