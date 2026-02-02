@@ -145,3 +145,68 @@
 - 已实现按键 `p` 切换（Chat 输入时不抢键）
 - 已在 `ralph-cli` 启动 TUI 时注入 hats graph 的 ASCII 渲染（compact/full）
 - 已验证：`cargo fmt` + `cargo clippy --all-targets --all-features` + `cargo test` + `cargo test -p ralph-core smoke_runner`
+
+---
+
+## 2026-02-02 12:21 +0800｜Bug：`ralph run --tui` 启动时卡很久才进入 TUI（a15bced 引入）
+
+### 现象
+
+- 从 `a15bced` 开始，`ralph run --tui` 启动时会在进入 TUI（alternate screen）前卡住很久。
+- 体感像“先黑屏/无 UI 很久”，然后才突然出现 TUI。
+
+### 初步怀疑（待证据验证）
+
+- `a15bced` 在启动 TUI 之前同步渲染 Hat Graph Radar：
+  - 会调用 `beautiful-mermaid-rs`（QuickJS + eval 大 bundle）把 Mermaid 转成 ASCII。
+  - 首次初始化 JS 引擎 + eval bundle 是重 CPU/重 IO 的，可能秒级甚至更久。
+  - 并且我们做了两次渲染（compact + full），会进一步放大启动延迟。
+
+### 证据（已复现/量化）
+
+- 同样的 Mermaid→ASCII 渲染链路（`beautiful-mermaid-rs`）在本机耗时非常夸张：
+  - `target/release/ralph hats graph --format ascii -c presets/pdd-to-code-assist.yml` 约 **22 秒**
+  - `cargo run --bin ralph -- hats graph --format ascii -c presets/pdd-to-code-assist.yml`（debug）约 **87 秒**
+- 由于 `a15bced` 是在 **进入 TUI 之前** 同步做这一步，所以用户体验就是“长时间黑屏后才出现 TUI”。
+
+### 方案（至少二选一）
+
+#### 方案 A：异步/延迟渲染 Radar（我将按此执行）
+
+- TUI 先立即启动（保证 UI 秒开）。
+- Radar 图在后台 `spawn_blocking` 渲染，渲染完成后再写入 TUI state 刷新显示。
+- 优点：彻底消除 “启动前卡住” 的体验问题。
+- 缺点：Radar 会晚一点出现（但 UI 已经可用）。
+
+#### 方案 B：只渲染一次 + 复用字符串（降一半开销）
+
+- 只生成一种 ASCII（例如 compact），放大时仅扩大窗口并裁剪更多行。
+- 优点：实现最小。
+- 缺点：首次 QuickJS 初始化仍然会阻塞 TUI 启动；只能缓解不能根治。
+
+#### 方案 C：Radar 不做 Mermaid→ASCII（QuickJS）渲染，只显示 Mermaid 源码文本（最终采用）
+
+- Radar 面板直接显示 Mermaid 文本：
+  - compact：只显示关键连线（更像雷达概览）
+  - full：显示完整 Mermaid（含节点 label），便于复制/外部渲染
+- 优点：
+  - 彻底消除启动卡顿（不再触发 QuickJS 初始化与重渲染）
+  - Radar 立即可见，且不会后台吃满 CPU
+- 缺点：
+  - 没有“盒子图”的视觉效果（但仍是 Mermaid 结构，信息完整）
+
+> 决定：改为选择 **方案 C**。理由：它直接消除根因（避免重渲染），比异步更彻底。
+
+### 阶段
+
+- [x] 阶段1：复现 + 定位耗时点（量化 Mermaid→ASCII 的真实耗时）
+- [x] 阶段2：移除 Radar 的 Mermaid→ASCII 渲染，改为 Mermaid 文本（串行 + 并行）
+- [x] 阶段3：回归测试与验证（fmt/clippy/test + smoke_runner）
+- [x] 阶段4：四文件记录（notes/WORKLOG/ERRORFIX）
+
+### 状态
+
+**已完成**：
+- Radar 不再调用 `beautiful-mermaid-rs` 的 Mermaid→ASCII 渲染（避免 QuickJS 大开销）
+- `ralph run --tui` 不会再因为 Radar 生成而“长时间黑屏”
+- 已通过：`cargo fmt`、`cargo clippy --all-targets --all-features`、`cargo test`、`cargo test -p ralph-core smoke_runner`

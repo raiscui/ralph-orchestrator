@@ -135,6 +135,28 @@
 
 ---
 
+## 2026-02-02 12:21 +0800｜Bugfix：`ralph run --tui` 启动前卡很久（Radar 渲染阻塞）
+
+### 修复摘要
+
+- 根因：Radar 在进入 TUI 前同步走了 `beautiful-mermaid-rs` 的 Mermaid→ASCII（QuickJS）渲染，耗时可达 20s+（release）/80s+（debug）。
+- 修复：Radar 改为显示 Mermaid 源码文本（compact=edges-only，zoom=full Mermaid），不再触发重渲染。
+
+### 关键改动
+
+- `crates/ralph-cli/src/hats.rs`：新增/切换为 `render_hat_graph_radar_text(...)`（轻量），避免 QuickJS。
+- `crates/ralph-cli/src/loop_runner.rs`、`crates/ralph-cli/src/parallel_runner.rs`：改用 `render_hat_graph_radar_text(...)` 注入到 TUI。
+- `specs/terminal-ui.spec.md`：补充“Radar 不得阻塞 TUI 启动”的约束与实现说明。
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
 ## 2026-02-01 23:32 +0800｜`ralph hats graph` Mermaid 输出改为“逻辑视图”：隐藏 Ralph + Hat→Hat 实线
 
 ### 问题
