@@ -779,40 +779,6 @@ pub fn format(&self, input: &str) -> Text<'static> {
 
 ---
 
-## 2026-02-02 12:21 +0800｜Bug：TUI 启动前卡很久（Hat Graph Radar 渲染阻塞）
-
-### 现象
-
-- 合并 `a15bced` 后，`ralph run --tui` 在进入 TUI（alternate screen）前会卡很久。
-
-### 证据（量化）
-
-- `beautiful-mermaid-rs` 的 Mermaid→ASCII 渲染非常慢：
-  - release：`target/release/ralph hats graph --format ascii -c presets/pdd-to-code-assist.yml` 约 22 秒
-  - debug：`cargo run --bin ralph -- hats graph --format ascii -c presets/pdd-to-code-assist.yml` 约 87 秒
-
-### 根因
-
-- Radar 生成复用了 `beautiful-mermaid-rs` 的 Mermaid→ASCII（QuickJS + eval 大 bundle）。
-- 且是在 **启动 TUI 之前** 同步执行，导致用户看到“长时间无 UI”。
-
-### 修复策略
-
-- Radar 不再做 Mermaid→ASCII（QuickJS）渲染。
-- 改为直接展示 Mermaid 源码文本：
-  - compact：只显示关键连线（edges-only）
-  - full：完整 Mermaid（含节点 label）
-- 这样既保留“拓扑结构信息”，又避免把启动路径拉成十几秒/几十秒。
-
-### 验证
-
-- `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
 ## 2026-02-01 23:32 +0800｜`ralph hats graph` Mermaid 逻辑视图：隐藏 Ralph、Hat→Hat 实线、可选 starting_event 入口
 
 ### 现象
