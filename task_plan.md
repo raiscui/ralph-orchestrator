@@ -280,8 +280,10 @@
 - [x] 阶段2：实现（Radar 渲染 options：`use_ascii: Some(false)`）
 - [x] 阶段3：回归测试（Unicode 断言）
 - [x] 阶段4：门禁验证（fmt/clippy/test + replay smoke tests）
-- [ ] 阶段5：四文件记录 + git 提交
+- [x] 阶段5：四文件记录 + git 提交
 
 ### 当前状态
 
-**进行中**：阶段5（四文件记录已追加，待 git commit）。
+**已完成**：
+- Radar 渲染已对齐 `beautiful-mermaid-rs --ascii` 的默认 Unicode box-drawing 输出
+- 已同步 spec / 回归测试 / 门禁验证，并完成 git commit
