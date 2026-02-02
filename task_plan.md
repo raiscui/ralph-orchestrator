@@ -257,3 +257,31 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` ✅
   - `cargo test` ✅
   - `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-03 00:42 +0800｜修正：Hat Graph Radar 对齐 `beautiful-mermaid-rs --ascii`（Unicode 线条字符文字图）
+
+### 背景 / 现象
+
+- `beautiful-mermaid-rs` 的 CLI：`--ascii` 默认会输出 **Unicode 线条字符**（┌─┐│└┘▶），而 `--ascii --use-ascii` 才会强制 “纯 ASCII（+--|）”。
+- 目前 Ralph 的 Hat Graph Radar（右上角覆盖层）使用了 `use_ascii: Some(true)`，输出是 “纯 ASCII（+--|）”，因此与你期望的效果不一致。
+
+### 目标
+
+- Hat Graph Radar（compact + full）统一改为 **Unicode 线条字符文字图**（对齐 `beautiful-mermaid-rs --ascii`）。
+- 同步 `specs/terminal-ui.spec.md`：把 “ASCII-only” 改为“文本图（默认 Unicode box-drawing）”，避免误导。
+- 增加/调整回归测试，锁死：
+  - Radar 的渲染结果包含 Unicode box-drawing 字符（例如 `┌` / `─` / `│`）。
+
+### 阶段
+
+- [x] 阶段1：补充/更新 spec（Hat Graph Radar 输出字符集语义）
+- [x] 阶段2：实现（Radar 渲染 options：`use_ascii: Some(false)`）
+- [x] 阶段3：回归测试（Unicode 断言）
+- [x] 阶段4：门禁验证（fmt/clippy/test + replay smoke tests）
+- [ ] 阶段5：四文件记录 + git 提交
+
+### 当前状态
+
+**进行中**：阶段5（四文件记录已追加，待 git commit）。

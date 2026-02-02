@@ -67,6 +67,34 @@
 
 ---
 
+## 2026-02-03 00:45 +0800｜tui hat graph radar：对齐 `beautiful-mermaid-rs --ascii` 默认输出（Unicode 文字图，不要纯 ASCII）
+
+### 现象
+- TUI 右上角 Hat Graph Radar 的拓扑“文字图”目前是纯 ASCII（+--|）。
+- 这与你期望的 `beautiful-mermaid-rs --ascii` 默认效果（Unicode box-drawing：┌─┐│└┘▶）不一致。
+
+### 根因
+- `crates/ralph-cli/src/hats.rs` 的 `render_hat_graph_radar_ascii(...)`：
+  - compact 渲染使用 `use_ascii: Some(true)`，等价于强制 `--use-ascii`；
+  - full 渲染走 `GraphFormat::Ascii`，同样是纯 ASCII。
+
+### 修复
+- `crates/ralph-cli/src/hats.rs`：
+  - compact/full 统一改为 `use_ascii: Some(false)`，输出 Unicode box-drawing 文字图，语义对齐 `beautiful-mermaid-rs --ascii`。
+  - 新增回归测试 `test_render_hat_graph_radar_uses_unicode_box_drawing`，锁死该行为。
+- `specs/terminal-ui.spec.md`：
+  - 把 Hat Graph Radar 的 “ASCII-only” 修正为“文本图（默认 Unicode box-drawing）”，避免再次误读。
+- `crates/ralph-tui/src/lib.rs`：
+  - 更新注释，明确 Radar 注入的是“文字图”，默认 Unicode。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
 ## 2026-02-02 00:35 +0800｜hats graph：complete_publishes（如 spec.approved）无订阅者时在逻辑视图里“消失”
 
 ### 现象

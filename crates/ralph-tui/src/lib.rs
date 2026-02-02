@@ -129,10 +129,11 @@ impl Tui {
         self
     }
 
-    /// 注入 hats graph radar 的 ASCII 渲染结果（用于右上角拓扑小地图）。
+    /// 注入 hats graph radar 的“文字图”渲染结果（用于右上角拓扑小地图）。
     ///
     /// 说明：
-    /// - ASCII 图由 `ralph-cli` 在启动 TUI 时生成（从 config + registry），TUI 只负责展示；
+    /// - 文字图由 `ralph-cli` 在启动 TUI 时生成（从 config + registry），TUI 只负责展示；
+    /// - 默认使用 Unicode box-drawing 字符（┌─┐│└┘▶），对齐 `beautiful-mermaid-rs --ascii` 的输出；
     /// - `ascii_compact` 用于小窗视图（更紧凑），`ascii_full` 用于放大视图（更可读）。
     #[must_use]
     pub fn with_hat_graph_radar(self, ascii_compact: String, ascii_full: String) -> Self {

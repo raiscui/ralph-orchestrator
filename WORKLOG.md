@@ -115,6 +115,33 @@
 
 ---
 
+## 2026-02-03 00:45 +0800｜修正：Hat Graph Radar 输出对齐 `beautiful-mermaid-rs --ascii`（Unicode box-drawing，而非纯 ASCII）
+
+### 你要的效果
+- Hat Graph Radar 的“文字图”要对齐 `beautiful-mermaid-rs --ascii` 的默认输出：
+  - 使用 Unicode 线条字符（┌─┐│└┘▶）
+  - 不要强制纯 ASCII（+--|）
+
+### 我做了什么
+- `crates/ralph-cli/src/hats.rs`：
+  - `render_hat_graph_radar_ascii(...)`：
+    - compact/full 都改为 `use_ascii: Some(false)`，输出 Unicode box-drawing 文字图。
+    - full 视图改为直接调用 `render_mermaid_ascii`（默认参数 + `use_ascii=false`），避免语义误用。
+- `crates/ralph-tui/src/lib.rs`：
+  - 更新 `with_hat_graph_radar(...)` 的注释，明确这是“文字图”，默认 Unicode。
+- `specs/terminal-ui.spec.md`：
+  - 把 Hat Graph Radar 的 “ASCII-only” 描述修正为“文本图（默认 Unicode box-drawing）”。
+- 回归测试：
+  - `crates/ralph-cli/src/hats.rs` 新增 `test_render_hat_graph_radar_uses_unicode_box_drawing`，断言输出包含 box-drawing 字符。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
 ## 2026-02-03 00:17 +0800｜回退 Radar workaround：恢复 Mermaid→ASCII 渲染（依赖 beautiful-mermaid-rs 已修复性能）
 
 ### 我做了什么

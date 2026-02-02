@@ -398,7 +398,7 @@ fn render_hat_dag_via_mermaid(
     Ok(rendered)
 }
 
-/// 为 TUI 的右上角 Radar 面板渲染 hats graph（ASCII Mermaid）。
+/// 为 TUI 的右上角 Radar 面板渲染 hats graph（文本 Mermaid：默认 Unicode 线条字符）。
 ///
 /// 返回：
 /// - `(ascii_compact, ascii_full)`
@@ -407,6 +407,9 @@ fn render_hat_dag_via_mermaid(
 /// - 两份字符串都带末尾 `\n`，便于直接展示/拼接；
 /// - compact 视图会把 padding 压到 0，更适合小窗“雷达”；
 /// - full 视图使用更可读的默认渲染参数。
+/// - 这里“ascii”指的是“文字图（ASCII/Unicode）”的渲染模式：
+///   - 对齐 `beautiful-mermaid-rs --ascii` 的默认行为：使用 Unicode box-drawing 字符（┌─┐│└┘▶）
+///   - 而不是强制纯 ASCII（+--|），后者更接近 `--ascii --use-ascii`。
 pub(crate) fn render_hat_graph_radar_ascii(
     config: &RalphConfig,
     registry: &HatRegistry,
@@ -421,19 +424,34 @@ pub(crate) fn render_hat_graph_radar_ascii(
     let mut ascii_compact = render_mermaid_ascii(
         &diagram,
         &AsciiRenderOptions {
-            use_ascii: Some(true),
+            use_ascii: Some(false),
             padding_x: Some(0),
             padding_y: Some(0),
             box_border_padding: Some(0),
         },
     )
-    .with_context(|| "Failed to render Mermaid topology (compact) as ASCII".to_string())?;
+    .with_context(|| {
+        "Failed to render Mermaid topology (compact) as Unicode text diagram".to_string()
+    })?;
 
     if !ascii_compact.ends_with('\n') {
         ascii_compact.push('\n');
     }
 
-    let ascii_full = render_hat_dag_via_mermaid(config, registry, GraphFormat::Ascii)?;
+    let mut ascii_full = render_mermaid_ascii(
+        &diagram,
+        &AsciiRenderOptions {
+            use_ascii: Some(false),
+            ..Default::default()
+        },
+    )
+    .with_context(|| {
+        "Failed to render Mermaid topology (full) as Unicode text diagram".to_string()
+    })?;
+
+    if !ascii_full.ends_with('\n') {
+        ascii_full.push('\n');
+    }
 
     Ok((ascii_compact, ascii_full))
 }
@@ -747,6 +765,32 @@ mod tests {
 
         // deterministic output should contain key node names
         assert!(output.contains("Builder"));
+    }
+
+    #[test]
+    fn test_render_hat_graph_radar_uses_unicode_box_drawing() {
+        // 回归测试：
+        // - Hat Graph Radar 的“文字图”输出应对齐 `beautiful-mermaid-rs --ascii` 默认行为；
+        // - 即使用 Unicode box-drawing 字符（┌─┐│└┘▶），而不是强制纯 ASCII（+--|）。
+        let mut registry = HatRegistry::new();
+        registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
+
+        let config = RalphConfig::default();
+        let (ascii_compact, ascii_full) = render_hat_graph_radar_ascii(&config, &registry).unwrap();
+
+        fn contains_box_drawing(s: &str) -> bool {
+            s.chars()
+                .any(|c| matches!(c, '┌' | '─' | '│' | '└' | '┘' | '▶'))
+        }
+
+        assert!(
+            contains_box_drawing(&ascii_compact),
+            "expected radar compact output to contain Unicode box-drawing characters"
+        );
+        assert!(
+            contains_box_drawing(&ascii_full),
+            "expected radar full output to contain Unicode box-drawing characters"
+        );
     }
 
     #[test]
