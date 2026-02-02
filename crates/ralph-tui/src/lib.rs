@@ -129,6 +129,19 @@ impl Tui {
         self
     }
 
+    /// 注入 hats graph radar 的 ASCII 渲染结果（用于右上角拓扑小地图）。
+    ///
+    /// 说明：
+    /// - ASCII 图由 `ralph-cli` 在启动 TUI 时生成（从 config + registry），TUI 只负责展示；
+    /// - `ascii_compact` 用于小窗视图（更紧凑），`ascii_full` 用于放大视图（更可读）。
+    #[must_use]
+    pub fn with_hat_graph_radar(self, ascii_compact: String, ascii_full: String) -> Self {
+        if let Ok(mut state) = self.state.lock() {
+            state.set_hat_graph_radar(ascii_compact, ascii_full);
+        }
+        self
+    }
+
     /// Sets the termination signal receiver for graceful shutdown.
     ///
     /// The TUI will exit when this receiver signals `true`.

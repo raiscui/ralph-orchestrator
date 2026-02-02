@@ -97,6 +97,10 @@ pub fn render(f: &mut Frame, area: Rect) {
             Span::raw("      Copy current selection (parallel)"),
         ]),
         Line::from(vec![
+            Span::styled("  p", Style::default().fg(Color::Cyan)),
+            Span::raw("      Toggle hat graph zoom"),
+        ]),
+        Line::from(vec![
             Span::styled("  Tab", Style::default().fg(Color::Cyan)),
             Span::raw("    Switch focus (parallel)"),
         ]),

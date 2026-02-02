@@ -26,6 +26,7 @@ A ratatui-based terminal UI that displays Ralph's current state during orchestra
 - Historical event browsing - use `ralph events` command
 - Log streaming - separate concern
 - Configuration editing - use YAML files
+- Execution controls that affect orchestration (pause/skip/abort). View-only toggles are allowed.
 
 ## Architecture
 
@@ -122,6 +123,22 @@ For custom hats, the TUI must be initialized with the `HatRegistry` to look up s
 1. **Header**: Title bar with live/done indicator
 2. **Status Panel**: Next hat, iteration, timing
 3. **Footer**: Last event topic, activity indicator
+
+### Hat Graph Radar (Top-right Overlay)
+
+The TUI MAY display a small "radar" overlay in the top-right corner of the content area that visualizes the configured hat topology.
+
+Behavior:
+- The overlay is purely visual (read-only). It MUST NOT publish events or change orchestration behavior.
+- The overlay content is ASCII-only and is rendered from Mermaid topology (same source as `ralph hats graph`).
+- Pressing `p` toggles between:
+  - **Small** (radar) view: compact rendering, minimal padding
+  - **Zoomed** view: larger panel, more readable graph
+- In text-input contexts (search input / parallel chat editor), `p` MUST be treated as normal text input and MUST NOT toggle the overlay.
+
+Implementation notes:
+- The ASCII graph SHOULD be generated once at TUI startup by the CLI (from `RalphConfig + HatRegistry`) and injected into the TUI state as cached strings.
+- The overlay MUST NOT panic on small terminal sizes. If the content area cannot fit a bordered panel, it SHOULD be hidden.
 
 ### Hat Display
 

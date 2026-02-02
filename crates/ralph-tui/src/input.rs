@@ -36,6 +36,8 @@ pub enum Action {
     ShowHelp,
     /// Dismiss help overlay or cancel search
     DismissHelp,
+    /// 右上角 Hat Graph Radar：放大/还原（按键 `p` 切换）
+    ToggleHatGraphZoom,
     /// Key not mapped to any action
     None,
 }
@@ -78,6 +80,9 @@ pub fn map_key(key: KeyEvent) -> Action {
         // Help
         KeyCode::Char('?') => Action::ShowHelp,
         KeyCode::Esc => Action::DismissHelp,
+
+        // Hat graph radar
+        KeyCode::Char('p') => Action::ToggleHatGraphZoom,
 
         // Unknown
         _ => Action::None,
@@ -171,6 +176,12 @@ mod tests {
     fn esc_returns_dismiss_help() {
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(map_key(key), Action::DismissHelp);
+    }
+
+    #[test]
+    fn p_returns_toggle_hat_graph_zoom() {
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::ToggleHatGraphZoom);
     }
 
     // AC13: Vim l Next Iteration

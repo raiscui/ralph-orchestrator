@@ -9,7 +9,9 @@ use ralph_adapters::CliBackend;
 use ralph_core::{
     HatJob, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend, OutputStream,
 };
-use ralph_core::{ParallelSupervisor, RalphConfig, Record, SessionRecorder, TerminationReason};
+use ralph_core::{
+    HatRegistry, ParallelSupervisor, RalphConfig, Record, SessionRecorder, TerminationReason,
+};
 use ralph_proto::{HatInstanceId, HatInstanceState, TerminalWrite, UxEvent};
 use ralph_tui::{Tui, TuiUpdate};
 use std::fs::File;
@@ -442,11 +444,22 @@ pub async fn run_parallel_loop_impl(
 
     // TUI（并行 Supervisor UI）
     let (mut tui_handle, tui_update_tx) = if enable_tui {
-        let tui = Tui::new_parallel()
+        let mut tui = Tui::new_parallel()
             .with_parallel_markdown_rendering(!plain)
             .with_parallel_max_buffer_lines(config.tui.max_buffer_lines)
             .with_termination_signal(terminated_rx)
             .with_interrupt_tx(interrupt_tx.clone());
+
+        // 右上角 Radar：best-effort 渲染 hats graph（失败不影响主流程）
+        let registry = HatRegistry::from_config(&config);
+        match crate::hats::render_hat_graph_radar_ascii(&config, &registry) {
+            Ok((ascii_compact, ascii_full)) => {
+                tui = tui.with_hat_graph_radar(ascii_compact, ascii_full);
+            }
+            Err(e) => {
+                warn!("Failed to render hat graph radar for parallel TUI: {e:#}");
+            }
+        }
 
         let update_tx = tui
             .update_sender()

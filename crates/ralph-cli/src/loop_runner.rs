@@ -246,9 +246,19 @@ pub async fn run_loop_impl(
         // This allows TUI to display custom hats (e.g., "Security Reviewer")
         // instead of generic "ralph" for all events
         let hat_map = build_tui_hat_map(event_loop.registry());
-        let tui = Tui::new()
-            .with_hat_map(hat_map)
-            .with_termination_signal(terminated_rx);
+        let mut tui = Tui::new().with_hat_map(hat_map);
+
+        // 右上角 Radar：best-effort 渲染 hats graph（失败不影响主流程）
+        match crate::hats::render_hat_graph_radar_ascii(&config, event_loop.registry()) {
+            Ok((ascii_compact, ascii_full)) => {
+                tui = tui.with_hat_graph_radar(ascii_compact, ascii_full);
+            }
+            Err(e) => {
+                warn!("Failed to render hat graph radar for TUI: {e:#}");
+            }
+        }
+
+        let tui = tui.with_termination_signal(terminated_rx);
 
         // Get shared state before spawning (for content streaming)
         let state = tui.state();

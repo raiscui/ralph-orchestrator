@@ -122,6 +122,26 @@ pub enum TuiMode {
     Parallel,
 }
 
+// =============================================================================
+// Hat Graph Radar（右上角覆盖层）
+// =============================================================================
+//
+// 设计目标：
+// - 在 TUI 右上角提供一个类似“游戏雷达/小地图”的拓扑速览；
+// - 内容来自 hats graph 的 Mermaid 拓扑，但在终端里以 ASCII 图展示；
+// - 放大/还原只是 UI 行为，不影响 orchestration。
+//
+// 说明：
+// - ASCII 图由 ralph-cli 在启动 TUI 时生成并注入，这里只做缓存 + 展示，
+//   避免在 TUI 每帧渲染时重复做 Mermaid→ASCII 的转换。
+#[derive(Debug, Clone)]
+pub struct HatGraphRadar {
+    /// 小窗（雷达）展示：更紧凑的 ASCII 图（通常 padding=0）。
+    pub ascii_compact: String,
+    /// 大窗（放大）展示：更可读的 ASCII 图（通常默认 padding）。
+    pub ascii_full: String,
+}
+
 /// TUI 的状态更新事件（用于 observer → channel → reducer）。
 #[derive(Debug, Clone)]
 pub enum TuiUpdate {
@@ -304,6 +324,14 @@ pub struct TuiState {
     pub active_task: Option<TaskSummary>,
 
     // ========================================================================
+    // Hat Graph Radar (Top-right overlay)
+    // ========================================================================
+    /// 右上角 hats 拓扑雷达图（若 CLI 注入则显示）。
+    pub hat_graph_radar: Option<HatGraphRadar>,
+    /// 是否处于“放大”视图（按键 `p` 切换）。
+    pub hat_graph_zoomed: bool,
+
+    // ========================================================================
     // Parallel Mode State
     // ========================================================================
     /// 并行模式（Supervisor TUI）的状态（默认空）。
@@ -342,6 +370,9 @@ impl TuiState {
             // Task tracking state
             task_counts: TaskCounts::default(),
             active_task: None,
+            // Hat graph radar
+            hat_graph_radar: None,
+            hat_graph_zoomed: false,
             // Parallel mode
             parallel: ParallelTuiState::default(),
         }
@@ -386,6 +417,9 @@ impl TuiState {
             // Task tracking state
             task_counts: TaskCounts::default(),
             active_task: None,
+            // Hat graph radar
+            hat_graph_radar: None,
+            hat_graph_zoomed: false,
             // Parallel mode
             parallel: ParallelTuiState::default(),
         }
@@ -539,6 +573,18 @@ impl TuiState {
     /// Sets the active task.
     pub fn set_active_task(&mut self, task: Option<TaskSummary>) {
         self.active_task = task;
+    }
+
+    // ========================================================================
+    // Hat Graph Radar Methods
+    // ========================================================================
+
+    /// 注入 hats graph radar 的 ASCII 渲染结果（由 CLI 在启动 TUI 时生成）。
+    pub fn set_hat_graph_radar(&mut self, ascii_compact: String, ascii_full: String) {
+        self.hat_graph_radar = Some(HatGraphRadar {
+            ascii_compact,
+            ascii_full,
+        });
     }
 
     /// Returns true if there are any open tasks.

@@ -17,7 +17,6 @@ use anyhow::{Context, Result};
 use beautiful_mermaid_rs::{AsciiRenderOptions, render_mermaid_ascii};
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{HatRegistry, RalphConfig};
-use std::collections::HashSet;
 use std::io::Write;
 use tracing::warn;
 
@@ -95,7 +94,7 @@ pub fn execute(config_path: &std::path::Path, args: HatsArgs, use_colors: bool) 
             show_hat(&mut stdout, &registry, &show_args.name, use_colors)
         }
         Some(HatsCommands::Validate) => validate_hats(&mut stdout, &config, &registry, use_colors),
-        Some(HatsCommands::Graph { format }) => graph_hats(&mut stdout, &registry, format),
+        Some(HatsCommands::Graph { format }) => graph_hats(&mut stdout, &config, &registry, format),
     }
 }
 
@@ -341,27 +340,36 @@ fn print_check<W: Write>(
     Ok(())
 }
 
-fn graph_hats<W: Write>(writer: &mut W, registry: &HatRegistry, format: GraphFormat) -> Result<()> {
+fn graph_hats<W: Write>(
+    writer: &mut W,
+    config: &RalphConfig,
+    registry: &HatRegistry,
+    format: GraphFormat,
+) -> Result<()> {
     match format {
         GraphFormat::Mermaid => {
             writeln!(writer, "```mermaid")?;
-            write!(writer, "{}", generate_mermaid_string(registry))?;
+            write!(writer, "{}", generate_mermaid_string(config, registry))?;
             writeln!(writer, "```")?;
         }
         GraphFormat::Unicode | GraphFormat::Ascii | GraphFormat::Compact => {
-            let rendered = render_hat_dag_via_mermaid(registry, format)?;
+            let rendered = render_hat_dag_via_mermaid(config, registry, format)?;
             write!(writer, "{rendered}")?;
         }
     }
     Ok(())
 }
 
-fn render_hat_dag_via_mermaid(registry: &HatRegistry, format: GraphFormat) -> Result<String> {
+fn render_hat_dag_via_mermaid(
+    config: &RalphConfig,
+    registry: &HatRegistry,
+    format: GraphFormat,
+) -> Result<String> {
     if registry.is_empty() {
         return Ok("No hats configured.\n".to_string());
     }
 
-    let diagram = generate_mermaid_string(registry);
+    let diagram = generate_mermaid_string(config, registry);
     let options = match format {
         GraphFormat::Unicode => AsciiRenderOptions {
             use_ascii: Some(false),
@@ -390,76 +398,203 @@ fn render_hat_dag_via_mermaid(registry: &HatRegistry, format: GraphFormat) -> Re
     Ok(rendered)
 }
 
+/// 为 TUI 的右上角 Radar 面板渲染 hats graph（ASCII Mermaid）。
+///
+/// 返回：
+/// - `(ascii_compact, ascii_full)`
+///
+/// 说明：
+/// - 两份字符串都带末尾 `\n`，便于直接展示/拼接；
+/// - compact 视图会把 padding 压到 0，更适合小窗“雷达”；
+/// - full 视图使用更可读的默认渲染参数。
+pub(crate) fn render_hat_graph_radar_ascii(
+    config: &RalphConfig,
+    registry: &HatRegistry,
+) -> Result<(String, String)> {
+    if registry.is_empty() {
+        let empty = "No hats configured.\n".to_string();
+        return Ok((empty.clone(), empty));
+    }
+
+    let diagram = generate_mermaid_string(config, registry);
+
+    let mut ascii_compact = render_mermaid_ascii(
+        &diagram,
+        &AsciiRenderOptions {
+            use_ascii: Some(true),
+            padding_x: Some(0),
+            padding_y: Some(0),
+            box_border_padding: Some(0),
+        },
+    )
+    .with_context(|| "Failed to render Mermaid topology (compact) as ASCII".to_string())?;
+
+    if !ascii_compact.ends_with('\n') {
+        ascii_compact.push('\n');
+    }
+
+    let ascii_full = render_hat_dag_via_mermaid(config, registry, GraphFormat::Ascii)?;
+
+    Ok((ascii_compact, ascii_full))
+}
+
 /// Generate Mermaid flowchart syntax for the hat topology.
-fn generate_mermaid_string(registry: &HatRegistry) -> String {
+fn generate_mermaid_string(config: &RalphConfig, registry: &HatRegistry) -> String {
+    // NOTE:
+    // - Mermaid 的“节点 ID”在不同渲染器里兼容性差异很大；
+    //   目前我们发现：当节点 ID 使用中文/emoji 时，`beautiful-mermaid-rs` 会吞掉边/节点，
+    //   导致 `ralph hats graph` 只剩下 task.start→Ralph。
+    // - 因此这里把“节点 ID”和“节点展示名（label）”分离：
+    //   - ID：稳定 + ASCII 安全（hat.id）
+    //   - label：保留中文/emoji（hat.name）
+    // - HatRegistry 内部是 HashMap，迭代顺序不稳定。为了让输出尽量确定性，这里先按 hat.id 排序。
+    let mut hats: Vec<_> = registry.all().collect();
+    hats.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+
     let mut output = String::new();
     output.push_str("flowchart LR\n");
-    output.push_str("    Start[task.start] --> Ralph\n");
 
-    // Reconstruct Ralph's publishes (what hats subscribe to)
-    let mut ralph_publishes: HashSet<String> = HashSet::new();
-    for hat in registry.all() {
-        for sub in &hat.subscriptions {
-            ralph_publishes.insert(sub.as_str().to_string());
-        }
+    // 先声明节点（含 label），避免后续边只引用 ID 时渲染器把 label 丢成裸 ID。
+    for hat in &hats {
+        let node_id = mermaid_hat_node_id(hat.id.as_str());
+        let label_source = if hat.name.trim().is_empty() {
+            hat.id.as_str()
+        } else {
+            &hat.name
+        };
+        let label = format_mermaid_node_label(label_source);
+        output.push_str(&format!("    {node_id}[{label}]\n"));
     }
 
-    // Ralph -> Hats
-    for hat in registry.all() {
-        let node_id = sanitize_id(&hat.name);
-        for sub in &hat.subscriptions {
-            output.push_str(&format!("    Ralph -->|{}| {}\n", sub.as_str(), node_id));
-        }
-    }
+    // （逻辑视图）入口边：当显式设置 starting_event 时，展示 task.start -> starting_event -> hats
+    if let Some(starting_event) = config.event_loop.starting_event.as_deref() {
+        let mut targets: Vec<String> = hats
+            .iter()
+            .filter(|hat| {
+                hat.subscriptions
+                    .iter()
+                    .any(|s| s.as_str() == starting_event)
+            })
+            .map(|hat| mermaid_hat_node_id(hat.id.as_str()))
+            .collect();
 
-    // Hats -> Ralph
-    for hat in registry.all() {
-        let node_id = sanitize_id(&hat.name);
-        for pub_event in &hat.publishes {
+        targets.sort();
+        targets.dedup();
+
+        // 如果配置了 starting_event，但没有任何订阅者，这本身就应在 `ralph hats validate` 里报错。
+        // 这里仍然把 Start 节点输出出来，便于用户一眼发现“入口没有接到任何 hat”。
+        output.push_str("    Start[task.start]\n");
+        for target_id in targets {
             output.push_str(&format!(
-                "    {} -->|{}| Ralph\n",
-                node_id,
-                pub_event.as_str()
+                "    Start -->|{}| {}\n",
+                starting_event, target_id
             ));
         }
     }
 
-    // Hat -> Hat (direct flow visualization)
-    // Even though everything goes through Ralph, it's useful to see A -> B
-    for source in registry.all() {
-        let source_id = sanitize_id(&source.name);
+    // （逻辑视图）结束节点：当显式设置 complete_publishes 时，把它画成一个固定终点节点。
+    //
+    // 备注：
+    // - complete_publishes 是“工作流完成候选事件”，可能没有任何 hat 订阅。
+    //   如果我们只靠 Hat→Hat 的订阅关系推导，它会在图上直接消失。
+    if let Some(complete_topic) = config.event_loop.complete_publishes.as_deref() {
+        output.push_str("    Complete[complete]\n");
+
+        let mut complete_sources: Vec<String> = hats
+            .iter()
+            .filter(|hat| hat.publishes.iter().any(|p| p.as_str() == complete_topic))
+            .map(|hat| mermaid_hat_node_id(hat.id.as_str()))
+            .collect();
+        complete_sources.sort();
+        complete_sources.dedup();
+
+        for source_id in complete_sources {
+            output.push_str(&format!(
+                "    {} -->|{}| Complete\n",
+                source_id, complete_topic
+            ));
+        }
+    }
+
+    // Hat -> Hat（逻辑视图）：A publishes topic，且 B subscribes topic，则展示 A -->|topic| B
+    //
+    // 备注：
+    // - 虽然运行时是通过 Ralph 调度，但图里我们只展示“对用户有意义”的逻辑连线。
+    // - 这里会按 (source, topic, target) 去重 + 排序，保证输出稳定可预测。
+    let mut edges: Vec<(String, String, String)> = Vec::new();
+    for source in &hats {
         for pub_event in &source.publishes {
-            // Find hats that subscribe to this
-            for target in registry.all() {
+            let topic = pub_event.as_str();
+            for target in &hats {
                 if target.id == source.id {
                     continue;
                 }
-                if target
-                    .subscriptions
-                    .iter()
-                    .any(|s| s.as_str() == pub_event.as_str())
-                {
-                    let target_id = sanitize_id(&target.name);
-                    output.push_str(&format!(
-                        "    {} -.->|{}| {}\n",
-                        source_id,
-                        pub_event.as_str(),
-                        target_id
+                if target.subscriptions.iter().any(|s| s.as_str() == topic) {
+                    edges.push((
+                        mermaid_hat_node_id(source.id.as_str()),
+                        topic.to_string(),
+                        mermaid_hat_node_id(target.id.as_str()),
                     ));
                 }
             }
         }
     }
 
-    // NOTE: ralph_publishes is currently unused in the diagram text, but keeping it
-    // computed makes it trivial to add styling/legend for "Ralph can emit" later (e.g., TUI).
-    let _ = ralph_publishes;
+    edges.sort();
+    edges.dedup();
+    for (source_id, topic, target_id) in edges {
+        output.push_str(&format!("    {} -->|{}| {}\n", source_id, topic, target_id));
+    }
 
     output
 }
 
-fn sanitize_id(name: &str) -> String {
-    name.chars().filter(|c| c.is_alphanumeric()).collect()
+fn mermaid_hat_node_id(hat_id: &str) -> String {
+    // 加前缀是为了：
+    // - 避免 hat.id 恰好叫 "Start"/"Ralph" 这类节点名导致冲突
+    // - 避免 hat.id 以数字开头时触发 Mermaid 的标识符解析歧义
+    format!("Hat_{}", sanitize_mermaid_identifier(hat_id))
+}
+
+fn sanitize_mermaid_identifier(raw: &str) -> String {
+    // Mermaid 的标识符规则在不同渲染器/版本里存在差异。
+    // 这里保守地只允许 ASCII [A-Za-z0-9_]，其余字符全部移除。
+    let mut out = String::new();
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        }
+    }
+
+    if out.is_empty() {
+        "hat".to_string()
+    } else {
+        out
+    }
+}
+
+fn escape_mermaid_label(label: &str) -> String {
+    // Mermaid 支持用 `["..."]` 作为 label，这里做最小必要转义：
+    // - `\` 与 `"` 会影响字符串边界
+    // - `\n` 统一转为 `\\n`，避免破坏语法（也更利于 ASCII 渲染器）
+    label
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+fn format_mermaid_node_label(label: &str) -> String {
+    // Mermaid 的 `Node[label]` 语法无法直接包含 `]` 与换行。
+    // 遇到这类情况就回退到带引号的 label，并做必要转义。
+    //
+    // 备注：
+    // - 我们默认优先不用引号，是因为当前 `beautiful-mermaid-rs` 会把引号当成 label 内容输出，
+    //   造成终端图里出现 `"Ralph"` 这种多余引号，阅读体验很差。
+    if label.contains(']') || label.contains('\n') {
+        format!("\"{}\"", escape_mermaid_label(label))
+    } else {
+        label.to_string()
+    }
 }
 
 fn show_hat<W: Write>(
@@ -522,7 +657,7 @@ mod tests {
     use ralph_proto::Hat;
 
     fn mock_hat(name: &str, subs: &[&str], pubs: &[&str]) -> Hat {
-        let mut hat = Hat::new(sanitize_id(name), name);
+        let mut hat = Hat::new(sanitize_mermaid_identifier(name), name);
         hat.description = format!("Description for {name}");
         hat.subscriptions = subs.iter().map(|s| (*s).into()).collect();
         hat.publishes = pubs.iter().map(|s| (*s).into()).collect();
@@ -530,11 +665,12 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_id() {
-        assert_eq!(sanitize_id("My Hat"), "MyHat");
-        assert_eq!(sanitize_id("cool-hat"), "coolhat");
-        assert_eq!(sanitize_id("Hat!@#"), "Hat");
-        assert_eq!(sanitize_id("123"), "123");
+    fn test_sanitize_mermaid_identifier() {
+        assert_eq!(sanitize_mermaid_identifier("My Hat"), "MyHat");
+        assert_eq!(sanitize_mermaid_identifier("cool-hat"), "coolhat");
+        assert_eq!(sanitize_mermaid_identifier("Hat!@#"), "Hat");
+        assert_eq!(sanitize_mermaid_identifier("123"), "123");
+        assert_eq!(sanitize_mermaid_identifier("___"), "___");
     }
 
     #[test]
@@ -586,15 +722,16 @@ mod tests {
         registry.register(mock_hat("A", &["start"], &["mid"]));
         registry.register(mock_hat("B", &["mid"], &["end"]));
 
+        let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &registry, GraphFormat::Mermaid).unwrap();
+        graph_hats(&mut buf, &config, &registry, GraphFormat::Mermaid).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("flowchart LR"));
-        assert!(output.contains("Ralph -->|start| A"));
-        assert!(output.contains("A -->|mid| Ralph"));
-        assert!(output.contains("Ralph -->|mid| B"));
+        assert!(output.contains("Hat_A -->|mid| Hat_B"));
+        assert!(!output.contains("Ralph"));
+        assert!(!output.contains("-.->"));
     }
 
     #[test]
@@ -602,13 +739,14 @@ mod tests {
         let mut registry = HatRegistry::new();
         registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
 
+        let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &registry, GraphFormat::Ascii).unwrap();
+        graph_hats(&mut buf, &config, &registry, GraphFormat::Ascii).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // deterministic output should contain key node names
-        assert!(output.contains("Builder") || output.contains("Ralph"));
+        assert!(output.contains("Builder"));
     }
 
     #[test]
@@ -617,14 +755,59 @@ mod tests {
         registry.register(mock_hat("A", &["start"], &["mid"]));
         registry.register(mock_hat("B", &["mid"], &["end"]));
 
-        let output = generate_mermaid_string(&registry);
+        let config = RalphConfig::default();
+        let output = generate_mermaid_string(&config, &registry);
 
         assert!(output.contains("flowchart LR"));
-        assert!(output.contains("Ralph -->|start| A"));
-        assert!(output.contains("A -->|mid| Ralph"));
-        assert!(output.contains("Ralph -->|mid| B"));
-        // Hat-to-hat connection (A publishes mid, B subscribes to mid)
-        assert!(output.contains("A -.->|mid| B"));
+        assert!(output.contains("Hat_A -->|mid| Hat_B"));
+        assert!(!output.contains("Ralph"));
+        assert!(!output.contains("-.->"));
+    }
+
+    #[test]
+    fn test_generate_mermaid_string_includes_complete_publishes() {
+        let mut registry = HatRegistry::new();
+        registry.register(mock_hat("A", &["start"], &["mid"]));
+        registry.register(mock_hat("B", &["mid"], &["end"]));
+
+        let mut config = RalphConfig::default();
+        config.event_loop.complete_publishes = Some("end".to_string());
+
+        let output = generate_mermaid_string(&config, &registry);
+
+        assert!(output.contains("Complete[complete]"));
+        assert!(output.contains("Hat_B -->|end| Complete"));
+    }
+
+    #[test]
+    fn test_graph_hats_unicode_with_non_ascii_names() {
+        // 回归测试：
+        // - hat.name 含中文/emoji 时，unicode/ascii 渲染不应只剩下 task.start→Ralph
+        // - 关键是 Mermaid 的“节点 ID”必须是 ASCII 安全的，label 才保留中文/emoji
+        let mut registry = HatRegistry::new();
+
+        let mut writer = Hat::new("spec_writer", "📋 规格撰写者");
+        writer.subscriptions = vec!["spec.start".into(), "spec.rejected".into()];
+        writer.publishes = vec!["spec.ready".into()];
+        registry.register(writer);
+
+        let mut reviewer = Hat::new("spec_reviewer", "🔎 规格审阅者");
+        reviewer.subscriptions = vec!["spec.ready".into()];
+        reviewer.publishes = vec!["spec.rejected".into(), "spec.approved".into()];
+        registry.register(reviewer);
+
+        let mut logger = Hat::new("spec_logger", "🧾 规格记录员");
+        logger.subscriptions = vec!["spec.ready".into(), "spec.rejected".into()];
+        registry.register(logger);
+
+        let config = RalphConfig::default();
+        let rendered =
+            render_hat_dag_via_mermaid(&config, &registry, GraphFormat::Unicode).unwrap();
+
+        // 只校验关键内容存在即可，避免对 ASCII/Unicode 画法过度耦合（布局可能随渲染器升级微调）。
+        assert!(rendered.contains("规格撰写者"));
+        assert!(rendered.contains("规格审阅者"));
+        assert!(rendered.contains("规格记录员"));
     }
 
     #[test]

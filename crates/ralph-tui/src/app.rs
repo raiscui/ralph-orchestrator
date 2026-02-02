@@ -134,6 +134,97 @@ fn inner_block(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     }
 }
 
+fn hat_graph_radar_area(
+    content_area: ratatui::layout::Rect,
+    zoomed: bool,
+) -> Option<ratatui::layout::Rect> {
+    // =========================================================================
+    // Hat Graph Radar 的布局策略（右上角覆盖层）
+    //
+    // 目标：
+    // - 默认小窗：像游戏右上角“雷达”，尽量不遮挡正文；
+    // - 放大模式：扩大可视面积，更易读；
+    // - 终端过小：宁可不显示，也不要越界/挤爆布局。
+    // =========================================================================
+
+    // 需要至少能容纳一个带边框的 panel（最小：宽 8，高 5）。
+    if content_area.width < 8 || content_area.height < 5 {
+        return None;
+    }
+
+    let (mut width, mut height) = if zoomed {
+        // 放大：占 content 区域约 2/3，并做上限裁剪，避免超大屏占用过多视线。
+        let w = content_area.width.saturating_mul(2) / 3;
+        let h = content_area.height.saturating_mul(2) / 3;
+        (w.min(120), h.min(40))
+    } else {
+        // 小窗：固定上限尺寸（更像“雷达”），但不超过 content 区域。
+        (content_area.width.min(36), content_area.height.min(10))
+    };
+
+    width = width.max(8).min(content_area.width);
+    height = height.max(5).min(content_area.height);
+    if width < 8 || height < 5 {
+        return None;
+    }
+
+    // 右上角锚定：向左/向下扩张（符合“雷达放大”的直觉）。
+    let x = content_area
+        .x
+        .saturating_add(content_area.width.saturating_sub(width));
+    let y = content_area.y;
+
+    Some(ratatui::layout::Rect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn render_hat_graph_radar_overlay(
+    f: &mut ratatui::Frame,
+    content_area: ratatui::layout::Rect,
+    state: &TuiState,
+    theme: &TuiTheme,
+) -> Option<ratatui::layout::Rect> {
+    let radar = state.hat_graph_radar.as_ref()?;
+    let zoomed = state.hat_graph_zoomed;
+
+    let area = hat_graph_radar_area(content_area, zoomed)?;
+    let inner = inner_block(area);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+
+    let title = if zoomed {
+        "Hat Graph (p: mini)"
+    } else {
+        "Hat Graph (p: zoom)"
+    };
+    let block = panel_block(title, zoomed, theme);
+    f.render_widget(block, area);
+    patch_exabind_panel_border_bg(f.buffer_mut(), area, theme);
+
+    let graph = if zoomed {
+        radar.ascii_full.as_str()
+    } else {
+        radar.ascii_compact.as_str()
+    };
+
+    let lines: Vec<Line> = graph
+        .lines()
+        .take(inner.height as usize)
+        .map(|l| Line::from(Span::styled(l.to_string(), theme.muted())))
+        .collect();
+
+    // 注意：这里不启用自动换行（wrap），因为换行会破坏 ASCII 图的结构。
+    let paragraph = Paragraph::new(lines).style(theme.muted());
+    f.render_widget(paragraph, inner);
+
+    Some(area)
+}
+
 fn request_interrupt(tx: Option<&watch::Sender<bool>>) {
     if let Some(tx) = tx {
         let _ = tx.send(true);
@@ -698,6 +789,12 @@ pub fn dispatch_action(action: Action, state: &mut TuiState, viewport_height: us
         Action::SearchPrev => {
             state.prev_match();
         }
+        Action::ToggleHatGraphZoom => {
+            // 右上角 Hat Graph Radar：只改变 UI 尺寸，不影响任何 orchestration 行为。
+            if state.hat_graph_radar.is_some() {
+                state.hat_graph_zoomed = !state.hat_graph_zoomed;
+            }
+        }
         Action::None => {}
     }
     false
@@ -1120,6 +1217,14 @@ impl App {
                                             // Global keys（注意：Chat 焦点下字符应当进入输入框，不应触发 quit/help）
                                             let focus = state.parallel.focus;
                                             if focus != ParallelFocus::Chat {
+                                                if key.code == KeyCode::Char('p') {
+                                                    // 并行模式：在非 Chat 输入场景下，`p` 用于切换右上角 Hat Graph Radar 的放大/还原。
+                                                    if state.hat_graph_radar.is_some() {
+                                                        state.hat_graph_zoomed =
+                                                            !state.hat_graph_zoomed;
+                                                    }
+                                                    continue;
+                                                }
                                                 if key.code == KeyCode::Char('q') {
                                                     // 并行模式：退出 TUI 时必须退出所有 worker CLI 子进程。
                                                     // 复用 interrupt_tx，让并行 runner 走 killpg(SIGTERM→SIGKILL) 的统一清理路径。
@@ -1616,6 +1721,7 @@ impl App {
                             let mut exabind_instances_area: Option<ratatui::layout::Rect> = None;
                             let mut exabind_output_area: Option<ratatui::layout::Rect> = None;
                             let mut exabind_bottom_area: Option<ratatui::layout::Rect> = None;
+                            let mut exabind_radar_area: Option<ratatui::layout::Rect> = None;
 
                             // 统一背景：先铺一层 app 级背景色，避免切换视图时出现“旧帧残影”或颜色不一致。
                             f.render_widget(Block::new().style(theme.app_bg()), f.area());
@@ -2165,6 +2271,13 @@ impl App {
                             }
                         }
 
+                        // 右上角覆盖层：Hat Graph Radar（ASCII Mermaid）
+                        if let Some(area) =
+                            render_hat_graph_radar_overlay(f, content_area, &state, &theme)
+                        {
+                            exabind_radar_area = Some(area);
+                        }
+
                         // Render footer
                         f.render_widget(footer::render(&state, theme), chunks[2]);
 
@@ -2191,6 +2304,9 @@ impl App {
                                         patch_exabind_panel_border_bg(f.buffer_mut(), area, &theme);
                                     }
                                     if let Some(area) = exabind_bottom_area {
+                                        patch_exabind_panel_border_bg(f.buffer_mut(), area, &theme);
+                                    }
+                                    if let Some(area) = exabind_radar_area {
                                         patch_exabind_panel_border_bg(f.buffer_mut(), area, &theme);
                                     }
                                 }
@@ -2447,6 +2563,19 @@ mod tests {
         dispatch_action(Action::DismissHelp, &mut state, 10);
 
         assert!(!state.show_help);
+    }
+
+    #[test]
+    fn dispatch_action_toggle_hat_graph_zoom_toggles_when_radar_present() {
+        let mut state = TuiState::new();
+        state.set_hat_graph_radar("compact".to_string(), "full".to_string());
+        assert!(!state.hat_graph_zoomed);
+
+        dispatch_action(Action::ToggleHatGraphZoom, &mut state, 10);
+        assert!(state.hat_graph_zoomed);
+
+        dispatch_action(Action::ToggleHatGraphZoom, &mut state, 10);
+        assert!(!state.hat_graph_zoomed);
     }
 
     #[test]
