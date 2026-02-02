@@ -652,6 +652,42 @@ tui:
 
 ---
 
+## 2026-02-02 22:13 +0800｜实现完成：tui-codeblock-syntax-highlighting（仅 fenced code block 做语法高亮）
+
+### 总体结论
+- 选择了 `tree-sitter-highlight` 做 code block 语法高亮（闭合后一次性高亮）。
+- 非 code block 的 Markdown 渲染仍然走现有 `termimad`（保持行为不变、改动面可控）。
+
+### 关键实现点
+- 语言支持（首期固定）：
+  - `rust`
+  - `sh`/`bash`
+  - `json`
+  - `yaml`/`yml`
+  - `toml`
+  - `python`/`py`
+  - `js`/`javascript`、`ts`/`typescript`
+- 分段器（state machine）：
+  - 引入行缓存，只对“完整行（以 \\n 结尾）”判断 fence，避免 chunk 边界误判。
+  - 未闭合 code block：统一 code 样式，不做语法高亮（避免流式抖动与重复开销）。
+  - closing fence 到来：对该 code block 一次性语法高亮并冻结。
+- 冻结缓存（性能关键）：
+  - `TuiStreamHandler` 改为“冻结块 + 实时尾部”模型：历史块不因后续 chunk 重渲染。
+  - 已闭合 code block 的渲染结果保持不变（后续 chunk 只追加，不修改历史）。
+- stdout/TUI 一致性：
+  - 以 ANSI 作为共享中间表示：stdout pretty 直接输出 ANSI；TUI 走 `ansi-to-tui` 解析回 spans。
+  - stdout pretty 与 TUI 复用同一套 lang normalize / 降级 / 高亮逻辑。
+- highlights queries：
+  - 直接使用各 grammar crate 内置的 `*_QUERY` 常量（离线可用、构建可重复），不再额外 vendor queries 文件。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
 ## 2026-02-02 16:06 +0800｜Tenere（pythops/tenere）语法高亮实现：bat 输出 ANSI → ansi-to-tui 转 Text
 
 ### 结论先行

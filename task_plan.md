@@ -255,3 +255,35 @@
 **已完成**：
 - 已生成 `openspec/changes/tui-codeblock-syntax-highlighting/` 下的全部 artifacts（proposal/design/specs/tasks）
 - 当前 change 已处于 “All artifacts complete” 状态，可进入 `/opsx:apply` 开始实现
+
+---
+
+## 2026-02-02 21:09 +0800｜实施：tui-codeblock-syntax-highlighting（只高亮 fenced code block）
+
+### 目标（来自 OpenSpec）
+
+- 渲染模式为 Rendered 时：
+  - 对 fenced code block 做语法高亮（支持：rust、bash/sh、json、yaml/yml、toml、python/py、js/javascript、ts/typescript）。
+  - 未闭合 code block 不做语法高亮（只用统一 code 样式），闭合后一次性高亮并冻结。
+  - TUI 与 stdout pretty 输出语义一致（都走同一套高亮与降级逻辑）。
+- `--plain` 模式：
+  - fences 原样可见，且不产生 code block 语法高亮 ANSI。
+- 性能优先：
+  - 避免每个流式 chunk 都全量重渲染历史内容（引入冻结块/缓存）。
+
+### 阶段（按 tasks.md 拆分）
+
+- [x] 阶段1：依赖与 queries（tree-sitter + 语法查询离线化）
+- [x] 阶段2：分段器（跨 chunk fence 识别 + lang normalize + 降级）
+- [x] 阶段3：高亮渲染器（闭合后一次性高亮 + ANSI 输出）
+- [x] 阶段4：集成到 TUI/stdout（冻结块/缓存 + 一致性）
+- [x] 阶段5：回归测试 + 门禁验证（fmt/clippy/test/smoke_runner）
+
+### 当前状态
+
+**已完成（All Done）**：
+- Rendered 模式下 fenced code block 已支持 tree-sitter 语法高亮（闭合后一次性高亮）。
+- 未闭合 code block 始终保持统一 code 样式（不高亮），closing fence 到来后才高亮。
+- `TuiStreamHandler` 已引入“冻结块/缓存”，避免每个 chunk 全量重渲染历史内容。
+- stdout pretty 已复用同一套渲染链路（ANSI 中间表示，行为与 TUI 一致）。
+- 已补回归测试并通过 fmt/clippy/test + replay smoke runner。

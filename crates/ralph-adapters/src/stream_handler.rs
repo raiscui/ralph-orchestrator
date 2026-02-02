@@ -13,9 +13,11 @@ use ratatui::{
     style::{Color as RatatuiColor, Style},
     text::{Line, Span},
 };
+use std::cell::RefCell;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use termimad::{Alignment, MadSkin};
+use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
 /// Detects if text contains ANSI escape sequences.
 ///
@@ -199,6 +201,416 @@ fn default_markdown_skin() -> MadSkin {
     skin
 }
 
+// ============================================================================
+// Fenced Code Block Syntax Highlighting (tree-sitter-highlight)
+//
+// 设计目标：
+// - 只对 Markdown fenced code block（```lang ... ```）内部做语法高亮。
+// - 未闭合的 code block（流式阶段）不做语法高亮：只用统一 code 样式展示，避免“每个 chunk 反复高亮”。
+// - 语法高亮输出统一产出为 ANSI 文本：
+//   - stdout pretty：直接输出 ANSI（最省事，且与现有 termimad 路线一致）
+//   - TUI：复用 `ansi-to-tui` 把 ANSI 解析回 `ratatui::Line`
+// - 为了减少开销：每个线程只初始化一次高亮器与配置（thread_local）。
+// ============================================================================
+
+/// 我们支持的 fenced code block 语言集合（首期范围）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeBlockLanguage {
+    Rust,
+    Bash,
+    Json,
+    Yaml,
+    Toml,
+    Python,
+    JavaScript,
+    TypeScript,
+}
+
+impl CodeBlockLanguage {
+    /// 把 ```lang 里的语言标签规范化到我们支持的集合。
+    ///
+    /// 注意：
+    /// - 这里是“显示层”能力，不影响事件解析等逻辑。
+    /// - 未识别的语言会降级为“统一 code 样式”（不做语法高亮）。
+    fn from_lang_tag(lang_tag: &str) -> Option<Self> {
+        let normalized = lang_tag.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "rust" => Some(Self::Rust),
+            "sh" | "bash" => Some(Self::Bash),
+            "json" => Some(Self::Json),
+            "yaml" | "yml" => Some(Self::Yaml),
+            "toml" => Some(Self::Toml),
+            "python" | "py" => Some(Self::Python),
+            "javascript" | "js" => Some(Self::JavaScript),
+            "typescript" | "ts" => Some(Self::TypeScript),
+            _ => None,
+        }
+    }
+}
+
+/// 一组简单的 RGB 颜色（用于生成 ANSI 24-bit 前景色）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rgb {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+impl Rgb {
+    const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
+/// code block 语法高亮的调色板（与 `sublime_monokai_extended` 保持一致的“3% 蓝调混合”）。
+///
+/// 说明：
+/// - 这里故意不复用 `termimad::Color`，因为我们需要输出 ANSI（24-bit RGB）。
+/// - 值的来源与 `default_markdown_skin()` 一致，确保 stdout/TUI 色彩语义统一。
+mod codeblock_palette {
+    use super::Rgb;
+
+    const MIX_R: u8 = 0x44;
+    const MIX_G: u8 = 0x93;
+    const MIX_B: u8 = 0xf8;
+
+    const MIX_WEIGHT_PERCENT: u16 = 3;
+    const BASE_WEIGHT_PERCENT: u16 = 100 - MIX_WEIGHT_PERCENT;
+
+    const fn mix_channel(base: u8, mix: u8) -> u8 {
+        // 四舍五入：+50 再 /100
+        ((base as u16 * BASE_WEIGHT_PERCENT + mix as u16 * MIX_WEIGHT_PERCENT + 50) / 100) as u8
+    }
+
+    const fn mix_rgb(r: u8, g: u8, b: u8) -> Rgb {
+        Rgb::new(
+            mix_channel(r, MIX_R),
+            mix_channel(g, MIX_G),
+            mix_channel(b, MIX_B),
+        )
+    }
+
+    pub const DIMMED2: Rgb = mix_rgb(0x56, 0x56, 0x56);
+
+    pub const TITLE: Rgb = mix_rgb(0xff, 0xd8, 0x66);
+    pub const HEADING: Rgb = mix_rgb(0xfc, 0x98, 0x67);
+    pub const QUOTE: Rgb = mix_rgb(0x66, 0xd9, 0xef);
+    pub const RAW_INLINE: Rgb = mix_rgb(0x78, 0xdc, 0xe8);
+    pub const BOLD: Rgb = mix_rgb(0xa9, 0xdc, 0x76);
+    pub const ITALIC: Rgb = mix_rgb(0xe4, 0x2e, 0x70);
+}
+
+/// tree-sitter-highlight 使用的 highlight name 列表（必须覆盖我们支持语言 queries 里出现的 capture 名称）。
+///
+/// 说明：
+/// - `HighlightConfiguration::configure` 需要一份“所有可能的 highlight 名称”列表；
+/// - 若 queries 里使用了某个 `@name`，但此列表不包含它，该捕获将不会产生高亮事件；
+/// - 这里我们用“从支持语言 queries 抽取出来的去重集合”，避免漏项。
+const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
+    "_name",
+    "attribute",
+    "boolean",
+    "comment",
+    "comment.documentation",
+    "constant",
+    "constant.builtin",
+    "constructor",
+    "definition.class",
+    "definition.constant",
+    "definition.function",
+    "definition.interface",
+    "definition.macro",
+    "definition.method",
+    "definition.module",
+    "doc",
+    "embedded",
+    "escape",
+    "function",
+    "function.builtin",
+    "function.macro",
+    "function.method",
+    "glimmer",
+    "injection.content",
+    "injection.language",
+    "keyword",
+    "label",
+    "local.definition",
+    "local.reference",
+    "local.scope",
+    "name",
+    "number",
+    "operator",
+    "property",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "punctuation.special",
+    "reference.call",
+    "reference.class",
+    "reference.implementation",
+    "reference.type",
+    "string",
+    "string.special",
+    "string.special.key",
+    "tag",
+    "type",
+    "type.builtin",
+    "variable",
+    "variable.builtin",
+    "variable.parameter",
+];
+
+/// 把 highlight name 映射到 ANSI 前景色（best-effort）。
+///
+/// 设计取舍：
+/// - 不追求把所有 token 都上色（避免“彩虹噪音”）。
+/// - 重点给：keyword / string / comment / type / function / constant / number / boolean。
+fn color_for_highlight_name(name: &str) -> Option<Rgb> {
+    use codeblock_palette as p;
+
+    // 注释：弱化
+    if name == "comment" || name.starts_with("comment.") || name == "doc" {
+        return Some(p::DIMMED2);
+    }
+
+    // 字符串：偏黄
+    if name == "string" || name.starts_with("string.") {
+        return Some(p::TITLE);
+    }
+
+    // 关键字：偏粉/红
+    if name == "keyword" {
+        return Some(p::ITALIC);
+    }
+
+    // 类型：偏橙
+    if name == "type" || name.starts_with("type.") || name.starts_with("definition.interface") {
+        return Some(p::HEADING);
+    }
+
+    // 函数：偏绿
+    if name.starts_with("function") || name.starts_with("definition.function") {
+        return Some(p::BOLD);
+    }
+
+    // 常量 / 布尔 / 数字：偏青蓝
+    if name.starts_with("constant") || name == "boolean" || name == "number" {
+        return Some(p::QUOTE);
+    }
+
+    // 其它：不强制上色（保持 base code 色）
+    None
+}
+
+fn ansi_set_fg(rgb: Rgb) -> String {
+    format!("\x1b[38;2;{};{};{}m", rgb.r, rgb.g, rgb.b)
+}
+
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// 一个线程内复用的 code block 语法高亮器（高亮配置初始化开销只付一次）。
+struct CodeBlockHighlighter {
+    highlighter: Highlighter,
+    rust: HighlightConfiguration,
+    bash: HighlightConfiguration,
+    json: HighlightConfiguration,
+    yaml: HighlightConfiguration,
+    toml: HighlightConfiguration,
+    python: HighlightConfiguration,
+    javascript: HighlightConfiguration,
+    typescript: HighlightConfiguration,
+}
+
+impl CodeBlockHighlighter {
+    fn new() -> anyhow::Result<Self> {
+        // 说明：HighlightConfiguration::new 会解析 queries；
+        // 我们把它集中在初始化阶段完成，运行期只做 highlight()。
+        let mut rust = HighlightConfiguration::new(
+            tree_sitter_rust::LANGUAGE.into(),
+            "rust",
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            tree_sitter_rust::INJECTIONS_QUERY,
+            "",
+        )?;
+        rust.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+
+        let mut bash = HighlightConfiguration::new(
+            tree_sitter_bash::LANGUAGE.into(),
+            "bash",
+            tree_sitter_bash::HIGHLIGHT_QUERY,
+            "",
+            "",
+        )?;
+        bash.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+
+        let mut json = HighlightConfiguration::new(
+            tree_sitter_json::LANGUAGE.into(),
+            "json",
+            tree_sitter_json::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )?;
+        json.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+
+        let mut yaml = HighlightConfiguration::new(
+            tree_sitter_yaml::LANGUAGE.into(),
+            "yaml",
+            tree_sitter_yaml::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )?;
+        yaml.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+
+        let mut toml = HighlightConfiguration::new(
+            tree_sitter_toml_ng::LANGUAGE.into(),
+            "toml",
+            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )?;
+        toml.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+
+        let mut python = HighlightConfiguration::new(
+            tree_sitter_python::LANGUAGE.into(),
+            "python",
+            tree_sitter_python::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )?;
+        python.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+
+        let mut javascript = HighlightConfiguration::new(
+            tree_sitter_javascript::LANGUAGE.into(),
+            "javascript",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::INJECTIONS_QUERY,
+            tree_sitter_javascript::LOCALS_QUERY,
+        )?;
+        javascript.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+
+        // TypeScript crate 同时包含 TS/TSX；这里先按 spec 支持 TS（ts/typescript）。
+        let mut typescript = HighlightConfiguration::new(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            "typescript",
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            "",
+            tree_sitter_typescript::LOCALS_QUERY,
+        )?;
+        typescript.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+
+        Ok(Self {
+            highlighter: Highlighter::new(),
+            rust,
+            bash,
+            json,
+            yaml,
+            toml,
+            python,
+            javascript,
+            typescript,
+        })
+    }
+
+    fn highlighter_and_config(
+        &mut self,
+        language: CodeBlockLanguage,
+    ) -> (&mut Highlighter, &HighlightConfiguration) {
+        match language {
+            CodeBlockLanguage::Rust => (&mut self.highlighter, &self.rust),
+            CodeBlockLanguage::Bash => (&mut self.highlighter, &self.bash),
+            CodeBlockLanguage::Json => (&mut self.highlighter, &self.json),
+            CodeBlockLanguage::Yaml => (&mut self.highlighter, &self.yaml),
+            CodeBlockLanguage::Toml => (&mut self.highlighter, &self.toml),
+            CodeBlockLanguage::Python => (&mut self.highlighter, &self.python),
+            CodeBlockLanguage::JavaScript => (&mut self.highlighter, &self.javascript),
+            CodeBlockLanguage::TypeScript => (&mut self.highlighter, &self.typescript),
+        }
+    }
+
+    /// 把 code block 渲染为 ANSI 文本（包含颜色序列）。
+    ///
+    /// 规则：
+    /// - `language=None` 或未知语言：统一 code 样式（无语法高亮）。
+    /// - `language=Some(x)`：闭合后一次性高亮（tree-sitter-highlight）。
+    fn render_code_block_to_ansi(
+        &mut self,
+        language: Option<CodeBlockLanguage>,
+        code: &str,
+    ) -> String {
+        // base：与 Markdown code block 统一用 RAW_INLINE（青色）作为默认前景色
+        let base_fg = codeblock_palette::RAW_INLINE;
+        let mut out = String::new();
+        out.push_str(&ansi_set_fg(base_fg));
+
+        let Some(language) = language else {
+            out.push_str(code);
+            out.push_str(ANSI_RESET);
+            return out;
+        };
+
+        let (highlighter, config) = self.highlighter_and_config(language);
+        let highlights = highlighter.highlight(config, code.as_bytes(), None, |_| None);
+
+        let Ok(highlights) = highlights else {
+            // 语法高亮失败：安全降级为统一 code 样式（不 panic、不丢内容）
+            out.push_str(code);
+            out.push_str(ANSI_RESET);
+            return out;
+        };
+
+        let mut style_stack: Vec<Option<Rgb>> = Vec::new();
+        let mut current_fg: Rgb = base_fg;
+
+        for event in highlights {
+            let Ok(event) = event else {
+                // 单个事件失败也降级：直接输出原始 code（保持可用性）
+                continue;
+            };
+
+            match event {
+                HighlightEvent::Source { start, end } => {
+                    // 根据当前栈顶颜色决定本段输出的前景色
+                    let desired_fg = style_stack.last().and_then(|c| *c).unwrap_or(base_fg);
+
+                    if desired_fg != current_fg {
+                        out.push_str(&ansi_set_fg(desired_fg));
+                        current_fg = desired_fg;
+                    }
+
+                    // 安全：code 来自 UTF-8 文本；tree-sitter 给的是 byte offset
+                    out.push_str(&code[start..end]);
+                }
+                HighlightEvent::HighlightStart(highlight) => {
+                    let name = TREE_SITTER_HIGHLIGHT_NAMES
+                        .get(highlight.0)
+                        .copied()
+                        .unwrap_or("");
+                    style_stack.push(color_for_highlight_name(name));
+                }
+                HighlightEvent::HighlightEnd => {
+                    let _ = style_stack.pop();
+                }
+            }
+        }
+
+        // 结束时 reset，避免影响后续文本
+        out.push_str(ANSI_RESET);
+        out
+    }
+}
+
+thread_local! {
+    /// 说明：tree-sitter-highlight 建议“每线程一个 Highlighter”。
+    ///
+    /// 我们这里用 thread_local 避免跨线程共享（也避免加锁），同时把初始化成本摊平到首次使用。
+    static TLS_CODEBLOCK_HIGHLIGHTER: RefCell<CodeBlockHighlighter> = RefCell::new(
+        CodeBlockHighlighter::new().expect("CodeBlockHighlighter init should not fail")
+    );
+}
+
+fn with_codeblock_highlighter<R>(f: impl FnOnce(&mut CodeBlockHighlighter) -> R) -> R {
+    TLS_CODEBLOCK_HIGHLIGHTER.with(|cell| f(&mut cell.borrow_mut()))
+}
+
 /// Session completion result data.
 #[derive(Debug, Clone)]
 pub struct SessionResult {
@@ -273,8 +685,7 @@ impl PrettyStreamHandler {
         // termimad 会把 Markdown 渲染成带 ANSI 的终端文本（并在给定宽度下 hard-wrap）。
         // 对于非 TUI（stdout）场景，直接输出 ANSI 最简单，
         // 也避免了“ratatui::Line → ANSI”的二次转换带来的额外开销与差异。
-        let skin = default_markdown_skin();
-        let rendered = skin.text(&text, Some(wrap_width)).to_string();
+        let rendered = render_markdown_with_codeblocks_to_ansi(&text, wrap_width);
 
         let _ = self.stdout.write_all(rendered.as_bytes());
         let _ = self.stdout.flush();
@@ -479,6 +890,109 @@ fn ansi_text_to_lines(text: &str) -> Vec<Line<'static>> {
     }
 }
 
+/// 判断一行是否是 fenced code block 的 opening fence（例如 ```rust）。
+///
+/// 返回：语言标签（可能为空字符串）。
+fn parse_opening_fence_lang_tag(line: &str) -> Option<&str> {
+    // Markdown 允许最多 3 个前导空格；超过则可能是缩进代码块或列表嵌套，先不强行识别。
+    let trimmed = line.trim_start_matches(' ');
+    let leading_spaces = line.len().saturating_sub(trimmed.len());
+    if leading_spaces > 3 {
+        return None;
+    }
+
+    let rest = trimmed.strip_prefix("```")?;
+    Some(rest.trim())
+}
+
+/// 判断一行是否是 fenced code block 的 closing fence（例如 ```）。
+fn is_closing_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start_matches(' ');
+    let leading_spaces = line.len().saturating_sub(trimmed.len());
+    if leading_spaces > 3 {
+        return false;
+    }
+
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return false;
+    };
+
+    // closing fence 允许 trailing spaces，但不允许语言标签
+    rest.trim().is_empty()
+}
+
+/// 把 Markdown 文本渲染为 ANSI，并在 fenced code block 内做语法高亮（best-effort）。
+///
+/// 关键规则（对齐 OpenSpec）：
+/// - 已闭合的 code block：做语法高亮（若语言支持）；未知语言安全降级为统一 code 样式。
+/// - 未闭合的 code block：不做语法高亮，只用统一 code 样式显示，避免流式阶段反复高亮。
+fn render_markdown_with_codeblocks_to_ansi(text: &str, wrap_width: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let skin = default_markdown_skin();
+
+    with_codeblock_highlighter(|highlighter| {
+        let mut out = String::new();
+
+        let mut markdown_buf = String::new();
+        let mut in_code_block = false;
+        let mut code_lang: Option<CodeBlockLanguage> = None;
+        let mut code_buf = String::new();
+
+        for line in text.split_inclusive('\n') {
+            if !in_code_block {
+                if let Some(lang_tag) = parse_opening_fence_lang_tag(line) {
+                    // 进入 code block：先把此前的 Markdown 段落渲染输出并清空缓存。
+                    if !markdown_buf.is_empty() {
+                        out.push_str(&skin.text(&markdown_buf, Some(wrap_width)).to_string());
+                        markdown_buf.clear();
+                    }
+
+                    in_code_block = true;
+                    code_lang = CodeBlockLanguage::from_lang_tag(lang_tag);
+                    code_buf.clear();
+                    continue;
+                }
+
+                markdown_buf.push_str(line);
+                continue;
+            }
+
+            // in_code_block == true
+            if is_closing_fence_line(line) {
+                // code block 闭合：此时才做语法高亮（一次性）。
+                let ansi = highlighter.render_code_block_to_ansi(code_lang, &code_buf);
+                out.push_str(&ansi);
+
+                // 确保 code block 与后续内容“至少按行分隔”
+                if !code_buf.ends_with('\n') {
+                    out.push('\n');
+                }
+
+                in_code_block = false;
+                code_lang = None;
+                code_buf.clear();
+                continue;
+            }
+
+            code_buf.push_str(line);
+        }
+
+        // 处理尾部残留
+        if in_code_block {
+            // 未闭合 code block：不做语法高亮，按统一 code 样式输出（安全降级）
+            let ansi = highlighter.render_code_block_to_ansi(None, &code_buf);
+            out.push_str(&ansi);
+        } else if !markdown_buf.is_empty() {
+            out.push_str(&skin.text(&markdown_buf, Some(wrap_width)).to_string());
+        }
+
+        out
+    })
+}
+
 fn render_markdown_to_lines_best_effort(text: &str, wrap_width: u16) -> Vec<Line<'static>> {
     render_markdown_to_lines(text, wrap_width).unwrap_or_else(|| plain_text_to_lines(text))
 }
@@ -487,9 +1001,10 @@ fn render_markdown_to_lines(text: &str, wrap_width: u16) -> Option<Vec<Line<'sta
     let wrap_width = usize::from(normalize_wrap_width(wrap_width)).max(3);
 
     // termimad 会把 Markdown 渲染成带 ANSI 的终端文本（并在给定宽度下 hard-wrap）。
+    // 在 fenced code block 内，我们叠加 tree-sitter 语法高亮（输出同样是 ANSI）。
+    //
     // 然后我们再把 ANSI 解析回 ratatui Lines，以便在 TUI 内渲染。
-    let skin = default_markdown_skin();
-    let rendered = skin.text(text, Some(wrap_width)).to_string();
+    let rendered = render_markdown_with_codeblocks_to_ansi(text, wrap_width);
 
     match rendered.as_str().into_text() {
         Ok(parsed_text) => Some(
@@ -540,13 +1055,210 @@ pub fn render_text_to_lines(
     }
 }
 
+// ============================================================================
+// Streaming fenced code block segmenter (state machine)
+//
+// 设计目标：
+// - 跨 chunk 识别 fenced code block（```lang ... ```）。
+// - 未闭合阶段：只“识别”，不做语法高亮（高亮在 closing fence 时一次性进行）。
+// - 行缓存：只对“完整行（以 \\n 结尾）”做 fence 判断，避免 chunk 边界把 ``` 切开导致误判。
+// - 分段输出：当遇到 opening/closing fence 时产出“可冻结的段”（Markdown 段 / 已闭合 code block 段）。
+// ============================================================================
+
+#[derive(Debug)]
+enum FencedCodeBlockSegment {
+    Markdown(String),
+    CodeBlock {
+        language: Option<CodeBlockLanguage>,
+        code: String,
+        /// 是否已经遇到 closing fence。
+        ///
+        /// - `true`：允许做语法高亮（language 支持时）。
+        /// - `false`：必须禁用语法高亮（即使 language 是支持的）。
+        is_closed: bool,
+    },
+}
+
+#[derive(Debug, Default)]
+struct FencedCodeBlockStreamSegmenter {
+    /// chunk 级别的行缓存：保存“不以 \\n 结尾”的尾部残片。
+    pending_line_fragment: String,
+    /// fence 外的 Markdown 累积缓冲。
+    markdown_buf: String,
+    /// 是否处于 fenced code block 内部。
+    in_code_block: bool,
+    /// 当前 code block 的语言（normalize 后）。
+    code_lang: Option<CodeBlockLanguage>,
+    /// 当前 code block 的内容累积缓冲（仅包含 fence 内部，不含 ``` 行）。
+    code_buf: String,
+}
+
+impl FencedCodeBlockStreamSegmenter {
+    fn push_chunk(&mut self, chunk: &str) -> Vec<FencedCodeBlockSegment> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+
+        self.pending_line_fragment.push_str(chunk);
+        let buffer = std::mem::take(&mut self.pending_line_fragment);
+
+        let mut segments = Vec::new();
+
+        for part in buffer.split_inclusive('\n') {
+            if part.ends_with('\n') {
+                self.process_complete_line(part, &mut segments);
+            } else {
+                // 不完整的行：留到下一个 chunk 再判断是否是 fence。
+                self.pending_line_fragment.push_str(part);
+            }
+        }
+
+        segments
+    }
+
+    fn drain_all(&mut self) -> Vec<FencedCodeBlockSegment> {
+        let mut segments = Vec::new();
+
+        // 先把尾部残片并入当前缓冲（但它仍然“不是完整行”，因此不会触发 fence 识别）。
+        if !self.pending_line_fragment.is_empty() {
+            if self.in_code_block {
+                self.code_buf.push_str(&self.pending_line_fragment);
+            } else {
+                self.markdown_buf.push_str(&self.pending_line_fragment);
+            }
+            self.pending_line_fragment.clear();
+        }
+
+        if self.in_code_block {
+            if !self.code_buf.is_empty() {
+                segments.push(FencedCodeBlockSegment::CodeBlock {
+                    language: self.code_lang,
+                    code: std::mem::take(&mut self.code_buf),
+                    is_closed: false,
+                });
+            }
+        } else if !self.markdown_buf.is_empty() {
+            segments.push(FencedCodeBlockSegment::Markdown(std::mem::take(
+                &mut self.markdown_buf,
+            )));
+        }
+
+        // drain 之后，重置为 OUTSIDE 状态（跨 tool call / error 时与旧行为一致：上下文断开）。
+        self.in_code_block = false;
+        self.code_lang = None;
+        self.code_buf.clear();
+        self.markdown_buf.clear();
+
+        segments
+    }
+
+    fn process_complete_line(&mut self, line: &str, segments: &mut Vec<FencedCodeBlockSegment>) {
+        if !self.in_code_block {
+            if let Some(lang_tag) = parse_opening_fence_lang_tag(line) {
+                // opening fence：先冻结此前累积的 Markdown 段（不含 fence 行）。
+                if !self.markdown_buf.is_empty() {
+                    segments.push(FencedCodeBlockSegment::Markdown(std::mem::take(
+                        &mut self.markdown_buf,
+                    )));
+                }
+
+                self.in_code_block = true;
+                self.code_lang = CodeBlockLanguage::from_lang_tag(lang_tag);
+                self.code_buf.clear();
+                return;
+            }
+
+            self.markdown_buf.push_str(line);
+
+            // 额外优化：遇到空行时冻结一次 Markdown 段，避免长回答在流式阶段持续全量重渲染。
+            if line.trim().is_empty() {
+                segments.push(FencedCodeBlockSegment::Markdown(std::mem::take(
+                    &mut self.markdown_buf,
+                )));
+            }
+
+            return;
+        }
+
+        // in_code_block == true
+        if is_closing_fence_line(line) {
+            segments.push(FencedCodeBlockSegment::CodeBlock {
+                language: self.code_lang,
+                code: std::mem::take(&mut self.code_buf),
+                is_closed: true,
+            });
+
+            self.in_code_block = false;
+            self.code_lang = None;
+            self.code_buf.clear();
+            return;
+        }
+
+        self.code_buf.push_str(line);
+    }
+
+    fn live_segment(&self) -> Option<FencedCodeBlockSegment> {
+        if self.in_code_block {
+            if self.code_buf.is_empty() && self.pending_line_fragment.is_empty() {
+                return None;
+            }
+
+            let mut code = self.code_buf.clone();
+            code.push_str(&self.pending_line_fragment);
+            Some(FencedCodeBlockSegment::CodeBlock {
+                language: self.code_lang,
+                code,
+                is_closed: false,
+            })
+        } else {
+            if self.markdown_buf.is_empty() && self.pending_line_fragment.is_empty() {
+                return None;
+            }
+
+            let mut markdown = self.markdown_buf.clone();
+            markdown.push_str(&self.pending_line_fragment);
+            Some(FencedCodeBlockSegment::Markdown(markdown))
+        }
+    }
+}
+
+// ============================================================================
+// Frozen blocks for TUI streaming (avoid re-rendering history)
+// ============================================================================
+
+#[derive(Debug)]
+enum FrozenTextKind {
+    /// 原始文本（Plain / ANSI passthrough）。
+    PlainText(String),
+    /// fence 外的 Markdown 段（Rendered 模式下使用 termimad 渲染）。
+    MarkdownText(String),
+    /// fenced code block 段（closing fence 到来后才允许语法高亮）。
+    CodeBlock {
+        language: Option<CodeBlockLanguage>,
+        code: String,
+        is_closed: bool,
+    },
+}
+
+#[derive(Debug)]
+struct FrozenTextBlock {
+    kind: FrozenTextKind,
+    /// 当前渲染宽度下，该块占用的行数（用于增量更新/重建）。
+    line_len: usize,
+}
+
+impl FrozenTextBlock {
+    fn new(kind: FrozenTextKind, line_len: usize) -> Self {
+        Self { kind, line_len }
+    }
+}
+
 /// A content block in the chronological stream.
 ///
 /// Used to preserve ordering between text and non-text content (tool calls, errors).
-#[derive(Clone)]
 enum ContentBlock {
-    /// Markdown/ANSI text that was accumulated before being frozen
-    Text(String),
+    /// 一段已冻结的文本块（不会因后续 chunk 到来而重渲染/重高亮）
+    Text(FrozenTextBlock),
     /// A single non-text line (tool call, error, completion summary, etc.)
     NonText(Line<'static>),
 }
@@ -563,8 +1275,14 @@ enum ContentBlock {
 /// **Chronological ordering**: When a tool call arrives, the current text buffer
 /// is "frozen" into a content block, preserving the order in which events arrived.
 pub struct TuiStreamHandler {
-    /// Buffer for accumulating current markdown text (not yet frozen)
-    current_text_buffer: String,
+    /// fenced code block 分段器（仅 Rendered 且非 ANSI passthrough 时启用）。
+    segmenter: FencedCodeBlockStreamSegmenter,
+    /// 当前仍在累积、尚未冻结的原始文本（Plain 模式或 ANSI passthrough）。
+    raw_text_buffer: String,
+    /// 一旦检测到 ANSI，本段文本会进入 passthrough：
+    /// - 继续保留 ANSI（通过 `ansi-to-tui`）
+    /// - 禁用 Markdown 渲染与 code block 语法高亮（避免“ANSI+Markdown”混合导致吞样式）
+    ansi_passthrough: bool,
     /// Chronological sequence of content blocks (frozen text + non-text events)
     blocks: Vec<ContentBlock>,
     /// Verbose mode (show tool results)
@@ -573,6 +1291,12 @@ pub struct TuiStreamHandler {
     render_mode: MarkdownRenderMode,
     /// Collected output lines for rendering
     lines: Arc<Mutex<Vec<Line<'static>>>>,
+    /// 当前用于缓存的 wrap 宽度（终端 resize 时会触发重建）。
+    cached_wrap_width: u16,
+    /// 当前 shared lines 中“冻结部分”的行数（用于增量刷新尾部）。
+    frozen_line_len: usize,
+    /// 当前 shared lines 中“实时部分”的行数（仅用于调试/断言）。
+    live_line_len: usize,
 }
 
 impl TuiStreamHandler {
@@ -586,12 +1310,18 @@ impl TuiStreamHandler {
 
     /// Creates a new TUI handler with explicit render mode.
     pub fn new_with_mode(verbose: bool, render_mode: MarkdownRenderMode) -> Self {
+        let wrap_width = terminal_wrap_width();
         Self {
-            current_text_buffer: String::new(),
+            segmenter: FencedCodeBlockStreamSegmenter::default(),
+            raw_text_buffer: String::new(),
+            ansi_passthrough: false,
             blocks: Vec::new(),
             verbose,
             render_mode,
             lines: Arc::new(Mutex::new(Vec::new())),
+            cached_wrap_width: wrap_width,
+            frozen_line_len: 0,
+            live_line_len: 0,
         }
     }
 
@@ -608,12 +1338,18 @@ impl TuiStreamHandler {
         lines: Arc<Mutex<Vec<Line<'static>>>>,
         render_mode: MarkdownRenderMode,
     ) -> Self {
+        let wrap_width = terminal_wrap_width();
         Self {
-            current_text_buffer: String::new(),
+            segmenter: FencedCodeBlockStreamSegmenter::default(),
+            raw_text_buffer: String::new(),
+            ansi_passthrough: false,
             blocks: Vec::new(),
             verbose,
             render_mode,
             lines,
+            cached_wrap_width: wrap_width,
+            frozen_line_len: 0,
+            live_line_len: 0,
         }
     }
 
@@ -624,7 +1360,8 @@ impl TuiStreamHandler {
 
     /// Flushes any buffered markdown text by re-parsing and updating lines.
     pub fn flush_text_buffer(&mut self) {
-        self.update_lines();
+        self.freeze_current_text();
+        self.refresh_live_lines();
     }
 
     /// Freezes the current text buffer into a content block.
@@ -632,48 +1369,200 @@ impl TuiStreamHandler {
     /// This is called when a non-text event (tool call, error) arrives,
     /// ensuring that text before the event stays before it in the output.
     fn freeze_current_text(&mut self) {
-        if !self.current_text_buffer.is_empty() {
-            self.blocks
-                .push(ContentBlock::Text(self.current_text_buffer.clone()));
-            self.current_text_buffer.clear();
+        // Plain：原样冻结（Markdown 控制符可见，但 ANSI 仍会被解析为样式）。
+        if self.render_mode == MarkdownRenderMode::Plain {
+            if self.raw_text_buffer.is_empty() {
+                return;
+            }
+
+            let text = std::mem::take(&mut self.raw_text_buffer);
+            self.append_frozen_text_blocks(vec![FrozenTextKind::PlainText(text)]);
+            self.ansi_passthrough = false;
+            self.segmenter = FencedCodeBlockStreamSegmenter::default();
+            return;
+        }
+
+        // Rendered + ANSI passthrough：本段按 Plain 渲染（保留 ANSI，不做 Markdown/code highlight）。
+        if self.ansi_passthrough {
+            if self.raw_text_buffer.is_empty() {
+                return;
+            }
+
+            let text = std::mem::take(&mut self.raw_text_buffer);
+            self.append_frozen_text_blocks(vec![FrozenTextKind::PlainText(text)]);
+            self.ansi_passthrough = false;
+            self.segmenter = FencedCodeBlockStreamSegmenter::default();
+            return;
+        }
+
+        // Rendered + 正常 Markdown：冻结分段器内的全部残留（closing fence 未到来则视为未闭合）。
+        let segments = self.segmenter.drain_all();
+        if segments.is_empty() {
+            return;
+        }
+
+        let kinds: Vec<FrozenTextKind> = segments
+            .into_iter()
+            .map(|seg| match seg {
+                FencedCodeBlockSegment::Markdown(text) => FrozenTextKind::MarkdownText(text),
+                FencedCodeBlockSegment::CodeBlock {
+                    language,
+                    code,
+                    is_closed,
+                } => FrozenTextKind::CodeBlock {
+                    language,
+                    code,
+                    is_closed,
+                },
+            })
+            .collect();
+
+        self.append_frozen_text_blocks(kinds);
+    }
+
+    fn render_frozen_text_kind_to_lines(
+        kind: &FrozenTextKind,
+        wrap_width: u16,
+    ) -> Vec<Line<'static>> {
+        match kind {
+            FrozenTextKind::PlainText(text) => {
+                // PlainText：无论当前 handler 的 render_mode 是什么，都按 Plain 渲染，
+                // 以保证 fences 等控制符可见；同时依然保留 ANSI 解析优先级。
+                render_text_to_lines(text, MarkdownRenderMode::Plain, wrap_width)
+            }
+            FrozenTextKind::MarkdownText(text) => {
+                // fence 外 Markdown：正常走 termimad（并叠加 code block 语法高亮逻辑，但本段不包含 fence）
+                render_text_to_lines(text, MarkdownRenderMode::Rendered, wrap_width)
+            }
+            FrozenTextKind::CodeBlock {
+                language,
+                code,
+                is_closed,
+            } => {
+                // 未闭合阶段必须禁用语法高亮（即使 language 是支持的）。
+                let highlight_lang = if *is_closed { *language } else { None };
+
+                let mut code_for_render = code.clone();
+                if *is_closed && !code_for_render.ends_with('\n') {
+                    // 与 `render_markdown_with_codeblocks_to_ansi()` 的行为一致：闭合块与后续内容至少换行分隔。
+                    code_for_render.push('\n');
+                }
+
+                let ansi = with_codeblock_highlighter(|highlighter| {
+                    highlighter.render_code_block_to_ansi(highlight_lang, &code_for_render)
+                });
+                ansi_text_to_lines(&ansi)
+            }
         }
     }
 
-    /// Re-renders all content blocks and updates the shared lines.
-    ///
-    /// Iterates through frozen blocks in chronological order, then appends
-    /// any current (unfrozen) text buffer content. This preserves the
-    /// interleaved ordering of text and non-text content.
-    fn update_lines(&mut self) {
-        let mut all_lines = Vec::new();
-        let wrap_width = terminal_wrap_width();
+    fn compute_live_lines(&self, wrap_width: u16) -> Vec<Line<'static>> {
+        if self.render_mode == MarkdownRenderMode::Plain {
+            return render_text_to_lines(
+                &self.raw_text_buffer,
+                MarkdownRenderMode::Plain,
+                wrap_width,
+            );
+        }
 
-        // Render frozen blocks in chronological order
-        for block in &self.blocks {
+        if self.ansi_passthrough {
+            return render_text_to_lines(
+                &self.raw_text_buffer,
+                MarkdownRenderMode::Plain,
+                wrap_width,
+            );
+        }
+
+        let Some(seg) = self.segmenter.live_segment() else {
+            return Vec::new();
+        };
+
+        match seg {
+            FencedCodeBlockSegment::Markdown(text) => {
+                render_text_to_lines(&text, MarkdownRenderMode::Rendered, wrap_width)
+            }
+            FencedCodeBlockSegment::CodeBlock { code, .. } => {
+                // live code block：必须禁用语法高亮（统一 code 样式）
+                let ansi = with_codeblock_highlighter(|highlighter| {
+                    highlighter.render_code_block_to_ansi(None, &code)
+                });
+                ansi_text_to_lines(&ansi)
+            }
+        }
+    }
+
+    /// 当终端宽度发生变化时，重建全部冻结块的渲染结果。
+    fn rebuild_all_lines(&mut self, wrap_width: u16) {
+        let mut rebuilt = Vec::new();
+
+        for block in &mut self.blocks {
             match block {
-                ContentBlock::Text(text) => {
-                    all_lines.extend(render_text_to_lines(text, self.render_mode, wrap_width));
+                ContentBlock::Text(text_block) => {
+                    let lines =
+                        Self::render_frozen_text_kind_to_lines(&text_block.kind, wrap_width);
+                    text_block.line_len = lines.len();
+                    rebuilt.extend(lines);
                 }
                 ContentBlock::NonText(line) => {
-                    all_lines.push(line.clone());
+                    rebuilt.push(line.clone());
                 }
             }
         }
 
-        // Render current (unfrozen) text buffer for real-time updates
-        if !self.current_text_buffer.is_empty() {
-            all_lines.extend(render_text_to_lines(
-                &self.current_text_buffer,
-                self.render_mode,
-                wrap_width,
-            ));
+        self.frozen_line_len = rebuilt.len();
+
+        let live = self.compute_live_lines(wrap_width);
+        self.live_line_len = live.len();
+        rebuilt.extend(live);
+
+        *self.lines.lock().unwrap() = rebuilt;
+        self.cached_wrap_width = wrap_width;
+    }
+
+    fn refresh_live_lines(&mut self) {
+        let wrap_width = terminal_wrap_width();
+        if wrap_width != self.cached_wrap_width {
+            self.rebuild_all_lines(wrap_width);
+            return;
         }
 
-        // Note: Long lines are NOT truncated here. The TUI's ContentPane widget
-        // handles soft-wrapping at viewport boundaries, preserving full content.
+        let live = self.compute_live_lines(wrap_width);
+        self.live_line_len = live.len();
 
-        // Update shared lines
-        *self.lines.lock().unwrap() = all_lines;
+        let mut lines = self.lines.lock().unwrap();
+        lines.truncate(self.frozen_line_len);
+        lines.extend(live);
+    }
+
+    fn append_frozen_text_blocks(&mut self, kinds: Vec<FrozenTextKind>) {
+        if kinds.is_empty() {
+            return;
+        }
+
+        let wrap_width = terminal_wrap_width();
+        if wrap_width != self.cached_wrap_width {
+            // 先重建，避免“旧宽度的 live lines”残留。
+            self.rebuild_all_lines(wrap_width);
+        }
+
+        let mut rendered_new_lines: Vec<Line<'static>> = Vec::new();
+        let mut new_blocks: Vec<ContentBlock> = Vec::new();
+
+        for kind in kinds {
+            let lines = Self::render_frozen_text_kind_to_lines(&kind, self.cached_wrap_width);
+            let line_len = lines.len();
+            rendered_new_lines.extend(lines);
+            new_blocks.push(ContentBlock::Text(FrozenTextBlock::new(kind, line_len)));
+        }
+
+        self.blocks.extend(new_blocks);
+
+        // 增量写入：只需要把尾部 live 部分截掉，然后追加新冻结块的 lines。
+        let mut lines = self.lines.lock().unwrap();
+        lines.truncate(self.frozen_line_len);
+        lines.extend(rendered_new_lines);
+        self.frozen_line_len = lines.len();
+        self.live_line_len = 0;
     }
 
     /// Adds a non-text line (tool call, error, etc.) and updates display.
@@ -681,19 +1570,91 @@ impl TuiStreamHandler {
     /// First freezes any pending text buffer to preserve chronological order.
     fn add_non_text_line(&mut self, line: Line<'static>) {
         self.freeze_current_text();
-        self.blocks.push(ContentBlock::NonText(line));
-        self.update_lines();
+        self.blocks.push(ContentBlock::NonText(line.clone()));
+
+        let wrap_width = terminal_wrap_width();
+        if wrap_width != self.cached_wrap_width {
+            self.rebuild_all_lines(wrap_width);
+            return;
+        }
+
+        let mut lines = self.lines.lock().unwrap();
+        lines.truncate(self.frozen_line_len);
+        lines.push(line);
+        self.frozen_line_len = lines.len();
+        self.live_line_len = 0;
     }
 }
 
 impl StreamHandler for TuiStreamHandler {
     fn on_text(&mut self, text: &str) {
-        // Append text to current buffer
-        self.current_text_buffer.push_str(text);
+        if text.is_empty() {
+            return;
+        }
 
-        // Re-parse and update lines on each text chunk
-        // This handles streaming markdown correctly
-        self.update_lines();
+        let wrap_width = terminal_wrap_width();
+        if wrap_width != self.cached_wrap_width {
+            self.rebuild_all_lines(wrap_width);
+        }
+
+        // Plain 模式：原样累积并刷新（fences 可见）。
+        if self.render_mode == MarkdownRenderMode::Plain {
+            self.raw_text_buffer.push_str(text);
+            self.refresh_live_lines();
+            return;
+        }
+
+        // Rendered 模式：若出现 ANSI，则切换到 passthrough（禁用 Markdown/code highlight，避免吞样式）。
+        if self.ansi_passthrough || contains_ansi(text) {
+            if !self.ansi_passthrough {
+                // 首次进入 passthrough：先冻结此前的 Markdown/Code 段（保持时间顺序）。
+                let segments = self.segmenter.drain_all();
+                let kinds: Vec<FrozenTextKind> = segments
+                    .into_iter()
+                    .map(|seg| match seg {
+                        FencedCodeBlockSegment::Markdown(t) => FrozenTextKind::MarkdownText(t),
+                        FencedCodeBlockSegment::CodeBlock {
+                            language,
+                            code,
+                            is_closed,
+                        } => FrozenTextKind::CodeBlock {
+                            language,
+                            code,
+                            is_closed,
+                        },
+                    })
+                    .collect();
+                self.append_frozen_text_blocks(kinds);
+                self.ansi_passthrough = true;
+            }
+
+            self.raw_text_buffer.push_str(text);
+            self.refresh_live_lines();
+            return;
+        }
+
+        // Rendered + 非 ANSI：走 fenced code block 分段器。
+        let segments = self.segmenter.push_chunk(text);
+        if !segments.is_empty() {
+            let kinds: Vec<FrozenTextKind> = segments
+                .into_iter()
+                .map(|seg| match seg {
+                    FencedCodeBlockSegment::Markdown(t) => FrozenTextKind::MarkdownText(t),
+                    FencedCodeBlockSegment::CodeBlock {
+                        language,
+                        code,
+                        is_closed,
+                    } => FrozenTextKind::CodeBlock {
+                        language,
+                        code,
+                        is_closed,
+                    },
+                })
+                .collect();
+            self.append_frozen_text_blocks(kinds);
+        }
+
+        self.refresh_live_lines();
     }
 
     fn on_tool_call(&mut self, name: &str, _id: &str, input: &serde_json::Value) {
@@ -2065,6 +3026,167 @@ mod tests {
 
             assert!(has_green, "Should have green line. Lines: {:?}", lines);
             assert!(has_red, "Should have red line. Lines: {:?}", lines);
+        }
+    }
+
+    // ========================================================================
+    // Fenced Code Block Syntax Highlighting Tests
+    // ========================================================================
+
+    mod codeblock_syntax_highlighting {
+        use super::*;
+        use ratatui::style::Color as RatatuiColor;
+
+        fn base_code_fg() -> RatatuiColor {
+            let rgb = codeblock_palette::RAW_INLINE;
+            RatatuiColor::Rgb(rgb.r, rgb.g, rgb.b)
+        }
+
+        fn has_non_base_fg(lines: &[Line<'static>], needle: &str) -> bool {
+            let base = base_code_fg();
+            lines.iter().any(|line| {
+                line.to_string().contains(needle)
+                    && line.spans.iter().any(|span| match span.style.fg {
+                        Some(fg) => fg != base,
+                        None => false,
+                    })
+            })
+        }
+
+        #[test]
+        fn closed_rust_code_block_produces_observable_highlight_in_ansi_and_tui() {
+            let md = "```rust\nfn main() {\n    // comment\n    let s = \"hi\";\n}\n```\n";
+
+            // stdout pretty：本质就是 ANSI 字符串
+            let ansi = render_markdown_with_codeblocks_to_ansi(md, 80);
+
+            let base = ansi_set_fg(codeblock_palette::RAW_INLINE);
+            assert!(
+                ansi.contains(&base),
+                "Rendered ANSI should include base code fg. ANSI: {ansi:?}"
+            );
+
+            // 至少包含一个“非 base”的颜色切换（字符串/注释/关键字 任一即可）
+            let keyword = ansi_set_fg(codeblock_palette::ITALIC);
+            let string = ansi_set_fg(codeblock_palette::TITLE);
+            let comment = ansi_set_fg(codeblock_palette::DIMMED2);
+
+            assert!(
+                ansi.contains(&keyword) || ansi.contains(&string) || ansi.contains(&comment),
+                "Rendered ANSI should contain at least one highlight fg sequence (keyword/string/comment). ANSI: {ansi:?}"
+            );
+
+            // TUI：ANSI -> ratatui spans，应该能观察到非 base 的 fg
+            let lines = render_text_to_lines(md, MarkdownRenderMode::Rendered, 80);
+            assert!(
+                has_non_base_fg(&lines, "\"hi\""),
+                "TUI lines should contain non-base fg for highlighted tokens. Lines: {lines:?}"
+            );
+        }
+
+        #[test]
+        fn unclosed_code_block_is_not_highlighted_until_closing_fence_arrives() {
+            let mut handler = TuiStreamHandler::new(false);
+            handler.on_text("```rust\nlet s = \"hi\";\n");
+
+            let lines_before_close = handler.get_lines();
+            let base = base_code_fg();
+
+            let has_non_base_before = lines_before_close.iter().any(|line| {
+                line.to_string().contains("\"hi\"")
+                    && line.spans.iter().any(|span| match span.style.fg {
+                        Some(fg) => fg != base,
+                        None => false,
+                    })
+            });
+            assert!(
+                !has_non_base_before,
+                "Unclosed code block MUST NOT be syntax-highlighted. Lines: {lines_before_close:?}"
+            );
+
+            handler.on_text("```\n");
+            let lines_after_close = handler.get_lines();
+            assert!(
+                has_non_base_fg(&lines_after_close, "\"hi\""),
+                "Closed code block SHOULD be highlighted after closing fence. Lines: {lines_after_close:?}"
+            );
+        }
+
+        #[test]
+        fn closed_code_block_output_is_frozen_across_later_chunks() {
+            let mut handler = TuiStreamHandler::new(false);
+            handler.on_text("```rust\nlet s = \"hi\";\n```\n");
+
+            let lines_after_close = handler.get_lines();
+            assert!(
+                has_non_base_fg(&lines_after_close, "\"hi\""),
+                "Sanity: close should highlight. Lines: {lines_after_close:?}"
+            );
+
+            handler.on_text("after code block\n");
+            let lines_after_more = handler.get_lines();
+
+            assert!(
+                lines_after_more.len() >= lines_after_close.len(),
+                "New chunk should only append lines, not remove history."
+            );
+            assert_eq!(
+                &lines_after_more[..lines_after_close.len()],
+                &lines_after_close,
+                "Frozen code block lines MUST remain unchanged after later chunks."
+            );
+        }
+
+        #[test]
+        fn opening_fence_split_across_chunks_does_not_leave_stray_fences() {
+            let mut handler = TuiStreamHandler::new(false);
+            handler.on_text("``");
+            handler.on_text("`rust\nlet s = \"hi\";\n```\n");
+
+            let lines = handler.get_lines();
+            let full: String = lines.iter().map(|l| l.to_string()).collect();
+            assert!(
+                !full.contains("```"),
+                "Rendered mode should hide fences even when split across chunks. Text: {full:?}"
+            );
+
+            assert!(
+                has_non_base_fg(&lines, "\"hi\""),
+                "Sanity: closed code block should still be highlighted. Lines: {lines:?}"
+            );
+        }
+
+        #[test]
+        fn plain_mode_keeps_fences_visible_and_has_no_syntax_highlight_styles() {
+            let md = "```rust\nlet s = \"hi\";\n```\n";
+            let lines = render_text_to_lines(md, MarkdownRenderMode::Plain, 80);
+
+            let full: String = lines.iter().map(|l| l.to_string()).collect();
+            assert!(
+                full.contains("```rust"),
+                "Plain mode should keep fences. Text: {full:?}"
+            );
+
+            let has_any_fg = lines
+                .iter()
+                .any(|line| line.spans.iter().any(|span| span.style.fg.is_some()));
+            assert!(
+                !has_any_fg,
+                "Plain mode must not introduce syntax highlight styles. Lines: {lines:?}"
+            );
+        }
+
+        #[test]
+        fn unknown_language_safely_degrades_to_plain_code_style() {
+            let md = "```haskell\nmain = putStrLn \"hi\"\n```\n";
+            let ansi = render_markdown_with_codeblocks_to_ansi(md, 80);
+
+            // 只应出现一次 24-bit fg（base code fg）
+            let fg_count = ansi.matches("\u{1b}[38;2;").count();
+            assert_eq!(
+                fg_count, 1,
+                "Unknown language should not trigger extra highlight colors. ANSI: {ansi:?}"
+            );
         }
     }
 }

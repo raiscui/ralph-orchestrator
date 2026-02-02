@@ -115,6 +115,37 @@
 
 ---
 
+## 2026-02-02 22:13 +0800｜tui-codeblock-syntax-highlighting：仅 fenced code block 做语法高亮（tree-sitter-highlight）
+
+### 最终行为（对齐 OpenSpec）
+- Rendered 模式：
+  - 仅对 fenced code block（```lang ... ```）内部做语法高亮。
+  - 未闭合 code block：统一 code 样式显示，不做语法高亮（流式稳定）。
+  - 已闭合 code block：closing fence 到来后一次性语法高亮，并冻结渲染结果（后续 chunk 不会改变历史块）。
+  - 未知语言：安全降级为统一 code 样式（不高亮、不 panic、不丢内容）。
+  - stdout pretty 与 TUI 输出语义一致（同一套 lang normalize / 降级 / 高亮映射）。
+- `--plain` 模式：
+  - fences 原样可见（``` 不被隐藏）。
+  - 不产生 code block 语法高亮的 ANSI（但仍保留“输入自带 ANSI”解析优先级）。
+
+### 核心改动点
+- `crates/ralph-adapters/Cargo.toml`：
+  - 引入 `tree-sitter` / `tree-sitter-highlight` 与 rust/bash/json/yaml/toml/python/js/ts grammar 依赖。
+- `crates/ralph-adapters/src/stream_handler.rs`：
+  - 新增 `CodeBlockHighlighter` + highlight group → 调色板映射（ANSI 24-bit 输出）。
+  - 新增跨 chunk fenced code block 分段器（带行缓存，避免边界切割误判）。
+  - 改造 `TuiStreamHandler` 为“冻结块 + 尾部实时段”，避免每个 chunk 全量重渲染历史内容。
+  - 改造 `PrettyStreamHandler` 在 flush 阶段复用同一渲染链路（stdout pretty 也有 code block 高亮）。
+  - 新增回归测试覆盖：闭合高亮、未闭合不高亮、冻结、plain、未知语言降级、chunk 边界 split fence。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
 ## 2026-02-02 16:06 +0800｜调研：Tenere（pythops/tenere）如何做语法高亮
 
 ### 我做了什么（以及为什么）
