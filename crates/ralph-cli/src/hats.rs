@@ -398,19 +398,16 @@ fn render_hat_dag_via_mermaid(
     Ok(rendered)
 }
 
-/// 为 TUI 的右上角 Radar 面板渲染 hats graph（Mermaid 文本）。
+/// 为 TUI 的右上角 Radar 面板渲染 hats graph（ASCII Mermaid）。
 ///
 /// 返回：
-/// - `(compact, full)`
+/// - `(ascii_compact, ascii_full)`
 ///
 /// 说明：
-/// - **这里不做 Mermaid→ASCII 盒子图渲染**，只输出 Mermaid 源码文本。
-///   原因：`beautiful-mermaid-rs`（QuickJS+大 bundle）在 debug/release 下都可能是“十几秒级”开销，
-///   会把 `ralph run --tui` 的启动体验拖成“长时间黑屏”。
-/// - small/zoom 的差异通过 “TUI panel 尺寸 + 文本裁剪” 达成：
-///   - compact：仅输出关键连线（更像雷达概览）
-///   - full：输出完整 Mermaid（含节点 label），便于复制/外部渲染
-pub(crate) fn render_hat_graph_radar_text(
+/// - 两份字符串都带末尾 `\n`，便于直接展示/拼接；
+/// - compact 视图会把 padding 压到 0，更适合小窗“雷达”；
+/// - full 视图使用更可读的默认渲染参数。
+pub(crate) fn render_hat_graph_radar_ascii(
     config: &RalphConfig,
     registry: &HatRegistry,
 ) -> Result<(String, String)> {
@@ -419,103 +416,26 @@ pub(crate) fn render_hat_graph_radar_text(
         return Ok((empty.clone(), empty));
     }
 
-    let mut compact = generate_mermaid_radar_compact(config, registry);
-    if !compact.ends_with('\n') {
-        compact.push('\n');
+    let diagram = generate_mermaid_string(config, registry);
+
+    let mut ascii_compact = render_mermaid_ascii(
+        &diagram,
+        &AsciiRenderOptions {
+            use_ascii: Some(true),
+            padding_x: Some(0),
+            padding_y: Some(0),
+            box_border_padding: Some(0),
+        },
+    )
+    .with_context(|| "Failed to render Mermaid topology (compact) as ASCII".to_string())?;
+
+    if !ascii_compact.ends_with('\n') {
+        ascii_compact.push('\n');
     }
 
-    let mut full = generate_mermaid_string(config, registry);
-    if !full.ends_with('\n') {
-        full.push('\n');
-    }
+    let ascii_full = render_hat_dag_via_mermaid(config, registry, GraphFormat::Ascii)?;
 
-    Ok((compact, full))
-}
-
-/// Radar 小窗：只输出“关键连线”，尽量让用户在小面板里就能看懂拓扑。
-fn generate_mermaid_radar_compact(config: &RalphConfig, registry: &HatRegistry) -> String {
-    // 逻辑视图：保持与 `generate_mermaid_string(...)` 一致的推导规则，但去掉 hat 节点声明行。
-    //
-    // 备注：
-    // - 这里输出的是 Mermaid 文本（不是 ASCII 盒子图），因此性能几乎只与 hats 数量线性相关；
-    // - 仍然保持排序+去重，确保输出稳定可预测（便于截图对比/调试）。
-    let mut hats: Vec<_> = registry.all().collect();
-    hats.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-
-    let mut output = String::new();
-    output.push_str("flowchart LR\n");
-
-    // 入口边：starting_event（可选）
-    if let Some(starting_event) = config.event_loop.starting_event.as_deref() {
-        let mut targets: Vec<String> = hats
-            .iter()
-            .filter(|hat| {
-                hat.subscriptions
-                    .iter()
-                    .any(|s| s.as_str() == starting_event)
-            })
-            .map(|hat| mermaid_hat_node_id(hat.id.as_str()))
-            .collect();
-
-        targets.sort();
-        targets.dedup();
-
-        output.push_str("    Start[task.start]\n");
-        for target_id in targets {
-            output.push_str(&format!(
-                "    Start -->|{}| {}\n",
-                starting_event, target_id
-            ));
-        }
-    }
-
-    // 结束节点：complete_publishes（可选）
-    if let Some(complete_topic) = config.event_loop.complete_publishes.as_deref() {
-        output.push_str("    Complete[complete]\n");
-
-        let mut complete_sources: Vec<String> = hats
-            .iter()
-            .filter(|hat| hat.publishes.iter().any(|p| p.as_str() == complete_topic))
-            .map(|hat| mermaid_hat_node_id(hat.id.as_str()))
-            .collect();
-        complete_sources.sort();
-        complete_sources.dedup();
-
-        for source_id in complete_sources {
-            output.push_str(&format!(
-                "    {} -->|{}| Complete\n",
-                source_id, complete_topic
-            ));
-        }
-    }
-
-    // Hat -> Hat（逻辑视图）：A publishes topic，且 B subscribes topic，则展示 A -->|topic| B
-    let mut edges: Vec<(String, String, String)> = Vec::new();
-    for source in &hats {
-        for pub_event in &source.publishes {
-            let topic = pub_event.as_str();
-            for target in &hats {
-                if target.id == source.id {
-                    continue;
-                }
-                if target.subscriptions.iter().any(|s| s.as_str() == topic) {
-                    edges.push((
-                        mermaid_hat_node_id(source.id.as_str()),
-                        topic.to_string(),
-                        mermaid_hat_node_id(target.id.as_str()),
-                    ));
-                }
-            }
-        }
-    }
-
-    edges.sort();
-    edges.dedup();
-    for (source_id, topic, target_id) in edges {
-        output.push_str(&format!("    {} -->|{}| {}\n", source_id, topic, target_id));
-    }
-
-    output
+    Ok((ascii_compact, ascii_full))
 }
 
 /// Generate Mermaid flowchart syntax for the hat topology.

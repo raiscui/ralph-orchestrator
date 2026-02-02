@@ -248,10 +248,10 @@ pub async fn run_loop_impl(
         let hat_map = build_tui_hat_map(event_loop.registry());
         let mut tui = Tui::new().with_hat_map(hat_map);
 
-        // 右上角 Radar：best-effort 生成 hats graph 文本（失败不影响主流程）
-        match crate::hats::render_hat_graph_radar_text(&config, event_loop.registry()) {
-            Ok((compact, full)) => {
-                tui = tui.with_hat_graph_radar(compact, full);
+        // 右上角 Radar：best-effort 渲染 hats graph（失败不影响主流程）
+        match crate::hats::render_hat_graph_radar_ascii(&config, event_loop.registry()) {
+            Ok((ascii_compact, ascii_full)) => {
+                tui = tui.with_hat_graph_radar(ascii_compact, ascii_full);
             }
             Err(e) => {
                 warn!("Failed to render hat graph radar for TUI: {e:#}");
