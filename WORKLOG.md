@@ -115,6 +115,41 @@
 
 ---
 
+## 2026-02-02 16:06 +0800｜调研：Tenere（pythops/tenere）如何做语法高亮
+
+### 我做了什么（以及为什么）
+- 我直接读了 Tenere 的 `Cargo.toml` 和 `src/formatter.rs`。
+  - 原因：语法高亮通常由依赖决定，且实现一般集中在 formatter/render 模块里。
+- 我把 Tenere 的输出渲染链路拆开看，确认每一步的输入/输出形态（String → ANSI String → Ratatui Text）。
+
+### 结论（可复用的模式）
+- Tenere 把“语法高亮”外包给 `bat`：
+  - `bat` 输出带 ANSI 颜色码的文本（终端彩色输出）。
+- Tenere 用 `ansi-to-tui` 把 ANSI 文本解析为 `ratatui::text::Text`：
+  - 这样 Ratatui 的 `Paragraph` 就能渲染带颜色的富文本。
+- Tenere 固定把输入命名为 `"text.md"`：
+  - 让 bat 按 Markdown 处理。
+  - LLM 输出只要用 fenced code block（```rust 等），就能触发 code block 内的语言高亮。
+
+### 额外观察（潜在坑）
+- 流式输出场景下，Tenere 每次 chunk 都会对“累积到当前的整段回答”重跑一次 bat 渲染。
+  - 回答很长/分片很多时，可能会出现明显的重复开销（体感 O(n²)）。
+
+---
+
+## 2026-02-02 21:09 +0800｜OpenSpec FF：tui-codeblock-syntax-highlighting（生成实现所需 artifacts）
+
+### 产出位置
+- `openspec/changes/tui-codeblock-syntax-highlighting/`
+
+### 已生成 artifacts
+- `proposal.md`：阐明“为什么要做”与能力边界（只高亮 fenced code block，兼顾流式与长滚动性能）
+- `design.md`：给出“怎么做”的技术路线（分段状态机 + 冻结缓存 + TUI/stdout 一致性）
+- `specs/codeblock-syntax-highlighting/spec.md`：定义可测试的 MUST 级需求与场景（语言集合、未闭合不高亮、冻结、不支持语言降级、plain 模式）
+- `tasks.md`：把实现拆成可逐条勾选的任务清单（依赖/分段器/高亮器/TUI+stdout 集成/测试与门禁）
+
+---
+
 ## 2026-02-02 02:39 +0800｜TUI：右上角 Hat Graph Radar（ASCII Mermaid）+ `p` 放大/还原
 
 ### 变更摘要

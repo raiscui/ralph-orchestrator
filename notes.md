@@ -652,6 +652,68 @@ tui:
 
 ---
 
+## 2026-02-02 16:06 +0800｜Tenere（pythops/tenere）语法高亮实现：bat 输出 ANSI → ansi-to-tui 转 Text
+
+### 结论先行
+- Tenere 的“语法高亮”不是自己写 parser/lexer。
+- 它直接依赖 `bat` crate（`Cargo.toml` 里有 `bat = "0.25"`）。
+- `bat` 负责把输入渲染成带 ANSI 颜色转义序列的文本（本质是“终端彩色输出”）。
+- Tenere 再用 `ansi-to-tui` 把 ANSI 文本解析成 `ratatui::text::Text`，交给 Ratatui 渲染。
+
+### 关键代码（核心链路）
+- 来源（Tenere）：
+  - `https://raw.githubusercontent.com/pythops/tenere/master/Cargo.toml`
+  - `https://raw.githubusercontent.com/pythops/tenere/master/src/formatter.rs`
+
+```rust
+pub fn format(&self, input: &str) -> Text<'static> {
+    let mut buffer = String::new();
+    let input = Input::from_bytes(input.as_bytes()).name("text.md");
+    self.controller
+        .run(vec![input.into()], Some(&mut buffer))
+        .unwrap();
+    buffer.into_text().unwrap_or(Text::from(buffer))
+}
+```
+
+### 这个实现“为什么能高亮”
+- 关键点 1：`bat` 本身就是“带语法高亮的 cat”，内部用 `syntect` 做语法高亮与主题配色（Tenere 把这件事外包给 bat）。
+- 关键点 2：`Input::...name("text.md")` 很关键：
+  - Tenere 固定把内容当作 Markdown。
+  - 这意味着 LLM 输出只要是 Markdown（尤其是 fenced code block，例如 ```rust），bat 就能识别并对 code block 的语言做高亮。
+- 关键点 3：`ansi-to-tui` 解决了“bat 输出是 ANSI 字符串，而 Ratatui 需要结构化 Style/Span”这个鸿沟。
+
+### 行为与限制（对照我们自己的 TUI）
+- 性能特征：Tenere 在流式输出时，会把“到目前为止的整段回答”反复交给 bat 重渲染（`Chat::handle_answer` 每次 chunk 都 `formatter.format(...)`）。
+  - 这在回答很长时可能是 O(n²) 的感觉（chunk 越多、字符串越长，重复工作越多）。
+- 可配置性：Tenere 只设置了 `colored_output: true`，其余基本走 `bat::Config::default()`：
+  - 主题/风格更多是 bat 默认值，Tenere 没有在 config.toml 暴露“选择主题”的能力。
+
+---
+
+## 2026-02-02 21:09 +0800｜OpenSpec change：tui-codeblock-syntax-highlighting（已 FF 完成 artifacts）
+
+### 目标（用户已确认）
+- 支持语言：`rust, bash/sh, json, yaml, toml, python, js/ts`
+- 流式阶段：未闭合 code fence 不做语法高亮
+- 输出一致性：TUI + stdout pretty 都需要语法高亮
+
+### 已生成的 artifacts（位置）
+- `openspec/changes/tui-codeblock-syntax-highlighting/proposal.md`
+- `openspec/changes/tui-codeblock-syntax-highlighting/design.md`
+- `openspec/changes/tui-codeblock-syntax-highlighting/specs/codeblock-syntax-highlighting/spec.md`
+- `openspec/changes/tui-codeblock-syntax-highlighting/tasks.md`
+
+### 关键设计摘记（实现时要盯住的点）
+- 当前最大性能风险来自 `TuiStreamHandler` 每个 chunk 都全量 `update_lines()` 重渲染历史内容。
+- 方案核心是“分段 + 冻结缓存”：
+  - opening fence：先冻结之前的 Markdown 段
+  - closing fence：一次性语法高亮并冻结 code block
+  - 后续 chunk：只增量渲染尾部，不再重算历史闭合块
+- 语法高亮引擎在 design 中倾向 tree-sitter-highlight（性能上限更高），并用 highlight group → Sublime Monokai Extended 调色板映射保证 TUI/stdout 一致。
+
+---
+
 ## 2026-02-02 02:39 +0800｜TUI：右上角 Hat Graph Radar（ASCII Mermaid），按键 `p` 放大/还原
 
 ### 关键发现

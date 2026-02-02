@@ -210,3 +210,48 @@
 - Radar 不再调用 `beautiful-mermaid-rs` 的 Mermaid→ASCII 渲染（避免 QuickJS 大开销）
 - `ralph run --tui` 不会再因为 Radar 生成而“长时间黑屏”
 - 已通过：`cargo fmt`、`cargo clippy --all-targets --all-features`、`cargo test`、`cargo test -p ralph-core smoke_runner`
+
+---
+
+## 2026-02-02 16:06 +0800｜调研：Tenere（pythops/tenere）是如何做语法高亮的
+
+### 目标
+
+- 搞清楚 Tenere 的“语法高亮”具体依赖哪些库。
+- 搞清楚它的渲染链路（从 LLM 输出到 TUI 显示）是怎么接起来的。
+- 记录关键实现点，方便在 Ralph/TUI 里做同类能力时复用思路。
+
+### 阶段（本次调研）
+
+- [x] 阶段1：定位入口（Cargo.toml / formatter 模块）
+- [x] 阶段2：阅读关键实现（Formatter / Chat 渲染）
+- [x] 阶段3：形成结论（高亮链路 + 关键点 + 限制）
+- [x] 阶段4：四文件记录（notes/WORKLOG）
+
+### 状态
+
+**已完成**：
+- Tenere 语法高亮并不是自己实现的 tokenization，而是“借用 bat 产出 ANSI 颜色”。
+- 通过 `ansi-to-tui` 把 ANSI 转成 `ratatui::text::Text`，再用 `Paragraph` 渲染到 TUI。
+- 输入文件名固定为 `"text.md"`，让 bat 按 Markdown 处理，并对 fenced code block 做语言高亮。
+
+---
+
+## 2026-02-02 21:09 +0800｜OpenSpec FF：tui-codeblock-syntax-highlighting（产出 artifacts，未实现）
+
+### 目标
+
+- 把“只对 fenced code block 做语法高亮（TUI + stdout pretty）、未闭合不高亮、闭合后冻结缓存”的需求固化为 OpenSpec change artifacts。
+- 让实现阶段可以直接按 tasks.md 逐条落地，而不再反复讨论范围与取舍。
+
+### 阶段（本次 FF）
+
+- [x] 阶段1：创建 change 目录（spec-driven schema）
+- [x] 阶段2：编写 proposal / design / specs / tasks
+- [x] 阶段3：`openspec status` 验证进入 apply-ready 状态
+
+### 状态
+
+**已完成**：
+- 已生成 `openspec/changes/tui-codeblock-syntax-highlighting/` 下的全部 artifacts（proposal/design/specs/tasks）
+- 当前 change 已处于 “All artifacts complete” 状态，可进入 `/opsx:apply` 开始实现
