@@ -115,6 +115,21 @@
 
 ---
 
+## 2026-02-03 00:17 +0800｜回退 Radar workaround：恢复 Mermaid→ASCII 渲染（依赖 beautiful-mermaid-rs 已修复性能）
+
+### 我做了什么
+- 回退两笔历史 workaround（恢复 TUI Radar 使用 Mermaid→ASCII 盒子图渲染）：
+  - `Revert "docs: record tui radar startup regression fix"`（revert: `8b02e6b`）
+  - `Revert "tui: avoid slow mermaid-ascii radar generation"`（revert: `29f4b48`）
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
 ## 2026-02-02 22:13 +0800｜tui-codeblock-syntax-highlighting：仅 fenced code block 做语法高亮（tree-sitter-highlight）
 
 ### 最终行为（对齐 OpenSpec）

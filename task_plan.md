@@ -221,3 +221,39 @@
 - `TuiStreamHandler` 已引入“冻结块/缓存”，避免每个 chunk 全量重渲染历史内容。
 - stdout pretty 已复用同一套渲染链路（ANSI 中间表示，行为与 TUI 一致）。
 - 已补回归测试并通过 fmt/clippy/test + replay smoke runner。
+
+---
+
+## 2026-02-03 00:09 +0800｜撤销临时 workaround：beautiful-mermaid-rs 性能已修复，回退两笔历史修改
+
+### 背景
+
+- 你说明 `/Users/cuiluming/local_doc/l_dev/my/rust/beautiful-mermaid-rs` 的性能问题已经在上游修复。
+- 因此我们需要把 Ralph 侧（或相关仓库）之前为规避该性能问题而引入的两笔修改撤回：
+  - `e88d58944be2e3297662817ba9bfb8d653cc747a`
+  - `e7c2e92d3b2619f01734ac1622e34c17ad5e25f2`
+
+### 目标
+
+- 回退上述两个 commit 的代码改动，使行为回到“未加 workaround”状态。
+- 回退后通过全量门禁验证（fmt/clippy/test + smoke runner）。
+
+### 阶段
+
+- [x] 阶段1：定位两个 commit 属于哪个仓库 + 阅读 diff（避免误回退）
+- [x] 阶段2：按正确顺序执行 revert（必要时解决冲突）
+- [x] 阶段3：全量门禁验证（fmt/clippy/test + smoke runner）
+- [x] 阶段4：四文件记录（notes/WORKLOG；如遇冲突或踩坑再写 ERRORFIX）
+
+### 当前状态
+
+**已完成（All Done）**：
+- 已确认这两个 commit 都在 `ralph-orchestrator` 仓库内（不是 `beautiful-mermaid-rs`）。
+- 已完成 revert：
+  - `Revert "docs: record tui radar startup regression fix"`（`e88d589...`）
+  - `Revert "tui: avoid slow mermaid-ascii radar generation"`（`e7c2e92...`）
+- 已通过全量门禁验证：
+  - `cargo fmt --check` ✅
+  - `cargo clippy --all-targets --all-features -- -D warnings` ✅
+  - `cargo test` ✅
+  - `cargo test -p ralph-core smoke_runner` ✅

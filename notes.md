@@ -688,6 +688,15 @@ tui:
 
 ---
 
+## 2026-02-03 00:17 +0800｜回退 Radar workaround（beautiful-mermaid-rs 性能已修复）
+
+- 这两个 commit 都在 `ralph-orchestrator` 仓库内（不是 `beautiful-mermaid-rs` 本体）：
+  - `e88d58944be2e3297662817ba9bfb8d653cc747a`（docs 记录 startup regression）
+  - `e7c2e92d3b2619f01734ac1622e34c17ad5e25f2`（把 Radar 从 Mermaid→ASCII 改成 Mermaid 文本）
+- 已执行 `git revert` 回退两笔修改，恢复 Radar 使用 Mermaid→ASCII 渲染；并通过全量门禁验证（fmt/clippy/test + smoke runner）。
+
+---
+
 ## 2026-02-02 16:06 +0800｜Tenere（pythops/tenere）语法高亮实现：bat 输出 ANSI → ansi-to-tui 转 Text
 
 ### 结论先行
