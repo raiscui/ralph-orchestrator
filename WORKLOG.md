@@ -113,6 +113,137 @@
 - `cargo test -p ralph-core smoke_runner` ✅
 - `cargo test -p ralph-core kiro` ✅
 
+---
+
+## 2026-02-02 02:39 +0800｜TUI：右上角 Hat Graph Radar（ASCII Mermaid）+ `p` 放大/还原
+
+### 变更摘要
+
+- `ralph-tui`
+  - 新增 Hat Graph Radar 状态缓存（compact/full）与 zoom 标记，并在渲染阶段叠加到 content 区域右上角。
+  - 新增按键 `p` 切换 zoom（并行模式 Chat 聚焦时不抢键）。
+  - Help 面板补充 `p` 快捷键说明。
+- `ralph-cli`
+  - 启动串行/并行 TUI 时 best-effort 生成 hats graph 的 ASCII 渲染并注入（失败只 warn，不影响主流程）。
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-01 23:32 +0800｜`ralph hats graph` Mermaid 输出改为“逻辑视图”：隐藏 Ralph + Hat→Hat 实线
+
+### 问题
+- `ralph hats graph --format mermaid` 会把调度员 `Ralph` 画出来，并把订阅/发布都画成 `Ralph <-> Hat`。
+- 这会导致线路接近“全连接”，阅读困难。
+- 同时 Hat→Hat 的逻辑边用了虚线 `-.->`，与“明面上就是 Hat→Hat”不一致。
+
+### 修复
+- CLI 的 Mermaid 生成改为“逻辑视图”：
+  - 不再输出 `Ralph` 节点与任何 `Ralph <-> Hat` 边
+  - Hat→Hat 传播关系统一用实线 `-->`
+  - 当配置 `event_loop.starting_event` 存在时，补充入口边：`Start[task.start] -->|starting_event| Hat`
+  - 输出按 `(source_id, topic, target_id)` 排序 + 去重，保持确定性
+
+### 变更点
+- `crates/ralph-cli/src/hats.rs`：调整 `generate_mermaid_string()` / `graph_hats()`，并同步单测断言
+- `specs/hats-graph-logical-view.spec.md`：新增规范，明确输出语义与验收标准
+
+### 验证
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-02 00:35 +0800｜hats graph：把 `complete_publishes` 显示为 `Complete[complete]` 终点
+
+### 背景
+- `event_loop.complete_publishes` 是工作流“结束候选事件”。
+- 它可能没有任何 hat 订阅，但对读图的人来说非常关键（否则看不到闭环）。
+
+### 修复
+- Mermaid 逻辑视图在检测到 `complete_publishes` 时：
+  - 固定输出 `Complete[complete]` 节点
+  - 从所有发布该 topic 的 hat 画边：`Hat_X -->|complete_publishes| Complete`
+
+### 变更点
+- `crates/ralph-cli/src/hats.rs`：`generate_mermaid_string()` 增加 Complete 节点与边
+- `specs/hats-graph-logical-view.spec.md`：补充 `G5`（complete_publishes 可视化规则）
+- `crates/ralph-cli/src/hats.rs`：新增回归测试 `test_generate_mermaid_string_includes_complete_publishes`
+
+### 验证
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-01 11:34 +0800｜并行 TUI：`LOOP_COMPLETE` 后重置并暂停 max_runtime，直到 `Running` 才重新计时
+
+### 你要解决的问题
+
+- 你希望在并行 TUI 里，`LOOP_COMPLETE` 只是“暂时停歇”。
+- 如果停歇太久，不应该被 `event_loop.max_runtime_seconds` 把会话强制杀掉。
+- 但一旦又开始跑新的 job，则应重新开始 max_runtime 的计时护栏。
+
+### 实现摘要（只对 TUI 生效）
+
+- 并行 Supervisor 在启用 TUI 时：
+  - `LOOP_COMPLETE` 进入暂停态，不退出。
+  - 进入暂停态时，max_runtime 计时重置并暂停。
+  - 直到任意实例进入 `Running`（新的 job 启动）才重新开始计时。
+- parallel-cli/CI/E2E 保持原样：`LOOP_COMPLETE` 仍然收敛退出，max_runtime 从 run 启动开始计时。
+
+### 变更文件
+
+- `specs/parallel-hat-instances.spec.md`
+- `crates/ralph-core/src/parallel/supervisor.rs`
+- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+## 2026-02-01 15:28 +0800｜修复 `ralph hats graph` 在中文/emoji hat 名称下吞节点（unicode/ascii 只剩 task.start→Ralph）
+
+### 现象
+- 在 `examples/parallel-trigger-routing/ralph.yml` 这类包含中文/emoji hat 名称的配置下：
+  - `ralph hats graph --format mermaid` 输出拓扑完整
+  - 但 `ralph hats graph --format unicode/ascii/compact` 只显示 task.start→Ralph（hats 消失）
+
+### 根因
+- Mermaid 生成阶段把节点 ID 直接用 `hat.name`（中文/emoji）生成。
+- `beautiful-mermaid-rs` 对 Unicode 节点 ID 的兼容性不足，会吞边/吞节点但不报错。
+
+### 修复（最小改动，根因级）
+- `crates/ralph-cli/src/hats.rs`：
+  - Mermaid 图改为“节点 ID / 节点 label 分离”：
+    - ID：使用 ASCII 安全的 `hat.id`，并加 `Hat_` 前缀避免冲突/歧义
+    - label：继续使用 `hat.name`（保留中文/emoji）
+  - 生成前对 hats 按 `hat.id` 排序，降低 HashMap 迭代顺序带来的布局波动。
+  - 新增回归测试：中文/emoji hat 名称下 unicode 图必须包含各 hat 名称。
+  - 更新原有 Mermaid 输出相关测试断言（节点 ID 变为 `Hat_*`）。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
 ## 2026-02-01 12:19 +0800｜Markdown 配色微调：全色混入 3% #4493f8（白色不变）
 
 ### 目标回顾

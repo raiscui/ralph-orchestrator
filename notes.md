@@ -593,6 +593,38 @@ tui:
 
 ---
 
+## 2026-02-01｜并行 TUI：`LOOP_COMPLETE` 后重置并暂停 max_runtime，直到 `Running` 才重新计时
+
+### 需求要点（你提出的精确语义）
+
+- `LOOP_COMPLETE` 之后，`event_loop.max_runtime_seconds` **重置**。
+- 在暂停态期间 **不计时**。
+- 直到“任何 hat instance 又开始运行”（`HatInstanceState::Running`）才重新开始计时。
+
+### 关键实现点（落点）
+
+- 计时状态机在 `ParallelSupervisor::run()` 内实现（不新增 YAML 配置字段）：
+  - `max_runtime_started_at`：当前计时窗口的起点
+  - `max_runtime_counting`：是否正在计时（暂停态=false）
+  - `max_runtime_waiting_for_running`：是否在等待下一次 Running 来启动计时
+- 进入暂停态（TUI + completion promise）时：
+  - `max_runtime_started_at = now`（重置）
+  - `max_runtime_counting = false`（暂停计时）
+  - `max_runtime_waiting_for_running = true`（等 Running）
+- 收到 `HatInstanceEvent::StateChanged(Running)` 且 waiting=true 时：
+  - `max_runtime_started_at = now`
+  - `max_runtime_counting = true`
+  - `max_runtime_waiting_for_running = false`
+- 收到 external events 解锁暂停态时：
+  - 不直接开始计时，仍等 Running（符合你的口径）
+  - 但加了一个兜底：如果此刻已经存在 Running，则直接开始计时，避免极端竞态导致“永久暂停”。
+
+### 测试覆盖
+
+- 新增回归测试：暂停态下等待超过 max_runtime 不应退出；恢复并进入 Running 后应能触发 MaxRuntime 终止。
+
+---
+
 ## 2026-02-01 12:02 +0800｜Markdown 配色微调：bold（强调/标签类）改为 #a9dc76
 
 ### 现象
@@ -610,6 +642,135 @@ tui:
 ### 关键实现点
 - `sublime_monokai_extended::BOLD` 改为 `#a9dc76`（RGB: 169, 220, 118）。
 - 新增回归测试：直接断言 `MadSkin` 内部 `bold` 的 fg 配置（避免 `NO_COLOR=1` 抑制 ANSI 导致不稳定）。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-02 02:39 +0800｜TUI：右上角 Hat Graph Radar（ASCII Mermaid），按键 `p` 放大/还原
+
+### 关键发现
+
+- `ralph-cli` 已经具备 “hats graph → Mermaid → ASCII/Unicode” 的渲染链路：
+  - Mermaid 生成：`crates/ralph-cli/src/hats.rs` 的 `generate_mermaid_string(...)`
+  - ASCII 渲染：`beautiful_mermaid_rs::render_mermaid_ascii(...)`
+- `ralph-tui` 的渲染入口在 `crates/ralph-tui/src/app.rs` 的 `terminal.draw(...)`：
+  - 在 content 渲染后、footer 前追加 overlay，能做到“覆盖层”效果
+  - Warp 的 bg=Reset 模式下，exabind 边框需要在 effects 之后再 patch 一次 bg
+
+### 落地策略（方案 B）
+
+- 生成与渲染放在 `ralph-cli`（启动 TUI 时 best-effort）：
+  - 产出 `(ascii_compact, ascii_full)` 两份缓存字符串
+  - 注入到 `ralph-tui`：`Tui::with_hat_graph_radar(ascii_compact, ascii_full)`
+- `ralph-tui` 只负责：
+  - 缓存 + 渲染 overlay（右上角）
+  - `p` 切换 zoom（串行/并行都可用；并行 Chat 聚焦时不抢键）
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-01 23:32 +0800｜`ralph hats graph` Mermaid 逻辑视图：隐藏 Ralph、Hat→Hat 实线、可选 starting_event 入口
+
+### 现象
+- `ralph hats graph --format mermaid` 输出包含 `Ralph` 中心节点。
+- 同时会出现：
+  - `Ralph -> Hat`（订阅）
+  - `Hat -> Ralph`（发布）
+  - `Hat -.-> Hat`（逻辑连线，但用虚线）
+- 当 hat 数量一多时，视觉上接近“全连接”，很难读。
+
+### 期望（用户口径）
+- 图上 **不要出现** `Ralph`（调度员在背后即可）。
+- 不要出现 `Hat -> Ralph` / `Ralph -> Hat` 这种“内部调度边”。
+- Hat 与 Hat 的逻辑关系要用 **实线** `-->`（不要 `-.->`）。
+
+### 落地位置
+- `crates/ralph-cli/src/hats.rs`：
+  - `graph_hats()`：接入 `RalphConfig`，让图能感知 `event_loop.starting_event`
+  - `generate_mermaid_string()`：改为输出“逻辑视图”（Hat→Hat 实线），并在有 starting_event 时补 `Start[task.start]` 入口边
+
+### 关键实现点
+- 仍保持 Mermaid “ID/label 分离”：
+  - 节点 ID：`Hat_{sanitize(hat.id)}`（ASCII 安全）
+  - 节点 label：`hat.name`（允许中文/emoji）
+- 入口边（可选）：
+  - 当 `config.event_loop.starting_event` 存在时，输出：
+    - `Start[task.start]`
+    - `Start -->|starting_event| Hat_X`（所有订阅了 starting_event 的 hats）
+- Hat→Hat 边：
+  - 收集 `(source publishes topic) && (target subscribes topic) && source != target` 的组合
+  - 按 `(source_id, topic, target_id)` 排序 + 去重
+  - 用 `-->` 输出
+
+### 验证
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-02 00:35 +0800｜hats graph：把 `complete_publishes` 画成 `Complete[complete]` 终点节点
+
+### 现象
+- 在 `examples/parallel-trigger-routing/ralph.yml` 里配置了：
+  - `event_loop.complete_publishes: "spec.approved"`
+- 但 `ralph hats graph --format mermaid` 的逻辑视图只画 Hat→Hat（需要订阅者），导致：
+  - `spec.approved` 因为没有任何 hat 订阅而“消失”
+  - 图上看不到工作流怎么结束
+
+### 根因
+- 逻辑视图的 Hat→Hat 边推导规则是：
+  - `(A publishes T) && (B subscribes T)` 才画 `A -->|T| B`
+- `complete_publishes` 本质是“工作流完成候选事件”，不要求被 hat 订阅，因此不能用上述规则推导。
+
+### 修复策略
+- 当 `event_loop.complete_publishes` 存在时：
+  - 固定输出一个终点节点：`Complete[complete]`
+  - 找出所有发布该 topic 的 hats，并画边：`Hat_X -->|complete_publishes| Complete`
+
+### 落地位置
+- `crates/ralph-cli/src/hats.rs`：`generate_mermaid_string()`
+- `specs/hats-graph-logical-view.spec.md`：新增 `G5`（complete_publishes 终点节点语义）
+
+### 验证
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-01 15:28 +0800｜修复 `ralph hats graph` 在中文/emoji hat 名称下吞节点
+
+### 现象
+- 在 `examples/parallel-trigger-routing/ralph.yml` 这类配置里：
+  - `ralph hats graph --format mermaid` 输出的 Mermaid 文本包含完整 hats 拓扑。
+  - 但 `ralph hats graph --format unicode/ascii` 只显示 task.start→Ralph（hats 节点与边消失）。
+
+### 根因
+- 我们之前把 Mermaid 节点 ID 直接用 `hat.name`（中文/emoji）生成。
+- `beautiful-mermaid-rs` 在 Mermaid→ASCII/Unicode 渲染链路里，对“Unicode 节点 ID”兼容性不足，会吞边/吞节点，但不会报错。
+
+### 修复策略（Ralph 侧修复，最小改动）
+- Mermaid 输出改为“节点 ID / 节点 label 分离”：
+  - 节点 ID：用 `hat.id`，并限制为 ASCII `[A-Za-z0-9_]`，统一加 `Hat_` 前缀避免冲突。
+  - 节点 label：继续用 `hat.name`（保留中文/emoji）。
+- 为了降低渲染布局波动，输出前对 hats 按 `hat.id` 排序（避免 HashMap 迭代顺序随机）。
 
 ### 验证
 - `cargo fmt --check` ✅
