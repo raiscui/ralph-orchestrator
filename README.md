@@ -307,6 +307,10 @@ Ralph also supports an **experimental** parallel runtime that can run multiple h
 
 The UI currently runs in **log-only mode** (no parallel TUI yet). Output is attributed per instance (e.g. `[writer#1:out] ...`).
 
+Runnable examples:
+- `examples/parallel-trigger-routing/` — trigger-driven routing semantics (fanout + instance queue)
+- `examples/parallel-experimental-dev-engine/` — parallel experimentation workflow (runner/auditor/integrator, windowed dispatch, integration gate)
+
 Minimal example:
 
 ```yaml

@@ -29,6 +29,29 @@
 - `cargo clippy --all-targets --all-features -- -D warnings` ✅
 - `cargo test` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-04 20:13 +0800｜补充：新增 parallel-experimental-dev-engine example 的 Codex E2E 场景
+
+### 交付物
+
+- 新增专用 E2E scenario（直跑 example，E2E workspace 预填 EXPERIMENT_PLAN，断言 topic 链路 + patch + LOOP_COMPLETE）：
+  - `crates/ralph-e2e/src/scenarios/parallel_experimental_dev_engine_example.rs`
+- 注册并导出该 scenario（可被 `ralph-e2e --list` / runner 发现）：
+  - `crates/ralph-e2e/src/scenarios/mod.rs`
+  - `crates/ralph-e2e/src/lib.rs`
+  - `crates/ralph-e2e/src/main.rs`
+- OpenSpec 同步：补充“必须有专用 Codex E2E 场景”的 MUST 约束，并追加 tasks：
+  - `openspec/changes/parallel-hat-solution-eval-example/specs/parallel-experimental-dev-engine/spec.md`
+  - `openspec/changes/parallel-hat-solution-eval-example/tasks.md`
+
+### 验证（Backpressure）
+
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-e2e` ✅（确保新增 scenario 编译通过）
 ---
 
 ## 2026-02-03 23:41 +0800｜TUI：取消 Radar 高对比模式（移除 c 切换）
@@ -396,3 +419,26 @@ cargo run --bin ralph -- run -c examples/parallel-experimental-dev-engine/ralph.
 ### 验证
 
 - Mermaid：已用 `mermaid-validator` 校验并修复 parse error（括号 label 引号化）
+
+---
+
+## 2026-02-04 16:24 +0800｜apply：parallel-hat-solution-eval-example（落地并行实验开发永动机 example + 回放门禁）
+
+### 交付物
+
+- 新增示例配置与文档：
+  - `examples/parallel-experimental-dev-engine/ralph.yml`
+  - `examples/parallel-experimental-dev-engine/README.md`
+- 补充仓库文档入口（parallel runnable examples）：
+  - `README.md`
+- 新增 replay fixture（用于 CI/本地确定性回放）：
+  - `crates/ralph-core/tests/fixtures/parallel_experimental_dev_engine.jsonl`
+- 新增 smoke tests（锁死关键语义：topic 链路 + 归因前缀 + patch + LOOP_COMPLETE）：
+  - `crates/ralph-core/tests/smoke_runner.rs`
+
+### 验证（Backpressure）
+
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅

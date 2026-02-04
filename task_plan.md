@@ -177,3 +177,74 @@
 - 因此本轮把“integrator（主工作区单写者）”也补充进 change，并把 runner 的产物要求收紧为：
   - `patch` MUST
   - `commit` MAY（只能作为补充信息，不能替代 patch）
+
+---
+
+## 2026-02-04 16:07 +0800｜apply：parallel-hat-solution-eval-example（落地 example + 并行回放门禁）
+
+### 目标
+
+- 把 `parallel-hat-solution-eval-example` 这份 change 里的“并行实验开发永动机”范式，真正落盘到仓库中。
+- 交付一个可运行的 example：包含 `ralph.yml` + 使用说明。
+- 同时交付 replay fixture + smoke test，用硬门禁锁死关键语义（runner/auditor/integrator 分工、patch 采纳链路、LOOP_COMPLETE 结束条件）。
+
+### 阶段
+
+- [x] 阶段1：回读 change 上下文与 tasks，确认每条任务的验收口径
+- [x] 阶段2：新增 example（`ralph.yml` + `README.md`）
+- [x] 阶段3：新增 replay fixture，并把它接入 `smoke_runner`
+- [x] 阶段4：验证（`cargo fmt --check` / `cargo clippy` / `cargo test` / replay smoke）
+- [x] 阶段5：逐条勾选 tasks + 四文件追加记录（`notes.md` / `WORKLOG.md`）
+
+### 当前状态
+
+**已完成**：
+
+- 示例配置与文档已落盘：`examples/parallel-experimental-dev-engine/`
+- 仓库 README 已补充 runnable example 入口链接
+- replay fixture + smoke tests 已落盘（并覆盖关键 topic/归因前缀/patch/LOOP_COMPLETE）
+- 已通过 `cargo fmt --check` / `cargo clippy` / `cargo test`
+
+---
+
+## 2026-02-04 20:06 +0800｜补充：为 parallel-experimental-dev-engine example 增加专用 E2E 场景（Codex）
+
+### 目标
+
+- 增加一个 **专门覆盖** `examples/parallel-experimental-dev-engine/` 的 `ralph-e2e` 场景。
+- 用 **Codex** 真后端跑一次端到端闭环。
+- 断言要“比较硬”：
+  - 必须出现关键 topic 链路（experiment → review → integration → complete）
+  - 必须看到 `patch` 作为可搬运产物
+  - 必须收敛到 `LOOP_COMPLETE`
+
+### 方案方向（两条路）
+
+- 方案 A（更硬、更贴近真实使用，优先选）：
+  - E2E 直接跑该 example，并在 E2E workspace 里把 `EXPERIMENT_PLAN` 预填为一组“可确定成功”的轻量实验（只写入小文件 + rg 验证）。
+  - 断言主要基于 `.ralph/events.jsonl`（比 stdout 更稳），并额外要求不出现 `routing.escalate` / `gate.request` 等异常信号。
+  - 代价：仍属于“真后端 E2E”，可能受模型行为波动影响（但已经尽量压缩不确定性）。
+- 方案 B（更稳、更便宜，但不够“真”）：
+  - 不跑真后端，只扩展 replay fixture / smoke tests 的覆盖面（例如增加 `needs_more_evidence` 或 `integration.rejected` 分支 fixture）。
+  - 代价：它验证的是“回放语义”，不是“Codex 真实端到端”。
+
+### 做出的决定
+
+- 采用方案 A 先做“硬 E2E”；如果 flakey，再回退到方案 B 或调软断言。
+
+### 当前状态
+
+**已完成**：
+
+- 已新增专用 E2E scenario（Codex）：`crates/ralph-e2e/src/scenarios/parallel_experimental_dev_engine_example.rs`
+  - 直跑 example，并在 E2E workspace 预填 `EXPERIMENT_PLAN`（轻量实验：写文件 + rg 验证）
+  - 断言基于 `.ralph/events.jsonl`：关键 topic 链路 + patch + LOOP_COMPLETE
+- 已注册/导出 scenario（可被 `ralph-e2e --list` 发现）：
+  - `crates/ralph-e2e/src/scenarios/mod.rs`
+  - `crates/ralph-e2e/src/lib.rs`
+  - `crates/ralph-e2e/src/main.rs`
+- 已通过 backpressure：
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test`
+  - `cargo test -p ralph-e2e`

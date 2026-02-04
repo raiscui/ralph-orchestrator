@@ -50,6 +50,7 @@ mod incremental;
 mod memory;
 mod orchestration;
 mod parallel;
+mod parallel_experimental_dev_engine_example;
 mod parallel_trigger_routing_example;
 mod tasks;
 
@@ -71,6 +72,7 @@ pub use memory::{
 };
 pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
 pub use parallel::{ParallelHatInstancesScenario, ParallelStartingEventInferenceScenario};
+pub use parallel_experimental_dev_engine_example::ParallelExperimentalDevEngineExampleScenario;
 pub use parallel_trigger_routing_example::ParallelTriggerRoutingExampleScenario;
 pub use tasks::{TaskAddScenario, TaskCloseScenario, TaskCompletionScenario, TaskReadyScenario};
 

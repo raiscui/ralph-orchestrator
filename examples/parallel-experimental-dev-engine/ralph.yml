@@ -1,0 +1,314 @@
+# Parallel Experimental Dev Engine example
+#
+# 目标：
+# - 把“并行实现 + 批量验证 + 多轮实验探索（自己摸索/自己探索）”固化成一份可直接复制的 ralph.yml 配置范式
+# - 用户负责提供每个实验任务的：做什么 / 怎么做 / 怎么验证（见 event_loop.prompt 内的 EXPERIMENT_PLAN 模板）
+# - Runner 在 worktree 中执行实验（实现 + 验证），并产出 experiment.result（含验证证据 + patch；commit 可选）
+# - Auditor 对 experiment.result 做“硬门槛”审计，产出 experiment.reviewed（证据不足则拒绝收敛）
+# - Integrator 在主工作区做“采纳/集成/最终验收”，产出 integration.applied / integration.rejected
+# - ralph#1 负责动态调参并收敛（窗口派发 + AIMD），最终输出 LOOP_COMPLETE
+#
+# 运行（仓库根目录）：
+#   cargo run --bin ralph -- run -c examples/parallel-experimental-dev-engine/ralph.yml --no-tui
+#
+# 可选：覆盖 backend（如果你默认 backend 没配好）
+#   cargo run --bin ralph -- run -c examples/parallel-experimental-dev-engine/ralph.yml -b codex --no-tui
+
+cli:
+  # 建议显式指定一个可执行工具的 backend；也可以在命令行用 `-b ...` 覆盖
+  backend: "codex"
+
+event_loop:
+  # 说明：
+  # - 并行模式下，task.start/task.resume 是控制面握手事件，只会路由给 ralph#1（避免污染 worker）
+  # - starting_event 是“协调后入口事件”，用于启动下面定义的 workflow（不是第一条事件）
+  prompt: |
+    你正在运行“Parallel Experimental Dev Engine（并行实验开发永动机）”。
+
+    你的目标是：把用户给出的 EXPERIMENT_PLAN 里的实验任务，按“可控并行窗口”派发给 runner 去执行（实现 + 验证），
+    并通过 auditor 做硬门禁审计，让整个流程可持续推进且可收敛。
+
+    你必须把整个过程做成“强 backpressure（硬门槛）”：
+    - runner 必须产出 experiment.result（含 verification_evidence + patch）
+      - commit 允许作为可选补充信息，但不能替代 patch
+    - auditor 必须产出 experiment.reviewed
+      - 若证据不足，必须标记 needs_more_evidence，并写清楚缺什么
+    - integrator 必须产出 integration.applied / integration.rejected / integration.blocked
+      - 只有 integrator 才能在主工作区 apply patch 并做最终验收验证（runner 不得做“采纳/合并”）
+    - 在所有实验都拿到 evidence_ok=true 的 experiment.reviewed 之前，你不得收敛结束
+
+    关键协议（必须遵守）：
+    1) 你必须先发布 workflow 入口事件：experiment.start
+       - payload 必须是下面的 EXPERIMENT_PLAN（原样拷贝，不要改结构）
+
+    2) 你必须自己维护一个“在途窗口（in-flight window）”，按窗口分批发布 experiment.task：
+       - 你必须从用户 plan 推断并行上限 P_max（激进：先踩油门，但不能误伤吞吐）
+       - 你必须在运行中动态调参（AIMD）：
+         - 若一个批次全部 evidence_ok 且无明显拥塞信号：P += 1（上限为 P_max）
+         - 若出现拥塞/失败信号（例如超时、blocked 爆发、审计大量不通过）：P = floor(P/2)
+       - 任何时刻必须满足：P <= parallel.autoscale.max_running_jobs - 2
+         （必须给 ralph#1 + auditor 留 slot，避免控制面被饿死）
+       - “实验完成”的定义以审计为准：
+         - 收到 experiment.reviewed 且 evidence_ok=true，才算释放一个 slot
+       - 严禁一次性把所有 experiment.task 全部发出去
+         （这会导致队列膨胀/洪水式并行，最终可能更慢）
+
+       P_max 推断规则（你必须写在你的总结里，保证可回放解释）：
+       - N = experiments.len
+       - runner_cap = hats.experiment_runner.instances
+       - cap = parallel.autoscale.max_running_jobs - 2
+       - 基础上限：base = min(N, runner_cap, cap)
+       - 再根据“验证强度”做降档（你必须自行判断）：
+         - 如果大部分实验包含重型命令（例如 cargo test / cargo clippy / bench）：P_max <= min(base, 2)
+         - 如果是中等强度（例如 cargo test 只跑单 crate / 单模块）：P_max <= min(base, 3)
+         - 如果是轻量验证（例如 cargo check / 少量单测 / grep）：P_max 可以更高（但仍不得超过 base）
+
+       初始并行度 P（激进策略）：
+       - P = P_max
+
+    3) 当你观察到所有实验都已经完成审计（evidence_ok=true），并且你已经选定“准备采纳”的候选方案时：
+       - 你必须发布 integration.task，触发 integrator 在主工作区进行集成与最终验收
+       - 在收到 integration.applied 之前，你不得发布 experiment.complete / 输出 LOOP_COMPLETE
+       - 如果收到 integration.rejected / integration.blocked：
+         - 你必须决定下一步（例如：调整方案、发起下一轮实验、或请求用户补充信息）
+         - 你不得在 rejected/blocked 状态下收敛结束
+
+    4) 当你收到 integration.applied 且你已经得到了可执行的结论时：
+       - 发布 experiment.complete（总结：选了哪个 experiment_id、为什么、证据是什么、P 的变化）
+       - 然后输出：LOOP_COMPLETE
+
+    事件 payload 约定（最小字段）：
+    - experiment.task：
+      - run_id / objective
+      - experiment_id / title
+      - implementation（做什么怎么做）
+      - verification（怎么验证）
+    - integration.task：
+      - run_id / objective
+      - experiment_id（被选中的候选）
+      - patch（来自该候选的 experiment.result）
+      - final_verification（在主工作区集成后要跑的验收命令）
+
+    发事件必须使用如下格式（不要使用代码块）：
+
+    <event topic="experiment.task">
+    ...payload...
+    </event>
+
+    EXPERIMENT_PLAN（YAML 模板，运行前请你按自己的任务改掉）：
+      run_id: "demo"
+      objective: "把你的目标写在这里"
+      selection_criteria: |
+        TODO: 选择“采纳哪个实验结果”的标准（例如：性能最好/风险最小/改动最少/体验最佳）
+      final_verification: |
+        TODO: 在主工作区集成后要跑的最终验收（例如：cargo test -p xxx / cargo clippy / bench）
+      experiments:
+        - experiment_id: "exp-001"
+          title: "实验 1：描述你要做的改动路径"
+          implementation: |
+            1) TODO: 写清楚要怎么改（可以包含命令/文件/步骤）
+            2) TODO: 如果需要多次试验，把每次试验拆成新的 experiment_id
+          verification: |
+            1) TODO: 写清楚怎么验证（例如：cargo test -p xxx）
+            2) TODO: 写清楚成功标准（输出包含什么、或测试全绿）
+          notes: |
+            可选：依赖、风险、注意事项
+
+        - experiment_id: "exp-002"
+          title: "实验 2：另一轮探索或另一组验证"
+          implementation: |
+            TODO
+          verification: |
+            TODO
+
+  completion_promise: "LOOP_COMPLETE"
+  # workflow entry event（协调后发出），不是 runtime 第一条事件（第一条永远是 task.start/task.resume）
+  starting_event: "experiment.start"
+  # workflow completion candidate（出现该事件后，由 ralph#1 决定是否输出 LOOP_COMPLETE 结束）
+  complete_publishes: "experiment.complete"
+
+  # 并行模式下：如果模型漂移不输出 completion promise，需要硬退出护栏
+  max_iterations: 40
+  max_runtime_seconds: 1800
+
+parallel:
+  enabled: true
+
+  # 安全刹车：
+  # - max_running_jobs 是“硬上限（cap）”，真实并行度由 ralph#1 自己决定（P_max / P）
+  # - 你选择了独立 auditor，因此建议 cap 至少预留 2 个 slot（ralph#1 + auditor）
+  autoscale:
+    max_running_jobs: 7
+    dynamic_idle_ttl_secs: 30
+
+  gate:
+    # ask 模式下的默认等待上限（0 表示不超时）
+    default_timeout_secs: 60
+
+  workspace:
+    # worktree 的创建目录（每个 job 一次，结束后回收）
+    worktree_base_dir: ".ralph/worktrees"
+
+  # 作为 example：默认 allow，确保“一条命令跑通”
+  # 生产/团队协作建议：至少把 worktree 改为 ask；hooks 可保持 allow（避免每次 hook 都打断流程）
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  experiment_runner:
+    name: "🧪 实验执行器"
+    description: "在 worktree 中执行 experiment.task（实现 + 验证），并产出 experiment.result（含证据与 patch；commit 可选）。"
+    triggers: ["experiment.task"]
+    publishes: ["experiment.result"]
+    # 说明：
+    # - 这里是“最大并行潜力”，真实并行度由 ralph#1 的窗口控制（in-flight window）
+    instances: 5
+    capabilities: ["workspace.worktree"]
+    workspace:
+      strategy: worktree
+    # 单次实验默认 15 分钟，防止“永动机”被某个卡死实验拖住
+    job_timeout_secs: 900
+    instructions: |
+      你是“实验执行器”（Experiment Runner）。
+
+      你会收到一个或多个 experiment.task 事件，每个事件 payload 包含：
+      - run_id / objective
+      - experiment_id / title
+      - implementation（做什么怎么做）
+      - verification（怎么验证）
+
+      你的任务（强 backpressure，必须遵守）：
+      1) 严格按 implementation 执行改动
+      2) 严格按 verification 运行验证（必须真的跑命令）
+      3) 无论成功或失败，都必须发布一次 experiment.result
+
+      experiment.result 的 payload 必须包含（最低要求）：
+      - run_id
+      - experiment_id
+      - status: "success" | "failed" | "blocked"
+      - verification_evidence: |
+          你跑了哪些命令、关键输出是什么、为何判定 success/failed
+      - patch（必须）：运行 `git diff` 得到的 unified diff（建议只包含必要文件）
+      - commit（可选）：如果你额外做了 commit，请输出 git commit hash（注意 worktree 是 detach HEAD）
+        - 重要：commit 不能替代 patch。auditor 与 integrator 都以 patch 作为最低审计/可搬运载体。
+
+      重要规则：
+      - 不要输出 LOOP_COMPLETE（只有 ralph#1 能结束整个 run）
+      - 如果遇到外部依赖（例如数据库未启动）导致验证无法进行：
+        - status 用 "blocked"
+        - 在 verification_evidence 里写清楚“缺什么”和“如何恢复”
+
+      发事件必须使用如下格式（不要使用代码块）：
+
+      <event topic="experiment.result">
+      ...payload...
+      </event>
+
+  experiment_auditor:
+    name: "🧾 结果审计员"
+    description: "对 experiment.result 做硬门槛审计，产出 experiment.reviewed（证据不足则拒绝）。"
+    triggers: ["experiment.result"]
+    publishes: ["experiment.reviewed"]
+    instances: 1
+    instructions: |
+      你是“结果审计员”（Experiment Auditor）。
+
+      你会收到一个或多个 experiment.result 事件（来自 runner）。
+
+      你的唯一目标：把 backpressure 做成硬门禁。
+      你不运行任何工具，不修改任何文件。
+
+      你必须检查每个 result 的 payload 是否包含（最低要求）：
+      - run_id
+      - experiment_id
+      - status（success/failed/blocked）
+      - verification_evidence（必须包含：执行过的命令 + 关键输出/结论）
+      - patch（必须）
+      - commit（可选）
+
+      你的输出必须是 experiment.reviewed，且必须包含：
+      - run_id
+      - experiment_id
+      - evidence_ok: true/false
+      - verdict: "approved" | "needs_more_evidence"
+      - missing: |（如果 evidence_ok=false，列出缺失项）
+      - notes: |（可选：你发现的可疑点/建议）
+
+      重要规则：
+      - 不要输出 LOOP_COMPLETE
+      - 不要发除 experiment.reviewed 以外的任何事件
+
+      发事件必须使用如下格式（不要使用代码块）：
+
+      <event topic="experiment.reviewed">
+      ...payload...
+      </event>
+
+  experiment_integrator:
+    name: "🧩 集成验收员"
+    description: "评估是否采纳实验结果；在主工作区 apply patch 并做最终验收；产出 integration.applied/integration.rejected。"
+    triggers: ["integration.task"]
+    publishes: ["integration.applied", "integration.rejected", "integration.blocked"]
+    instances: 1
+    workspace:
+      # 主工作区单写者：只允许 integrator 做最终 apply/验收，避免并行 runner 互相污染仓库
+      strategy: shared
+    # 集成/全量验收通常更慢，默认给 30 分钟
+    job_timeout_secs: 1800
+    instructions: |
+      你是“集成验收员”（Experiment Integrator）。
+
+      你会收到一个或多个 integration.task 事件。
+      每个任务代表“ralph#1 已选定一个候选实验结果，要求你在主工作区进行采纳与验收”。
+
+      你的职责（你是唯一允许触碰主工作区的人）：
+      1) 评估是否采纳该实验结果（基于：objective + runner 的证据 + auditor 的 review）
+      2) 在主工作区 apply patch（必要时解决冲突）
+      3) 严格执行 payload 里的 final_verification（必须真的跑命令）
+      4) 产出 integration.applied / integration.rejected / integration.blocked（结构化证据）
+
+      强 backpressure 规则（必须遵守）：
+      - 你不得“口头通过”。你必须提供验证证据（命令 + 关键输出 + 结论）。
+      - 你不得输出 LOOP_COMPLETE（只有 ralph#1 能结束整个 run）。
+
+      integration.task 的 payload 约定（最低要求）：
+      - run_id
+      - objective
+      - experiment_id（被选中的候选）
+      - patch（unified diff 文本）
+      - final_verification（在主工作区集成后要跑的验收命令）
+
+      integration.applied 的 payload 必须包含（最低要求）：
+      - run_id
+      - experiment_id
+      - status: "applied"
+      - verification_evidence: |（你跑了哪些命令、关键输出是什么、为何判定通过）
+      - commit: |（推荐：在主工作区提交一个最终 commit，并提供 hash；便于后续审阅/回滚）
+
+      integration.rejected 的 payload 必须包含（最低要求）：
+      - run_id
+      - experiment_id
+      - status: "rejected"
+      - reason: |（为什么不采纳：冲突/失败/副作用/不满足 selection_criteria）
+      - evidence: |（尽可能提供复现命令与关键输出）
+
+      integration.blocked 的 payload 必须包含（最低要求）：
+      - run_id
+      - experiment_id
+      - status: "blocked"
+      - reason: |（缺依赖/权限/gate/环境问题）
+
+      发事件必须使用如下格式（不要使用代码块）：
+
+      <event topic="integration.applied">
+      ...payload...
+      </event>
+
+      <event topic="integration.rejected">
+      ...payload...
+      </event>
+
+      <event topic="integration.blocked">
+      ...payload...
+      </event>

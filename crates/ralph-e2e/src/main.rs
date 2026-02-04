@@ -56,6 +56,7 @@ use ralph_e2e::{
     MockCliError,
     MockConfig,
     MultiIterScenario,
+    ParallelExperimentalDevEngineExampleScenario,
     // Tier 8: Parallel Runtime
     ParallelHatInstancesScenario,
     ParallelStartingEventInferenceScenario,
@@ -276,6 +277,7 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(ParallelStartingEventInferenceScenario::new()),
         Box::new(ParallelStartingEventInferenceScenario::new_multi_candidate()),
         Box::new(ParallelTriggerRoutingExampleScenario::new()),
+        Box::new(ParallelExperimentalDevEngineExampleScenario::new()),
     ]
 }
 

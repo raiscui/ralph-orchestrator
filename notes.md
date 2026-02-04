@@ -547,3 +547,64 @@
 
 - Mermaid flowchart 的 edge label 包含括号时可能触发 parse error。
 - 规避方式：给 label 加引号，例如 `-->|\"experiment.task (windowed)\"|`。
+
+---
+
+## 2026-02-04 16:24 +0800｜apply 落盘：parallel-hat-solution-eval-example（example / fixture / smoke）
+
+### 这次落盘了什么
+
+- 新增并行“实验开发永动机”示例目录：
+  - `examples/parallel-experimental-dev-engine/ralph.yml`
+  - `examples/parallel-experimental-dev-engine/README.md`
+- 补充仓库文档入口：
+  - `README.md` 的 parallel 章节新增 runnable examples 链接
+- 新增 replay fixture + smoke gates：
+  - `crates/ralph-core/tests/fixtures/parallel_experimental_dev_engine.jsonl`
+  - `crates/ralph-core/tests/smoke_runner.rs` 增加 fixture 存在性检查 + 关键 topic/归因前缀/patch/LOOP_COMPLETE 断言
+
+### 细节与踩坑点
+
+- README 里的 mermaid 图表已用 `mermaid-validator` 校验通过（避免括号 label parse error）。
+- `cargo test -p ralph-core smoke_runner` 这个命令会按“名称过滤”测试，可能不会跑到 `tests/smoke_runner.rs` 的集成测试本体。
+  - 如果你要“只跑 smoke_runner 这个集成测试文件”，更稳的方式是：
+    - `cargo test -p ralph-core --test smoke_runner`
+
+---
+
+## 2026-02-04 20:13 +0800｜补充：为 parallel-experimental-dev-engine example 增加专用 ralph-e2e（Codex）场景
+
+### 为什么要加（动机）
+
+- smoke/replay 能验证“语义与回放确定性”，但它不覆盖“真后端（Codex）端到端跑一遍”的现实风险。
+- 你要的是“比较硬”的 E2E，所以我选了：
+  - **直跑 example**
+  - **用 events.jsonl 做断言主依据**
+  - **强制闭环：patch + integration.applied + LOOP_COMPLETE**
+
+### 怎么做（关键实现点）
+
+- 新增一个 E2E scenario：`ParallelExperimentalDevEngineExampleScenario`
+  - 只支持 `Backend::Codex`（避免其它 backend 工具能力差异导致假失败）
+- 在 E2E workspace 中“预填 EXPERIMENT_PLAN”
+  - 因为这个 example 的本意就是“用户先填 plan 再运行”
+  - 预填的 plan 选择“轻量、确定成功”的实验：只创建小文件 + `rg` 验证
+  - 这样能最大化降低 flakey 的来源（不引入编译/网络/长跑命令）
+
+### 断言强度（当前是偏硬的版本）
+
+- 必须出现关键 topic 链路（并且数量至少等于预填实验数）：
+  - `experiment.start` / `experiment.task` / `experiment.result` / `experiment.reviewed` / `integration.task` / `integration.applied` / `experiment.complete`
+- `experiment.reviewed` 必须明确 `evidence_ok=true`（避免“证据不足也收敛”的回归）
+- 必须看到 `patch`，且至少包含一次 `diff --git`（unified diff 形态）
+- 禁止出现异常信号：
+  - `gate.*`（example 默认 allow，不应触发审批）
+  - `routing.escalate`（路由/target 失败应被捕获）
+
+### 如果后续发现不适合（你说的“再改”方向）
+
+- 如果 Codex 偶发不写 `diff --git` 或不稳定输出 `evidence_ok`：
+  - 先把断言从“强内容匹配”降级到“topic 出现 + exit_code=0 + 不 timeout”
+  - 或把 `EXPECTED_EXPERIMENTS` 从 2 调到 1（更宽松）
+- 如果仍然 flakey：
+  - 把“硬约束”迁移到 replay fixtures（增加 `needs_more_evidence` / `integration.rejected` 分支 fixture）

@@ -133,3 +133,25 @@ The repository MUST include a replay fixture that replays an end-to-end run of t
 #### Scenario: 存在可回放的 JSONL fixture
 - **WHEN** a developer runs the replay-based smoke tests
 - **THEN** the repository MUST include a JSONL fixture under `crates/ralph-core/tests/fixtures/` for this workflow
+
+---
+
+### Requirement: 必须提供该 example 的真后端 E2E 场景（Codex）
+The repository MUST include a dedicated `ralph-e2e` scenario that directly runs `examples/parallel-experimental-dev-engine/` against the Codex backend, and MUST assert the workflow emits the critical topic chain, includes an auditable `patch`, and converges to `LOOP_COMPLETE`.
+
+#### Scenario: E2E 场景存在且只支持 Codex
+- **WHEN** a developer lists E2E scenarios
+- **THEN** there MUST be an E2E scenario for `parallel-experimental-dev-engine`
+- **AND** it MUST support `Backend::Codex` (and MAY restrict to Codex only)
+
+#### Scenario: E2E 断言覆盖关键 topic 链路与 patch
+- **WHEN** the E2E scenario runs the example workflow
+- **THEN** it MUST observe events including:
+  - `experiment.start`
+  - `experiment.task`
+  - `experiment.result` (payload MUST include `patch`)
+  - `experiment.reviewed` (payload MUST indicate `evidence_ok=true`)
+  - `integration.task`
+  - `integration.applied`
+  - `experiment.complete`
+- **AND** the run MUST converge to `LOOP_COMPLETE` (exit successfully rather than timing out)

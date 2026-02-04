@@ -87,6 +87,7 @@ pub use crate::scenarios::{
     MemoryRapidWriteScenario,
     MemorySearchScenario,
     MultiIterScenario,
+    ParallelExperimentalDevEngineExampleScenario,
     // Tier 8: Parallel Runtime (experimental)
     ParallelHatInstancesScenario,
     ParallelStartingEventInferenceScenario,

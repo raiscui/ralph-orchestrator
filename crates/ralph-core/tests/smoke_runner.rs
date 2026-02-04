@@ -68,6 +68,16 @@ fn test_parallel_workflow_semantics_fixture_exists() {
     );
 }
 
+#[test]
+fn test_parallel_experimental_dev_engine_fixture_exists() {
+    let fixture = fixtures_dir().join("parallel_experimental_dev_engine.jsonl");
+    assert!(
+        fixture.exists(),
+        "Parallel experimental dev engine fixture should exist at {:?}",
+        fixture
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Acceptance Criteria #7: Integration Test Validates Full Replay Flow
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,6 +288,88 @@ fn test_full_replay_flow_with_parallel_workflow_semantics_fixture() {
     assert!(
         output.contains("[ralph#1:out]"),
         "Fixture should contain ralph#1 attribution prefix"
+    );
+    assert!(
+        output.contains("LOOP_COMPLETE"),
+        "Fixture should terminate via completion promise"
+    );
+}
+
+#[test]
+fn test_full_replay_flow_with_parallel_experimental_dev_engine_fixture() {
+    use ralph_core::testing::ReplayBackend;
+
+    let fixture = fixtures_dir().join("parallel_experimental_dev_engine.jsonl");
+
+    let config = SmokeTestConfig::new(&fixture);
+    let result = SmokeRunner::run(&config).expect("Should run fixture successfully");
+
+    assert!(
+        result.completed_successfully(),
+        "Parallel experimental dev engine session should complete successfully"
+    );
+    assert_eq!(
+        *result.termination_reason(),
+        TerminationReason::Completed,
+        "Should terminate with Completed (LOOP_COMPLETE detected)"
+    );
+
+    // Fixture should contain a full chain:
+    // experiment.task -> experiment.result -> experiment.reviewed -> integration.task -> integration.applied
+    assert!(
+        result.event_count() >= 6,
+        "Should parse at least 6 events from fixture, got {}",
+        result.event_count()
+    );
+
+    // 额外校验：fixture 文本里确实包含“并行归因前缀 + 关键 topic + patch + LOOP_COMPLETE”，锁死示例语义。
+    let mut backend = ReplayBackend::from_file(&fixture).expect("Should load replay fixture");
+    let output = String::from_utf8(backend.collect_all()).expect("Fixture output must be UTF-8");
+    assert!(
+        output.contains("[experiment_runner#1:out]")
+            || output.contains("[experiment_runner#2:out]"),
+        "Fixture should contain experiment_runner attribution prefix"
+    );
+    assert!(
+        output.contains("[experiment_auditor#1:out]"),
+        "Fixture should contain experiment_auditor attribution prefix"
+    );
+    assert!(
+        output.contains("[experiment_integrator#1:out]"),
+        "Fixture should contain experiment_integrator attribution prefix"
+    );
+    assert!(
+        output.contains("[ralph#1:out]"),
+        "Fixture should contain ralph#1 attribution prefix"
+    );
+
+    assert!(
+        output.contains("experiment.task"),
+        "Fixture should contain experiment.task event"
+    );
+    assert!(
+        output.contains("experiment.result"),
+        "Fixture should contain experiment.result event"
+    );
+    assert!(
+        output.contains("experiment.reviewed"),
+        "Fixture should contain experiment.reviewed event"
+    );
+    assert!(
+        output.contains("integration.task"),
+        "Fixture should contain integration.task event"
+    );
+    assert!(
+        output.contains("integration.applied"),
+        "Fixture should contain integration.applied event"
+    );
+    assert!(
+        output.contains("experiment.complete"),
+        "Fixture should contain experiment.complete event"
+    );
+    assert!(
+        output.contains("patch: |"),
+        "Fixture should contain a patch payload"
     );
     assert!(
         output.contains("LOOP_COMPLETE"),
