@@ -2,7 +2,7 @@
 
 use ralph_core::HatJobOutputChunk;
 use ralph_proto::{Event, HatId, HatInstanceId, HatInstanceState};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -134,12 +134,246 @@ pub enum TuiMode {
 // 说明：
 // - ASCII 图由 ralph-cli 在启动 TUI 时生成并注入，这里只做缓存 + 展示，
 //   避免在 TUI 每帧渲染时重复做 Mermaid→ASCII 的转换。
+
+/// Hat Graph Radar 的“坐标点”（以终端 cell 为单位）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HatGraphRadarPoint {
+    pub x: u16,
+    pub y: u16,
+}
+
+/// Hat Graph Radar 的矩形区域（以终端 cell 为单位）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HatGraphRadarRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// Hat Graph Radar 的节点 meta：用于把“某个 hat 的 box”映射到字符画坐标。
+#[derive(Debug, Clone)]
+pub struct HatGraphRadarNodeMeta {
+    /// Mermaid node id（parser identity），例如 `Hat_planner`。
+    pub id: String,
+    /// 节点展示 label（可能包含 emoji/中文）。
+    pub label: String,
+    /// 节点 box 的矩形范围（含边框）。
+    pub box_rect: HatGraphRadarRect,
+}
+
+/// Hat Graph Radar 的边 meta：用于按最新 event 做“逐段点亮”动画。
+#[derive(Debug, Clone)]
+pub struct HatGraphRadarEdgeMeta {
+    pub from: String,
+    pub to: String,
+    pub label: String,
+    /// 有序 path 坐标序列（包含拐点/箭头/box-start marker 等关键格子）。
+    pub path: Vec<HatGraphRadarPoint>,
+}
+
+/// Hat Graph Radar 的完整 meta（nodes + edges）。
+#[derive(Debug, Clone, Default)]
+pub struct HatGraphRadarMeta {
+    pub nodes: Vec<HatGraphRadarNodeMeta>,
+    pub edges: Vec<HatGraphRadarEdgeMeta>,
+}
+
+impl HatGraphRadarMeta {
+    pub fn find_node(&self, id: &str) -> Option<&HatGraphRadarNodeMeta> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+
+    pub fn matching_edges(
+        &self,
+        from: &str,
+        label: &str,
+    ) -> impl Iterator<Item = &HatGraphRadarEdgeMeta> {
+        self.edges
+            .iter()
+            .filter(move |e| e.from == from && e.label == label)
+    }
+
+    pub fn matching_edges_exact(
+        &self,
+        from: &str,
+        label: &str,
+        to: &str,
+    ) -> impl Iterator<Item = &HatGraphRadarEdgeMeta> {
+        self.edges
+            .iter()
+            .filter(move |e| e.from == from && e.label == label && e.to == to)
+    }
+}
+
+// =============================================================================
+// Hat Graph Radar：事件线动画（按 Running 目标驱动）
+// =============================================================================
+//
+// 你最新口径（2026-02-03）：
+// - 线路需要先做 progressive reveal（从 source → target 逐段点亮）；
+// - reveal 完成后，线路应保持“全亮”并持续显示，直到目标 hat 退出 Running（进入 Idle/Done/Failed）；
+// - “指向的目标 box 不再 Running”时，必须立刻取消该线路高亮（不要残留）。
+//
+// 设计取舍：
+// - cause event 采用 best-effort 推断：从“最近收到的业务事件”里找一条能够在 hats graph
+//   中连到该 target hat 的边（from+topic+to 完全匹配）。
+// - 动画本身是纯 UI 行为，不影响 orchestration。
+
+/// Hat Graph Radar 边动画速度：每多少毫秒“点亮一个 cell”。
+pub(crate) const HAT_GRAPH_EDGE_ANIMATION_STEP_MS: u64 = 30;
+/// progressive reveal 的最大时长：用于把“很长的路径”加速到一个可读的时间窗口内。
+const HAT_GRAPH_EDGE_ANIMATION_MAX_REVEAL_MS: u64 = 800;
+
+/// Hat Graph Radar：扫描头（跑动高亮段）的移动速度（每多少毫秒前进一个 cell）。
+///
+/// 说明：
+/// - 这是 reveal 完成后的“锦上添花”动效，目的是让用户一眼看出“这条边仍在生效/仍在运行态”；
+/// - 速度不应跟随 reveal 的 step_ms（reveal 会为长路径自动加速，否则扫描会快到看不见）。
+pub(crate) const HAT_GRAPH_EDGE_HEAD_STEP_MS: u64 = 60;
+
+/// Hat Graph Radar：扫描头的长度（以 cell 数计）。
+pub(crate) const HAT_GRAPH_EDGE_HEAD_LEN: usize = 16;
+
+/// 推断“cause event”的回看窗口：只在这个时间范围内找最近事件（避免匹配到过旧的事件）。
+const HAT_GRAPH_CAUSE_LOOKBACK: Duration = Duration::from_secs(10);
+
+/// 保存最近事件的上限（按条数），避免无限增长。
+const HAT_GRAPH_RECENT_EVENT_MAX: usize = 64;
+
+/// Radar 侧用于推断 “cause event” 的最近事件记录（只存必要信息）。
+#[derive(Debug, Clone)]
+pub struct HatGraphRadarRecentEvent {
+    pub source_hat: HatId,
+    pub topic: String,
+    pub observed_at: Instant,
+}
+
+/// 某个 target hat 当前正在播放的“cause event 边动画”。
+#[derive(Debug, Clone)]
+pub struct HatGraphRadarEdgeAnimation {
+    pub target_hat: HatId,
+    pub source_hat: HatId,
+    pub topic: String,
+    pub started_at: Instant,
+    pub step_ms: u64,
+}
+
+/// Radar 边动画在“当前帧”应如何渲染（纯渲染计划，可单测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HatGraphRadarEdgeRenderPlan {
+    /// 用 base 色从 path[0..base_steps] 做高亮（reveal 阶段为部分，reveal 后为全量）。
+    pub base_steps: usize,
+    /// 扫描头的起点（沿 path 的索引）。
+    pub head_start: Option<usize>,
+    /// 扫描头的长度（以 cell 数计）。
+    pub head_len: usize,
+    /// 扫描头是否允许环绕（reveal 完成后为 true）。
+    pub head_wrap: bool,
+}
+
+/// 计算 Radar 边动画的渲染计划。
+///
+/// 规则：
+/// - reveal 阶段：base 只亮到当前进度；head 贴着 reveal 前沿（更亮、更醒目）
+/// - reveal 完成后：base 全亮；head 以固定速度循环移动（直到目标 hat 退出 Running 才会被上层清理）
+pub(crate) fn plan_hat_graph_radar_edge_animation(
+    elapsed: Duration,
+    path_len: usize,
+    reveal_step_ms: u64,
+    head_step_ms: u64,
+    head_len: usize,
+) -> HatGraphRadarEdgeRenderPlan {
+    if path_len == 0 {
+        return HatGraphRadarEdgeRenderPlan {
+            base_steps: 0,
+            head_start: None,
+            head_len: 0,
+            head_wrap: false,
+        };
+    }
+
+    let elapsed_ms = elapsed.as_millis();
+    let reveal_step_ms = reveal_step_ms.max(1);
+    let head_step_ms = head_step_ms.max(1);
+
+    let total_steps = (elapsed_ms / u128::from(reveal_step_ms)) as usize;
+    let revealed = total_steps.min(path_len);
+
+    // reveal 阶段：head 贴着前沿，不环绕
+    if revealed < path_len {
+        if revealed == 0 {
+            return HatGraphRadarEdgeRenderPlan {
+                base_steps: 0,
+                head_start: None,
+                head_len: 0,
+                head_wrap: false,
+            };
+        }
+
+        let head_len = head_len.min(revealed);
+        let head_start = revealed.saturating_sub(head_len);
+        return HatGraphRadarEdgeRenderPlan {
+            base_steps: revealed,
+            head_start: Some(head_start),
+            head_len,
+            head_wrap: false,
+        };
+    }
+
+    // reveal 完成：base 全亮；head 循环扫描
+    let reveal_total_ms =
+        u128::from(reveal_step_ms).saturating_mul(u128::try_from(path_len).unwrap_or(u128::MAX));
+    let after_reveal_ms = elapsed_ms.saturating_sub(reveal_total_ms);
+    let head_ticks = (after_reveal_ms / u128::from(head_step_ms)) as usize;
+    let head_start = head_ticks % path_len;
+    let head_len = head_len.min(path_len);
+
+    HatGraphRadarEdgeRenderPlan {
+        base_steps: path_len,
+        head_start: Some(head_start),
+        head_len,
+        head_wrap: true,
+    }
+}
+
+fn sanitize_mermaid_identifier(raw: &str) -> String {
+    // 说明：
+    // - Radar 的 meta 里边/节点引用的是 Mermaid “节点 ID”（例如 Hat_builder）；
+    // - 该规则必须与 `ralph-cli` / `ralph-tui::app.rs` 的生成逻辑一致，否则匹配不到边。
+    //
+    // 规则：保守地只允许 ASCII [A-Za-z0-9_]，其余字符全部移除。
+    let mut out = String::new();
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        }
+    }
+
+    if out.is_empty() {
+        "hat".to_string()
+    } else {
+        out
+    }
+}
+
+fn mermaid_hat_node_id(hat_id: &str) -> String {
+    // 与 `crates/ralph-cli/src/hats.rs#mermaid_hat_node_id` / `crates/ralph-tui/src/app.rs` 保持一致：
+    // - 加前缀避免与 Start/Complete 等节点名冲突；
+    // - 避免 hat_id 以数字开头触发 Mermaid 标识符解析歧义。
+    format!("Hat_{}", sanitize_mermaid_identifier(hat_id))
+}
+
 #[derive(Debug, Clone)]
 pub struct HatGraphRadar {
     /// 小窗（雷达）展示：更紧凑的 ASCII 图（通常 padding=0）。
     pub ascii_compact: String,
     /// 大窗（放大）展示：更可读的 ASCII 图（通常默认 padding）。
     pub ascii_full: String,
+    /// compact 视图的 meta（可选：渲染器不支持/注入失败时允许降级为无高亮/无动画）。
+    pub meta_compact: Option<HatGraphRadarMeta>,
+    /// full 视图的 meta（可选：同上）。
+    pub meta_full: Option<HatGraphRadarMeta>,
 }
 
 /// TUI 的状态更新事件（用于 observer → channel → reducer）。
@@ -330,6 +564,10 @@ pub struct TuiState {
     pub hat_graph_radar: Option<HatGraphRadar>,
     /// 是否处于“放大”视图（按键 `p` 切换）。
     pub hat_graph_zoomed: bool,
+    /// Radar 的“最近业务事件”（用于推断某个 Running hat 的 cause event）。
+    pub hat_graph_recent_events: VecDeque<HatGraphRadarRecentEvent>,
+    /// Radar 的“按 Running 目标驱动”的边动画（target_hat -> animation）。
+    pub hat_graph_edge_animations: HashMap<HatId, HatGraphRadarEdgeAnimation>,
 
     // ========================================================================
     // Parallel Mode State
@@ -373,6 +611,8 @@ impl TuiState {
             // Hat graph radar
             hat_graph_radar: None,
             hat_graph_zoomed: false,
+            hat_graph_recent_events: VecDeque::new(),
+            hat_graph_edge_animations: HashMap::new(),
             // Parallel mode
             parallel: ParallelTuiState::default(),
         }
@@ -420,6 +660,8 @@ impl TuiState {
             // Hat graph radar
             hat_graph_radar: None,
             hat_graph_zoomed: false,
+            hat_graph_recent_events: VecDeque::new(),
+            hat_graph_edge_animations: HashMap::new(),
             // Parallel mode
             parallel: ParallelTuiState::default(),
         }
@@ -438,6 +680,7 @@ impl TuiState {
 
         self.last_event = Some(topic.to_string());
         self.last_event_at = Some(now);
+        self.record_hat_graph_radar_event(event, now);
 
         // First, check if we have a custom hat mapping for this topic
         if let Some((hat_id, hat_display)) = self.hat_map.get(topic) {
@@ -505,18 +748,193 @@ impl TuiState {
                 self.parallel.register_instance(instance_id, state);
             }
             TuiUpdate::ParallelInstanceState { instance_id, state } => {
-                self.parallel.set_instance_state(instance_id, state);
+                // 说明：
+                // - 你希望“哪个 box 进入 Running，就显示它的染色 + cause event 线路动画”；
+                // - 因此我们需要捕捉“非 Running → Running”的跃迁点。
+                let prev_state = self.parallel.instances.get(&instance_id).map(|s| s.state);
+                self.parallel.set_instance_state(instance_id.clone(), state);
+
+                let now = Instant::now();
+                if let Some(hat_id) = instance_id.split_hat_id() {
+                    if state == HatInstanceState::Running
+                        && prev_state != Some(HatInstanceState::Running)
+                    {
+                        self.maybe_start_hat_graph_edge_animation_for_running_hat(
+                            HatId::new(hat_id),
+                            now,
+                        );
+                    }
+
+                    // 如果某个实例退出 Running，需要判断该 hat 是否“已经没有任何 Running 实例”。
+                    // 若是，则立刻取消该 hat 的线路动画（符合你“目标不 Running 就取消”的口径）。
+                    if prev_state == Some(HatInstanceState::Running)
+                        && state != HatInstanceState::Running
+                        && !self.is_hat_running_parallel(hat_id)
+                    {
+                        self.hat_graph_edge_animations.remove(&HatId::new(hat_id));
+                    }
+                }
             }
             TuiUpdate::ParallelOutputChunk(chunk) => {
                 self.parallel.append_output(&chunk);
             }
             TuiUpdate::ParallelEvent(event) => {
+                // 并行模式：同步更新“最近事件/活跃度”指标（与串行模式一致）。
+                let now = Instant::now();
+                self.last_event = Some(event.topic.as_str().to_string());
+                self.last_event_at = Some(now);
+                self.record_hat_graph_radar_event(&event, now);
                 self.parallel.apply_event(&event);
             }
             TuiUpdate::ParallelStatus(msg) => {
                 self.parallel.chat_status = Some(msg);
             }
         }
+    }
+
+    fn is_hat_running_parallel(&self, hat_id: &str) -> bool {
+        self.parallel.instances.iter().any(|(instance_id, view)| {
+            view.state == HatInstanceState::Running
+                && instance_id.split_hat_id().is_some_and(|id| id == hat_id)
+        })
+    }
+
+    fn record_hat_graph_radar_event(&mut self, event: &Event, now: Instant) {
+        // 说明：
+        // - 你明确指出 event 线路动画应是“因果可视化”，不是 gate/human 这类控制面噪音；
+        // - 因此这里只记录“业务事件”，并且必须能推导出发布者 hat（source/source_instance）。
+        let topic = event.topic.as_str();
+        if topic.starts_with("gate.") || topic == "human.message" {
+            return;
+        }
+
+        let source_hat = if let Some(source_hat) = event.source.clone() {
+            source_hat
+        } else if let Some(source_instance) = event.source_instance.as_ref()
+            && let Some(hat_id) = source_instance.split_hat_id()
+        {
+            HatId::new(hat_id)
+        } else {
+            return;
+        };
+
+        self.hat_graph_recent_events
+            .push_back(HatGraphRadarRecentEvent {
+                source_hat,
+                topic: topic.to_string(),
+                observed_at: now,
+            });
+
+        // 容量上限：按条数裁剪（保证常数级内存）。
+        while self.hat_graph_recent_events.len() > HAT_GRAPH_RECENT_EVENT_MAX {
+            let _ = self.hat_graph_recent_events.pop_front();
+        }
+    }
+
+    fn maybe_start_hat_graph_edge_animation_for_running_hat(
+        &mut self,
+        target_hat: HatId,
+        now: Instant,
+    ) {
+        // 说明：
+        // - 只有 Radar + meta 存在时，才有条件做“因果边动画”；
+        // - 这里使用 meta 做“结构匹配”，避免靠字符串/ANSI 解析导致脆弱。
+        let Some(radar) = self.hat_graph_radar.as_ref() else {
+            return;
+        };
+        let Some(meta) = radar.meta_full.as_ref().or(radar.meta_compact.as_ref()) else {
+            return;
+        };
+
+        // 目标节点：Hat_{id}
+        let target_node_id = mermaid_hat_node_id(target_hat.as_str());
+
+        // 从最近事件里倒序找：谁能在图上连到 target（from+topic+to 完全匹配）。
+        let mut cause: Option<(HatId, String)> = None;
+        for e in self.hat_graph_recent_events.iter().rev() {
+            if now.saturating_duration_since(e.observed_at) > HAT_GRAPH_CAUSE_LOOKBACK {
+                break;
+            }
+
+            let from_node_id = mermaid_hat_node_id(e.source_hat.as_str());
+            let topic = e.topic.as_str();
+            let matches = meta.edges.iter().any(|edge| {
+                edge.from == from_node_id && edge.to == target_node_id && edge.label == topic
+            });
+            if matches {
+                cause = Some((e.source_hat.clone(), e.topic.clone()));
+                break;
+            }
+        }
+
+        let Some((source_hat, topic)) = cause else {
+            return;
+        };
+
+        // 计算 step_ms：
+        // - 默认 `HAT_GRAPH_EDGE_ANIMATION_STEP_MS`（30ms / cell）
+        // - 如果路径很长，则加速（缩小 step_ms），让 reveal 在一个合理窗口内完成
+        let from_node_id = mermaid_hat_node_id(source_hat.as_str());
+        let max_len = meta
+            .matching_edges_exact(&from_node_id, topic.as_str(), &target_node_id)
+            .map(|edge| edge.path.len())
+            .max()
+            .unwrap_or(0);
+
+        let step_ms = if max_len == 0 {
+            HAT_GRAPH_EDGE_ANIMATION_STEP_MS
+        } else {
+            let adaptive = HAT_GRAPH_EDGE_ANIMATION_MAX_REVEAL_MS / max_len as u64;
+            adaptive.clamp(1, HAT_GRAPH_EDGE_ANIMATION_STEP_MS.max(1))
+        };
+
+        self.hat_graph_edge_animations.insert(
+            target_hat.clone(),
+            HatGraphRadarEdgeAnimation {
+                target_hat,
+                source_hat,
+                topic,
+                started_at: now,
+                step_ms,
+            },
+        );
+    }
+
+    /// 每帧（render tick）推进 Radar 的可视化状态：
+    /// - 清理过旧的 recent events（用于 cause 推断）
+    /// - 清理无效的边动画（目标不再 Running）
+    pub(crate) fn tick_hat_graph_radar_animation(&mut self, now: Instant) {
+        // 1) recent events：只保留 lookback 窗口内的（越界的直接丢弃）
+        while let Some(front) = self.hat_graph_recent_events.front() {
+            if now.saturating_duration_since(front.observed_at) > HAT_GRAPH_CAUSE_LOOKBACK {
+                let _ = self.hat_graph_recent_events.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // 2) edge animations：目标不 Running 时移除
+        let running_hats: HashSet<String> = if self.mode == TuiMode::Parallel {
+            let mut hats = HashSet::new();
+            for (instance_id, view) in &self.parallel.instances {
+                if view.state != HatInstanceState::Running {
+                    continue;
+                }
+                if let Some(hat_id) = instance_id.split_hat_id() {
+                    hats.insert(hat_id.to_string());
+                }
+            }
+            hats
+        } else {
+            HashSet::new()
+        };
+
+        self.hat_graph_edge_animations.retain(|target_hat, _anim| {
+            if self.mode == TuiMode::Parallel {
+                return running_hats.contains(target_hat.as_str());
+            }
+            true
+        });
     }
 
     /// Returns formatted hat display (emoji + name).
@@ -580,11 +998,8 @@ impl TuiState {
     // ========================================================================
 
     /// 注入 hats graph radar 的 ASCII 渲染结果（由 CLI 在启动 TUI 时生成）。
-    pub fn set_hat_graph_radar(&mut self, ascii_compact: String, ascii_full: String) {
-        self.hat_graph_radar = Some(HatGraphRadar {
-            ascii_compact,
-            ascii_full,
-        });
+    pub fn set_hat_graph_radar(&mut self, radar: HatGraphRadar) {
+        self.hat_graph_radar = Some(radar);
     }
 
     /// Returns true if there are any open tasks.
@@ -1418,6 +1833,182 @@ mod tests {
             assert!(state.iteration_changed());
             state.prev_iteration = state.iteration; // simulate app clearing flag
         }
+    }
+
+    #[test]
+    fn serial_event_with_source_is_recorded_for_cause_inference() {
+        // 说明：
+        // - 新口径下，Radar 的线路动画不再是“全局最新事件”，而是“按 Running 目标触发的短动画”；
+        // - 但我们仍需要记录最近业务事件，用于后续推断某个 hat 进入 Running 时的 cause event。
+        let mut state = TuiState::new();
+
+        let event = Event::new("build.task", "").with_source(HatId::new("builder"));
+        state.update(&event);
+
+        assert_eq!(state.hat_graph_recent_events.len(), 1);
+        let last = state
+            .hat_graph_recent_events
+            .back()
+            .expect("recent event should exist");
+        assert_eq!(last.source_hat.as_str(), "builder");
+        assert_eq!(last.topic, "build.task");
+    }
+
+    #[test]
+    fn parallel_running_transition_starts_and_cancels_cause_edge_animation() {
+        // 说明：
+        // - 当某个 hat 从非 Running → Running 时，应启动“cause event”线路动画；
+        // - 当该 hat 不再 Running 时，应立刻取消该线路动画。
+        let mut state = TuiState::new_parallel();
+
+        // 准备一张最小拓扑：planner --build.task--> builder
+        state.set_hat_graph_radar(HatGraphRadar {
+            ascii_compact: String::new(),
+            ascii_full: String::new(),
+            meta_compact: Some(HatGraphRadarMeta {
+                nodes: vec![
+                    HatGraphRadarNodeMeta {
+                        id: "Hat_planner".to_string(),
+                        label: "planner".to_string(),
+                        box_rect: HatGraphRadarRect {
+                            x: 0,
+                            y: 0,
+                            width: 1,
+                            height: 1,
+                        },
+                    },
+                    HatGraphRadarNodeMeta {
+                        id: "Hat_builder".to_string(),
+                        label: "builder".to_string(),
+                        box_rect: HatGraphRadarRect {
+                            x: 0,
+                            y: 0,
+                            width: 1,
+                            height: 1,
+                        },
+                    },
+                ],
+                edges: vec![HatGraphRadarEdgeMeta {
+                    from: "Hat_planner".to_string(),
+                    to: "Hat_builder".to_string(),
+                    label: "build.task".to_string(),
+                    path: vec![
+                        HatGraphRadarPoint { x: 0, y: 0 },
+                        HatGraphRadarPoint { x: 1, y: 0 },
+                        HatGraphRadarPoint { x: 2, y: 0 },
+                    ],
+                }],
+            }),
+            meta_full: None,
+        });
+
+        // 1) 先收到一个业务事件（用于 cause 推断）
+        let event = Event::new("build.task", "").with_source(HatId::new("planner"));
+        state.apply_update(TuiUpdate::ParallelEvent(event));
+
+        // 2) builder#1 进入 Running：应触发边动画（planner -> builder）
+        state.apply_update(TuiUpdate::ParallelRegisterInstance {
+            instance_id: HatInstanceId::new("builder#1"),
+            state: HatInstanceState::Created,
+        });
+        state.apply_update(TuiUpdate::ParallelInstanceState {
+            instance_id: HatInstanceId::new("builder#1"),
+            state: HatInstanceState::Running,
+        });
+
+        let anim = state
+            .hat_graph_edge_animations
+            .get(&HatId::new("builder"))
+            .expect("edge animation should be started when builder enters Running");
+        assert_eq!(anim.source_hat.as_str(), "planner");
+        assert_eq!(anim.target_hat.as_str(), "builder");
+        assert_eq!(anim.topic, "build.task");
+
+        // 说明：
+        // - 线路在 reveal 完成后应该持续显示，直到目标 hat 退出 Running；
+        // - 因此 tick 到很久之后（但仍保持 Running）也不应被自动清理。
+        let future = anim.started_at + Duration::from_secs(120);
+        state.tick_hat_graph_radar_animation(future);
+        assert!(
+            state
+                .hat_graph_edge_animations
+                .contains_key(&HatId::new("builder")),
+            "edge animation should persist while target hat remains Running"
+        );
+
+        // 3) builder#1 退出 Running：应立刻取消该 hat 的线路动画
+        state.apply_update(TuiUpdate::ParallelInstanceState {
+            instance_id: HatInstanceId::new("builder#1"),
+            state: HatInstanceState::Idle,
+        });
+        assert!(
+            !state
+                .hat_graph_edge_animations
+                .contains_key(&HatId::new("builder")),
+            "edge animation should be cancelled when builder is no longer Running"
+        );
+    }
+
+    #[test]
+    fn hat_graph_edge_render_plan_reveals_then_scans_until_cancelled_by_running_state() {
+        // 说明：
+        // - 这个测试只验证“渲染计划”本身：reveal -> full -> scanning；
+        // - “何时取消”由上层逻辑决定（目标退出 Running 时会 remove animation），这里不在纯函数里处理。
+
+        let path_len = 10;
+        let reveal_step_ms = 10;
+        let head_step_ms = 50;
+        let head_len = 3;
+
+        // 0ms：还没开始 reveal
+        let plan = plan_hat_graph_radar_edge_animation(
+            Duration::from_millis(0),
+            path_len,
+            reveal_step_ms,
+            head_step_ms,
+            head_len,
+        );
+        assert_eq!(plan.base_steps, 0);
+        assert_eq!(plan.head_start, None);
+
+        // 25ms：reveal 了 2 个 cell，head 贴着前沿（不环绕）
+        let plan = plan_hat_graph_radar_edge_animation(
+            Duration::from_millis(25),
+            path_len,
+            reveal_step_ms,
+            head_step_ms,
+            head_len,
+        );
+        assert_eq!(plan.base_steps, 2);
+        assert_eq!(plan.head_start, Some(0));
+        assert_eq!(plan.head_len, 2);
+        assert!(!plan.head_wrap);
+
+        // 100ms：reveal 刚好完成（10*10ms），进入扫描态：base 全亮，head 从起点开始跑
+        let plan = plan_hat_graph_radar_edge_animation(
+            Duration::from_millis(100),
+            path_len,
+            reveal_step_ms,
+            head_step_ms,
+            head_len,
+        );
+        assert_eq!(plan.base_steps, path_len);
+        assert_eq!(plan.head_start, Some(0));
+        assert_eq!(plan.head_len, head_len);
+        assert!(plan.head_wrap);
+
+        // 150ms：after_reveal=50ms，head 前进 1 格
+        let plan = plan_hat_graph_radar_edge_animation(
+            Duration::from_millis(150),
+            path_len,
+            reveal_step_ms,
+            head_step_ms,
+            head_len,
+        );
+        assert_eq!(plan.base_steps, path_len);
+        assert_eq!(plan.head_start, Some(1));
+        assert_eq!(plan.head_len, head_len);
+        assert!(plan.head_wrap);
     }
 
     #[test]

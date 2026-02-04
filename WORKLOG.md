@@ -1,859 +1,398 @@
 # WORKLOG
+#
+# 说明：
+# - 本文件用于追加记录“完成的工作与验证结果”（面向未来回看）。
+# - 当文件超过 1000 行会按时间戳轮换为 `WORKLOG_YYYY-MM-DD_HHMM.md`，避免变成巨无霸难以检索。
+#
+# 上一个轮换文件：
+# - `WORKLOG_2026-02-03_1655.md`
 
-> 说明：历史 WORKLOG 已按“超过 1000 行自动归档”的规则拆分为时间戳文件。
-> - `archive/WORKLOG_2026-01-29_1908.md`
-> - `archive/WORKLOG_2026-01-29_2022.md`
+## 2026-02-03 16:55 +0800｜Hat Graph Radar：Running 高亮色 #a9dc76；并行模式边动画基于 source_instance 触发
 
-## 2026-01-30 01:16 +0800｜Tier8 E2E：覆盖 `parallel-trigger-routing` example（按 hat 统计 job_runs）+ completion 收敛护栏
-
-### 你要解决的问题
-1) `examples/parallel-trigger-routing` 在并行跑 demo 时：
-   - 你观察到 `ralph#1` 输出 `LOOP_COMPLETE` 后，其他进程仍持续创建/运行 job（不收敛）。
-2) 你希望 E2E **直接覆盖 example 配置**，并断言每个 hat 的“应跑次数”：
-   - `spec_writer == 2`
-   - `spec_reviewer == 2`
-   - `spec_logger == 3`
-   - 并且明确：这里的“次数”应该按 **job_runs** 统计，而不是按 instance 数量。
+### 你指出的关键点
+- `examples/parallel-trigger-routing/.ralph/events.jsonl` 里 publisher 字段是 `hat`，不是 `source`。
+- 因此并行模式不应强行把 `event.source` 自动填成当前实例的 hat_id。
 
 ### 我做了什么
-- 新增 Tier8 场景 `parallel-trigger-routing-example`：
-  - `crates/ralph-e2e/src/scenarios/parallel_trigger_routing_example.rs`
-  - 行为：把 `examples/parallel-trigger-routing/ralph.yml` **原样拷贝**进 E2E workspace 运行（并行 headless）。
-  - 断言口径：
-    - 解析并行 stdout 的 `[instance:out|err:job=<id>]` 前缀；
-    - `job_id` 去重；
-    - 再按 hat 名聚合（`spec_writer#*` → `spec_writer`）得到 `job_runs`。
-  - 断言内容：
-    - `spec_writer job_runs == 2`
-    - `spec_reviewer job_runs == 2`
-    - `spec_logger job_runs == 3`
-    - `LOOP_COMPLETE` 后不得出现新的 `job_id`（防止 completion 后仍派工）。
-
-- 为了做到“真的跑 example prompt”，E2E executor 支持不覆盖 `event_loop.prompt`：
-  - `crates/ralph-e2e/src/executor.rs`：新增 `PromptSource::Config`（不传 `-p`，使用 `ralph.yml` 内置 prompt）。
-
-### 关键结论（针对你问的“event 是否会标记用过”）
-- Hat 输出事件不是从文件读的，它们走的是 supervisor ↔ hat instance 的 channel。
-- `.ralph/events.jsonl` 主要是**历史日志/回放/排障锚点**，不是“消费队列”。
-- 外部注入事件（`ralph emit`）才会写入 `.ralph/current-events` 指向的 JSONL，并由 reader 以 file position 增量读取。
-
-### 关于你看到的 “spec_writer 跑 3 次”
-- 我在本机统计了 `examples/parallel-trigger-routing/.ralph/events.jsonl`：
-  - `spec.start` 出现了 3 次。
-  - 更符合“你连续跑了多次 demo 导致 append-only 历史日志叠加”，而不是“单次 run 内必然重复触发”。
-- E2E keep-workspace 的单次 run（`.e2e-tests/parallel-trigger-routing-example/.ralph/events.jsonl`）显示闭环为：
-  - `spec.start → spec.ready → spec.rejected → spec.ready → spec.approved`（符合预期）。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test` ✅
-- `cargo run -p ralph-e2e -- codex --filter parallel-trigger-routing-example --keep-workspace --verbose --skip-analysis` ✅
-
-## 2026-01-30 01:51 +0800｜问答：`ralph.yml` 里 hat 的 `description` 会不会注入到 prompt？
-- 会注入，但主要是注入到“协调者”的 prompt 里，作为 `## HATS` / `## HATS TOPOLOGY (CONFIGURED)` 的描述列。
-- 不会自动注入到每个 hat 的 job prompt；如果你希望某个 hat 自己也“读到这段描述”，把它写进该 hat 的 `instructions` 更可靠。
-
-## 2026-01-30 03:56 +0800｜并行 Supervisor Output：接近 mdfried（Big Headers + stderr 前缀列）
-
-### 目标回顾
-- 终端：Warp
-- 作用范围：仅并行 Supervisor 的 Output 面板
-- 视觉目标：接近 `mdfried` 的 Big Headers（未来再做 `![]()` 图片内联）
-
-### 我做了什么（落地改动）
-- 引入图片渲染的安全开关与依赖：
-  - 新增配置：`tui.images.enabled`、`tui.images.inline_remote`（默认都为 false）
-  - 接入 `ratatui-image`（协议探测/渲染）、`cosmic-text`（字体栅格化）、`image`（RGBA 图像）
-- 并行 Output 面板重构为“富块渲染”（Text + Image）：
-  - 新增 `OutputBlock/OutputRow/ParallelOutputBuffer` 统一滚动模型
-  - 新增 `ParallelOutputPane`：支持 stream 前缀列 + 图片协议渲染/占位渲染
-  - 框选复制改为“所见即所得”：copy 模式不渲染图片协议，并把前缀列置空（避免破坏 Markdown 行首语义）
-- Big Headers（H1/H2/H3）：
-  - Rendered 模式 + 启用图片渲染 + picker 可用时，把标题渲染为图片块（2 行高）
-  - 参考 mdfried：`cosmic-text` → RGBA → `ratatui-image` 协议图像
-  - 加入缓存：同宽度/同文本/同协议类型不重复 encode；宽度变化会清空缓存
-- stderr 前缀列与正文分离：
-  - 不再把 `"[stderr]"` 拼进正文
-  - stdout/stderr 的区分改由 UI 的前缀列呈现，因此 stderr 的 `#`/`>`/`-` 等行首语义不会被破坏
-
-### 回归测试与验证
-- 新增单测：
-  - stderr 的 Markdown 渲染输出应与 markdown 渲染器一致（不应注入前缀）
-  - Big Headers 在启用图片渲染（halfblocks）时应占用多行，并验证缓存复用
-- 验证命令：
-  - `cargo fmt --check` ✅
-  - `cargo clippy --all-targets --all-features -- -D warnings` ✅
-  - `cargo test` ✅
-  - `cargo test -p ralph-core --test smoke_runner` ✅
-
-## 2026-01-30 12:47 +0800｜回退 Markdown 渲染器：恢复 termimad（撤销 mdfrier）
-
-### 目标回顾
-- 取消使用 `mdfried/mdfrier` 的渲染链路。
-- 恢复项目原本使用 `termimad` 渲染 Markdown 的方式。
-
-### 我做了什么
-- 渲染入口回退到 `termimad`：
-  - `crates/ralph-adapters/src/stream_handler.rs`：
-    - `Rendered` 模式下改用 `termimad::MadSkin` 渲染 Markdown。
-    - stdout（Pretty）直接输出 termimad 的 ANSI，避免“ratatui::Line → ANSI”的二次转换。
-    - TUI 路径保持为：termimad 输出 ANSI → `ansi-to-tui` 解析回 `ratatui::Line`。
-- 清理依赖：
-  - `Cargo.toml`：移除 `mdfrier`，新增 `termimad = "0.34.1"`。
-  - `crates/ralph-adapters/Cargo.toml`：依赖从 `mdfrier.workspace` 切回 `termimad.workspace`。
-  - `Cargo.lock`：已更新，不再包含 `mdfrier`。
-- 注释同步：
-  - `crates/ralph-tui/src/state/parallel.rs`：将语义换行说明从 `mdfrier` 更新为 `termimad`。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
----
-
-## 2026-02-03 00:45 +0800｜修正：Hat Graph Radar 输出对齐 `beautiful-mermaid-rs --ascii`（Unicode box-drawing，而非纯 ASCII）
-
-### 你要的效果
-- Hat Graph Radar 的“文字图”要对齐 `beautiful-mermaid-rs --ascii` 的默认输出：
-  - 使用 Unicode 线条字符（┌─┐│└┘▶）
-  - 不要强制纯 ASCII（+--|）
-
-### 我做了什么
-- `crates/ralph-cli/src/hats.rs`：
-  - `render_hat_graph_radar_ascii(...)`：
-    - compact/full 都改为 `use_ascii: Some(false)`，输出 Unicode box-drawing 文字图。
-    - full 视图改为直接调用 `render_mermaid_ascii`（默认参数 + `use_ascii=false`），避免语义误用。
-- `crates/ralph-tui/src/lib.rs`：
-  - 更新 `with_hat_graph_radar(...)` 的注释，明确这是“文字图”，默认 Unicode。
-- `specs/terminal-ui.spec.md`：
-  - 把 Hat Graph Radar 的 “ASCII-only” 描述修正为“文本图（默认 Unicode box-drawing）”。
-- 回归测试：
-  - `crates/ralph-cli/src/hats.rs` 新增 `test_render_hat_graph_radar_uses_unicode_box_drawing`，断言输出包含 box-drawing 字符。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 00:17 +0800｜回退 Radar workaround：恢复 Mermaid→ASCII 渲染（依赖 beautiful-mermaid-rs 已修复性能）
-
-### 我做了什么
-- 回退两笔历史 workaround（恢复 TUI Radar 使用 Mermaid→ASCII 盒子图渲染）：
-  - `Revert "docs: record tui radar startup regression fix"`（revert: `8b02e6b`）
-  - `Revert "tui: avoid slow mermaid-ascii radar generation"`（revert: `29f4b48`）
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-02 22:13 +0800｜tui-codeblock-syntax-highlighting：仅 fenced code block 做语法高亮（tree-sitter-highlight）
-
-### 最终行为（对齐 OpenSpec）
-- Rendered 模式：
-  - 仅对 fenced code block（```lang ... ```）内部做语法高亮。
-  - 未闭合 code block：统一 code 样式显示，不做语法高亮（流式稳定）。
-  - 已闭合 code block：closing fence 到来后一次性语法高亮，并冻结渲染结果（后续 chunk 不会改变历史块）。
-  - 未知语言：安全降级为统一 code 样式（不高亮、不 panic、不丢内容）。
-  - stdout pretty 与 TUI 输出语义一致（同一套 lang normalize / 降级 / 高亮映射）。
-- `--plain` 模式：
-  - fences 原样可见（``` 不被隐藏）。
-  - 不产生 code block 语法高亮的 ANSI（但仍保留“输入自带 ANSI”解析优先级）。
-
-### 核心改动点
-- `crates/ralph-adapters/Cargo.toml`：
-  - 引入 `tree-sitter` / `tree-sitter-highlight` 与 rust/bash/json/yaml/toml/python/js/ts grammar 依赖。
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - 新增 `CodeBlockHighlighter` + highlight group → 调色板映射（ANSI 24-bit 输出）。
-  - 新增跨 chunk fenced code block 分段器（带行缓存，避免边界切割误判）。
-  - 改造 `TuiStreamHandler` 为“冻结块 + 尾部实时段”，避免每个 chunk 全量重渲染历史内容。
-  - 改造 `PrettyStreamHandler` 在 flush 阶段复用同一渲染链路（stdout pretty 也有 code block 高亮）。
-  - 新增回归测试覆盖：闭合高亮、未闭合不高亮、冻结、plain、未知语言降级、chunk 边界 split fence。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-02 16:06 +0800｜调研：Tenere（pythops/tenere）如何做语法高亮
-
-### 我做了什么（以及为什么）
-- 我直接读了 Tenere 的 `Cargo.toml` 和 `src/formatter.rs`。
-  - 原因：语法高亮通常由依赖决定，且实现一般集中在 formatter/render 模块里。
-- 我把 Tenere 的输出渲染链路拆开看，确认每一步的输入/输出形态（String → ANSI String → Ratatui Text）。
-
-### 结论（可复用的模式）
-- Tenere 把“语法高亮”外包给 `bat`：
-  - `bat` 输出带 ANSI 颜色码的文本（终端彩色输出）。
-- Tenere 用 `ansi-to-tui` 把 ANSI 文本解析为 `ratatui::text::Text`：
-  - 这样 Ratatui 的 `Paragraph` 就能渲染带颜色的富文本。
-- Tenere 固定把输入命名为 `"text.md"`：
-  - 让 bat 按 Markdown 处理。
-  - LLM 输出只要用 fenced code block（```rust 等），就能触发 code block 内的语言高亮。
-
-### 额外观察（潜在坑）
-- 流式输出场景下，Tenere 每次 chunk 都会对“累积到当前的整段回答”重跑一次 bat 渲染。
-  - 回答很长/分片很多时，可能会出现明显的重复开销（体感 O(n²)）。
-
----
-
-## 2026-02-02 21:09 +0800｜OpenSpec FF：tui-codeblock-syntax-highlighting（生成实现所需 artifacts）
-
-### 产出位置
-- `openspec/changes/tui-codeblock-syntax-highlighting/`
-
-### 已生成 artifacts
-- `proposal.md`：阐明“为什么要做”与能力边界（只高亮 fenced code block，兼顾流式与长滚动性能）
-- `design.md`：给出“怎么做”的技术路线（分段状态机 + 冻结缓存 + TUI/stdout 一致性）
-- `specs/codeblock-syntax-highlighting/spec.md`：定义可测试的 MUST 级需求与场景（语言集合、未闭合不高亮、冻结、不支持语言降级、plain 模式）
-- `tasks.md`：把实现拆成可逐条勾选的任务清单（依赖/分段器/高亮器/TUI+stdout 集成/测试与门禁）
-
----
-
-## 2026-02-02 02:39 +0800｜TUI：右上角 Hat Graph Radar（ASCII Mermaid）+ `p` 放大/还原
-
-### 变更摘要
-
-- `ralph-tui`
-  - 新增 Hat Graph Radar 状态缓存（compact/full）与 zoom 标记，并在渲染阶段叠加到 content 区域右上角。
-  - 新增按键 `p` 切换 zoom（并行模式 Chat 聚焦时不抢键）。
-  - Help 面板补充 `p` 快捷键说明。
-- `ralph-cli`
-  - 启动串行/并行 TUI 时 best-effort 生成 hats graph 的 ASCII 渲染并注入（失败只 warn，不影响主流程）。
-
-### 验证
-
-- `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-01 23:32 +0800｜`ralph hats graph` Mermaid 输出改为“逻辑视图”：隐藏 Ralph + Hat→Hat 实线
-
-### 问题
-- `ralph hats graph --format mermaid` 会把调度员 `Ralph` 画出来，并把订阅/发布都画成 `Ralph <-> Hat`。
-- 这会导致线路接近“全连接”，阅读困难。
-- 同时 Hat→Hat 的逻辑边用了虚线 `-.->`，与“明面上就是 Hat→Hat”不一致。
-
-### 修复
-- CLI 的 Mermaid 生成改为“逻辑视图”：
-  - 不再输出 `Ralph` 节点与任何 `Ralph <-> Hat` 边
-  - Hat→Hat 传播关系统一用实线 `-->`
-  - 当配置 `event_loop.starting_event` 存在时，补充入口边：`Start[task.start] -->|starting_event| Hat`
-  - 输出按 `(source_id, topic, target_id)` 排序 + 去重，保持确定性
-
-### 变更点
-- `crates/ralph-cli/src/hats.rs`：调整 `generate_mermaid_string()` / `graph_hats()`，并同步单测断言
-- `specs/hats-graph-logical-view.spec.md`：新增规范，明确输出语义与验收标准
-
-### 验证
-- `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
----
-
-## 2026-02-02 00:35 +0800｜hats graph：把 `complete_publishes` 显示为 `Complete[complete]` 终点
-
-### 背景
-- `event_loop.complete_publishes` 是工作流“结束候选事件”。
-- 它可能没有任何 hat 订阅，但对读图的人来说非常关键（否则看不到闭环）。
-
-### 修复
-- Mermaid 逻辑视图在检测到 `complete_publishes` 时：
-  - 固定输出 `Complete[complete]` 节点
-  - 从所有发布该 topic 的 hat 画边：`Hat_X -->|complete_publishes| Complete`
-
-### 变更点
-- `crates/ralph-cli/src/hats.rs`：`generate_mermaid_string()` 增加 Complete 节点与边
-- `specs/hats-graph-logical-view.spec.md`：补充 `G5`（complete_publishes 可视化规则）
-- `crates/ralph-cli/src/hats.rs`：新增回归测试 `test_generate_mermaid_string_includes_complete_publishes`
-
-### 验证
-- `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
----
-
-## 2026-02-01 11:34 +0800｜并行 TUI：`LOOP_COMPLETE` 后重置并暂停 max_runtime，直到 `Running` 才重新计时
-
-### 你要解决的问题
-
-- 你希望在并行 TUI 里，`LOOP_COMPLETE` 只是“暂时停歇”。
-- 如果停歇太久，不应该被 `event_loop.max_runtime_seconds` 把会话强制杀掉。
-- 但一旦又开始跑新的 job，则应重新开始 max_runtime 的计时护栏。
-
-### 实现摘要（只对 TUI 生效）
-
-- 并行 Supervisor 在启用 TUI 时：
-  - `LOOP_COMPLETE` 进入暂停态，不退出。
-  - 进入暂停态时，max_runtime 计时重置并暂停。
-  - 直到任意实例进入 `Running`（新的 job 启动）才重新开始计时。
-- parallel-cli/CI/E2E 保持原样：`LOOP_COMPLETE` 仍然收敛退出，max_runtime 从 run 启动开始计时。
-
-### 变更文件
-
-- `specs/parallel-hat-instances.spec.md`
-- `crates/ralph-core/src/parallel/supervisor.rs`
-- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
-
-### 验证
-
-- `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
-## 2026-02-01 15:28 +0800｜修复 `ralph hats graph` 在中文/emoji hat 名称下吞节点（unicode/ascii 只剩 task.start→Ralph）
-
-### 现象
-- 在 `examples/parallel-trigger-routing/ralph.yml` 这类包含中文/emoji hat 名称的配置下：
-  - `ralph hats graph --format mermaid` 输出拓扑完整
-  - 但 `ralph hats graph --format unicode/ascii/compact` 只显示 task.start→Ralph（hats 消失）
-
-### 根因
-- Mermaid 生成阶段把节点 ID 直接用 `hat.name`（中文/emoji）生成。
-- `beautiful-mermaid-rs` 对 Unicode 节点 ID 的兼容性不足，会吞边/吞节点但不报错。
-
-### 修复（最小改动，根因级）
-- `crates/ralph-cli/src/hats.rs`：
-  - Mermaid 图改为“节点 ID / 节点 label 分离”：
-    - ID：使用 ASCII 安全的 `hat.id`，并加 `Hat_` 前缀避免冲突/歧义
-    - label：继续使用 `hat.name`（保留中文/emoji）
-  - 生成前对 hats 按 `hat.id` 排序，降低 HashMap 迭代顺序带来的布局波动。
-  - 新增回归测试：中文/emoji hat 名称下 unicode 图必须包含各 hat 名称。
-  - 更新原有 Mermaid 输出相关测试断言（节点 ID 变为 `Hat_*`）。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
-## 2026-02-01 12:19 +0800｜Markdown 配色微调：全色混入 3% #4493f8（白色不变）
-
-### 目标回顾
-- 你希望 Markdown 内部颜色整体“略微偏蓝”：
-  - 所有颜色混入 3% `#4493f8`
-  - 白色（正文）保持不变
-
-### 我做了什么
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - 在 `sublime_monokai_extended` palette 内增加“统一混合”函数（const + 整数权重）：
-    - `new = base * 97% + #4493f8 * 3%`（四舍五入）
-  - 除 `FOREGROUND` 外，其余 Markdown palette 颜色统一走混合（DIMMED/DIMMED2/TITLE/HEADING/QUOTE/RAW_INLINE/BOLD/ITALIC/STRIKE/LIST_PUNCT）。
-  - `FOREGROUND` 保持不变（确保正文白色不被污染）。
-- 回归测试同步更新：
-  - 锁定混合后的最终 RGB 值，避免未来误改混合权重或漏混某个颜色。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
-## 2026-02-01 12:02 +0800｜Markdown 配色微调：bold（强调/标签类）改为 #a9dc76
-
-### 目标回顾
-- 你指出类似 `"1. 初 始 化 ： 入 口 命 令 启 动"` 这种 Markdown 里：
-  - “初始化”这类强调/标签文本当前是红色
-  - 你希望它改成绿色 `#a9dc76`（更像“步骤标签”的语义）。
-
-### 我做了什么
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - 将 `sublime_monokai_extended::BOLD` 改为 `#a9dc76`，并继续用于 `skin.bold`（也就是 `**bold**` 的渲染）。
-  - 新增回归测试 `markdown_bold_uses_custom_green`，锁定 bold 的 fg，避免未来回退。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
-## 2026-02-01 11:44 +0800｜Markdown 配色微调：H1 #ffd866 + heading #fc9867 + code #78dce8（无背景）
-
-### 目标回顾
-- 你希望 Markdown 内部配色使用 `sublime-monokai-extended`，并按最新偏好微调：
-  - code block：取消背景；前景 `#78dce8`
-  - inline code：取消背景；前景 `#78dce8`
-  - 标题（H1）：`#ffd866`
-  - heading（H2-H6）：`#fc9867`
-  - Markdown 红色：`#ff6188`
-
-### 我做了什么
-- `task_plan.md`：
-  - 按“四文件上下文模式”新开本次任务计划。
-  - 历史计划归档为 `task_plan_2026-02-01_1140.md`（避免继续膨胀到 1000 行以上）。
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - Sublime Monokai Extended palette 新增 `TITLE = #ffd866`，用于 H1（标题）。
-  - `default_markdown_skin()` 把标题分层：
-    - H1：`#ffd866`
-    - H2-H6：`#fc9867`
-  - 回归测试新增/调整：
-    - `markdown_h1_uses_custom_yellow`
-    - `markdown_heading_uses_custom_orange` 改为断言 `H2`（`headers[1]`）
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
----
-
-## 2026-02-01 11:34 +0800｜并行 TUI：`LOOP_COMPLETE` 暂停不退出 + 禁用实例回收
-
-### 背景
-
-- 目标是让并行 TUI 在 `LOOP_COMPLETE` 之后进入“暂时停歇”，而不是结束进程。
-- 这样你可以继续发送 human message 来驱动下一轮对话/继续推进任务。
-- 同时禁用实例回收，避免实例进入 `done` 后 human message 变得不可达。
-
-### 核心改动
-
-- completion promise 在 **parallel-tui** 下改为“暂停语义”：
-  - `LOOP_COMPLETE` 触发后进入暂停态（Supervisor 不退出）。
-  - 暂停态保留 completion 的“收敛护栏”：不再路由内部延迟事件去派生新 job。
-  - 暂停态仍持续消费 external events（human.message 等），一旦收到外部事件就解除暂停并恢复正常路由。
-- **parallel-tui** 下禁用动态实例 idle TTL 回收：
-  - 通过将 dynamic idle TTL 等价设置为“极大值”，避免 dynamic instance 自动进入 `done`。
-
-### 变更文件
-
-- `crates/ralph-core/src/parallel/supervisor.rs`
-- `crates/ralph-core/src/parallel/supervisor/routing.rs`
+- `crates/ralph-tui/src/theme.rs` / `crates/ralph-tui/src/app.rs`
+  - Running hat box 高亮色固定为 `#a9dc76`（前景色）。
 - `crates/ralph-cli/src/parallel_runner.rs`
-- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
-- `specs/parallel-hat-instances.spec.md`
+  - 并行事件转发策略：`gate.*` / `human.message` / `source_instance` / `source` 事件进入 TUI，避免漏掉业务事件。
+- `crates/ralph-tui/src/state.rs`
+  - Radar 动画触发：优先用 `event.source`；否则用 `event.source_instance.split_hat_id()` 推导发布者 hat。
+- `crates/ralph-core/src/parallel/instance.rs`
+  - 回滚：不再自动补齐 `event.source`（保持协议语义更原样）。
+  - 保留：继续补齐 `event.source_instance` 与 `event.id`（用于归因与回放）。
+
+### 验证
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+---
+
+## 2026-02-03 23:41 +0800｜TUI：取消 Radar 高对比模式（移除 c 切换）
+
+### 做了什么
+
+- `crates/ralph-tui/src/state.rs`
+  - 删除 `hat_graph_high_contrast`（不再保存/切换高对比偏好）
+- `crates/ralph-tui/src/input.rs`
+  - 删除 `ToggleHatGraphHighContrast` 与 `c` 键映射
+- `crates/ralph-tui/src/app.rs`
+  - 删除 reducer 分支与并行模式非 Chat 场景的 `c` 全局快捷键处理
+  - `apply_hat_graph_radar_scan_head` 去掉 `high_contrast` 参数与配色分支（只保留默认 stop）
+  - 删除/更新相关回归测试
+- `crates/ralph-tui/src/widgets/help.rs`、`specs/terminal-ui.spec.md`
+  - 移除 `c` 的 help/spec 文档描述，避免“幽灵功能”
 
 ### 验证
 
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-03 23:40 +0800｜TUI：拖尾加长 + 扫描头提亮 + base 边变暗（让动效更聚焦）
+
+### 做了什么
+
+- 拖尾加长
+  - `crates/ralph-tui/src/state.rs`
+    - `HAT_GRAPH_EDGE_HEAD_LEN: 16`（扫头更长，拖尾更明显）
+- 扫描头整体提亮（不再把拖尾压暗）
+  - `crates/ralph-tui/src/app.rs`
+    - 去掉 tail 的 `DIM` 依赖（避免“拖尾变暗”的观感）
+    - normal 渐变改为 `blue -> lavender -> text`
+    - BOLD 区间扩大（更亮的方向提示）
+- base 高亮边变暗（降低抢眼程度）
+  - `crates/ralph-tui/src/app.rs`
+    - base 高亮色从 `sapphire` 改为 `overlay1`
+- 测试更新
+  - `crates/ralph-tui/src/app.rs`
+    - 更新扫描头回归测试，锁死“bg 不改、拖尾有渐变、tip BOLD 更亮”的规则
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-03 23:10 +0800｜TUI：Radar 扫描头去掉 bg + truecolor 渐变拖尾 + 高对比模式（c）
+
+### 你最新要求
+
+- 去掉扫描头的轻微发光底色（bg）。
+- 扫描头更高级：tip 更亮，tail 更长更柔和。
+- 增加一档高对比模式（切换更醒目的扫描头配色）。
+
+### 做了什么
+
+- 扫描头渲染（去掉 bg + truecolor 渐变 + 更长拖尾）
+  - `crates/ralph-tui/src/app.rs`
+    - `apply_hat_graph_radar_scan_head` 移除 `bg` 上色。
+    - 改为两段插值渐变（normal 冷色系 / high-contrast 暖色系）。
+    - 通过 `DIM/BOLD` 做 tail/tip 层次，避免再靠 bg“发光”。
+- 拖尾长度
+  - `crates/ralph-tui/src/state.rs`
+    - `HAT_GRAPH_EDGE_HEAD_LEN: 6 → 10`
+- 高对比模式开关（纯 UI）
+  - `crates/ralph-tui/src/state.rs`：新增 `hat_graph_high_contrast: bool`
+  - `crates/ralph-tui/src/input.rs`：`c` 绑定为 `ToggleHatGraphHighContrast`
+  - `crates/ralph-tui/src/app.rs`：
+    - 串行：走 `map_key → dispatch_action`
+    - 并行：非 Chat 输入场景下 `c` 切换（Chat 输入框里不抢字符）
+    - Radar 标题显示 `c: std/HC`
+- 帮助与规格同步
+  - `crates/ralph-tui/src/widgets/help.rs`：help 增加 `c` 说明
+  - `specs/terminal-ui.spec.md`：补充 `c` 的语义与“输入上下文不触发”约束
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-03 18:15 +0800｜Hat Graph Radar：事件线动画改为“跟随 Running 目标”的短动画
+
+### 你最新确认的 UX 规则
+- event 线路不需要持续很久。
+- 如果线路指向的目标 box 不再 Running，则立刻取消该线路动画。
+- 如果有新的 box 进入 Running，则新 box 染色，并同时显示“导致它 Running 的 event”线路动画。
+
+### 我做的改动（只改 TUI 行为，不扩协议）
+- `specs/terminal-ui.spec.md`
+  - 删除“循环播放 + 60s 驻留”的旧要求。
+  - 改为“按 Running 目标驱动”的短动画，并写清取消/触发规则。
+- `crates/ralph-tui/src/state.rs`
+  - 新增两层状态：
+    - `hat_graph_recent_events`：记录最近业务事件（用于推断 cause event）。
+    - `hat_graph_edge_animations`：按 `target_hat` 保存短动画（从非 Running → Running 时启动）。
+  - 在 `ParallelInstanceState` 更新里捕捉 Running 跃迁：
+    - 进入 Running：从 recent events + graph meta 推断 cause event，启动动画。
+    - 退出 Running：若该 hat 已无 Running 实例，则立刻取消动画。
+  - `tick_hat_graph_radar_animation` 改为“清理过期事件/动画 + 目标不 Running 即移除”。
+- `crates/ralph-tui/src/app.rs`
+  - 渲染侧不再依赖“全局最新 event”。
+  - 改为遍历 `hat_graph_edge_animations`，只对 Running 目标绘制 progressive reveal，超时即消失。
+
+### 验证
 - `cargo fmt` ✅
 - `cargo clippy --all-targets --all-features -- -D warnings` ✅
 - `cargo test` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
 
-## 2026-02-01 11:23 +0800｜Markdown 配色微调：inline code 取消背景 + 红色改为 #ff6188
+---
 
-### 目标回顾
-- inline code 取消背景色（不铺底）。
-- Markdown 红色改为 `#ff6188`。
+## 2026-02-03 17:08 +0800｜OpenSpec：创建新 change `parallel-hat-solution-eval-example`（并行 hat 多方案评估 example）
+
+### 目标（你提出的需求）
+- 新增一个 example + 并行 hats 框架，用于“同一改动存在多条可行实现路径，需要都实现并通过测试验证后再决策”的场景。
+
+### 我做了什么（按 artifact 驱动流程）
+- 创建 change：`openspec/changes/parallel-hat-solution-eval-example/`（默认 schema：`spec-driven`）
+- 查看 artifacts 状态：`0/4`
+  - `proposal`：ready
+  - `design`：blocked by proposal
+  - `specs`：blocked by proposal
+  - `tasks`：blocked by design, specs
+- 仅获取首个 artifact 指引（不创建 artifact）：
+  - `openspec instructions proposal --change "parallel-hat-solution-eval-example"`
+  - proposal 输出文件位置：`openspec/changes/parallel-hat-solution-eval-example/proposal.md`
+
+### 下一步（等待你确认后继续）
+- 起草并提交 `proposal.md` 后，才会解锁 `design` 与 `specs` 两个 artifacts。
+
+---
+
+## 2026-02-03 17:31 +0800｜OpenSpec：`parallel-hat-solution-eval-example` 创建 `proposal.md`
 
 ### 我做了什么
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - inline code：改为只设置前景色，并显式清空 background（`background_color = None`）。
-  - Markdown 红色系：将 inline code / bold 的前景色统一改为 `#ff6188`。
-  - 更新回归测试，锁定 inline code 的 fg/bg 配置。
+- 继续 change：`parallel-hat-solution-eval-example`
+- 创建 artifact：`proposal`
+  - 写入：`openspec/changes/parallel-hat-solution-eval-example/proposal.md`
+
+### 结果
+- Schema：`spec-driven`
+- Progress：`1/4`
+- 解锁情况：`design` 与 `specs` 已变为可创建；`tasks` 仍被 `design/specs` 阻塞
+
+---
+
+## 2026-02-03 19:03 +0800｜OpenSpec：`parallel-hat-solution-eval-example` 创建 `design.md`
+
+### 我做了什么
+- 创建 artifact：`design`
+  - 写入：`openspec/changes/parallel-hat-solution-eval-example/design.md`
+
+### 结果
+- Schema：`spec-driven`
+- Progress：`2/4`
+- 解锁情况：
+  - `specs` 仍可创建（下一步应创建 specs）
+  - `tasks` 仍被 `specs` 阻塞（已不再依赖 design）
+
+---
+
+## 2026-02-03 17:55 +0800｜Hat Graph Radar：向内偏移再下移 + 线动画循环播放 + 60s 驻留 + event.source 补齐
+
+### 你反馈的现象
+- Radar 覆盖层仍会遮挡 Output 的边线，需要再向下偏移一点。
+- 你看不到 event 线段动画（或只是一闪而过）。
+- 你指出 `.ralph/events.jsonl` 明明有 `hat/source_instance`，不应该“拍脑袋填当前实例”。
+
+### 我做了什么（核心改动）
+
+- 布局偏移（避免遮挡边线）
+  - `crates/ralph-tui/src/app.rs`：`HAT_GRAPH_RADAR_INSET_Y` 从 `3` 增加到 `4`。
+- 线动画：从“播完就停”改为“循环播放”
+  - `crates/ralph-tui/src/app.rs`：边动画改成“按步进取模”循环渲染，不再依赖 `elapsed <= total_ms`。
+  - `crates/ralph-tui/src/app.rs`：在每帧 render tick 调用 `state.tick_hat_graph_radar_animation(now)`，
+    让 `pending` 能在 **60 秒最小驻留**到期后切换生效。
+- event source 归因（发布者 hat）
+  - `crates/ralph-core/src/parallel/instance.rs`：在 `decorate_outgoing_event` 里补齐 `event.source=hat_id`（仅在缺失时补齐，不覆盖已有值），并继续保留 `source_instance`。
+  - 这样 TUI/诊断可以直接用 `event.source`，同时 `source_instance` 仍用于实例级归因。
+
+### 你问的“Radar 图是用 CLI 还是 crate？”
+- 现在是 **直接集成 `beautiful-mermaid-rs` crate**（不是 shell 调 CLI）。
+  - 入口：`crates/ralph-cli/src/hats.rs`：`render_mermaid_ascii_with_meta(...)` 生成 Unicode 图 + meta
+  - TUI：`crates/ralph-tui/src/app.rs` 用 meta 做 cell 级高亮与动画（不拼 ANSI 字符串）
 
 ### 验证
 - `cargo fmt --check` ✅
 - `cargo clippy --all-targets --all-features -- -D warnings` ✅
 - `cargo test` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
 
-## 2026-02-01 01:10 +0800｜Markdown 配色微调：代码块取消背景 + 标题改为 #ffd866
+---
 
-### 目标回顾
-- fenced code block 取消背景色（不铺底）。
-- 标题统一使用 `#ffd866`。
+## 2026-02-03 19:47 +0800｜交付：并行实验开发永动机（Parallel Experimental Dev Engine）配置方案
 
-### 我做了什么
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - code block：保留前景色，但将背景清空（`background_color = None`）。
-  - heading：统一改为 `#ffd866`。
-  - 新增回归测试：锁定 heading fg 与 code block bg 行为，避免回归。
+### 产物（可直接复制使用）
+
+- 配置：`examples/parallel-experimental-dev-engine/ralph.yml`
+- 说明：`examples/parallel-experimental-dev-engine/README.md`
+- 回放夹具：`crates/ralph-core/tests/fixtures/parallel_experimental_dev_engine.jsonl`
+- 回归测试：`crates/ralph-core/tests/smoke_runner.rs`（新增该 fixture 的 exists + full replay flow 校验）
+
+### 这份 ralph.yml 解决什么问题
+
+- 面向“探索型开发任务”：
+  - 同一目标需要多轮试验、多轮验证，且希望并行跑起来。
+- 把“怎么做 / 怎么验证”的责任交还给用户：
+  - 用户在 `EXPERIMENT_PLAN` 里写清楚实现步骤与验证命令。
+  - Ralph 只负责并行化、结构化、强制产出验证证据，并收敛结束。
+
+### 配置关键点（为什么这样配）
+
+- 两类 hats 分工明确（减少特殊情况，提升确定性）：
+  - `experiment_dispatcher`：只拆分与派发 `experiment.task`，不跑工具、不改文件。
+  - `experiment_runner`：多实例并行执行，每个任务必须“实现 + 验证”，并发布 `experiment.result`。
+- worktree 隔离 + 产物导出（避免 worktree 回收丢改动）：
+  - runner 使用 `workspace.strategy=worktree`。
+  - runner 必须在 result 里给出 `patch` 或 `commit`（至少一个），用于把改动带回主工作区。
+- 可收敛的入口/完成语义（三件套）：
+  - `event_loop.starting_event=experiment.start`
+  - `event_loop.complete_publishes=experiment.complete`
+  - `event_loop.completion_promise=LOOP_COMPLETE`
+- 安全刹车（防止“永动机”卡死）：
+  - `event_loop.max_iterations` / `event_loop.max_runtime_seconds`
+  - `parallel.autoscale.max_running_jobs` / `dynamic_idle_ttl_secs`
+  - runner `job_timeout_secs`
+
+### 如何运行（仓库根目录）
+
+```bash
+cargo run --bin ralph -- run -c examples/parallel-experimental-dev-engine/ralph.yml --no-tui
+```
+
+### 验证
+
+- `cargo test -p ralph-core --test smoke_runner` ✅
+
+## 2026-02-03 21:25 +0800｜TUI：Hat Graph Radar “常亮边 + 跑动高亮头”扫描动效
+
+### 做了什么
+- `crates/ralph-tui/src/state.rs`：
+  - 新增渲染计划纯函数 `plan_hat_graph_radar_edge_animation`（reveal → full → scan）
+  - 新增扫描头参数：`HAT_GRAPH_EDGE_HEAD_STEP_MS`、`HAT_GRAPH_EDGE_HEAD_LEN`
+  - 新增单测：`hat_graph_edge_render_plan_reveals_then_scans_until_cancelled_by_running_state`
+- `crates/ralph-tui/src/app.rs`：
+  - Radar 线路渲染改为“两层上色”：
+    - base：全亮路径（`sapphire`）
+    - head：短段扫描头（`sky` + `BOLD`），reveal 阶段贴前沿，reveal 后循环移动
+- `specs/terminal-ui.spec.md`：补充扫描头行为描述
+- `task_plan.md` 超 1000 行轮换：
+  - `task_plan_2026-02-03_2105.md`（归档）
+  - `task_plan.md`（新）
 
 ### 验证
 - `cargo fmt --check` ✅
 - `cargo clippy --all-targets --all-features -- -D warnings` ✅
 - `cargo test` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
 
-## 2026-02-01 00:59 +0800｜Markdown 内部配色：切换为 sublime-monokai-extended（Monokai Extended）
+---
 
-### 目标回顾
-- 你希望把 Markdown 的内部配色从 Monokai Pro 改成 `sublime-monokai-extended`（Monokai Extended）。
-- 要求 stdout 与 TUI 保持一致（同一套 skin 生效）。
+## 2026-02-03 20:45 +0800｜TUI：Hat Graph Radar 事件连线动画补点（修复“半截消失/断线观感”）
 
-### 我做了什么
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - 将 Markdown 主题从 Monokai Pro 改为 **Sublime Monokai Extended**：
-    - 参考 `Monokai Extended.tmTheme` 的 Markdown/markup scope 颜色，映射到 `termimad::MadSkin`：
-      - heading / quote / bold / italic / strike / raw inline
-    - code block / inline code 使用 selection/lineHighlight 作为背景，让代码区域更清晰。
-  - 更新回归测试：
-    - `markdown_inline_code_uses_sublime_monokai_extended_palette`
-    - `markdown_fenced_code_block_uses_sublime_monokai_extended_palette`
-    - 注：测试直接断言 `MadSkin` 的 fg/bg，避免 `NO_COLOR=1` 抑制 ANSI 输出导致不稳定。
+### 做了什么
+- `crates/ralph-cli/src/hats.rs`：
+  - 注入 radar meta 时，把 `edge.path` 从“关键点序列”补齐为“逐 cell 的连续路径”
+  - 增加单测锁死补点规则（水平/垂直补齐 + 非正交兜底）
+- `crates/ralph-tui/src/app.rs`、`crates/ralph-tui/src/state.rs`：
+  - 同步修正 Radar tick/动画相关注释口径（避免继续误导为“60 秒驻留/短动画”）
 
 ### 验证
 - `cargo fmt --check` ✅
 - `cargo clippy --all-targets --all-features -- -D warnings` ✅
 - `cargo test` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
 
-## 2026-02-01 00:34 +0800｜Markdown 内部配色：Monokai Pro（termimad）
+---
 
-### 目标回顾
-- 让 Ralph 的 Markdown 渲染（stdout + TUI）使用你提供的 Monokai Pro 调色板。
-- 保持 Markdown 语义不变，只调整内部配色与可读性。
+## 2026-02-03 19:52 +0800｜纠错：该需求仅补充到 OpenSpec change（不落盘实现）
+
+### 为什么要纠错
+
+- 你澄清：你要的是把方案补充到 change：`parallel-hat-solution-eval-example`，而不是现在就进入 apply/实现阶段。
+- 因此需要把误落到主仓库实现层的 example/fixture/smoke test 撤回，回到“artifact 驱动”流程。
 
 ### 我做了什么
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - 新增 `monokai_pro` palette（hex → RGB），并将它映射到 `default_markdown_skin()`：
-    - 正文：设置前景色（不强制背景色）。
-    - inline code：设置前景/背景（accent3 + dark2）。
-    - fenced code block：设置前景/背景（dimmed1 + dark1）。
-    - 标题：H1..H6 使用 accent6..accent1 的“彩虹阶梯”。
-    - 结构符号（bullet/quote/hr/table/ellipsis/strikeout）使用 dimmed/低饱和色。
-  - 为避免 workspace `crossterm`（0.28）与 `termimad` 的 `crossterm`（0.29）类型冲突，palette 常量使用 `termimad::crossterm::style::Color`。
 
-### 回归测试
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - 新增测试：
-    - `markdown_inline_code_uses_monokai_pro_palette`
-    - `markdown_fenced_code_block_uses_monokai_pro_palette`
-  - 注：测试直接断言 `MadSkin` 内部 fg/bg，避免 `NO_COLOR=1` 抑制 ANSI 输出导致不稳定。
+- 回滚实现层落盘内容（不再在主仓库新增 example/fixture/tests）：
+  - 删除：`examples/parallel-experimental-dev-engine/`
+  - 删除：`crates/ralph-core/tests/fixtures/parallel_experimental_dev_engine.jsonl`
+  - 同步移除 smoke_runner 中对应的 fixture 校验用例
+- 把可复制的草案内容补充进 change artifacts（供你 review）：
+  - `openspec/changes/parallel-hat-solution-eval-example/design.md` 新增 Appendix：
+    - `ralph.yml` 草案
+    - `README.md` 草案
 
 ### 验证
+
+- `cargo test -p ralph-core --test smoke_runner` ✅
+
+---
+
+## 2026-02-03 21:40 +0800｜TUI：Hat Graph Radar 扫描头渐变/发光（质感 + 对比度增强）
+
+### 做了什么
+
+- `crates/ralph-tui/src/app.rs`
+  - 扫描头从“单色 + BOLD”升级为“渐变 + 轻微发光底色（bg）”。
+  - 仍保持“两层渲染”结构：
+    - base：常亮全路径（用于表达“cause event 线路持续有效”）
+    - head：短段循环扫描头（用于表达“仍在运行”）
+- `crates/ralph-tui/src/app.rs`
+  - 新增回归测试 `hat_graph_radar_scan_head_uses_gradient_and_glow_bg`，
+    锁死 tip 必须“最亮 + BOLD + 更亮 bg”的对比度规则。
+
+### 验证
+
 - `cargo fmt --check` ✅
 - `cargo clippy --all-targets --all-features -- -D warnings` ✅
 - `cargo test` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
 
-## 2026-01-31 22:45 +0800｜合并 `for_marge` 分支（冲突解决 + TUI theme/exabind 整合）
+---
 
-### 我做了什么
-- 完成 `for_marge` → `main` 合并，并产出 merge commit：`5f8f58c`（`Merge branch 'for_marge'`）。
-- 冲突解决策略：
-  - `notes.md/task_plan.md/WORKLOG.md/ERRORFIX.md` 这类“会话记录文件”优先保留 `main`，避免内容搅在一起难读；同时保留 `for_marge` 新增的历史文件（例如 `notes_2026-01-30_1623.md` 等）。
-  - TUI 相关冲突以“让主线可继续演进”为原则：保留 `main` 的并行输出 buffer/渲染链路，并采纳 `for_marge` 的主题与 exabind 边框修正。
+## 2026-02-04 00:27 +0800｜补充：仅更新 OpenSpec change（`parallel-hat-solution-eval-example`），不落盘实现
 
-### 关键代码改动（摘要）
-- `crates/ralph-tui/src/theme.rs`：引入 `TuiTheme`（Catppuccin Mocha）+ `panel_block` + `patch_exabind_panel_border_bg`。
-- `crates/ralph-tui/src/widgets/header.rs` / `crates/ralph-tui/src/widgets/footer.rs` / `crates/ralph-tui/src/widgets/instances.rs`：
-  - 统一使用主题与 exabind 边框风格，并在需要处补 “外侧背景刷回” 的细节修正。
-- `crates/ralph-tui/src/widgets/content.rs`：渲染前先铺底，避免 bg=Reset 污染与动画/透明背景下闪烁。
-- `crates/ralph-tui/src/app.rs`：对齐新的主题/ContentPane 接口，并保持并行输出继续使用 `ParallelOutputPane`。
+### 你澄清的目标（我为什么要这样做）
 
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
+- 你要的是“研究出一个适用于并行方案评估/多轮实验探索的 `ralph.yml` 配置范式”。
+- 这一步应该先沉淀到 OpenSpec change（proposal/design/spec/tasks）。
+- 你明确不要进入 apply/实现阶段（不在主仓库新增 example/fixture/tests）。
 
-## 2026-01-31 17:08 +0800｜并行 TUI：输出缓冲默认 10000 行 + ralph.yml 可配置
+### 我做了什么（落在 change artifacts）
 
-### 目标回顾
-- 并行 instance/job 输出回看窗口不要太快丢历史：
-  - 默认上限从 5000 行提升到 10000 行
-- 把 `max_buffer_lines` 做成 `ralph.yml` 配置项（无需改代码即可调整）
-
-### 我做了什么
-- 默认值提升：
-  - `crates/ralph-tui/src/state/parallel.rs`：`ParallelTuiState::default().max_buffer_lines = 10_000`
-- 配置项落地：
-  - `crates/ralph-core/src/config.rs`：新增 `tui.max_buffer_lines`（默认 10_000）
-- 配置注入到并行 TUI：
-  - `crates/ralph-tui/src/lib.rs`：新增 `Tui::with_parallel_max_buffer_lines(...)`
-  - `crates/ralph-cli/src/parallel_runner.rs`：创建并行 TUI 时注入 `config.tui.max_buffer_lines`
-- `ralph init` 生成模板补充示例：
-  - `crates/ralph-cli/src/init.rs`：在注释区新增 `tui.max_buffer_lines` 示例
-- 顺手做了一个边界值修正：
-  - `max_buffer_lines == 0` 时不再累积 `raw_lines`，避免“UI 不保留输出但内存仍无限增长”的反直觉情况。
+- `openspec/changes/parallel-hat-solution-eval-example/design.md`
+  - 明确“窗口化派发（in-flight window）”：
+    - 以 `experiment.reviewed(evidence_ok=true)` 作为释放 slot 的完成信号
+    - 禁止洪水式一次性派发全部实验
+  - 明确“自适应并行度（激进 + AIMD）”：
+    - `P_max` 由 `ralph#1` 基于用户 plan/prompt 推断
+    - 运行中 `P += 1` / `P = floor(P/2)` 动态调参
+    - 强护栏：`P <= parallel.autoscale.max_running_jobs - 2`（预留 `ralph#1` + `auditor`）
+  - 新增独立 `experiment_auditor`（硬门槛审计：证据不足必须拒绝收敛）
+  - 新增独立 `experiment_integrator`（主工作区采纳/集成/最终验收：消费 `integration.task`，产出 `integration.applied`/`integration.rejected`）
+  - 收紧证据/产物口径：runner 必须提供 `patch`（`commit` 仅可选补充信息；auditor/integrator 以 patch 作为最低审计载体）
+  - 修复 README 草案里的 Mermaid 图表语法（label 含括号需加引号）
+  - 同步“生产建议”权限口径：`worktree: ask`、`hooks: allow`，并提示可用 `parallel.gate.default_timeout_secs` 做超时策略
+- `openspec/changes/parallel-hat-solution-eval-example/specs/parallel-experimental-dev-engine/spec.md`
+  - 补充 gate timeout 的 guardrail 要求（`parallel.gate.default_timeout_secs`）
+  - 补充 README 必须包含生产权限建议片段（`worktree: ask` / `hooks: allow`）
+  - 补充 integrator 的 MUST 约束（主工作区 `workspace.strategy=shared`，并产出可审计的集成结果事件）
 
 ### 验证
-- `cargo fmt --check` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
 
-## 2026-01-31 15:40 +0800｜澄清：starting_event 语义 + 解释 parallel instance 显示 `failed`
-
-### 你问的点
-1. 你认为 `starting_event` 被忽略（指向 `crates/ralph-core/src/event_loop/mod.rs:270`）。
-2. 你在 `examples/parallel-trigger-routing` 跑 parallel demo 时看到 instance 状态为 `failed`，想确认含义。
-
-### 我做了什么（最小改良，避免改核心行为）
-- 澄清并固化 `starting_event` 的“可选语义”（避免误读为“初始化事件”）：
-  - `crates/ralph-core/src/event_loop/mod.rs`：更新注释，明确 “starting_event 有/无配置” 两种分支语义。
-  - `crates/ralph-cli/src/loop_runner.rs`：同步更新注释，避免 CLI 层再出现相反描述。
-- 给 parallel 协调者（`ralph#1`）增加更明确的 prompt 语义锚点（减少模型漂移导致的误解）：
-  - `crates/ralph-core/src/parallel/supervisor.rs`：在 `KEY SEMANTICS` 里显式写出：
-    - starting_event set → MUST publish it
-    - starting_event unset → MUST decide entry (prefer derived candidates)
-
-### 说明：instance 状态 `failed` 的代码口径
-- `failed` 对应 `HatInstanceState::Failed`，含义是：该实例“最近一次 job 执行失败”（exit code 非 0 / timeout / cancel）。
-- 它不等价于“整个 run 必然失败”，但通常意味着该实例需要排查后端/超时/中断原因。
-
-### 我做了一个最接近你现场的复现
-- 在 `examples/parallel-trigger-routing` 目录下跑了一次：
-  - `../../target/release/ralph run -c ralph.yml --no-tui --plain --verbose`
-- 观察到最终输出：
-  - `[supervisor] final states: ... done`（未出现 failed）
-
-### 更正（避免误导未来阅读）
-- 之前 WORKLOG 中“fresh run 使用 starting_event（默认 task.start）”这句容易被理解成“starting_event 是初始化事件”。
-- 更准确的表述是：
-  - 初始化握手 topic 固定 `task.start`/`task.resume`
-  - starting_event 是协调后的 workflow entry（可选；未配置时由 `ralph#1` 推测/决定）
-
-### 验证（证据）
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-- mock E2E ✅：
-  - `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference --verbose`
-
-## 2026-01-31 13:40 +0800｜重构：拆分 `ralph-e2e` Tier8 `parallel.rs`（模块目录化，降低维护成本）
-
-### 目标回顾
-- `crates/ralph-e2e/src/scenarios/parallel.rs` 行数过长（>1000 行），后续继续扩展会加剧冲突与维护成本。
-- 目标是“纯重构”：不改变任何场景语义、断言口径与对外 API。
-
-### 我做了什么
-- 将 `parallel` 改为目录模块，并拆分为 4 个文件：
-  - `crates/ralph-e2e/src/scenarios/parallel/mod.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel/starting_event_inference.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel/job_run_counts.rs`
-- 维持原有导出路径：
-  - `ParallelHatInstancesScenario` / `ParallelStartingEventInferenceScenario` 仍由 `scenarios::parallel` 导出
-  - `JobRunCounts` / `parse_parallel_job_line` 仍可被 `parallel_trigger_routing_example` 通过 `super::parallel::{...}` 复用（可见性限制在 `crate::scenarios`）
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-- mock E2E ✅：
-  - `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference --verbose`
-
-## 2026-01-31 13:25 +0800｜新增 E2E 变体：starting_event 推测（多入口候选）
-
-### 目标回顾
-- 为 `starting_event` 未配置（由 `ralph#1` 自行推测入口事件）的语义，再补一个更贴近真实的 E2E 变体：
-  - 拓扑里存在多个 derived entry candidates（例如 `spec.start` 与 `docs.start`）
-  - prompt 给出明确 workflow 顺序（Planner 必须先跑），因此入口选择变得可判定、可做强断言
-
-### 我做了什么
-- 扩展 `ParallelStartingEventInferenceScenario` 为“多变体”：
-  - 现有场景（单入口候选）：`parallel-starting-event-inference`
-  - 新增变体（多入口候选）：`parallel-starting-event-inference-multi-candidate`
-- 变体拓扑引入 `docs` 干扰 hat：
-  - `docs.start → docs.done`（不在 `complete_publishes` 内）
-  - 期望 `ralph#1` 仍选择触发 Planner 的入口（`spec.start`），并完成 `spec.start → build.task → build.done` 闭环
-- 录制并登记 mock cassette：
-  - `cassettes/e2e/parallel-starting-event-inference-multi-candidate-codex.jsonl`
-
-### 变更文件
-- `crates/ralph-e2e/src/scenarios/parallel.rs`：新增 `MultiCandidate` 变体与断言（含 `docs.*` 未使用断言）
-- `crates/ralph-e2e/src/main.rs`：注册新变体场景
-- `specs/e2e-starting-event-inference.spec.md`：补充变体需求与 cassette 约定
-- `crates/ralph-e2e/README.md`：Tier8 场景列表补充变体说明
-- `cassettes/e2e/README.md`：登记新 cassette
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-- live E2E（Codex）✅：
-  - `cargo run -p ralph-e2e -- codex --filter parallel-starting-event-inference-multi-candidate --skip-analysis --keep-workspace --verbose`
-- mock E2E（cassette）✅：
-  - `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference-multi-candidate --verbose`
-
-## 2026-01-31 12:20 +0800｜新增 E2E：starting_event 未配置时 ralph#1 入口推测（parallel）
-
-### 目标回顾
-- 当 `event_loop.starting_event` 未设置时，应由 `ralph#1` 基于 hats 拓扑推测并发布 workflow entry event。
-- 需要一个端到端回归场景，覆盖“入口推测 + 触发链路 + 收敛到 LOOP_COMPLETE”。
-
-### 我做了什么
-- 新增 spec：`specs/e2e-starting-event-inference.spec.md`（定义可测口径与验收标准）。
-- 新增 ralph-e2e 场景：
-  - `ParallelStartingEventInferenceScenario`（id：`parallel-starting-event-inference`，Codex only）
-  - 断言点：
-    - `task.start` 后 `ralph#1` 的第一个 workflow entry event 必须是 `spec.start`
-    - 事件链路包含 `spec.start` → `build.task` → `build.done`
-    - 检测到 `LOOP_COMPLETE`
-- 录制 cassette + 打通 mock-mode：
-  - 新增 `cassettes/e2e/parallel-starting-event-inference-codex.jsonl`
-  - 修复 `ralph-e2e mock-cli`：支持“按调用次数分段回放”（否则 parallel 下 `ralph#1` 多 job 会导致 `LOOP_COMPLETE` 提前回放、workflow 中断）。
-
-### 验证（证据）
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- live E2E（Codex）✅：
-  - `cargo run -p ralph-e2e -- codex --filter parallel-starting-event-inference --skip-analysis --verbose --keep-workspace`
-- mock E2E（cassette）✅：
-  - `cargo run -p ralph-e2e -- --mock --filter parallel-starting-event-inference --verbose`
-
-## 2026-01-31 03:02 +0800｜按你的反馈回退 starting_event 语义：初始化固定 task.start，入口事件由 ralph#1 决策
-
-### 你指出的问题
-- 我之前把 `event_loop.starting_event` 当成了 fresh run 的“初始化事件 topic”（并在 `EventLoop::initialize()` 里使用它）。
-- 你明确要求：`starting_event` 未设置时，就由 `ralph#1` 自行决定；而不是默认替你选 `task.start` 或把它当作“第一事件”。
-
-### 我做了什么
-- 语义回退（按设计对齐）：
-  - `EventLoop::initialize()` fresh run 始终发布 `task.start`（`starting_event` 不再影响初始化事件 topic）。
-  - `loop_runner` 的 debug event logger 同步修正：fresh run 记录的初始事件也固定为 `task.start`。
-- prompt 增强（让 ralph#1 更清楚如何处理）：
-  - `starting_event` 已设置：提示 ralph#1 “协调后优先发布该入口事件启动 workflow”。
-  - `starting_event` 未设置：提示 ralph#1 “必须自行决定第一次 delegation 的入口事件”，并给出启发式候选入口事件列表（订阅但未被任何 hat 发布的事件）。
-- README 同步：
-  - 把 `starting_event` 从“First event published”改为“协调后入口事件（不是 first event）”，并修正示例配置。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
-## 2026-01-30 23:03 +0800｜continuous-learning：四文件摘要 + 归档清理（保持工作区干净）
-
-### 我做了什么
-- 在 `notes.md` 追加“四文件摘要（用于决定是否提取 skill）”，并确认 termimad 的 H1 默认居中属于可复用踩坑点。
-- 新增一个全局可复用 skill：
-  - `self-learning.termimad-h1-left-align`
-  - 位置：`/Users/cuiluming/.codex/skills/self-learning.termimad-h1-left-align/SKILL.md`
-- 归档历史文件，减少根目录噪音：
-  - `notes_*.md` / `task_plan_*.md` → `archive/`
-  - `WORKLOG_2026-01-29_1908.md` / `WORKLOG_2026-01-29_2022.md` → `archive/`（并同步更新 `WORKLOG.md` 引用路径）
-- 删除重复的未跟踪 example：`examples/parallel-trigger-routing2/`
-
-### 提交
-- `f4de8c5`：`chore: archive session notes and plans`
-
-## 2026-01-30 22:22 +0800｜termimad：H1 标题改为左对齐（取消居中）
-
-### 你要的效果
-- `termimad` 渲染 Markdown 时，H1（`# Title`）不再居中，改为靠左对齐。
-
-### 我做了什么
-- `crates/ralph-adapters/src/stream_handler.rs`：
-  - 新增 `default_markdown_skin()`：基于 `MadSkin::default()`，把 `headers[0].align` 从 `Center` 改为 `Left`。
-  - stdout（Pretty 输出）与 TUI（`ratatui::Line`）两条渲染路径统一使用该 skin，避免“一个左对齐一个仍居中”的分裂体验。
-  - 新增回归测试：`markdown_h1_is_left_aligned_in_rendered_mode`，防止未来升级 termimad 或重构时把 H1 又改回居中。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-
-## 2026-01-30 13:34 +0800｜彻底回退 mdfried 相关功能：移除 Big Headers/图片渲染 + 移除左侧红色 E + 许可证回退 MIT
-
-### 目标回顾
-- 彻底移除 Big Headers/图片渲染等 `mdfried` 相关特性（回到纯文本 Output）。
-- 并行 Output 面板不再显示左侧红色 `E`（stderr 用灰色弱化区分即可）。
-- 许可证从 `GPL-3.0-or-later` 回退到 `MIT`，并同步更新文档与元数据。
-
-### 我做了什么
-- 移除 Big Headers/图片渲染：
-  - 删除并行输出的 Image 相关结构与渲染逻辑，输出 buffer 回到“纯文本行”模型。
-  - 移除 `ratatui-image` / `cosmic-text` / `image` 依赖与相关代码。
-  - 移除 `tui.images.*` 配置项与 CLI/TUI 传递链路。
-- 移除 Output 左侧红色 `E`：
-  - `ParallelOutputPane` 不再渲染任何左侧前缀列，stderr 仅通过 `MUTED_FG`（灰色）弱化呈现。
-- 许可证回退：
-  - `Cargo.toml`：`workspace.package.license = "MIT"`
-  - 根目录 `LICENSE`：替换为 MIT License 文本
-  - README/docs：许可证 badge 与说明同步改为 MIT
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
-## 2026-01-31 02:35 +0800｜理性整合上游提交：backend args / hats graph / presets / events / scratchpad（Mermaid ASCII 改用 beautiful-mermaid-rs）
-
-### 目标回顾
-- 将你指定的多个 commit 的“高价值行为”整合进当前主线，避免原样搬运上游实现细节。
-- `ralph hats graph` 的 ascii/unicode/compact 必须使用 `/Users/cuiluming/local_doc/l_dev/my/rust/beautiful-mermaid-rs` 做确定性渲染。
-- 通过全量验证（fmt/clippy/test + replay smoke tests），用测试做背压门。
-
-### 我做了什么（按能力分组）
-
-- backend args（run 级别 + per-hat 级别）：
-  - `ralph run -- <BACKEND_ARGS...>`：支持把 trailing args 追加到 backend 命令行。
-  - `HatBackend` 扩展为支持 args：
-    - `NamedWithArgs { backend_type, args }`
-    - `KiroAgent { type, agent, args }`
-    - `Custom { command, args }`
-  - 串行 PTY 模式支持“每轮切换 backend”（避免 backend 在首轮锁死）。
-  - 统一 hat-level backend 生效优先级：优先使用 hat backend，失败回退全局 backend，并保持 timeout 配置按 backend 名生效。
-
-- starting_event 修复：
-  - `event_loop.starting_event` 不再被忽略：
-    - fresh run：使用 `starting_event`（默认 `task.start`）
-    - resume：固定为 `task.resume`
-
-- events JSONL 正确性改良：
-  - `events.jsonl` 写入改为“整行 JSON + 换行一次性追加写入”，降低半行 JSON 的概率。
-
-- scratchpad 行为组（清理 + 自动注入）：
-  - fresh run 会清理旧 scratchpad 内容（truncate 为空，而不是删除文件），避免 stale state 误导本轮目标。
-  - scratchpad 内容会自动注入 prompt（带字符预算 + tail 保留），减少 agent 每轮自行读取 scratchpad 的重复动作。
-
-- hats 可视化（确定性、可测试、离线可用）：
-  - 新增/完善 `ralph hats`：list/show/validate/graph。
-  - `graph --format ascii/unicode/compact`：从 Mermaid 文本生成，再用 `beautiful-mermaid-rs` 渲染（去掉 AI backend 画图逻辑）。
-
-- presets 镜像同步：
-  - `scripts/sync-embedded-files.sh` 支持把 `/presets/**` 镜像到 `crates/ralph-cli/presets/**`，保证 `cargo install` 也能拿到相同 presets。
-
-- prompt 省 token（active hat 场景）：
-  - 当存在 active hat 时，Ralph prompt 输出 `## ACTIVE HAT` + `### Event Publishing Guide`，跳过 `## HATS` 全量拓扑与 Mermaid（更聚焦、更省 token）。
-
-### 文档同步
-- `README.md`：
-  - 更新 `ralph hats graph` 示例：移除 `--backend`（现在不需要 backend 也能渲染 ascii/unicode）。
-  - 补充 `ralph run -- <BACKEND_ARGS...>` 的说明。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
+- Mermaid：已用 `mermaid-validator` 校验并修复 parse error（括号 label 引号化）

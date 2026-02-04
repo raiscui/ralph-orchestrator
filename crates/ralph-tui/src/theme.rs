@@ -237,6 +237,15 @@ impl TuiTheme {
             .bg(self.colors.yellow)
             .add_modifier(Modifier::REVERSED)
     }
+
+    /// Hat Graph Radar：运行中 hat 的 box 前景色。
+    ///
+    /// 说明：
+    /// - 这是一个“语义化角色”，而不是固定复用 Catppuccin 的某个 token；
+    /// - 你指定了该高亮色为 `#a9dc76`（便于与其它蓝色系强调色区分）。
+    pub const fn hat_graph_running_hat_fg(&self) -> Color {
+        Color::from_u32(0xA9_DC_76)
+    }
 }
 
 // =============================================================================
@@ -356,6 +365,16 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::prelude::Widget;
     use tachyonfx::{Duration as FxDuration, Interpolation, Motion, fx};
+
+    #[test]
+    fn hat_graph_running_hat_fg_is_custom_hex() {
+        let theme = TuiTheme::default();
+        assert_eq!(
+            theme.hat_graph_running_hat_fg(),
+            Color::from_u32(0xA9_DC_76),
+            "Running hat box 的高亮色应为 #a9dc76"
+        );
+    }
 
     #[test]
     fn patch_exabind_panel_border_bg_sets_border_cells_bg_to_crust() {

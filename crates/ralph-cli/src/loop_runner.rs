@@ -250,8 +250,8 @@ pub async fn run_loop_impl(
 
         // 右上角 Radar：best-effort 渲染 hats graph（失败不影响主流程）
         match crate::hats::render_hat_graph_radar_ascii(&config, event_loop.registry()) {
-            Ok((ascii_compact, ascii_full)) => {
-                tui = tui.with_hat_graph_radar(ascii_compact, ascii_full);
+            Ok(radar) => {
+                tui = tui.with_hat_graph_radar(radar);
             }
             Err(e) => {
                 warn!("Failed to render hat graph radar for TUI: {e:#}");

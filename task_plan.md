@@ -1,289 +1,179 @@
-# 任务计划：`ralph hats graph --format mermaid` 隐藏调度员节点（Ralph），输出“逻辑视图”拓扑
+# 任务计划：TUI Hat Graph Radar 扫描动效（常亮边 + 跑动高亮头）
 
 ## 目标
 
-- `ralph hats graph --format mermaid` 输出的 Mermaid 图中：
-  - **不出现**调度员节点 `Ralph`（避免全连接导致线路混乱）。
-  - **不出现**任何 `Hat -> Ralph` / `Ralph -> Hat` 的边（这些是内部调度细节）。
-  - Hat 与 Hat 之间的“逻辑连线”用 **实线** `-->`（不使用虚线 `-.->`）。
-- 保持输出尽量确定性（同一份配置，多次输出结构与顺序稳定）。
-- 增加/更新回归测试，锁死该行为，避免回归。
-
-## 方案（至少二选一）
-
-### 方案 A：仅 Mermaid 隐藏 Ralph（改动更小）
-
-- 仅 `--format mermaid` 改为“逻辑视图”（隐藏 Ralph、实线 Hat→Hat）。
-- `--format unicode/ascii/compact` 保持当前“物理视图”（包含 Ralph 中心节点）。
-- 优点：对默认输出（unicode）影响最小。
-- 缺点：不同 format 的语义不一致，用户心智负担更大。
-
-### 方案 B：所有 format 统一逻辑视图（更一致｜我将按此执行）
-
-- Mermaid + unicode/ascii/compact 全部使用“逻辑视图”：
-  - 不显示 Ralph 节点
-  - 只展示 Hat→Hat 的 topic 传播关系（实线）
-  - （可选）当配置 `event_loop.starting_event` 存在时，增加 `Start[task.start] -->|starting_event| Hat` 入口边
-- 优点：语义一致，图更干净，符合“Ralph 在背后调度”的表达。
-- 缺点：默认 unicode/ascii 的输出会变化（但更清爽）。
-
-> 决定：选择 **方案 B**，因为你明确希望“明面上不要出现 Ralph”，并且 Hat→Hat 逻辑边应是实线。
+- Radar 中的 “cause event” 连线在 reveal 完成后保持全亮；
+- 同时显示一个“高亮头”（短线段）沿路径循环移动；
+- 当目标 hat 退出 `Running`（进入 `Idle/Done/Failed`）时，立刻取消该连线的所有高亮与动效。
 
 ## 阶段
 
-- [x] 阶段1：需求确认 + 写入 spec
-- [x] 阶段2：实现 mermaid 生成逻辑视图（隐藏 Ralph + 实线 Hat→Hat）
-- [x] 阶段3：更新/补充回归测试
-- [x] 阶段4：验证（fmt/clippy/test + replay smoke tests）
-- [x] 阶段5：四文件记录（notes/WORKLOG/ERRORFIX）
-
-## 关键问题
-
-1. 是否需要保留入口节点 `Start[task.start]`？
-   - 我倾向：仅在 `event_loop.starting_event` 明确设置时才显示入口边，避免孤立节点与多余噪声。
-2. 图的“逻辑边”是否需要去重？
-   - 我倾向：按 `(source_hat, topic, target_hat)` 去重，保证输出稳定且不重复刷边。
+- [x] 阶段1：实现渲染计划（可测）+ 渲染 overlay
+- [x] 阶段2：补充回归测试（锁死扫描规则）
+- [x] 阶段3：验证（fmt/clippy/test + replay smoke tests）
+- [x] 阶段4：四文件追加记录（notes/WORKLOG/ERRORFIX）
 
 ## 状态
 
-**已完成**：
-- Mermaid 输出改为“逻辑视图”，明面上不再出现 `Ralph`，Hat→Hat 统一实线 `-->`
-- 当 `event_loop.starting_event` 显式存在时，补 `Start[task.start] -->|starting_event| Hat` 入口边
-- 已更新回归测试，并完成全量验证（含 replay smoke tests）
+**已完成**：扫描头动效已落地，并通过 fmt/clippy/test/smoke 门禁验证；相关记录已追加到 notes/WORKLOG。
 
 ---
 
-## 2026-02-02 00:35 +0800｜追加需求：把 `complete_publishes` 标记为 `Complete[complete]` 终点节点
-
-### 新目标
-
-- 当配置 `event_loop.complete_publishes` 存在时：
-  - Mermaid 逻辑视图里 **必须**出现一个固定终点节点：`Complete[complete]`
-  - 任意 hat 若 `publishes` 包含该 topic，则必须画出：`Hat_X -->|complete_publishes| Complete`
-- 这个 topic 可能没有任何 hat 订阅，因此不能只依赖 Hat→Hat 的订阅关系推导。
-
-### 阶段（本小改动）
-
-- [x] 阶段A：补充 spec（complete 节点规则）
-- [x] 阶段B：实现（生成 Complete 节点与边）
-- [x] 阶段C：更新回归测试
-- [x] 阶段D：验证（fmt/clippy/test + replay smoke tests）
-- [x] 阶段E：四文件追加记录
-
-### 当前状态
-
-**已完成**：
-- `complete_publishes` 会显示为 `Complete[complete]`，并从发布该 topic 的 hat 画到 Complete
-- 已补 spec、回归测试与全量门禁验证
-
----
-
-## 2026-02-02 02:39 +0800｜需求：TUI 右上角 Hat Graph Radar（ASCII Mermaid），按键 `p` 放大/还原
+## 2026-02-03 21:35 +0800｜增强：扫描头更有“质感”（渐变/对比度增强）
 
 ### 目标
 
-- TUI 界面右上角常驻一个 “Hat Graph Radar” 覆盖层：
-  - 显示 **ASCII** 风格的 hats graph（由 Mermaid 结构渲染而来）。
-  - 默认是小窗（类似游戏右上角小雷达）。
-  - 按 `p` 放大为大窗，再按 `p` 还原为小窗（纯 UI 行为，不影响 orchestration）。
-- 该覆盖层必须是“只读观察”：
-  - 不发送事件、不修改运行逻辑。
-  - 只改变显示尺寸。
-- 在 `Warp` 等终端启用“终端默认背景（bg=Reset）”模式时，边框背景不能把外圈染成不透明。
-- 增加/更新回归测试，锁死：
-  - `p` 键映射与状态切换
-  -（尽量）Overlay 位置与尺寸的基础约束（至少不 panic / 不越界）
-
-### 方案（至少二选一）
-
-#### 方案 A：只显示 Mermaid 源码（最省事）
-
-- 右上角展示 `flowchart LR ...` 的 Mermaid 源码（纯文本）。
-- 放大/还原只是“显示更多行”。
-- 优点：
-  - 完全不依赖 Mermaid 渲染器；
-  - 实现最简单、风险最低。
-- 缺点：
-  - 不像“雷达图”，视觉上不够直观；
-  - Mermaid 源码在小窗里可读性差。
-
-#### 方案 B：复用 `beautiful-mermaid-rs` 渲染 ASCII 图（更像雷达｜我将按此执行）
-
-- 复用 `ralph hats graph` 已有的 Mermaid 生成逻辑：
-  - 生成 Mermaid（逻辑视图）。
-  - 用 `beautiful-mermaid-rs` 渲染成 ASCII 图。
-- 小窗用更紧凑的渲染参数（padding=0），大窗用正常参数（更清晰）。
-- 优点：
-  - 视觉上更接近“雷达/小地图”；
-  - 与 CLI 的 `ralph hats graph --format ascii` 行为一致，可复用测试基线。
-- 缺点：
-  - 需要在 TUI 启动时注入预渲染字符串（或给 ralph-tui 增加依赖）。
-
-> 决定：选择 **方案 B**。理由：你要的是“右上角雷达图”观感，ASCII 渲染更符合直觉，并且我们已经在 `ralph hats graph` 里跑通了 Mermaid→ASCII 的链路。
+- 扫描头从“单一颜色 + 加粗”升级为“渐变 + 轻微发光底色”，让动效更立体；
+- 明显拉开与 base 线路（sapphire）的对比度，让用户更容易聚焦到“流动方向/活跃状态”。
 
 ### 阶段
 
-- [x] 阶段1：补充 spec（UI 行为/布局/按键/验收）
-- [x] 阶段2：实现 TUI overlay（右上角渲染 + Warp bg=Reset 细节）
-- [x] 阶段3：实现 `p` 键切换（串行/并行模式都可用；Chat 输入时不抢键）
-- [x] 阶段4：CLI 注入图数据（复用 hats graph 渲染逻辑）
-- [x] 阶段5：回归测试 + `cargo test`（含 replay smoke tests）
-- [x] 阶段6：四文件记录（notes/WORKLOG；若有坑再写 ERRORFIX）
+- [x] 阶段1：实现扫描头渐变样式（不改状态机，仅改渲染）
+- [x] 阶段2：补测试（至少锁死 tip 的样式与对比度）
+- [x] 阶段3：验证（fmt/clippy/test + replay smoke tests）
+- [x] 阶段4：四文件追加记录（notes/WORKLOG）
+
+### 当前状态
+
+**已完成**：扫描头渐变/对比度增强已落地；已通过 fmt/clippy/test/smoke 门禁；记录已追加到 notes/WORKLOG。
+
+---
+
+## 2026-02-03 23:05 +0800｜调整：去掉扫描头 bg 发光 + 更亮 tip/更长柔和 tail + 高对比模式
+
+### 目标
+
+- 去掉扫描头的“发光底色（bg）”，只用前景色与字形修饰做质感。
+- 扫描头更“高级”：
+  - tip 更亮、更醒目
+  - tail 更长、更柔和（更像一条拖尾，而不是一小截硬高亮）
+- 增加一档“高对比模式”，用于在不同终端观感下快速切换更醒目的扫描头配色。
+
+### 方案方向（两条路）
+
+- 方案 A（不惜代价，最佳质感）：
+  - 扫描头用 truecolor 做线性渐变（多 stop），并用 `DIM/BOLD` 做强弱层次；
+  - 高对比模式提供第二套 stop（暖色系）；
+  - 代价：实现稍复杂，但逻辑集中在渲染函数，风险可控。
+- 方案 B（先能用，后面再优雅）：
+  - 扫描头依旧用离散色阶（几段固定颜色）+ `DIM/BOLD`；
+  - 高对比模式只替换固定色阶；
+  - 代价：实现简单，但渐变“柔和度”不如 A。
+
+### 做出的决定
+
+- 选择：方案 A。
+- 理由：你明确要“更高级 + 更柔和 tail”，离散色阶很容易看起来像“几个硬切换块”，不够顺滑。
+
+### 阶段
+
+- [x] 阶段1：移除 bg 上色 + 扫描头渐变改为 truecolor 插值（normal/high-contrast 两套 stop）
+- [x] 阶段2：加入/调整回归测试（无 bg、tip 更亮、tail 更长）
+- [x] 阶段3：加入高对比模式开关（按键）+ help/spec 同步
+- [x] 阶段4：验证（fmt/clippy/test + replay smoke tests）
+- [x] 阶段5：四文件追加记录（notes/WORKLOG）
+
+### 当前状态
+
+**已完成**：已移除扫描头 bg；truecolor 渐变拖尾与高对比模式已落地；已通过 fmt/clippy/test/smoke；记录已追加到 notes/WORKLOG。
+
+---
+
+## 2026-02-03 23:34 +0800｜调优：拖尾加长 + 扫描头整体提亮 + base 线路压暗
+
+### 目标
+
+- 拖尾太短：把扫描头 tail 进一步加长（更像“流动的能量带”）。
+- 整体提亮：扫描头整体更亮、更醒目（让用户第一眼看到“方向”和“仍在跑”）。
+- 线段原色变暗：base 高亮边（常亮线路）变暗，降低它对注意力的抢夺。
+  - 重点：不是让拖尾变暗，而是让 base 更暗，扫描头承担主要亮度层次。
+
+### 阶段
+
+- [x] 阶段1：调整 base/highlight 配色策略（base 变暗、head 变亮）
+- [x] 阶段2：加长拖尾（head_len）并取消 tail 的 DIM 依赖
+- [x] 阶段3：更新回归测试（锁死“base 更暗、head 更亮、拖尾更长”）
+- [x] 阶段4：验证（fmt/clippy/test + replay smoke tests）
+- [x] 阶段5：四文件追加记录（notes/WORKLOG）
+
+### 当前状态
+
+**已完成**：拖尾已加长，扫描头整体已提亮，base 高亮边已压暗；已通过 fmt/clippy/test/smoke；记录已追加到 notes/WORKLOG。
+
+---
+
+## 2026-02-03 23:41 +0800｜调整：取消 Radar 扫描头“高对比模式”（c 切换）
+
+### 目标
+
+- 取消高对比模式（不再提供 `c` 切换）。
+- Radar 扫描头只保留一套默认配色与动效（更简单、更确定）。
+- 清理相关文档与 help 提示，避免 UI 产生“幽灵功能”。
+
+### 阶段
+
+- [x] 阶段1：移除 state/action/keybinding（`hat_graph_high_contrast` / `ToggleHatGraphHighContrast` / `c`）
+- [x] 阶段2：简化扫描头渲染函数签名与配色分支
+- [x] 阶段3：更新/删除回归测试（不再覆盖高对比分支）
+- [x] 阶段4：同步 help/spec 文档
+- [x] 阶段5：验证（fmt/clippy/test + replay smoke tests）
+- [x] 阶段6：四文件追加记录（notes/WORKLOG）
+
+### 当前状态
+
+**已完成**：已移除高对比模式（`c`）；扫描头渲染已简化；测试与文档已同步；已通过 fmt/clippy/test/smoke；记录已追加到 notes/WORKLOG。
+
+---
+
+## 2026-02-04 00:27 +0800｜探索：parallel-hat-solution-eval-example（并行实验开发永动机 ralph.yml 配置范式）
+
+### 目标
+
+- 把“多方案并行实现 + 批量验证 + 多轮探索试验”的工作方式，固化成一份可复用的 `ralph.yml` 配置范式。
+- 该范式必须在并行 hats 下稳定推进，并且具备强 backpressure（证据不足就不允许收敛）。
+- 本轮只补充到 OpenSpec change：`parallel-hat-solution-eval-example`，不进入 apply/实现阶段。
+
+### 阶段
+
+- [x] 阶段1：回读并行 runtime 现有语义（尤其 gate timeout / routing / autoscale cap）
+- [x] 阶段2：把关键决策补充进 change artifacts（proposal/design/spec/tasks）
+- [x] 阶段3：校验文档图表（Mermaid）语法正确性并修复
+- [x] 阶段4：四文件追加记录（notes/WORKLOG）
 
 ### 关键问题
 
-1. 覆盖层在并行模式下是否也显示？
-   - 我倾向：**显示**。同一份 config 的 hats 拓扑对并行/串行都成立，且“雷达图”更有价值。
-2. `p` 键在并行模式的 Chat 输入框里怎么办？
-   - 我倾向：Chat 聚焦时 `p` 作为文本输入，不触发缩放；否则作为全局缩放键。
+1. `permissions: ask` 是否有“超时”机制？超时后谁来决定继续/终止？
+2. “实验产物”用 `patch` 还是 `commit` 更合适？auditor 如何做硬门槛审计？
+3. 并行度应该写死还是动态调参？如何避免“一开并行就更慢”？
 
-### 状态
+### 方案方向（两条路）
 
-**已完成**：
-- 已更新 spec：`specs/terminal-ui.spec.md`
-- 已实现 TUI 右上角 Hat Graph Radar 覆盖层（小窗/放大切换）
-- 已实现按键 `p` 切换（Chat 输入时不抢键）
-- 已在 `ralph-cli` 启动 TUI 时注入 hats graph 的 ASCII 渲染（compact/full）
-- 已验证：`cargo fmt` + `cargo clippy --all-targets --all-features` + `cargo test` + `cargo test -p ralph-core smoke_runner`
----
+- 方案 A（不惜代价，最强安全/最强确定性）：
+  - `parallel.permissions.worktree: ask`、`parallel.permissions.hooks: ask`
+  - runner 强制输出 `patch`（不接受 commit）
+  - 更强的审计：证据字段更严格，缺一项就拒绝
+  - 代价：更容易被 gate 打断；体验更重
+- 方案 B（先能跑顺，后续再加强）：
+  - example 默认 `allow`，确保“一条命令跑通”
+  - 生产建议：`worktree: ask`，`hooks: allow`（避免 hooks 频繁打断）
+  - runner 必须输出 `patch`（`commit` 仅可选补充信息），由独立 integrator 在主工作区采纳/验收
+  - 代价：安全性靠“文档约定 + 审计门禁”兜底
 
-## 2026-02-02 16:06 +0800｜调研：Tenere（pythops/tenere）是如何做语法高亮的
+### 做出的决定（你已确认）
 
-### 目标
-
-- 搞清楚 Tenere 的“语法高亮”具体依赖哪些库。
-- 搞清楚它的渲染链路（从 LLM 输出到 TUI 显示）是怎么接起来的。
-- 记录关键实现点，方便在 Ralph/TUI 里做同类能力时复用思路。
-
-### 阶段（本次调研）
-
-- [x] 阶段1：定位入口（Cargo.toml / formatter 模块）
-- [x] 阶段2：阅读关键实现（Formatter / Chat 渲染）
-- [x] 阶段3：形成结论（高亮链路 + 关键点 + 限制）
-- [x] 阶段4：四文件记录（notes/WORKLOG）
-
-### 状态
-
-**已完成**：
-- Tenere 语法高亮并不是自己实现的 tokenization，而是“借用 bat 产出 ANSI 颜色”。
-- 通过 `ansi-to-tui` 把 ANSI 转成 `ratatui::text::Text`，再用 `Paragraph` 渲染到 TUI。
-- 输入文件名固定为 `"text.md"`，让 bat 按 Markdown 处理，并对 fenced code block 做语言高亮。
-
----
-
-## 2026-02-02 21:09 +0800｜OpenSpec FF：tui-codeblock-syntax-highlighting（产出 artifacts，未实现）
-
-### 目标
-
-- 把“只对 fenced code block 做语法高亮（TUI + stdout pretty）、未闭合不高亮、闭合后冻结缓存”的需求固化为 OpenSpec change artifacts。
-- 让实现阶段可以直接按 tasks.md 逐条落地，而不再反复讨论范围与取舍。
-
-### 阶段（本次 FF）
-
-- [x] 阶段1：创建 change 目录（spec-driven schema）
-- [x] 阶段2：编写 proposal / design / specs / tasks
-- [x] 阶段3：`openspec status` 验证进入 apply-ready 状态
-
-### 状态
-
-**已完成**：
-- 已生成 `openspec/changes/tui-codeblock-syntax-highlighting/` 下的全部 artifacts（proposal/design/specs/tasks）
-- 当前 change 已处于 “All artifacts complete” 状态，可进入 `/opsx:apply` 开始实现
-
----
-
-## 2026-02-02 21:09 +0800｜实施：tui-codeblock-syntax-highlighting（只高亮 fenced code block）
-
-### 目标（来自 OpenSpec）
-
-- 渲染模式为 Rendered 时：
-  - 对 fenced code block 做语法高亮（支持：rust、bash/sh、json、yaml/yml、toml、python/py、js/javascript、ts/typescript）。
-  - 未闭合 code block 不做语法高亮（只用统一 code 样式），闭合后一次性高亮并冻结。
-  - TUI 与 stdout pretty 输出语义一致（都走同一套高亮与降级逻辑）。
-- `--plain` 模式：
-  - fences 原样可见，且不产生 code block 语法高亮 ANSI。
-- 性能优先：
-  - 避免每个流式 chunk 都全量重渲染历史内容（引入冻结块/缓存）。
-
-### 阶段（按 tasks.md 拆分）
-
-- [x] 阶段1：依赖与 queries（tree-sitter + 语法查询离线化）
-- [x] 阶段2：分段器（跨 chunk fence 识别 + lang normalize + 降级）
-- [x] 阶段3：高亮渲染器（闭合后一次性高亮 + ANSI 输出）
-- [x] 阶段4：集成到 TUI/stdout（冻结块/缓存 + 一致性）
-- [x] 阶段5：回归测试 + 门禁验证（fmt/clippy/test/smoke_runner）
+- completion promise：继续使用 `LOOP_COMPLETE`。
+- 控制面预留：并行窗口必须给 `ralph#1` + `auditor` 留 slot（避免控制面被饿死）。
+- 审计：新增独立 `experiment_auditor` hat，硬门槛（证据不足必须拒绝收敛）。
+- 采纳/集成：新增独立 `experiment_integrator` hat，在主工作区 apply patch 并跑最终验收；runner 不做“合并/验收”。
+- 并行度：由 `ralph#1` 根据用户 plan/prompt 自动推断 `P_max`；运行中 AIMD 动态调参（激进）。
 
 ### 当前状态
 
-**已完成（All Done）**：
-- Rendered 模式下 fenced code block 已支持 tree-sitter 语法高亮（闭合后一次性高亮）。
-- 未闭合 code block 始终保持统一 code 样式（不高亮），closing fence 到来后才高亮。
-- `TuiStreamHandler` 已引入“冻结块/缓存”，避免每个 chunk 全量重渲染历史内容。
-- stdout pretty 已复用同一套渲染链路（ANSI 中间表示，行为与 TUI 一致）。
-- 已补回归测试并通过 fmt/clippy/test + replay smoke runner。
+**已完成**：关键决策已补充进 `parallel-hat-solution-eval-example` 的 change artifacts；并已把要点同步追加到 `notes.md` / `WORKLOG.md`（仅方案沉淀，不落盘实现）。
 
----
+### 本轮继续（新增对齐点）
 
-## 2026-02-03 00:09 +0800｜撤销临时 workaround：beautiful-mermaid-rs 性能已修复，回退两笔历史修改
-
-### 背景
-
-- 你说明 `/Users/cuiluming/local_doc/l_dev/my/rust/beautiful-mermaid-rs` 的性能问题已经在上游修复。
-- 因此我们需要把 Ralph 侧（或相关仓库）之前为规避该性能问题而引入的两笔修改撤回：
-  - `e88d58944be2e3297662817ba9bfb8d653cc747a`
-  - `e7c2e92d3b2619f01734ac1622e34c17ad5e25f2`
-
-### 目标
-
-- 回退上述两个 commit 的代码改动，使行为回到“未加 workaround”状态。
-- 回退后通过全量门禁验证（fmt/clippy/test + smoke runner）。
-
-### 阶段
-
-- [x] 阶段1：定位两个 commit 属于哪个仓库 + 阅读 diff（避免误回退）
-- [x] 阶段2：按正确顺序执行 revert（必要时解决冲突）
-- [x] 阶段3：全量门禁验证（fmt/clippy/test + smoke runner）
-- [x] 阶段4：四文件记录（notes/WORKLOG；如遇冲突或踩坑再写 ERRORFIX）
-
-### 当前状态
-
-**已完成（All Done）**：
-- 已确认这两个 commit 都在 `ralph-orchestrator` 仓库内（不是 `beautiful-mermaid-rs`）。
-- 已完成 revert：
-  - `Revert "docs: record tui radar startup regression fix"`（`e88d589...`）
-  - `Revert "tui: avoid slow mermaid-ascii radar generation"`（`e7c2e92...`）
-- 已通过全量门禁验证：
-  - `cargo fmt --check` ✅
-  - `cargo clippy --all-targets --all-features -- -D warnings` ✅
-  - `cargo test` ✅
-  - `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 00:42 +0800｜修正：Hat Graph Radar 对齐 `beautiful-mermaid-rs --ascii`（Unicode 线条字符文字图）
-
-### 背景 / 现象
-
-- `beautiful-mermaid-rs` 的 CLI：`--ascii` 默认会输出 **Unicode 线条字符**（┌─┐│└┘▶），而 `--ascii --use-ascii` 才会强制 “纯 ASCII（+--|）”。
-- 目前 Ralph 的 Hat Graph Radar（右上角覆盖层）使用了 `use_ascii: Some(true)`，输出是 “纯 ASCII（+--|）”，因此与你期望的效果不一致。
-
-### 目标
-
-- Hat Graph Radar（compact + full）统一改为 **Unicode 线条字符文字图**（对齐 `beautiful-mermaid-rs --ascii`）。
-- 同步 `specs/terminal-ui.spec.md`：把 “ASCII-only” 改为“文本图（默认 Unicode box-drawing）”，避免误导。
-- 增加/调整回归测试，锁死：
-  - Radar 的渲染结果包含 Unicode box-drawing 字符（例如 `┌` / `─` / `│`）。
-
-### 阶段
-
-- [x] 阶段1：补充/更新 spec（Hat Graph Radar 输出字符集语义）
-- [x] 阶段2：实现（Radar 渲染 options：`use_ascii: Some(false)`）
-- [x] 阶段3：回归测试（Unicode 断言）
-- [x] 阶段4：门禁验证（fmt/clippy/test + replay smoke tests）
-- [x] 阶段5：四文件记录 + git 提交
-
-### 当前状态
-
-**已完成**：
-- Radar 渲染已对齐 `beautiful-mermaid-rs --ascii` 的默认 Unicode box-drawing 输出
-- 已同步 spec / 回归测试 / 门禁验证，并完成 git commit
+- 你进一步对齐：采纳/合并/应用 patch 不应该由 runner 做，而应该有独立的 integrator hat 来负责。
+- 因此本轮把“integrator（主工作区单写者）”也补充进 change，并把 runner 的产物要求收紧为：
+  - `patch` MUST
+  - `commit` MAY（只能作为补充信息，不能替代 patch）

@@ -126,20 +126,32 @@ For custom hats, the TUI must be initialized with the `HatRegistry` to look up s
 
 ### Hat Graph Radar (Top-right Overlay)
 
-The TUI MAY display a small "radar" overlay in the top-right corner of the content area that visualizes the configured hat topology.
+The TUI MAY display a small "radar" overlay in the top-right corner of the terminal frame (excluding the footer) that visualizes the configured hat topology.
 
 Behavior:
 - The overlay is purely visual (read-only). It MUST NOT publish events or change orchestration behavior.
+- The overlay SHOULD be inset from the top-right corner (shifted inward, toward the lower-left) by a small margin to avoid feeling flush against the terminal edge and to avoid covering important pane borders (e.g., the Output panel top border in parallel mode).
 - The overlay content is a **text diagram** rendered from Mermaid topology (same source as `ralph hats graph`).
   - It SHOULD use Unicode box-drawing characters (┌─┐│└┘▶) to match `beautiful-mermaid-rs --ascii` default output.
+- When hat(s) are running, the overlay SHOULD visually highlight their node boxes (foreground color `#a9dc76`) to make active execution easy to spot at a glance.
+  - Parallel mode: highlight ALL hats whose instances are in `Running` state.
+  - Serial mode: highlight the current/next hat (as shown in the header status panel).
+- When a hat enters `Running` state (non-running → running transition), the overlay SHOULD visualize the most likely “cause event” as an animated edge:
+  - The UI SHOULD infer the cause event best-effort from recent business events + graph metadata (e.g., find an edge that matches `from + topic + to` for the newly running hat).
+  - Animation style SHOULD be a progressive reveal from source → target along the routed edge path (cell-by-cell), rather than a single flash.
+  - After the reveal completes, the edge SHOULD remain fully highlighted until the target hat leaves `Running` (e.g., enters `Idle`/`Done`/`Failed`).
+  - After the reveal completes, the UI SHOULD also show a short “highlight head” segment that continuously moves along the edge path (looping) while the target remains `Running` (to provide a strong “still active” visual cue).
+  - If the target hat box is no longer in `Running` state, any highlight/animation pointing to it SHOULD be cancelled/hidden immediately.
+  - If edge path metadata is unavailable, the overlay MUST gracefully degrade (still render the text diagram; skip animation).
 - Pressing `p` toggles between:
   - **Small** (radar) view: compact rendering, minimal padding
-  - **Zoomed** view: larger panel, more readable graph
+  - **Zoomed** view: panel size SHOULD adapt to the text diagram dimensions (plus borders) when possible, to avoid unnecessary cropping or excessive empty space
 - In text-input contexts (search input / parallel chat editor), `p` MUST be treated as normal text input and MUST NOT toggle the overlay.
 
 Implementation notes:
 - The text graph SHOULD be generated once at TUI startup by the CLI (from `RalphConfig + HatRegistry`) and injected into the TUI state as cached strings.
-- The overlay MUST NOT panic on small terminal sizes. If the content area cannot fit a bordered panel, it SHOULD be hidden.
+- If highlight/animation are implemented, the CLI SHOULD also inject the renderer metadata needed for stable cell-level styling (node box bounds and edge path coordinates), rather than attempting to re-parse the rendered text.
+- The overlay MUST NOT panic on small terminal sizes. If the available frame area (excluding the footer) cannot fit a bordered panel, it SHOULD be hidden.
 
 ### Hat Display
 

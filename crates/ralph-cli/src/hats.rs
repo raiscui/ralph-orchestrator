@@ -14,9 +14,15 @@ use crate::ConfigSource;
 use crate::display::colors;
 use crate::presets;
 use anyhow::{Context, Result};
-use beautiful_mermaid_rs::{AsciiRenderOptions, render_mermaid_ascii};
+use beautiful_mermaid_rs::{
+    AsciiRenderOptions, render_mermaid_ascii, render_mermaid_ascii_with_meta,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{HatRegistry, RalphConfig};
+use ralph_tui::state::{
+    HatGraphRadar, HatGraphRadarEdgeMeta, HatGraphRadarMeta, HatGraphRadarNodeMeta,
+    HatGraphRadarPoint, HatGraphRadarRect,
+};
 use std::io::Write;
 use tracing::warn;
 
@@ -413,15 +419,20 @@ fn render_hat_dag_via_mermaid(
 pub(crate) fn render_hat_graph_radar_ascii(
     config: &RalphConfig,
     registry: &HatRegistry,
-) -> Result<(String, String)> {
+) -> Result<HatGraphRadar> {
     if registry.is_empty() {
         let empty = "No hats configured.\n".to_string();
-        return Ok((empty.clone(), empty));
+        return Ok(HatGraphRadar {
+            ascii_compact: empty.clone(),
+            ascii_full: empty,
+            meta_compact: None,
+            meta_full: None,
+        });
     }
 
     let diagram = generate_mermaid_string(config, registry);
 
-    let mut ascii_compact = render_mermaid_ascii(
+    let compact = render_mermaid_ascii_with_meta(
         &diagram,
         &AsciiRenderOptions {
             use_ascii: Some(false),
@@ -434,11 +445,12 @@ pub(crate) fn render_hat_graph_radar_ascii(
         "Failed to render Mermaid topology (compact) as Unicode text diagram".to_string()
     })?;
 
+    let mut ascii_compact = compact.text;
     if !ascii_compact.ends_with('\n') {
         ascii_compact.push('\n');
     }
 
-    let mut ascii_full = render_mermaid_ascii(
+    let full = render_mermaid_ascii_with_meta(
         &diagram,
         &AsciiRenderOptions {
             use_ascii: Some(false),
@@ -449,11 +461,125 @@ pub(crate) fn render_hat_graph_radar_ascii(
         "Failed to render Mermaid topology (full) as Unicode text diagram".to_string()
     })?;
 
+    let mut ascii_full = full.text;
     if !ascii_full.ends_with('\n') {
         ascii_full.push('\n');
     }
 
-    Ok((ascii_compact, ascii_full))
+    Ok(HatGraphRadar {
+        ascii_compact,
+        ascii_full,
+        meta_compact: Some(convert_ascii_meta_to_radar_meta(compact.meta)),
+        meta_full: Some(convert_ascii_meta_to_radar_meta(full.meta)),
+    })
+}
+
+fn i32_to_u16_saturating(value: i32) -> u16 {
+    if value <= 0 {
+        0
+    } else {
+        (value as u32).min(u32::from(u16::MAX)) as u16
+    }
+}
+
+fn densify_hat_graph_radar_path(path: Vec<HatGraphRadarPoint>) -> Vec<HatGraphRadarPoint> {
+    // =========================================================================
+    // Hat Graph Radar：edge.path 补点（关键点 -> 连续线段）
+    //
+    // 背景：
+    // - `beautiful-mermaid-rs` 的 edge.meta.path 语义是“关键格子”（拐点/箭头等），
+    //   并不保证包含线段上的每一个 cell。
+    // - TUI 如果直接按关键点上色，会出现“只亮到一半/像断线”的观感。
+    //
+    // 策略：
+    // - 对相邻点之间的水平/垂直段做逐 cell 补齐（保留顺序）；
+    // - 如果遇到非正交段（理论上不该出现），保守地只连接关键点，避免引入错误路径。
+    // =========================================================================
+    if path.len() <= 1 {
+        return path;
+    }
+
+    let mut dense: Vec<HatGraphRadarPoint> = Vec::new();
+    let mut prev = path[0];
+    dense.push(prev);
+
+    for next in path.into_iter().skip(1) {
+        let dx = i32::from(next.x) - i32::from(prev.x);
+        let dy = i32::from(next.y) - i32::from(prev.y);
+
+        if dx == 0 && dy != 0 {
+            let step = dy.signum();
+            let mut y = i32::from(prev.y);
+            while y != i32::from(next.y) {
+                y += step;
+                dense.push(HatGraphRadarPoint {
+                    x: prev.x,
+                    y: y as u16,
+                });
+            }
+        } else if dy == 0 && dx != 0 {
+            let step = dx.signum();
+            let mut x = i32::from(prev.x);
+            while x != i32::from(next.x) {
+                x += step;
+                dense.push(HatGraphRadarPoint {
+                    x: x as u16,
+                    y: prev.y,
+                });
+            }
+        } else {
+            dense.push(next);
+        }
+
+        prev = next;
+    }
+
+    // 防御性去重：避免 renderer 输出重复关键点导致上层 animation “卡顿”。
+    dense.dedup_by(|a, b| a.x == b.x && a.y == b.y);
+    dense
+}
+
+fn convert_ascii_meta_to_radar_meta(
+    meta: beautiful_mermaid_rs::AsciiRenderMeta,
+) -> HatGraphRadarMeta {
+    let nodes = meta
+        .nodes
+        .into_iter()
+        .map(|node| HatGraphRadarNodeMeta {
+            id: node.id,
+            label: node.label,
+            box_rect: HatGraphRadarRect {
+                x: i32_to_u16_saturating(node.box_rect.x),
+                y: i32_to_u16_saturating(node.box_rect.y),
+                width: i32_to_u16_saturating(node.box_rect.width),
+                height: i32_to_u16_saturating(node.box_rect.height),
+            },
+        })
+        .collect();
+
+    let edges = meta
+        .edges
+        .into_iter()
+        .map(|edge| {
+            let path = edge
+                .path
+                .into_iter()
+                .map(|p| HatGraphRadarPoint {
+                    x: i32_to_u16_saturating(p.x),
+                    y: i32_to_u16_saturating(p.y),
+                })
+                .collect();
+
+            HatGraphRadarEdgeMeta {
+                from: edge.from,
+                to: edge.to,
+                label: edge.label,
+                path: densify_hat_graph_radar_path(path),
+            }
+        })
+        .collect();
+
+    HatGraphRadarMeta { nodes, edges }
 }
 
 /// Generate Mermaid flowchart syntax for the hat topology.
@@ -692,6 +818,52 @@ mod tests {
     }
 
     #[test]
+    fn densify_hat_graph_radar_path_fills_horizontal_and_vertical_segments() {
+        // 说明：
+        // - edge.meta.path 可能只给“关键点”，TUI 需要可连续上色的 cell path；
+        // - 这里验证：水平/垂直线段会被补齐到逐 cell 的连续序列。
+
+        let horizontal = densify_hat_graph_radar_path(vec![
+            HatGraphRadarPoint { x: 0, y: 0 },
+            HatGraphRadarPoint { x: 3, y: 0 },
+        ]);
+        assert_eq!(
+            horizontal,
+            vec![
+                HatGraphRadarPoint { x: 0, y: 0 },
+                HatGraphRadarPoint { x: 1, y: 0 },
+                HatGraphRadarPoint { x: 2, y: 0 },
+                HatGraphRadarPoint { x: 3, y: 0 },
+            ]
+        );
+
+        let vertical_reverse = densify_hat_graph_radar_path(vec![
+            HatGraphRadarPoint { x: 2, y: 3 },
+            HatGraphRadarPoint { x: 2, y: 1 },
+        ]);
+        assert_eq!(
+            vertical_reverse,
+            vec![
+                HatGraphRadarPoint { x: 2, y: 3 },
+                HatGraphRadarPoint { x: 2, y: 2 },
+                HatGraphRadarPoint { x: 2, y: 1 },
+            ]
+        );
+
+        let non_orthogonal = densify_hat_graph_radar_path(vec![
+            HatGraphRadarPoint { x: 0, y: 0 },
+            HatGraphRadarPoint { x: 1, y: 1 },
+        ]);
+        assert_eq!(
+            non_orthogonal,
+            vec![
+                HatGraphRadarPoint { x: 0, y: 0 },
+                HatGraphRadarPoint { x: 1, y: 1 },
+            ]
+        );
+    }
+
+    #[test]
     fn test_list_hats_empty() {
         let registry = HatRegistry::new();
         let mut buf = Vec::new();
@@ -776,7 +948,7 @@ mod tests {
         registry.register(mock_hat("Builder", &["build.task"], &["build.done"]));
 
         let config = RalphConfig::default();
-        let (ascii_compact, ascii_full) = render_hat_graph_radar_ascii(&config, &registry).unwrap();
+        let radar = render_hat_graph_radar_ascii(&config, &registry).unwrap();
 
         fn contains_box_drawing(s: &str) -> bool {
             s.chars()
@@ -784,11 +956,11 @@ mod tests {
         }
 
         assert!(
-            contains_box_drawing(&ascii_compact),
+            contains_box_drawing(&radar.ascii_compact),
             "expected radar compact output to contain Unicode box-drawing characters"
         );
         assert!(
-            contains_box_drawing(&ascii_full),
+            contains_box_drawing(&radar.ascii_full),
             "expected radar full output to contain Unicode box-drawing characters"
         );
     }

@@ -30,6 +30,17 @@ use crate::display::colors;
 use crate::process_management;
 use crate::{ColorMode, Verbosity};
 
+fn should_forward_event_to_tui(event: &ralph_proto::Event) -> bool {
+    // 事件转发策略（并行模式）：
+    // - gate.* / human.message：用于控制面 UI（Gate 面板/提示等）；
+    // - source_instance 存在：用于运行态可视化（Hat Graph Radar 边动画可据此推导发布者 hat）。
+    let topic = event.topic.as_str();
+    topic.starts_with("gate.")
+        || topic == "human.message"
+        || event.source_instance.is_some()
+        || event.source.is_some()
+}
+
 /// ralph-cli 的 HatJobExecutor：使用外部 CLI 后端执行 prompt（headless）。
 #[derive(Debug, Clone)]
 struct CliHatJobExecutor {
@@ -453,8 +464,8 @@ pub async fn run_parallel_loop_impl(
         // 右上角 Radar：best-effort 渲染 hats graph（失败不影响主流程）
         let registry = HatRegistry::from_config(&config);
         match crate::hats::render_hat_graph_radar_ascii(&config, &registry) {
-            Ok((ascii_compact, ascii_full)) => {
-                tui = tui.with_hat_graph_radar(ascii_compact, ascii_full);
+            Ok(radar) => {
+                tui = tui.with_hat_graph_radar(radar);
             }
             Err(e) => {
                 warn!("Failed to render hat graph radar for parallel TUI: {e:#}");
@@ -538,9 +549,11 @@ pub async fn run_parallel_loop_impl(
             if let Some(recorder) = &recorder_for_events {
                 recorder.record_bus_event(event);
             }
-            // 控制面事件（gate.* / human.message）才需要进 UI，减少噪音与开销
-            let topic = event.topic.as_str();
-            if topic.starts_with("gate.") || topic == "human.message" {
+            // 事件转发策略：
+            // - 控制面事件（gate.* / human.message）必须进 UI（Gate 面板/活跃度等）；
+            // - 运行态可视化（Hat Graph Radar 边动画）需要“带 source 的业务事件”进 UI；
+            // - 其余事件不转发，避免 UI 被高频噪音刷爆。
+            if should_forward_event_to_tui(event) {
                 let _ = event_tx.send(TuiUpdate::ParallelEvent(event.clone()));
             }
         });
@@ -740,4 +753,45 @@ pub async fn run_parallel_loop_impl(
     }
 
     Ok(reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ralph_proto::{Event, HatId};
+
+    #[test]
+    fn parallel_tui_event_forwarding_allows_gate_topics() {
+        // gate.* 属于控制面事件：必须转发到 TUI（否则 Gate 面板无法更新）。
+        let event = Event::new("gate.request", "");
+        assert!(should_forward_event_to_tui(&event));
+    }
+
+    #[test]
+    fn parallel_tui_event_forwarding_allows_human_message() {
+        // human.message 会影响 TUI 的活跃度与最近事件展示。
+        let event = Event::new("human.message", "");
+        assert!(should_forward_event_to_tui(&event));
+    }
+
+    #[test]
+    fn parallel_tui_event_forwarding_allows_events_with_source() {
+        // 允许带 source 的事件进入 UI（兼容外部注入/特殊来源事件）。
+        let event = Event::new("build.task", "").with_source(HatId::new("builder"));
+        assert!(should_forward_event_to_tui(&event));
+    }
+
+    #[test]
+    fn parallel_tui_event_forwarding_allows_events_with_source_instance() {
+        // 并行模式下，业务事件通常只有 source_instance（发布者实例），TUI 可据此推导 hat_id。
+        let event = Event::new("build.task", "").with_source_instance("builder#1");
+        assert!(should_forward_event_to_tui(&event));
+    }
+
+    #[test]
+    fn parallel_tui_event_forwarding_filters_noise_without_source_or_instance() {
+        // 既没有 source，也没有 source_instance，且不是 gate.* / human.message：认为是 UI 噪音，不转发。
+        let event = Event::new("build.task", "");
+        assert!(!should_forward_event_to_tui(&event));
+    }
 }

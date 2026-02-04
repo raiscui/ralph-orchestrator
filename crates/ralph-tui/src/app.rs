@@ -8,7 +8,11 @@ use crate::animation;
 use crate::chat::{ChatSubmit, parse_chat_submit};
 use crate::external_event_writer::ExternalEventWriter;
 use crate::input::{Action, map_key};
-use crate::state::{GateStatus, ParallelFocus, TuiMode, TuiState, TuiUpdate};
+use crate::state::{
+    GateStatus, HAT_GRAPH_EDGE_HEAD_LEN, HAT_GRAPH_EDGE_HEAD_STEP_MS, HatGraphRadarPoint,
+    HatGraphRadarRect, ParallelFocus, TuiMode, TuiState, TuiUpdate,
+    plan_hat_graph_radar_edge_animation,
+};
 use crate::theme::{TuiTheme, panel_block, patch_exabind_panel_border_bg};
 use crate::widgets::{
     content::{ContentPane, SelectionBounds},
@@ -27,16 +31,19 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ralph_core::truncate_with_ellipsis;
-use ralph_proto::{GateResolve, GateResolvedBy, HatInstanceId, TOPIC_GATE_RESOLVE};
+use ralph_proto::{
+    GateResolve, GateResolvedBy, HatInstanceId, HatInstanceState, TOPIC_GATE_RESOLVE,
+};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
 use scopeguard::defer;
+use std::collections::HashSet;
 use std::io;
 use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
@@ -134,9 +141,54 @@ fn inner_block(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     }
 }
 
+// =============================================================================
+// Hat Graph Radar：文字图尺寸测量
+// =============================================================================
+//
+// 说明：
+// - Hat Graph Radar 展示的是“字符图”（ASCII/Unicode box-drawing），不是像素图；
+// - 因此这里用 “终端列宽/行高” 来度量：
+//   - 宽度：每一行的 Unicode display width（emoji/东亚字符等可能占 2 列）
+//   - 高度：行数
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextDiagramSize {
+    width: u16,
+    height: u16,
+}
+
+/// Hat Graph Radar 在右上角的“向内偏移”。
+///
+/// 说明：
+/// - 用户期望 Radar 不要贴到终端边界上，而是从右上角向左下角方向缩进；
+/// - 这样视觉上更“呼吸”，也能避免覆盖 header 的重要信息。
+const HAT_GRAPH_RADAR_INSET_X: u16 = 2; // 右侧留白：向左偏移的列数
+const HAT_GRAPH_RADAR_INSET_Y: u16 = 4; // 顶部留白：向下偏移的行数（避免遮挡 Output 的边线）
+
+/// Hat Graph Radar 的 edge 动画速度：每多少毫秒“点亮一个 cell”。
+///
+/// 说明：
+/// - Radar 是一个小窗，边的线段通常不长；
+/// - 用“按 cell 推进”的方式能稳定实现“从起点到终点逐段点亮”的动画；
+/// - 具体常量定义在 `state.rs`（避免渲染侧与状态侧各写一份导致漂移）。
+fn measure_text_diagram_size(text: &str) -> TextDiagramSize {
+    let mut max_width: usize = 0;
+    let mut lines_count: usize = 0;
+
+    for line in text.lines() {
+        lines_count = lines_count.saturating_add(1);
+        max_width = max_width.max(line.width());
+    }
+
+    TextDiagramSize {
+        width: (max_width.min(usize::from(u16::MAX))) as u16,
+        height: (lines_count.min(usize::from(u16::MAX))) as u16,
+    }
+}
+
 fn hat_graph_radar_area(
-    content_area: ratatui::layout::Rect,
+    bounds: ratatui::layout::Rect,
     zoomed: bool,
+    diagram_size: TextDiagramSize,
 ) -> Option<ratatui::layout::Rect> {
     // =========================================================================
     // Hat Graph Radar 的布局策略（右上角覆盖层）
@@ -148,31 +200,42 @@ fn hat_graph_radar_area(
     // =========================================================================
 
     // 需要至少能容纳一个带边框的 panel（最小：宽 8，高 5）。
-    if content_area.width < 8 || content_area.height < 5 {
+    // 同时还要预留“向内偏移”的空间：真正可用空间 = bounds - inset。
+    let inset_x = HAT_GRAPH_RADAR_INSET_X;
+    let inset_y = HAT_GRAPH_RADAR_INSET_Y;
+
+    let available_width = bounds.width.saturating_sub(inset_x);
+    let available_height = bounds.height.saturating_sub(inset_y);
+
+    if available_width < 8 || available_height < 5 {
         return None;
     }
 
+    // 这里“优先适配字符图尺寸”，而不是只按屏幕比例拍脑袋：
+    // - zoom：尽量完整显示（图多大，面板就多大），再按 bounds 裁剪；
+    // - mini：仍保留“雷达感”的上限，但如果图本身更小就收缩，避免大块留白。
+    //
+    // 注意：这里的宽高是“含边框”的 panel 尺寸，因此需要 +2（上下/左右边框）。
+    let desired_width = diagram_size.width.saturating_add(2);
+    let desired_height = diagram_size.height.saturating_add(2);
+
     let (mut width, mut height) = if zoomed {
-        // 放大：占 content 区域约 2/3，并做上限裁剪，避免超大屏占用过多视线。
-        let w = content_area.width.saturating_mul(2) / 3;
-        let h = content_area.height.saturating_mul(2) / 3;
-        (w.min(120), h.min(40))
+        (desired_width, desired_height)
     } else {
-        // 小窗：固定上限尺寸（更像“雷达”），但不超过 content 区域。
-        (content_area.width.min(36), content_area.height.min(10))
+        (desired_width.min(36), desired_height.min(10))
     };
 
-    width = width.max(8).min(content_area.width);
-    height = height.max(5).min(content_area.height);
+    width = width.max(8).min(available_width);
+    height = height.max(5).min(available_height);
     if width < 8 || height < 5 {
         return None;
     }
 
     // 右上角锚定：向左/向下扩张（符合“雷达放大”的直觉）。
-    let x = content_area
+    let x = bounds
         .x
-        .saturating_add(content_area.width.saturating_sub(width));
-    let y = content_area.y;
+        .saturating_add(bounds.width.saturating_sub(inset_x).saturating_sub(width));
+    let y = bounds.y.saturating_add(inset_y);
 
     Some(ratatui::layout::Rect {
         x,
@@ -182,16 +245,261 @@ fn hat_graph_radar_area(
     })
 }
 
+fn sanitize_mermaid_identifier(raw: &str) -> String {
+    // 说明：
+    // - 这里需要把运行时 hat_id 映射到 Mermaid node id；
+    // - 必须与 `ralph-cli` 生成 Mermaid 的规则保持一致（否则 TUI 找不到对应节点）。
+    //
+    // 规则：保守地只允许 ASCII [A-Za-z0-9_]，其余字符全部移除。
+    let mut out = String::new();
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        }
+    }
+
+    if out.is_empty() {
+        "hat".to_string()
+    } else {
+        out
+    }
+}
+
+fn mermaid_hat_node_id(hat_id: &str) -> String {
+    // 与 `crates/ralph-cli/src/hats.rs#mermaid_hat_node_id` 保持一致：
+    // - 加前缀避免与 Start/Complete 等节点名冲突；
+    // - 避免 hat_id 以数字开头触发 Mermaid 标识符解析歧义。
+    format!("Hat_{}", sanitize_mermaid_identifier(hat_id))
+}
+
+fn collect_running_hat_ids_for_radar(state: &TuiState) -> Vec<String> {
+    match state.mode {
+        TuiMode::Serial => state
+            .pending_hat
+            .as_ref()
+            .map(|(id, _)| vec![id.as_str().to_string()])
+            .unwrap_or_default(),
+        TuiMode::Parallel => {
+            // 并行模式：高亮所有 Running 实例对应的 hat（你选择的 1B）。
+            let mut hats: Vec<String> = Vec::new();
+            for instance_id in &state.parallel.instance_order {
+                let Some(view) = state.parallel.instances.get(instance_id) else {
+                    continue;
+                };
+                if view.state != HatInstanceState::Running {
+                    continue;
+                }
+                let Some(hat_id) = instance_id.split_hat_id() else {
+                    continue;
+                };
+                hats.push(hat_id.to_string());
+            }
+            hats.sort();
+            hats.dedup();
+            hats
+        }
+    }
+}
+
+fn apply_fg_to_hat_graph_radar_rect(
+    buf: &mut ratatui::buffer::Buffer,
+    inner: ratatui::layout::Rect,
+    rect: HatGraphRadarRect,
+    fg: Color,
+) {
+    if rect.width == 0 || rect.height == 0 || inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let max_x = inner.x.saturating_add(inner.width.saturating_sub(1));
+    let max_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+
+    for dy in 0..usize::from(rect.height) {
+        for dx in 0..usize::from(rect.width) {
+            let x = inner.x.saturating_add(rect.x).saturating_add(dx as u16);
+            let y = inner.y.saturating_add(rect.y).saturating_add(dy as u16);
+            if x > max_x || y > max_y {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut(ratatui::layout::Position { x, y }) {
+                let style = cell.style();
+                cell.set_style(style.fg(fg));
+            }
+        }
+    }
+}
+
+fn apply_fg_to_hat_graph_radar_path(
+    buf: &mut ratatui::buffer::Buffer,
+    inner: ratatui::layout::Rect,
+    path: &[HatGraphRadarPoint],
+    steps: usize,
+    fg: Color,
+) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let max_x = inner.x.saturating_add(inner.width.saturating_sub(1));
+    let max_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+
+    for p in path.iter().take(steps) {
+        if p.x >= inner.width || p.y >= inner.height {
+            continue;
+        }
+
+        let x = inner.x.saturating_add(p.x);
+        let y = inner.y.saturating_add(p.y);
+        if x > max_x || y > max_y {
+            continue;
+        }
+
+        if let Some(cell) = buf.cell_mut(ratatui::layout::Position { x, y }) {
+            let style = cell.style();
+            cell.set_style(style.fg(fg));
+        }
+    }
+}
+
+fn apply_hat_graph_radar_scan_head(
+    buf: &mut ratatui::buffer::Buffer,
+    inner: ratatui::layout::Rect,
+    path: &[HatGraphRadarPoint],
+    start: usize,
+    len: usize,
+    wrap: bool,
+    theme: &TuiTheme,
+) {
+    // 说明：
+    // - 用于“扫描头”这种短段高亮：只覆盖 path 的一小段，并用渐变增强质感；
+    // - wrap=true 时允许从尾部绕回到头部（循环扫描）。
+    if inner.width == 0 || inner.height == 0 || path.is_empty() || len == 0 {
+        return;
+    }
+
+    // 渐变策略（tail -> tip）：
+    // - 你的最新要求：去掉 bg“发光底色”，只用前景色 + 修饰做质感；
+    // - 用 truecolor 插值实现“更柔和的拖尾”。
+    //
+    // 设计要点：
+    // - tail 更长：靠更长 head_len + 渐变制造“拖尾”
+    // - tip 更亮：尾段末端用更亮颜色 + BOLD 强调方向
+    //
+    // 注意：
+    // - 这里的 Color 使用的是 truecolor（Rgb），因此插值在支持真彩的终端里会更顺滑；
+    // - 若某些终端退化为 256 色，这里仍然能工作，只是渐变会更“阶梯”。
+    let colors = theme.colors();
+
+    fn to_rgb(c: Color) -> Option<(u8, u8, u8)> {
+        match c {
+            Color::Rgb(r, g, b) => Some((r, g, b)),
+            _ => None,
+        }
+    }
+
+    fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+        let t = t.clamp(0.0, 1.0);
+        let a = f32::from(a);
+        let b = f32::from(b);
+        (a + (b - a) * t).round().clamp(0.0, 255.0) as u8
+    }
+
+    fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+        let Some((ar, ag, ab)) = to_rgb(a) else {
+            return b;
+        };
+        let Some((br, bg, bb)) = to_rgb(b) else {
+            return b;
+        };
+
+        Color::Rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
+    }
+
+    fn two_segment_gradient(tail: Color, mid: Color, tip: Color, mid_t: f32, t: f32) -> Color {
+        let t = t.clamp(0.0, 1.0);
+        let mid_t = mid_t.clamp(0.05, 0.95);
+        if t <= mid_t {
+            lerp_color(tail, mid, t / mid_t)
+        } else {
+            lerp_color(mid, tip, (t - mid_t) / (1.0 - mid_t))
+        }
+    }
+
+    // 默认 stop（整体更亮的冷色系）：
+    // - tail：blue（整体提亮）
+    // - mid：lavender（更亮）
+    // - tip：text（最亮）
+    let (tail, mid, tip, mid_t) = (colors.blue, colors.lavender, colors.text, 0.70);
+
+    let max_x = inner.x.saturating_add(inner.width.saturating_sub(1));
+    let max_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+
+    for i in 0..len {
+        let idx = start.saturating_add(i);
+        let idx = if wrap { idx % path.len() } else { idx };
+        if idx >= path.len() {
+            break;
+        }
+        let p = path[idx];
+
+        if p.x >= inner.width || p.y >= inner.height {
+            continue;
+        }
+
+        let x = inner.x.saturating_add(p.x);
+        let y = inner.y.saturating_add(p.y);
+        if x > max_x || y > max_y {
+            continue;
+        }
+
+        // i: 0..len-1（从 tail 到 tip）
+        let last = len.saturating_sub(1);
+        let t = if last == 0 {
+            1.0
+        } else {
+            (i as f32) / (last as f32)
+        };
+
+        // 让 tip 更亮、更醒目；拖尾只做“颜色渐变”，不再依赖 DIM（你的口径：不是拖尾变暗）。
+        let fg = if i == last {
+            tip
+        } else {
+            two_segment_gradient(tail, mid, tip, mid_t, t)
+        };
+        let bold = t >= 0.70;
+
+        if let Some(cell) = buf.cell_mut(ratatui::layout::Position { x, y }) {
+            let mut style = cell.style().fg(fg);
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            cell.set_style(style);
+        }
+    }
+}
+
 fn render_hat_graph_radar_overlay(
     f: &mut ratatui::Frame,
-    content_area: ratatui::layout::Rect,
+    bounds: ratatui::layout::Rect,
     state: &TuiState,
     theme: &TuiTheme,
 ) -> Option<ratatui::layout::Rect> {
     let radar = state.hat_graph_radar.as_ref()?;
     let zoomed = state.hat_graph_zoomed;
 
-    let area = hat_graph_radar_area(content_area, zoomed)?;
+    let graph = if zoomed {
+        radar.ascii_full.as_str()
+    } else {
+        radar.ascii_compact.as_str()
+    };
+    let meta = if zoomed {
+        radar.meta_full.as_ref()
+    } else {
+        radar.meta_compact.as_ref()
+    };
+    let diagram_size = measure_text_diagram_size(graph);
+
+    let area = hat_graph_radar_area(bounds, zoomed, diagram_size)?;
     let inner = inner_block(area);
     if inner.width == 0 || inner.height == 0 {
         return None;
@@ -206,12 +514,6 @@ fn render_hat_graph_radar_overlay(
     f.render_widget(block, area);
     patch_exabind_panel_border_bg(f.buffer_mut(), area, theme);
 
-    let graph = if zoomed {
-        radar.ascii_full.as_str()
-    } else {
-        radar.ascii_compact.as_str()
-    };
-
     let lines: Vec<Line> = graph
         .lines()
         .take(inner.height as usize)
@@ -221,6 +523,89 @@ fn render_hat_graph_radar_overlay(
     // 注意：这里不启用自动换行（wrap），因为换行会破坏 ASCII 图的结构。
     let paragraph = Paragraph::new(lines).style(theme.muted());
     f.render_widget(paragraph, inner);
+
+    // ---------------------------------------------------------------------
+    // 运行态可视化：Running hats 高亮 + cause event 线路动画
+    //
+    // 说明：
+    // - 必须做 cell-level overlay（直接改字符串/塞 ANSI 会非常脆弱）；
+    // - 如果 meta 不存在，则自动降级为“纯展示”；
+    // - 线路动画采用 progressive reveal；reveal 完成后保持“全亮”，直到目标 hat 退出 Running。
+    // ---------------------------------------------------------------------
+    if let Some(meta) = meta {
+        let buf = f.buffer_mut();
+
+        // 1) Running hats：box 前景高亮色（#a9dc76）
+        let running_hat_fg = theme.hat_graph_running_hat_fg();
+        let running_hats = collect_running_hat_ids_for_radar(state);
+        let running_hat_set: HashSet<String> = running_hats.iter().cloned().collect();
+
+        for hat_id in &running_hats {
+            let node_id = mermaid_hat_node_id(hat_id);
+            let Some(node) = meta.find_node(&node_id) else {
+                continue;
+            };
+            apply_fg_to_hat_graph_radar_rect(buf, inner, node.box_rect, running_hat_fg);
+        }
+
+        // 2) cause event 线路动画：按“Running 目标”驱动（目标退出 Running 就消失）
+        //
+        // 动效规则（更像“在跑”的反馈）：
+        // - reveal 阶段：base 逐段点亮，扫描头贴着前沿更亮；
+        // - reveal 完成后：base 全亮，扫描头以固定速度循环跑动，直到目标退出 Running。
+        // base 高亮边：要“暗一些”，避免抢走注意力（你的口径：不是拖尾变暗，而是 base 变暗）。
+        // 说明：
+        // - Radar 文本本身是 muted（overlay0）；
+        // - base 高亮边选 overlay1：比 overlay0 略亮，仍可见，但明显弱于扫描头。
+        let edge_base_fg = theme.colors().overlay1;
+        for anim in state.hat_graph_edge_animations.values() {
+            // 目标 box 不 Running：立刻取消/隐藏该动画（你的口径）
+            if !running_hat_set.contains(anim.target_hat.as_str()) {
+                continue;
+            }
+
+            let elapsed = anim.started_at.elapsed();
+
+            let from = mermaid_hat_node_id(anim.source_hat.as_str());
+            let to = mermaid_hat_node_id(anim.target_hat.as_str());
+            let label = anim.topic.as_str();
+
+            let edges: Vec<_> = meta.matching_edges_exact(&from, label, &to).collect();
+            if edges.is_empty() {
+                continue;
+            }
+
+            for e in edges {
+                let plan = plan_hat_graph_radar_edge_animation(
+                    elapsed,
+                    e.path.len(),
+                    anim.step_ms,
+                    HAT_GRAPH_EDGE_HEAD_STEP_MS,
+                    HAT_GRAPH_EDGE_HEAD_LEN,
+                );
+
+                apply_fg_to_hat_graph_radar_path(
+                    buf,
+                    inner,
+                    &e.path,
+                    plan.base_steps,
+                    edge_base_fg,
+                );
+
+                if let Some(head_start) = plan.head_start {
+                    apply_hat_graph_radar_scan_head(
+                        buf,
+                        inner,
+                        &e.path,
+                        head_start,
+                        plan.head_len,
+                        plan.head_wrap,
+                        theme,
+                    );
+                }
+            }
+        }
+    }
 
     Some(area)
 }
@@ -1712,6 +2097,13 @@ impl App {
                         state.parallel.set_output_render_width(output_inner_width);
                     }
 
+                    // Hat Graph Radar：推进雷达的状态机（纯 UI）。
+                    //
+                    // 说明：
+                    // - recent events 需要按 lookback 窗口裁剪，避免因果推断匹配到过旧事件；
+                    // - edge animations 需要在目标 hat 退出 Running 时及时清理，避免残留线路。
+                    state.tick_hat_graph_radar_animation(Instant::now());
+
                     let state = state; // Rebind as immutable for rendering
                         terminal.draw(|f| {
                             // 说明：
@@ -2272,8 +2664,23 @@ impl App {
                         }
 
                         // 右上角覆盖层：Hat Graph Radar（ASCII Mermaid）
-                        if let Some(area) =
-                            render_hat_graph_radar_overlay(f, content_area, &state, &theme)
+                        // 说明：
+                        // - 这里用“整屏（去掉 footer）”做 bounds，保证 Radar 位置计算不受 pane 布局影响；
+                        // - 具体的“向内偏移”（从右上角往左下移）由 `hat_graph_radar_area(...)` 统一处理；
+                        // - 这样我们既能避免覆盖 footer，也能稳定控制与终端边界的留白。
+                        let radar_bounds = ratatui::layout::Rect {
+                            x: f.area().x,
+                            y: f.area().y,
+                            width: f.area().width,
+                            height: chunks[2].y.saturating_sub(f.area().y),
+                        };
+
+                        if let Some(area) = render_hat_graph_radar_overlay(
+                            f,
+                            radar_bounds,
+                            &state,
+                            &theme,
+                        )
                         {
                             exabind_radar_area = Some(area);
                         }
@@ -2413,6 +2820,116 @@ mod tests {
             Some(theme.colors().crust),
             "priming 后首帧应把左上角 border 的 bg 刷成 crust（与外侧一致）"
         );
+    }
+
+    // =========================================================================
+    // Hat Graph Radar：布局与自适配尺寸（回归测试）
+    // =========================================================================
+
+    #[test]
+    fn hat_graph_radar_measure_size_uses_unicode_display_width() {
+        // 说明：
+        // - 🎩 通常占 2 列宽；
+        // - box-drawing 字符占 1 列宽。
+        let diagram = "┌─┐\n│🎩│\n└─┘\n";
+        let size = measure_text_diagram_size(diagram);
+        assert_eq!(size.height, 3, "应按行数计算高度");
+        assert_eq!(size.width, 4, "应按 Unicode display width 计算宽度");
+    }
+
+    #[test]
+    fn hat_graph_radar_area_anchors_to_bounds_top_right() {
+        let bounds = Rect::new(0, 0, 80, 20);
+        let diagram_size = TextDiagramSize {
+            width: 10,
+            height: 3,
+        };
+
+        let area = hat_graph_radar_area(bounds, false, diagram_size).expect("should fit");
+
+        // mini 模式：优先按“图尺寸 + 边框”自适配，然后再裁剪到雷达上限。
+        assert_eq!(area.width, 12);
+        assert_eq!(area.height, 5);
+
+        // 关键回归点：从右上角向内偏移（往左下移），避免贴边。
+        assert_eq!(area.x, 66);
+        assert_eq!(area.y, HAT_GRAPH_RADAR_INSET_Y);
+    }
+
+    #[test]
+    fn hat_graph_radar_area_zoom_prefers_diagram_size() {
+        let bounds = Rect::new(0, 0, 80, 20);
+        let diagram_size = TextDiagramSize {
+            width: 40,
+            height: 10,
+        };
+
+        let area = hat_graph_radar_area(bounds, true, diagram_size).expect("should fit");
+
+        // zoom 模式：应优先适配“图尺寸 + 边框”，避免裁切/过大留白。
+        assert_eq!(area.width, 42);
+        assert_eq!(area.height, 12);
+        assert_eq!(area.x, 36);
+        assert_eq!(area.y, HAT_GRAPH_RADAR_INSET_Y);
+    }
+
+    #[test]
+    fn hat_graph_radar_area_zoom_clamps_to_bounds_when_diagram_too_large() {
+        let bounds = Rect::new(0, 0, 30, 10);
+        let diagram_size = TextDiagramSize {
+            width: 200,
+            height: 200,
+        };
+
+        let area = hat_graph_radar_area(bounds, true, diagram_size).expect("should fit");
+        assert_eq!(area.width, 28, "图太大时应按 bounds 裁剪宽度");
+        assert_eq!(area.height, 6, "图太大时应按 bounds 裁剪高度");
+        assert_eq!(area.x, 0);
+        assert_eq!(area.y, HAT_GRAPH_RADAR_INSET_Y);
+    }
+
+    // =========================================================================
+    // Hat Graph Radar：扫描头渐变（质感 + 对比度）
+    // =========================================================================
+
+    #[test]
+    fn hat_graph_radar_scan_head_uses_truecolor_gradient_without_bg_normal() {
+        // 说明：
+        // - 你的最新口径：去掉“发光底色(bg)”；
+        // - 扫描头更有质感：tip 更亮更醒目，tail 更长更柔和（靠渐变与长度，而不是 DIM）。
+        let theme = TuiTheme::default();
+        let inner = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(inner);
+
+        let path: Vec<HatGraphRadarPoint> =
+            (0..20).map(|x| HatGraphRadarPoint { x, y: 0 }).collect();
+
+        // 关键断言：不应修改 bg（去掉“发光底色”）
+        let tail_bg_before = buf[(0, 0)].style().bg;
+        let tip_bg_before = buf[(9, 0)].style().bg;
+
+        // 默认模式：冷色系渐变
+        apply_hat_graph_radar_scan_head(&mut buf, inner, &path, 0, 10, false, &theme);
+
+        // tail：x=0（不应设置 bg；不应通过 DIM 把拖尾压暗）
+        let tail = buf[(0, 0)].style();
+        assert_eq!(tail.fg, Some(theme.colors().blue));
+        assert_eq!(tail.bg, tail_bg_before);
+        assert!(!tail.add_modifier.contains(Modifier::BOLD));
+
+        // tail 深处：x=4（拖尾要“更长”，且应当有渐变变化）
+        let tail_deeper = buf[(4, 0)].style();
+        assert_ne!(
+            tail_deeper.fg,
+            Some(theme.colors().blue),
+            "拖尾中段应发生渐变（不应与 tail 起点完全相同）"
+        );
+
+        // tip：x=9（len=10 的最后一格，应最亮 + BOLD；不应设置 bg）
+        let tip = buf[(9, 0)].style();
+        assert_eq!(tip.fg, Some(theme.colors().text));
+        assert_eq!(tip.bg, tip_bg_before);
+        assert!(tip.add_modifier.contains(Modifier::BOLD));
     }
 
     // =========================================================================
@@ -2568,7 +3085,12 @@ mod tests {
     #[test]
     fn dispatch_action_toggle_hat_graph_zoom_toggles_when_radar_present() {
         let mut state = TuiState::new();
-        state.set_hat_graph_radar("compact".to_string(), "full".to_string());
+        state.set_hat_graph_radar(crate::state::HatGraphRadar {
+            ascii_compact: "compact".to_string(),
+            ascii_full: "full".to_string(),
+            meta_compact: None,
+            meta_full: None,
+        });
         assert!(!state.hat_graph_zoomed);
 
         dispatch_action(Action::ToggleHatGraphZoom, &mut state, 10);

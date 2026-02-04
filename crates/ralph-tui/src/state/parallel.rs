@@ -986,7 +986,13 @@ impl ParallelTuiState {
 
     pub fn append_output(&mut self, chunk: &HatJobOutputChunk) {
         let instance_id = chunk.instance_id.clone();
-        self.register_instance(instance_id.clone(), HatInstanceState::Created);
+        // 关键点：
+        // - output chunk 可能先于 instance state 更新到达；
+        // - 但一旦实例已存在（例如已经是 Running/Idle/Done），这里绝不能把 state 覆盖回 Created，
+        //   否则会导致 UI 状态回退（典型症状：Running 高亮“闪一下就没了”）。
+        if !self.instances.contains_key(&instance_id) {
+            self.register_instance(instance_id.clone(), HatInstanceState::Created);
+        }
 
         let max_buffer_lines = self.max_buffer_lines;
         let mode = self.output_render_mode;
@@ -1206,6 +1212,38 @@ mod tests {
         assert_eq!(editor.text(), "X");
         assert_eq!(editor.cursor, TextPos { row: 0, col: 1 });
         assert!(!editor.has_selection());
+    }
+
+    // =========================================================================
+    // Parallel Instance State
+    // =========================================================================
+
+    #[test]
+    fn parallel_append_output_does_not_override_instance_state() {
+        let mut state = ParallelTuiState::default();
+
+        let instance_id = HatInstanceId::from("builder#1");
+
+        // 先模拟 supervisor 把实例标记为 Running（这是 Radar 蓝色高亮的依据）。
+        state.set_instance_state(instance_id.clone(), HatInstanceState::Running);
+
+        // 再追加一次 output chunk：不应把 Running 覆盖回 Created。
+        state.append_output(&HatJobOutputChunk {
+            job_id: 1,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "hello".to_string(),
+        });
+
+        let view = state
+            .instances
+            .get(&instance_id)
+            .expect("instance must exist");
+        assert_eq!(
+            view.state,
+            HatInstanceState::Running,
+            "append_output 不应覆盖实例的生命周期状态"
+        );
     }
 
     // =========================================================================

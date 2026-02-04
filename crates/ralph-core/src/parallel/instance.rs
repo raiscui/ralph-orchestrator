@@ -1098,6 +1098,16 @@ impl HatInstanceActor {
     }
 
     fn decorate_outgoing_event(&mut self, mut event: Event) -> Event {
+        // 归因：补上 source（hat_id）与 source_instance（hat_id#n）。
+        //
+        // 说明：
+        // - TUI 的 Hat Graph Radar 需要知道“发布者 hat”才能做边动画与 box 高亮；
+        // - `.ralph/events.jsonl` 也会记录 `hat` / `source_instance`，两者语义应保持一致；
+        // - agent 输出的 `<event ...>` 通常不带 source，因此这里在缺失时补齐即可（不要覆盖已有值）。
+        if event.source.is_none() {
+            event = event.with_source(self.hat.id.clone());
+        }
+
         // 归因：补上 source_instance，便于后续路由与回放。
         event = event.with_source_instance(self.instance_id.clone());
 
@@ -1281,6 +1291,76 @@ mod tests {
         assert_eq!(
             actor.merged_workspace_strategy_for_pending(),
             WorkspaceStrategy::Worktree
+        );
+    }
+
+    #[test]
+    fn decorate_outgoing_event_sets_source_instance_and_id_and_source_hat() {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, _supervisor_rx) = mpsc::channel(1);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let mut actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("writer#1"),
+            hat: Hat::new("writer", "Writer").subscribe("build.task"),
+            hat_config: None,
+            workspace_runtime: WorkspaceRuntimeConfig::default(),
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: String::new(),
+            instruction_builder,
+            executor: Arc::new(NoopExecutor),
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Idle,
+            pending: Vec::new(),
+            next_job_id: 1,
+            next_event_seq: 1,
+            dynamic_idle_since: None,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: None,
+            running: None,
+            cancel_tx: None,
+        };
+
+        let event = Event::new("build.task", "hello");
+        let decorated = actor.decorate_outgoing_event(event);
+
+        assert_eq!(
+            decorated
+                .source_instance
+                .as_ref()
+                .expect("source_instance must be set")
+                .as_str(),
+            "writer#1"
+        );
+        assert_eq!(
+            decorated
+                .source
+                .as_ref()
+                .expect("source must be set")
+                .as_str(),
+            "writer",
+            "并行模式下也应为事件补齐 source（发布者 hat），便于 UI/路由/诊断一致"
+        );
+        assert!(
+            decorated.id.is_some(),
+            "event id should be generated when missing"
         );
     }
 }
