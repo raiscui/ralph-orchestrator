@@ -21,7 +21,9 @@ event_loop:
   max_cost_usd: null                    # Optional: stop after spending this much
   max_consecutive_failures: 5           # Stop after this many consecutive failures
   starting_event: "tdd.start"           # Workflow entry event published after coordination (hat mode)
-  complete_publishes: "fix.applied"     # Optional: workflow completion candidate event topic
+  complete_publishes: "fix.applied"     # Optional: workflow completion candidate event topic (MUST be in at least one hat publishes when hats are defined)
+  prompt: null                          # Optional: inline top-level prompt text (mutually exclusive with prompt_file)
+  ralph_prompt: null                    # Optional: extra prompt injected ONLY for Ralph (coordinator)
   prompt_file: "PROMPT.md"              # Default prompt file
 
 # CLI backend settings
@@ -78,7 +80,9 @@ Controls the orchestration loop behavior.
 | `max_cost_usd` | number | `null` | Stop after exceeding this cumulative cost |
 | `max_consecutive_failures` | integer | `5` | Stop after this many consecutive failures |
 | `starting_event` | string | `null` | Workflow entry event published after coordination (not the first event) |
-| `complete_publishes` | string | `null` | Workflow completion candidate event topic (observed by coordinator) |
+| `complete_publishes` | string | `null` | Workflow completion candidate event topic (observed by coordinator). When custom hats are defined, this topic MUST appear in at least one hat's `publishes`. |
+| `prompt` | string | `null` | Inline top-level prompt text (higher precedence than prompt_file). Mutually exclusive with an explicitly set non-default `prompt_file`. |
+| `ralph_prompt` | string | `null` | Extra prompt injected ONLY for Ralph (coordinator). Additive — does not affect prompt precedence and is not injected into other hats. |
 | `prompt_file` | string | `"PROMPT.md"` | Default prompt file |
 
 ### cli

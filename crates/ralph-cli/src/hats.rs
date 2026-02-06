@@ -23,6 +23,7 @@ use ralph_tui::state::{
     HatGraphRadar, HatGraphRadarEdgeMeta, HatGraphRadarMeta, HatGraphRadarNodeMeta,
     HatGraphRadarPoint, HatGraphRadarRect,
 };
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use tracing::warn;
 
@@ -42,6 +43,9 @@ pub enum HatsCommands {
         /// Output format (unicode, ascii, compact, mermaid)
         #[arg(long, default_value = "unicode")]
         format: GraphFormat,
+        /// Graph view mode (logical hides coordinator, physical includes ralph#1)
+        #[arg(long, default_value = "physical")]
+        view: GraphView,
     },
     /// List all configured hats (default if no subcommand)
     List {
@@ -64,6 +68,15 @@ pub enum GraphFormat {
     Compact,
     /// Raw Mermaid syntax - for external rendering tools
     Mermaid,
+}
+
+#[derive(ValueEnum, Clone, Debug, Default)]
+pub enum GraphView {
+    /// Logical view: Hat→Hat edges only (hides coordinator ralph#1)
+    Logical,
+    /// Physical view: also shows coordinator ralph#1 edges (useful for coordinator-driven workflows)
+    #[default]
+    Physical,
 }
 
 #[derive(ValueEnum, Clone, Debug, Default)]
@@ -100,7 +113,9 @@ pub fn execute(config_path: &std::path::Path, args: HatsArgs, use_colors: bool) 
             show_hat(&mut stdout, &registry, &show_args.name, use_colors)
         }
         Some(HatsCommands::Validate) => validate_hats(&mut stdout, &config, &registry, use_colors),
-        Some(HatsCommands::Graph { format }) => graph_hats(&mut stdout, &config, &registry, format),
+        Some(HatsCommands::Graph { format, view }) => {
+            graph_hats(&mut stdout, &config, &registry, format, view)
+        }
     }
 }
 
@@ -351,15 +366,20 @@ fn graph_hats<W: Write>(
     config: &RalphConfig,
     registry: &HatRegistry,
     format: GraphFormat,
+    view: GraphView,
 ) -> Result<()> {
     match format {
         GraphFormat::Mermaid => {
             writeln!(writer, "```mermaid")?;
-            write!(writer, "{}", generate_mermaid_string(config, registry))?;
+            write!(
+                writer,
+                "{}",
+                generate_mermaid_string(config, registry, view, MermaidLabelMode::Strict)
+            )?;
             writeln!(writer, "```")?;
         }
         GraphFormat::Unicode | GraphFormat::Ascii | GraphFormat::Compact => {
-            let rendered = render_hat_dag_via_mermaid(config, registry, format)?;
+            let rendered = render_hat_dag_via_mermaid(config, registry, format, view)?;
             write!(writer, "{rendered}")?;
         }
     }
@@ -370,12 +390,13 @@ fn render_hat_dag_via_mermaid(
     config: &RalphConfig,
     registry: &HatRegistry,
     format: GraphFormat,
+    view: GraphView,
 ) -> Result<String> {
     if registry.is_empty() {
         return Ok("No hats configured.\n".to_string());
     }
 
-    let diagram = generate_mermaid_string(config, registry);
+    let diagram = generate_mermaid_string(config, registry, view, MermaidLabelMode::TerminalPretty);
     let options = match format {
         GraphFormat::Unicode => AsciiRenderOptions {
             use_ascii: Some(false),
@@ -388,7 +409,10 @@ fn render_hat_dag_via_mermaid(
         GraphFormat::Compact => AsciiRenderOptions {
             use_ascii: Some(false),
             padding_x: Some(0),
-            padding_y: Some(0),
+            // 备注:
+            // - 方向已统一为 TD,physical view 常见回边(backlink).
+            // - `padding_y=0` 在某些图形下会触发渲染器异常,因此这里保留最小垂直间距.
+            padding_y: Some(1),
             box_border_padding: Some(0),
         },
         GraphFormat::Mermaid => AsciiRenderOptions::default(),
@@ -411,7 +435,7 @@ fn render_hat_dag_via_mermaid(
 ///
 /// 说明：
 /// - 两份字符串都带末尾 `\n`，便于直接展示/拼接；
-/// - compact 视图会把 padding 压到 0，更适合小窗“雷达”；
+/// - compact 视图会尽量压缩 padding,更适合小窗"雷达".
 /// - full 视图使用更可读的默认渲染参数。
 /// - 这里“ascii”指的是“文字图（ASCII/Unicode）”的渲染模式：
 ///   - 对齐 `beautiful-mermaid-rs --ascii` 的默认行为：使用 Unicode box-drawing 字符（┌─┐│└┘▶）
@@ -430,38 +454,70 @@ pub(crate) fn render_hat_graph_radar_ascii(
         });
     }
 
-    let diagram = generate_mermaid_string(config, registry);
+    // Radar 面板与 `ralph hats graph` 对齐：默认展示 physical view（包含 coordinator）。
+    // 这样在 coordinator-driven workflow（并行 supervisor）里，Radar 不会再“断开”。
+    let diagram = generate_mermaid_string(
+        config,
+        registry,
+        GraphView::Physical,
+        MermaidLabelMode::TerminalPretty,
+    );
 
-    let compact = render_mermaid_ascii_with_meta(
-        &diagram,
-        &AsciiRenderOptions {
-            use_ascii: Some(false),
-            padding_x: Some(0),
-            padding_y: Some(0),
-            box_border_padding: Some(0),
-        },
-    )
-    .with_context(|| {
-        "Failed to render Mermaid topology (compact) as Unicode text diagram".to_string()
-    })?;
+    let compact_options = AsciiRenderOptions {
+        use_ascii: Some(false),
+        padding_x: Some(0),
+        // 重要:
+        // - physical view 通常存在 "Hat -> ralph#1" 的回边(backlink).
+        // - 在 TD 方向下,`padding_y=0` 容易让渲染器找不到可走的路径并触发 QuickJS exception.
+        // - 因此这里保留水平紧凑(padding_x=0),但给垂直方向留出最小余量(padding_y=1).
+        padding_y: Some(1),
+        box_border_padding: Some(0),
+    };
 
-    let mut ascii_compact = compact.text;
+    // 说明:
+    // - `beautiful-mermaid-rs` 的 meta 渲染在某些布局下会触发 QuickJS exception(已知不稳定点).
+    // - Radar 属于 best-effort 能力,meta 失败时降级为"仅文字图"(不影响主流程).
+    let (mut ascii_compact, meta_compact) =
+        match render_mermaid_ascii_with_meta(&diagram, &compact_options) {
+            Ok(compact) => (
+                compact.text,
+                Some(convert_ascii_meta_to_radar_meta(compact.meta)),
+            ),
+            Err(e) => {
+                warn!(
+                    "Hat graph radar: compact meta render failed (falling back to text-only): {e:#}"
+                );
+
+                let text = render_mermaid_ascii(&diagram, &compact_options).with_context(|| {
+                    "Failed to render Mermaid topology (compact) as Unicode text diagram"
+                        .to_string()
+                })?;
+
+                (text, None)
+            }
+        };
     if !ascii_compact.ends_with('\n') {
         ascii_compact.push('\n');
     }
 
-    let full = render_mermaid_ascii_with_meta(
-        &diagram,
-        &AsciiRenderOptions {
-            use_ascii: Some(false),
-            ..Default::default()
-        },
-    )
-    .with_context(|| {
-        "Failed to render Mermaid topology (full) as Unicode text diagram".to_string()
-    })?;
+    let full_options = AsciiRenderOptions {
+        use_ascii: Some(false),
+        ..Default::default()
+    };
 
-    let mut ascii_full = full.text;
+    let (mut ascii_full, meta_full) = match render_mermaid_ascii_with_meta(&diagram, &full_options)
+    {
+        Ok(full) => (full.text, Some(convert_ascii_meta_to_radar_meta(full.meta))),
+        Err(e) => {
+            warn!("Hat graph radar: full meta render failed (falling back to text-only): {e:#}");
+
+            let text = render_mermaid_ascii(&diagram, &full_options).with_context(|| {
+                "Failed to render Mermaid topology (full) as Unicode text diagram".to_string()
+            })?;
+
+            (text, None)
+        }
+    };
     if !ascii_full.ends_with('\n') {
         ascii_full.push('\n');
     }
@@ -469,8 +525,8 @@ pub(crate) fn render_hat_graph_radar_ascii(
     Ok(HatGraphRadar {
         ascii_compact,
         ascii_full,
-        meta_compact: Some(convert_ascii_meta_to_radar_meta(compact.meta)),
-        meta_full: Some(convert_ascii_meta_to_radar_meta(full.meta)),
+        meta_compact,
+        meta_full,
     })
 }
 
@@ -583,7 +639,28 @@ fn convert_ascii_meta_to_radar_meta(
 }
 
 /// Generate Mermaid flowchart syntax for the hat topology.
-fn generate_mermaid_string(config: &RalphConfig, registry: &HatRegistry) -> String {
+fn generate_mermaid_string(
+    config: &RalphConfig,
+    registry: &HatRegistry,
+    view: GraphView,
+    label_mode: MermaidLabelMode,
+) -> String {
+    match view {
+        GraphView::Logical => generate_mermaid_string_logical(config, registry, label_mode),
+        GraphView::Physical => generate_mermaid_string_physical(config, registry, label_mode),
+    }
+}
+
+/// Generate Mermaid flowchart syntax for the hat topology (logical view).
+///
+/// 说明：
+/// - 逻辑视图只画 Hat→Hat 的传播关系（隐藏 ralph#1/coordinator）；
+/// - 入口/结束节点按 spec 规则可选输出（Start/Complete）。
+fn generate_mermaid_string_logical(
+    config: &RalphConfig,
+    registry: &HatRegistry,
+    label_mode: MermaidLabelMode,
+) -> String {
     // NOTE:
     // - Mermaid 的“节点 ID”在不同渲染器里兼容性差异很大；
     //   目前我们发现：当节点 ID 使用中文/emoji 时，`beautiful-mermaid-rs` 会吞掉边/节点，
@@ -596,7 +673,10 @@ fn generate_mermaid_string(config: &RalphConfig, registry: &HatRegistry) -> Stri
     hats.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
 
     let mut output = String::new();
-    output.push_str("flowchart LR\n");
+    // Mermaid 方向:
+    // - 你要求 ASCII/Unicode/Radar 与 `--format mermaid` 保持一致方向.
+    // - 因此这里统一使用 TD(Top-Down),避免方向分叉带来的理解成本.
+    output.push_str("flowchart TD\n");
 
     // 先声明节点（含 label），避免后续边只引用 ID 时渲染器把 label 丢成裸 ID。
     for hat in &hats {
@@ -606,7 +686,7 @@ fn generate_mermaid_string(config: &RalphConfig, registry: &HatRegistry) -> Stri
         } else {
             &hat.name
         };
-        let label = format_mermaid_node_label(label_source);
+        let label = format_mermaid_node_label(label_source, label_mode);
         output.push_str(&format!("    {node_id}[{label}]\n"));
     }
 
@@ -693,6 +773,185 @@ fn generate_mermaid_string(config: &RalphConfig, registry: &HatRegistry) -> Stri
     output
 }
 
+/// Generate Mermaid flowchart syntax for the hat topology (physical view).
+///
+/// 目标：
+/// - 提供一个“更贴近真实运行时路由”的视角：
+///   - coordinator（ralph#1）显式出现在图中；
+///   - 仅在“边界 topic”（无内部发布者/无内部订阅者）上画 Ralph↔Hat 边，
+///     避免回到“全连接噪声”。
+fn generate_mermaid_string_physical(
+    config: &RalphConfig,
+    registry: &HatRegistry,
+    label_mode: MermaidLabelMode,
+) -> String {
+    // 重要：coordinator 节点的 Mermaid ID 必须与 TUI 的 `mermaid_hat_node_id("ralph")` 对齐。
+    //
+    // 原因：
+    // - Radar 的因果边动画依赖 meta（from/to/label）做结构匹配；
+    // - 并行/串行事件的 `event.source` 通常是 hat_id（例如 "ralph"），TUI 会把它映射成 `Hat_ralph`；
+    // - 如果我们在 Mermaid 里用的是另一个 coordinator 节点 ID（例如 "Ralph"），Radar 就会匹配不到边。
+    let ralph_node_id = mermaid_hat_node_id("ralph");
+
+    let mut hats: Vec<_> = registry.all().collect();
+    hats.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+
+    let mut output = String::new();
+    // Mermaid 方向说明见 `generate_mermaid_string_logical`.
+    output.push_str("flowchart TD\n");
+
+    // =========================================================================
+    // Mermaid 布局稳定性：优先声明 ralph#1（coordinator）
+    //
+    // 经验结论：
+    // - `beautiful-mermaid-rs`（dagre/flowchart）对“节点声明顺序”比较敏感；
+    // - 如果先声明所有 hats、最后才声明 `ralph#1`，在 Unicode/ASCII 渲染里 coordinator
+    //   往往会被挤到图的右侧或中下方，不符合“调度员应在起点位置”的直觉；
+    // - 将 coordinator 节点放到 Mermaid 文本的最前面，可以在不改变拓扑语义的前提下，
+    //   让 `ralph#1` 更稳定地出现在图的左/上方（best-effort）。
+    // =========================================================================
+    // coordinator 节点（物理视图专有）
+    let ralph_label = format_mermaid_node_label("ralph#1 (coordinator)", label_mode);
+    output.push_str(&format!("    {ralph_node_id}[{ralph_label}]\n"));
+
+    // 先声明节点（含 label），避免后续边只引用 ID 时渲染器把 label 丢成裸 ID。
+    for hat in &hats {
+        let node_id = mermaid_hat_node_id(hat.id.as_str());
+        let label_source = if hat.name.trim().is_empty() {
+            hat.id.as_str()
+        } else {
+            &hat.name
+        };
+        let label = format_mermaid_node_label(label_source, label_mode);
+        output.push_str(&format!("    {node_id}[{label}]\n"));
+    }
+
+    // 控制面握手：fresh run 的起点永远是 task.start（见 event semantics spec）
+    output.push_str("    Start[task.start]\n");
+    output.push_str(&format!("    Start --> {ralph_node_id}\n"));
+
+    // topic 集合（按“精确字符串”聚合），用于判定哪些 topic 是“边界 topic”。
+    let mut published_exact: HashSet<String> = HashSet::new();
+    let mut subscribed_exact: HashSet<String> = HashSet::new();
+    for hat in &hats {
+        for t in &hat.publishes {
+            published_exact.insert(t.as_str().to_string());
+        }
+        for t in &hat.subscriptions {
+            subscribed_exact.insert(t.as_str().to_string());
+        }
+    }
+
+    // 物理视图边集合：
+    // - 仍然保留 Hat→Hat 的逻辑边（内部 topic）；
+    // - 仅对“无内部发布者/无内部订阅者”的边界 topic，补 Ralph↔Hat 边。
+    let mut edges: Vec<(String, String, String)> = Vec::new();
+
+    // Hat -> Hat（内部 topic）：与 logical view 一致
+    for source in &hats {
+        for pub_event in &source.publishes {
+            let topic = pub_event.as_str();
+            for target in &hats {
+                if target.id == source.id {
+                    continue;
+                }
+                if target.subscriptions.iter().any(|s| s.as_str() == topic) {
+                    edges.push((
+                        mermaid_hat_node_id(source.id.as_str()),
+                        topic.to_string(),
+                        mermaid_hat_node_id(target.id.as_str()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Ralph -> Hat：Hat 订阅了某个 topic，但没有任何 hat 发布该 topic
+    for target in &hats {
+        let target_id = mermaid_hat_node_id(target.id.as_str());
+        for sub in &target.subscriptions {
+            let topic = sub.as_str();
+            if !published_exact.contains(topic) {
+                edges.push((ralph_node_id.clone(), topic.to_string(), target_id.clone()));
+            }
+        }
+    }
+
+    // Hat -> Ralph：Hat 发布了某个 topic，但没有任何 hat 订阅该 topic
+    for source in &hats {
+        let source_id = mermaid_hat_node_id(source.id.as_str());
+        for pub_event in &source.publishes {
+            let topic = pub_event.as_str();
+            if !subscribed_exact.contains(topic) {
+                edges.push((source_id.clone(), topic.to_string(), ralph_node_id.clone()));
+            }
+        }
+    }
+
+    // complete_publishes：保持逻辑视图的“Complete[complete]”可视锚点；
+    // 若没有任何 hat 发布该 topic，则认为它由 ralph#1 负责发布（并在下一轮观察到它再输出 LOOP_COMPLETE）。
+    if let Some(complete_topic) = config.event_loop.complete_publishes.as_deref() {
+        output.push_str("    Complete[complete]\n");
+
+        let mut complete_sources: Vec<String> = hats
+            .iter()
+            .filter(|hat| hat.publishes.iter().any(|p| p.as_str() == complete_topic))
+            .map(|hat| mermaid_hat_node_id(hat.id.as_str()))
+            .collect();
+        complete_sources.sort();
+        complete_sources.dedup();
+
+        if complete_sources.is_empty() {
+            edges.push((
+                ralph_node_id.clone(),
+                complete_topic.to_string(),
+                "Complete".to_string(),
+            ));
+        } else {
+            for source_id in complete_sources {
+                edges.push((
+                    source_id,
+                    complete_topic.to_string(),
+                    "Complete".to_string(),
+                ));
+            }
+        }
+    }
+
+    edges.sort();
+    edges.dedup();
+
+    // `beautiful-mermaid-rs --ascii` 在某些布局下对“同一对节点之间的多条边”不够稳定，
+    // 可能直接触发 QuickJS exception（我们在 parallel-experimental-dev-engine 的 physical view 里复现过）。
+    //
+    // 物理视图本身是“看全貌/看路由”的辅助视角。
+    // 这里把涉及 Ralph 的多条边折叠成一条（label 用 " / " 拼接），既降低噪声，也规避渲染器的不稳定点。
+    let mut collapsed_by_pair: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut final_edges: Vec<(String, String, String)> = Vec::new();
+
+    for (from, topic, to) in edges {
+        if from == ralph_node_id || to == ralph_node_id {
+            collapsed_by_pair.entry((from, to)).or_default().push(topic);
+        } else {
+            final_edges.push((from, topic, to));
+        }
+    }
+
+    for ((from, to), mut topics) in collapsed_by_pair {
+        topics.sort();
+        topics.dedup();
+        final_edges.push((from, topics.join(" / "), to));
+    }
+
+    final_edges.sort();
+    final_edges.dedup();
+    for (from, topic, to) in final_edges {
+        output.push_str(&format!("    {from} -->|{topic}| {to}\n"));
+    }
+
+    output
+}
+
 fn mermaid_hat_node_id(hat_id: &str) -> String {
     // 加前缀是为了：
     // - 避免 hat.id 恰好叫 "Start"/"Ralph" 这类节点名导致冲突
@@ -727,14 +986,32 @@ fn escape_mermaid_label(label: &str) -> String {
         .replace('\n', "\\n")
 }
 
-fn format_mermaid_node_label(label: &str) -> String {
-    // Mermaid 的 `Node[label]` 语法无法直接包含 `]` 与换行。
-    // 遇到这类情况就回退到带引号的 label，并做必要转义。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MermaidLabelMode {
+    /// 标准 Mermaid 输出（面向 `--format mermaid`）：
+    /// - 优先保证 `mermaid-cli` / 浏览器 Mermaid 可解析；
+    /// - 必要时会为 label 加上双引号。
+    Strict,
+
+    /// 终端渲染优化（面向 ASCII/Unicode 图）：
+    /// - 尽量不加引号，避免 `beautiful-mermaid-rs` 把引号当作内容直接画出来；
+    /// - 只在“无法不加引号就会破坏语法”的情况下才加引号。
+    TerminalPretty,
+}
+
+fn format_mermaid_node_label(label: &str, mode: MermaidLabelMode) -> String {
+    // Mermaid 的 `Node[label]` 语法对可用字符非常敏感：
+    // - `]` 与换行会直接破坏语法；
+    // - `(` / `)` 在标准 Mermaid 解析器里也会触发歧义（会被当作“形状语法”的 token）。
     //
-    // 备注：
-    // - 我们默认优先不用引号，是因为当前 `beautiful-mermaid-rs` 会把引号当成 label 内容输出，
-    //   造成终端图里出现 `"Ralph"` 这种多余引号，阅读体验很差。
-    if label.contains(']') || label.contains('\n') {
+    // 这里做一个“按目标渲染器分层”的策略：
+    // - Strict：确保标准 Mermaid 解析器可用（`--format mermaid` 输出必须可复制可渲染）。
+    // - TerminalPretty：尽量保持终端图的可读性（少引号），但仍保证基本语法不破坏。
+    let requires_quotes = label.contains(']')
+        || label.contains('\n')
+        || (mode == MermaidLabelMode::Strict && (label.contains('(') || label.contains(')')));
+
+    if requires_quotes {
         format!("\"{}\"", escape_mermaid_label(label))
     } else {
         label.to_string()
@@ -915,10 +1192,17 @@ mod tests {
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &registry, GraphFormat::Mermaid).unwrap();
+        graph_hats(
+            &mut buf,
+            &config,
+            &registry,
+            GraphFormat::Mermaid,
+            GraphView::Logical,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        assert!(output.contains("flowchart LR"));
+        assert!(output.contains("flowchart TD"));
         assert!(output.contains("Hat_A -->|mid| Hat_B"));
         assert!(!output.contains("Ralph"));
         assert!(!output.contains("-.->"));
@@ -932,7 +1216,14 @@ mod tests {
         let config = RalphConfig::default();
         let mut buf = Vec::new();
 
-        graph_hats(&mut buf, &config, &registry, GraphFormat::Ascii).unwrap();
+        graph_hats(
+            &mut buf,
+            &config,
+            &registry,
+            GraphFormat::Ascii,
+            GraphView::Logical,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // deterministic output should contain key node names
@@ -972,12 +1263,59 @@ mod tests {
         registry.register(mock_hat("B", &["mid"], &["end"]));
 
         let config = RalphConfig::default();
-        let output = generate_mermaid_string(&config, &registry);
+        let output = generate_mermaid_string(
+            &config,
+            &registry,
+            GraphView::Logical,
+            MermaidLabelMode::Strict,
+        );
 
-        assert!(output.contains("flowchart LR"));
+        assert!(output.contains("flowchart TD"));
         assert!(output.contains("Hat_A -->|mid| Hat_B"));
         assert!(!output.contains("Ralph"));
         assert!(!output.contains("-.->"));
+    }
+
+    #[test]
+    fn test_generate_mermaid_string_terminal_pretty_uses_flowchart_td() {
+        // 回归测试:
+        // - ASCII/Unicode/Radar 的渲染链路使用 `TerminalPretty` 生成 Mermaid 源.
+        // - 你要求方向也必须是 TD,因此这里锁死 `flowchart TD`.
+        let mut registry = HatRegistry::new();
+        registry.register(mock_hat("A", &["start"], &["mid"]));
+        registry.register(mock_hat("B", &["mid"], &["end"]));
+
+        let config = RalphConfig::default();
+        let output = generate_mermaid_string(
+            &config,
+            &registry,
+            GraphView::Logical,
+            MermaidLabelMode::TerminalPretty,
+        );
+
+        assert!(output.contains("flowchart TD"));
+        assert!(!output.contains("flowchart LR"));
+    }
+
+    #[test]
+    fn test_generate_mermaid_string_strict_quotes_parentheses_in_node_labels() {
+        // 回归测试（Strict Mermaid 输出）：
+        // - 标准 Mermaid 解析器不接受 `Node[label (x)]` 这种“未加引号的括号”写法；
+        // - 因此只要 label 里含 `(` / `)`，我们就必须输出成 `Node["label (x)"]`。
+        let mut registry = HatRegistry::new();
+
+        let hat = Hat::new("hat_a", "A (primary)");
+        registry.register(hat);
+
+        let config = RalphConfig::default();
+        let output = generate_mermaid_string(
+            &config,
+            &registry,
+            GraphView::Logical,
+            MermaidLabelMode::Strict,
+        );
+
+        assert!(output.contains("Hat_hat_a[\"A (primary)\"]"));
     }
 
     #[test]
@@ -989,10 +1327,80 @@ mod tests {
         let mut config = RalphConfig::default();
         config.event_loop.complete_publishes = Some("end".to_string());
 
-        let output = generate_mermaid_string(&config, &registry);
+        let output = generate_mermaid_string(
+            &config,
+            &registry,
+            GraphView::Logical,
+            MermaidLabelMode::Strict,
+        );
 
         assert!(output.contains("Complete[complete]"));
         assert!(output.contains("Hat_B -->|end| Complete"));
+    }
+
+    #[test]
+    fn test_generate_mermaid_string_physical_view_adds_ralph_boundary_edges() {
+        // 回归测试（physical view）：
+        // - 当某个 topic 只有订阅者（没有 hat 发布者）时，应从 coordinator（Hat_ralph）画到该 hat；
+        // - 当 complete_publishes 没有 hat 发布者时，应从 coordinator（Hat_ralph）画到 Complete。
+        let mut registry = HatRegistry::new();
+        registry.register(mock_hat("Runner", &["work.task"], &["work.result"]));
+
+        let mut config = RalphConfig::default();
+        config.event_loop.complete_publishes = Some("work.complete".to_string());
+
+        let output = generate_mermaid_string(
+            &config,
+            &registry,
+            GraphView::Physical,
+            MermaidLabelMode::Strict,
+        );
+
+        assert!(output.contains("Hat_ralph[\"ralph#1 (coordinator)\"]"));
+        assert!(output.contains("Start[task.start]"));
+        assert!(output.contains("Start --> Hat_ralph"));
+        assert!(output.contains("Hat_ralph -->|work.task| Hat_Runner"));
+        assert!(output.contains("Hat_ralph -->|work.complete| Complete"));
+    }
+
+    #[test]
+    fn test_generate_mermaid_string_physical_declares_ralph_first_for_layout() {
+        // 回归测试（physical view 布局）：Unicode/ASCII 渲染对“节点声明顺序”比较敏感。
+        //
+        // 约束：
+        // - physical view 的 Mermaid 文本里，应优先声明 coordinator（Hat_ralph）节点，
+        //   以便 `beautiful-mermaid-rs` 渲染时 ralph#1 更稳定地靠左/靠上（best-effort）。
+        let mut registry = HatRegistry::new();
+        registry.register(mock_hat("A", &["start"], &["mid"]));
+        registry.register(mock_hat("B", &["mid"], &["end"]));
+
+        let config = RalphConfig::default();
+        let output = generate_mermaid_string(
+            &config,
+            &registry,
+            GraphView::Physical,
+            MermaidLabelMode::Strict,
+        );
+
+        let declared_hat_nodes: Vec<&str> = output
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("Hat_")
+                    && trimmed.contains('[')
+                    && trimmed.ends_with(']')
+                    && !trimmed.contains("-->")
+            })
+            .collect();
+
+        assert!(
+            !declared_hat_nodes.is_empty(),
+            "expected at least one Hat_* node declaration in Mermaid output"
+        );
+        assert_eq!(
+            declared_hat_nodes[0].trim_start(),
+            "Hat_ralph[\"ralph#1 (coordinator)\"]"
+        );
     }
 
     #[test]
@@ -1017,8 +1425,13 @@ mod tests {
         registry.register(logger);
 
         let config = RalphConfig::default();
-        let rendered =
-            render_hat_dag_via_mermaid(&config, &registry, GraphFormat::Unicode).unwrap();
+        let rendered = render_hat_dag_via_mermaid(
+            &config,
+            &registry,
+            GraphFormat::Unicode,
+            GraphView::Logical,
+        )
+        .unwrap();
 
         // 只校验关键内容存在即可，避免对 ASCII/Unicode 画法过度耦合（布局可能随渲染器升级微调）。
         assert!(rendered.contains("规格撰写者"));

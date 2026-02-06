@@ -184,6 +184,19 @@ impl HatGraphRadarMeta {
         self.nodes.iter().find(|n| n.id == id)
     }
 
+    fn edge_label_matches(edge_label: &str, topic: &str) -> bool {
+        // physical view 里，CLI 可能会把同一对节点之间的多条边折叠成一条：
+        // - label 形如：`integration.applied / integration.blocked / integration.rejected`
+        // Radar 做因果边动画时需要把“单个 topic”匹配到这类“多 topic label”上。
+        if edge_label == topic {
+            return true;
+        }
+
+        edge_label
+            .split(" / ")
+            .any(|candidate| candidate.trim() == topic)
+    }
+
     pub fn matching_edges(
         &self,
         from: &str,
@@ -191,7 +204,7 @@ impl HatGraphRadarMeta {
     ) -> impl Iterator<Item = &HatGraphRadarEdgeMeta> {
         self.edges
             .iter()
-            .filter(move |e| e.from == from && e.label == label)
+            .filter(move |e| e.from == from && Self::edge_label_matches(&e.label, label))
     }
 
     pub fn matching_edges_exact(
@@ -200,9 +213,9 @@ impl HatGraphRadarMeta {
         label: &str,
         to: &str,
     ) -> impl Iterator<Item = &HatGraphRadarEdgeMeta> {
-        self.edges
-            .iter()
-            .filter(move |e| e.from == from && e.label == label && e.to == to)
+        self.edges.iter().filter(move |e| {
+            e.from == from && e.to == to && Self::edge_label_matches(&e.label, label)
+        })
     }
 }
 
@@ -858,9 +871,10 @@ impl TuiState {
 
             let from_node_id = mermaid_hat_node_id(e.source_hat.as_str());
             let topic = e.topic.as_str();
-            let matches = meta.edges.iter().any(|edge| {
-                edge.from == from_node_id && edge.to == target_node_id && edge.label == topic
-            });
+            let matches = meta
+                .matching_edges_exact(&from_node_id, topic, &target_node_id)
+                .next()
+                .is_some();
             if matches {
                 cause = Some((e.source_hat.clone(), e.topic.clone()));
                 break;
@@ -1946,6 +1960,37 @@ mod tests {
                 .hat_graph_edge_animations
                 .contains_key(&HatId::new("builder")),
             "edge animation should be cancelled when builder is no longer Running"
+        );
+    }
+
+    #[test]
+    fn hat_graph_meta_matches_collapsed_multi_topic_labels() {
+        // 回归测试：
+        // - physical view 可能把同一对节点间的多条边折叠成一条（label 用 " / " 拼接）。
+        // - Radar 做因果边匹配时必须能用“单个 topic”匹配到这类折叠 label。
+        let meta = HatGraphRadarMeta {
+            nodes: Vec::new(),
+            edges: vec![HatGraphRadarEdgeMeta {
+                from: "Hat_ralph".to_string(),
+                to: "Hat_runner".to_string(),
+                label: "integration.applied / integration.blocked / integration.rejected"
+                    .to_string(),
+                path: Vec::new(),
+            }],
+        };
+
+        assert!(
+            meta.matching_edges_exact("Hat_ralph", "integration.applied", "Hat_runner")
+                .next()
+                .is_some(),
+            "expected topic to match within collapsed label"
+        );
+
+        assert!(
+            meta.matching_edges_exact("Hat_ralph", "integration.unknown", "Hat_runner")
+                .next()
+                .is_none(),
+            "unexpected topic should not match collapsed label"
         );
     }
 

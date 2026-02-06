@@ -20,7 +20,7 @@ use std::time::Duration;
 ///
 /// 关注点（偏硬断言）：
 /// - **必须**出现关键 topic 链路（experiment -> review -> integration -> complete）
-/// - **必须**出现 `patch`（可搬运、可审计的最小产物）
+/// - **必须**出现 `commit`（可搬运、可审计的最小产物）
 /// - **必须**收敛到 `LOOP_COMPLETE`
 ///
 /// 说明：
@@ -136,22 +136,20 @@ impl ParallelExperimentalDevEngineExampleScenario {
         }
     }
 
-    fn patch_artifact_present(&self, result: &ExecutionResult) -> crate::models::Assertion {
-        let result_with_patch = result
+    fn commit_artifact_present(&self, result: &ExecutionResult) -> crate::models::Assertion {
+        // 该 example 约定 runner 必须产出可搬运产物 `commit`（git hash），而不是在事件里嵌入超长 patch 文本。
+        let result_with_commit = result
             .events
             .iter()
-            .filter(|e| e.topic == "experiment.result" && e.payload.contains("patch"))
+            .filter(|e| e.topic == "experiment.result" && e.payload.contains("commit"))
             .count();
-        let has_unified_diff = result
-            .events
-            .iter()
-            .any(|e| e.topic == "experiment.result" && e.payload.contains("diff --git"));
 
-        let ok = result_with_patch >= 2 && has_unified_diff;
-        let builder = AssertionBuilder::new("Patch artifact present (example)")
-            .expected("experiment.result payload includes patch and at least one unified diff ('diff --git')")
+        // 与 `fill_experiment_plan` 里的预填实验数量对齐：至少每个 experiment 都应该产出一个 commit。
+        let ok = result_with_commit >= 2;
+        let builder = AssertionBuilder::new("Commit artifact present (example)")
+            .expected("experiment.result payload includes commit (git hash) for each experiment")
             .actual(format!(
-                "experiment.result with 'patch'={result_with_patch}, has_unified_diff={has_unified_diff}"
+                "experiment.result with 'commit'={result_with_commit}"
             ));
 
         if ok {
@@ -240,66 +238,73 @@ impl ParallelExperimentalDevEngineExampleScenario {
         }
     }
 
-    fn fill_experiment_plan(config_content: &str) -> Result<String, ScenarioError> {
+    fn fill_experiment_plan(prompt_content: &str) -> Result<String, ScenarioError> {
         // 说明：
-        // - example 的 prompt 里包含一个 TODO 模板，我们在 E2E workspace 里预填它。
+        // - example 的 PROMPT.md 是一份“Markdown 的 EXPERIMENT_PLAN 模板”（给 ralph#1 的 top-level prompt）。
+        // - E2E 为了确定性，会直接覆写 workspace 里的 PROMPT.md 为一份预填计划（同样是 Markdown）。
         // - 这样能把“真后端”的不确定性压到最低：只做轻量文件改动 + rg 验证。
-        let start_marker = "    EXPERIMENT_PLAN（YAML 模板，运行前请你按自己的任务改掉）：\n";
-        let start = config_content.find(start_marker).ok_or_else(|| {
-            ScenarioError::SetupError(
-                "failed to find EXPERIMENT_PLAN marker in example config".to_string(),
-            )
-        })?;
-
-        // YAML block scalar 结束点：indent 回退到 event_loop 的字段（`completion_promise`）。
-        let end_marker = "\n  completion_promise:";
-        let end = config_content[start..]
-            .find(end_marker)
-            .map(|i| start + i)
-            .ok_or_else(|| {
-                ScenarioError::SetupError(
-                    "failed to find event_loop.completion_promise marker in example config"
-                        .to_string(),
-                )
-            })?;
-
-        let prefix = &config_content[..start];
-        let suffix = &config_content[end..];
+        let _ = prompt_content; // 保留参数，便于未来在此处做结构校验（但当前不依赖 marker/模板内容）。
 
         // 预填的计划必须“简单、确定、可跑通”：
-        // - 每个实验只写一个文件，并用 rg 验证内容
+        // - 每个实验只写一个小文件，并用 rg 验证内容
         // - final_verification 也只做轻量检查，避免 E2E 被编译/网络拖慢
-        let plan = r#"    EXPERIMENT_PLAN（YAML 模板，运行前请你按自己的任务改掉）：
-      run_id: "e2e"
-      objective: "e2e: parallel experimental dev engine"
-      selection_criteria: |
-        Prefer the patch that is smaller and fully verified.
-      final_verification: |
-        rg -n "exp-001" e2e_exp001.txt
-      experiments:
-        - experiment_id: "exp-001"
-          title: "exp-001: create marker file"
-          implementation: |
-            1) 创建文件 e2e_exp001.txt，内容必须包含字符串：exp-001
-            2) 不要修改其他文件
-          verification: |
-            rg -n "exp-001" e2e_exp001.txt
-            git diff --name-only
-          notes: |
-            产物要求：experiment.result 必须包含 patch（unified diff）。
+        let plan = r#"# 实验计划（E2E 预填）
 
-        - experiment_id: "exp-002"
-          title: "exp-002: alternative marker file"
-          implementation: |
-            1) 创建文件 e2e_exp002.txt，内容必须包含字符串：exp-002
-            2) 不要修改其他文件
-          verification: |
-            rg -n "exp-002" e2e_exp002.txt
-            git diff --name-only
+## Run ID
+
+- e2e
+
+## 目标（Objective）
+
+- e2e: parallel experimental dev engine
+
+## 选择标准（Selection Criteria）
+
+- 优先采纳：改动更小、且验证证据更完整的 commit
+- 如果两个实验结果都等价：优先选择 `exp-001`（减少不确定性）
+
+## 最终验收（Final Verification / 主工作区）
+
+- `rg -n "exp-00[12]" e2e_marker.txt`
+
+## 实验列表（Experiments）
+
+### exp-001：create marker file
+
+#### 实现（Implementation）
+
+1. 创建文件 `e2e_marker.txt`，内容必须包含字符串：`exp-001`
+2. 将改动提交为 1 个 commit（用命令级 git 身份，避免环境缺失导致 commit 失败）：
+   - `git add -A`
+   - `git -c user.name="ralph" -c user.email="ralph@local" commit -m "exp-001: e2e marker file"`
+3. 不要修改其他文件
+
+#### 验证（Verification）
+
+- `rg -n "exp-001" e2e_marker.txt`
+- `git show --name-only --oneline HEAD`
+
+#### 备注（Notes，可选）
+
+- 产物要求：`experiment.result` 必须包含 `commit`（git hash），不要在 payload 里嵌入 patch 文本。
+
+### exp-002：alternative marker file
+
+#### 实现（Implementation）
+
+1. 创建文件 `e2e_marker.txt`，内容必须包含字符串：`exp-002`
+2. 将改动提交为 1 个 commit（用命令级 git 身份，避免环境缺失导致 commit 失败）：
+   - `git add -A`
+   - `git -c user.name="ralph" -c user.email="ralph@local" commit -m "exp-002: e2e marker file"`
+3. 不要修改其他文件
+
+#### 验证（Verification）
+
+- `rg -n "exp-002" e2e_marker.txt`
+- `git show --name-only --oneline HEAD`
 
 "#;
-
-        Ok(format!("{prefix}{plan}{suffix}"))
+        Ok(plan.to_string())
     }
 }
 
@@ -338,7 +343,8 @@ impl TestScenario for ParallelExperimentalDevEngineExampleScenario {
             ScenarioError::SetupError("failed to find workspace root (Cargo.toml)".to_string())
         })?;
 
-        let example_config_path = root.join("examples/parallel-experimental-dev-engine/ralph.yml");
+        let example_dir = root.join("examples/parallel-experimental-dev-engine");
+        let example_config_path = example_dir.join("ralph.yml");
         let config_content = std::fs::read_to_string(&example_config_path).map_err(|e| {
             ScenarioError::SetupError(format!(
                 "failed to read example config {}: {e}",
@@ -346,15 +352,35 @@ impl TestScenario for ParallelExperimentalDevEngineExampleScenario {
             ))
         })?;
 
-        // 原样拷贝示例 config，但会在 E2E workspace 里预填 EXPERIMENT_PLAN（否则示例仍是 TODO 模板）。
-        let config_filled = Self::fill_experiment_plan(&config_content)?;
-        std::fs::write(workspace.join("ralph.yml"), config_filled).map_err(|e| {
-            ScenarioError::SetupError(format!("failed to write workspace ralph.yml: {e}"))
+        let example_prompt_path = example_dir.join("PROMPT.md");
+        let prompt_content = std::fs::read_to_string(&example_prompt_path).map_err(|e| {
+            ScenarioError::SetupError(format!(
+                "failed to read example prompt {}: {e}",
+                example_prompt_path.display()
+            ))
+        })?;
+
+        // 原样拷贝示例目录，但会在 E2E workspace 里预填 EXPERIMENT_PLAN（否则示例仍是 TODO 模板）。
+        let dest_dir = workspace.join("examples/parallel-experimental-dev-engine");
+        std::fs::create_dir_all(&dest_dir).map_err(|e| {
+            ScenarioError::SetupError(format!(
+                "failed to create example directory in workspace {}: {e}",
+                dest_dir.display()
+            ))
+        })?;
+
+        std::fs::write(dest_dir.join("ralph.yml"), config_content).map_err(|e| {
+            ScenarioError::SetupError(format!("failed to write workspace example ralph.yml: {e}"))
+        })?;
+
+        let prompt_filled = Self::fill_experiment_plan(&prompt_content)?;
+        std::fs::write(dest_dir.join("PROMPT.md"), prompt_filled).map_err(|e| {
+            ScenarioError::SetupError(format!("failed to write workspace example PROMPT.md: {e}"))
         })?;
 
         Ok(ScenarioConfig {
-            config_file: "ralph.yml".into(),
-            // 直接使用 example 配置里的 `event_loop.prompt`（含我们的 plan 预填），避免 E2E runner 的提示词污染示例语义。
+            config_file: "examples/parallel-experimental-dev-engine/ralph.yml".into(),
+            // 直接使用 example 配置里的 prompt_file（含我们的 plan 预填），避免 E2E runner 的提示词污染示例语义。
             prompt: PromptSource::Config,
             // 与示例保持一致（当前为 40），避免 E2E 放宽迭代上限掩盖失控行为。
             max_iterations: 40,
@@ -384,7 +410,7 @@ impl TestScenario for ParallelExperimentalDevEngineExampleScenario {
             Assertions::no_timeout(&execution),
             self.parallel_mode_visible(&execution),
             self.required_topic_chain_observed(&execution),
-            self.patch_artifact_present(&execution),
+            self.commit_artifact_present(&execution),
             self.no_unexpected_gates_or_routing_escalations(&execution),
             self.no_new_jobs_started_after_loop_complete(&execution),
         ];

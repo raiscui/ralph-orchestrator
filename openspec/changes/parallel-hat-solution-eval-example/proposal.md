@@ -15,16 +15,16 @@
   - 自适应并行度：由 `ralph#1` 根据用户提供的计划/验证强度**自动推断并行上限**，并在运行中动态调参（激进起步 + AIMD 拥塞控制）。
   - 可可靠收敛：明确入口事件、完成候选事件、以及结束条件，避免卡死或漂移。
   - 明确职责拆分：
-    - `experiment_runner`：只负责“实现 + 验证 + 产出 patch + 结构化证据”，不负责采纳/合并。
+    - `experiment_runner`：只负责“实现 + 验证 + 产出 commit + 结构化证据”，不负责采纳/合并。
     - `experiment_auditor`：只负责“证据硬门槛审计”，证据不足就拒绝，阻断收敛。
-    - `experiment_integrator`：负责“是否采纳 + 如何应用（apply patch / 合并）+ 主工作区最终验证”，并产出最终集成结果。
+    - `experiment_integrator`：负责“是否采纳 + 如何应用（cherry-pick commit / 合并）+ 主工作区最终验证”，并产出最终集成结果。
 - 该参考配置将以可复制的方式落盘为一个 example 目录（便于直接运行/改造）：
   - `examples/parallel-experimental-dev-engine/ralph.yml`
   - `examples/parallel-experimental-dev-engine/README.md`
 - 增加/补充相应 specs：把这份配置方案的**事件契约**（topics 与 payload 约定）、
   **隔离策略**（worktree/patch/shared）以及**验证/收敛语义**写成明确的 MUST/SHOULD 规则。
   - 引入独立的“结果审计（auditor）”角色：对每条 `experiment.result` 做硬门禁审计，证据不足则不允许收敛。
-  - runner 的产物要求收敛到：**必须提供 `patch`**（用于独立审计与后续集成），`commit` 仅作为可选附加信息（便于保留提交历史）。
+  - runner 的产物要求收敛到：**必须提供 `commit`**（用于独立审计与后续集成），并避免在 payload 里嵌入超长 `patch` 文本。
 
 ## Capabilities
 

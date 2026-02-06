@@ -5,7 +5,7 @@
 - [x] 1.3 在示例工作流中加入独立 `experiment_auditor`（硬门槛审计：产出 `experiment.reviewed`）
 - [x] 1.4 在示例工作流中实现“自适应并行度 + 窗口派发”（ralph#1 推断 P_max，运行中 AIMD 调参，禁止洪水式派发）
 - [x] 1.5 在示例工作流中加入独立 `experiment_integrator`（主工作区采纳/集成：消费 `integration.task`，产出 `integration.applied`/`integration.rejected`）
-- [x] 1.6 收紧 runner 产物要求：`experiment.result` 必须包含 `patch`（`commit` 仅可选补充）；auditor 以 patch 作为最低审计载体
+- [x] 1.6 收紧 runner 产物要求：`experiment.result` 必须包含 `commit`（避免在 payload 里嵌入超长 `patch`）；auditor 以 commit 作为最低审计载体
 - [x] 1.7 视需要更新仓库文档，补充该 example 的入口链接（例如 `README.md` / `examples/` 索引）
 
 ## 2. Replay fixture 与 smoke tests

@@ -161,6 +161,7 @@ impl EventLoop {
             &registry,
             config.event_loop.starting_event.clone(),
         )
+        .with_ralph_prompt(config.event_loop.ralph_prompt.clone())
         .with_scratchpad(!config.memories.enabled);
 
         // Read events path from marker file, fall back to default if not present

@@ -404,7 +404,7 @@ hats:
     description: "Consumes build/test events and closes the workflow by triggering a strict target failure."
     instances: 1
     triggers: ["build.done", "test.done"]
-    publishes: ["build.task"]
+    publishes: ["build.task", "routing.escalate"]
     instructions: |
       You are Collector.
 
@@ -414,11 +414,17 @@ hats:
 
       Rules:
       - For each input event, print ONE short line that includes the topic.
-      - If you receive build.done and the payload contains the line "task_id: 2", emit ONE build.task targeting ghost_hat
-        (this MUST be rejected and should trigger routing.escalate):
+      - If you receive build.done and the payload contains the line "task_id: 2":
+        - Emit ONE build.task targeting ghost_hat (this MUST be rejected and should trigger routing.escalate)
+        - Then emit ONE routing.escalate event (so `complete_publishes: routing.escalate` has a declared hat publisher)
 
         <event topic="build.task" target="ghost_hat">
         Task: This must be rejected and should trigger routing.escalate
+        </event>
+
+        <event topic="routing.escalate">
+        status: ok
+        source: collector
         </event>
 
       - Otherwise, emit NO events.
@@ -517,7 +523,7 @@ hats:
     description: "消费 build/test 事件，并通过触发严格投递失败来关闭工作流。"
     instances: 1
     triggers: ["build.done", "test.done"]
-    publishes: ["build.task"]
+    publishes: ["build.task", "routing.escalate"]
     instructions: |
       你是 Collector（收集员）。
 
@@ -527,11 +533,17 @@ hats:
 
       规则：
       - 对每个输入事件，输出 1 行短文本，包含该 topic。
-      - 如果你收到 build.done 且 payload 包含一行 "task_id: 2"，发出一个 build.task，target 为 ghost_hat
-        （该投递必须被拒绝，并触发 routing.escalate）：
+      - 如果你收到 build.done 且 payload 包含一行 "task_id: 2"：
+        - 先发出一个 build.task（target 为 ghost_hat，该投递必须被拒绝，并触发 routing.escalate）
+        - 再发出一个 routing.escalate（保证 `complete_publishes: routing.escalate` 有明确的 hat publisher 声明）
 
         <event topic="build.task" target="ghost_hat">
         Task: This must be rejected and should trigger routing.escalate
+        </event>
+
+        <event topic="routing.escalate">
+        status: ok
+        source: collector
         </event>
 
       - 否则，不发出任何事件。

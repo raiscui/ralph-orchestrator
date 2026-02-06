@@ -143,6 +143,38 @@ tasks:
 }
 
 #[test]
+fn test_ralph_prompt_includes_event_loop_ralph_prompt() {
+    let yaml = r#"
+core:
+  scratchpad: ".agent/scratchpad.md"
+  specs_dir: "./specs"
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  ralph_prompt: |
+    RALPH_ONLY_LINE_1
+    RALPH_ONLY_LINE_2
+"#;
+
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let event_loop = EventLoop::new(config);
+
+    let prompt = event_loop.build_ralph_prompt("Test context");
+
+    assert!(
+        prompt.contains("### RALPH PROMPT"),
+        "Prompt should contain the Ralph-only injected section"
+    );
+    assert!(
+        prompt.contains("RALPH_ONLY_LINE_1"),
+        "Prompt should contain the injected ralph_prompt content"
+    );
+    assert!(
+        prompt.contains("RALPH_ONLY_LINE_2"),
+        "Prompt should contain the injected ralph_prompt content"
+    );
+}
+
+#[test]
 fn test_ralph_prompt_solo_mode_structure() {
     let yaml = r#"
 core:

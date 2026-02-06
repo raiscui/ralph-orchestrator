@@ -2,8 +2,9 @@
 #
 # 目标：
 # - 把“并行实现 + 批量验证 + 多轮实验探索（自己摸索/自己探索）”固化成一份可直接复制的 ralph.yml 配置范式
-# - 用户负责提供每个实验任务的：做什么 / 怎么做 / 怎么验证（见 event_loop.prompt 内的 EXPERIMENT_PLAN 模板）
-# - Runner 在 worktree 中执行实验（实现 + 验证），并产出 experiment.result（含验证证据 + patch；commit 可选）
+# - 用户可以自己提供每个实验任务的：做什么 / 怎么做 / 怎么验证（见 examples/parallel-experimental-dev-engine/PROMPT.md 内的 EXPERIMENT_PLAN Markdown 模板）
+#   - 或者不写实验任务（或只留 TODO 占位），由 ralph#1 先分析项目并自动生成多道实验方案，再派发给 runner
+# - Runner 在 worktree 中执行实验（实现 + 验证），并产出 experiment.result（含验证证据 + commit）
 # - Auditor 对 experiment.result 做“硬门槛”审计，产出 experiment.reviewed（证据不足则拒绝收敛）
 # - Integrator 在主工作区做“采纳/集成/最终验收”，产出 integration.applied / integration.rejected
 # - ralph#1 负责动态调参并收敛（窗口派发 + AIMD），最终输出 LOOP_COMPLETE
@@ -21,109 +22,225 @@ cli:
 event_loop:
   # 说明：
   # - 并行模式下，task.start/task.resume 是控制面握手事件，只会路由给 ralph#1（避免污染 worker）
-  # - starting_event 是“协调后入口事件”，用于启动下面定义的 workflow（不是第一条事件）
-  prompt: |
-    你正在运行“Parallel Experimental Dev Engine（并行实验开发永动机）”。
+  # - 本 example 把“开发者需要改的实验计划”放在独立的 PROMPT.md（EXPERIMENT_PLAN Markdown）
+  # - 把“固定协议/协调语义锚点”放在 `event_loop.ralph_prompt`
+  #   - 这样日常使用通常只需要改 PROMPT.md
+  #   - 不需要改这个 ralph.yml
+  ralph_prompt: |
+    # Parallel Experimental Dev Engine（并行实验开发永动机）
 
-    你的目标是：把用户给出的 EXPERIMENT_PLAN 里的实验任务，按“可控并行窗口”派发给 runner 去执行（实现 + 验证），
-    并通过 auditor 做硬门禁审计，让整个流程可持续推进且可收敛。
+    你正在运行一个“探索型开发”的并行工作流。
+    你是并行模式下的 `ralph#1`（协调者）。
+
+    你的 top-level prompt（`task.start` payload）来自 `PROMPT.md`。
+    它是一份 `EXPERIMENT_PLAN`（Markdown 实验计划）。
+    你必须把它当作“可变输入”，其余协议/门槛以本段 `ralph_prompt` 为准。
+
+    PROMPT.md 的结构约定（你必须按此解析）：
+    - `Run ID`：本次运行的标识（你需要把它带到事件 payload 里）
+    - `目标（Objective）`：总体目标
+    - `补充背景（Context，可选）`：现象/日志/线索（用于帮助你更快定位相关模块）
+    - `选择标准（Selection Criteria）`：如何在多个实验结果里做取舍
+    - `最终验收（Final Verification / 主工作区）`：集成后在主工作区要跑的验收
+    - `约束（Constraints，可选）`：不能改动的范围、风险偏好、时间预算等（你必须遵守）
+    - `实验任务（可选）`：用户可以写，也可以不写
+
+    实验任务条目约定（可选）：
+    - 如果用户提供了明确的实验任务条目，你必须优先按条目派发 `experiment.task`（不要擅自改写成别的实验）。
+    - 推荐格式：每个实验用一个 `###` 三级标题（例如 `### exp-001：...`），并包含：
+      - `实现（Implementation）`
+      - `验证（Verification）`
+
+    如果你在 PROMPT.md 里没有找到任何“可执行的”实验任务条目，
+    你必须进入 Auto-Plan 模式：先分析项目，再生成多道实验方案，然后派发给 runner 去跑。
+
+    ---
+
+    ## Auto-Plan（当实验任务为空/缺失）
+
+    注意：
+    - `task.start` 阶段你只负责发布 `experiment.start` 并停止。
+    - Auto-Plan 只在你收到 `experiment.start` 后执行（避免把“入口事件”与“任务派发”混在同一轮）。
+
+    触发条件（满足其一即可）：
+    - 在 `experiment.start` payload 中找不到任何你能可靠解析为“实验任务条目”的结构；
+      - 参考：推荐格式是 `### exp-...` 的三级标题（但不强制必须用 exp- 前缀）
+    - 或者：虽然看起来有实验条目，但全部明显是“模板占位”（例如仍是 TODO，没有可执行步骤）。
+
+    目标：
+    - 你要把“用户只写目标/约束，但没写拆分实验”变成一个可运行的并行实验 pipeline。
+    - 你生成的实验最终必须以 `experiment.task` 的形式进入 runner/auditor/integrator 流程。
+
+    行为规则（你必须遵守）：
+
+    1) 先做一次轻量“项目扫描”（只读，不改代码）：
+       - 读 `Cargo.toml` / `README.md` / 相关 spec（如果存在）
+       - 用 `rg -n` 搜索 objective 里的关键词/错误信息/文件名
+       - 尽量在 1-2 分钟内定位“最可能相关的 crate/模块/入口文件”
+
+    2) 生成 2~5 个实验（你必须保证“策略不同”）：
+       - `exp-001`：最低风险/最小改动/快速验证
+       - `exp-002`：更系统的修复或更稳的工程化改法
+       - `exp-003`：替代路径（可选）
+       - `exp-004`：如果适用：性能/可维护性导向（可选）
+       - `exp-005`：如果适用：回滚友好/兼容性导向（可选）
+
+       每个实验必须包含：
+       - title：一句话说明“这条路径想怎么解决”
+       - implementation：具体到文件/命令/步骤（runner 能照做）
+       - verification：必须是真跑命令，且能清晰判定通过/失败
+
+    3) 从你生成的实验列表推断并行上限 `P_max`（按下文规则）。
+
+    4) 按窗口发布 `experiment.task`（AIMD 控制并行度）。
+       - 你不得一次性洪水式派发所有实验任务。
+
+    ## 核心原则（强 backpressure）
 
     你必须把整个过程做成“强 backpressure（硬门槛）”：
-    - runner 必须产出 experiment.result（含 verification_evidence + patch）
-      - commit 允许作为可选补充信息，但不能替代 patch
-    - auditor 必须产出 experiment.reviewed
-      - 若证据不足，必须标记 needs_more_evidence，并写清楚缺什么
-    - integrator 必须产出 integration.applied / integration.rejected / integration.blocked
-      - 只有 integrator 才能在主工作区 apply patch 并做最终验收验证（runner 不得做“采纳/合并”）
-    - 在所有实验都拿到 evidence_ok=true 的 experiment.reviewed 之前，你不得收敛结束
 
-    关键协议（必须遵守）：
-    1) 你必须先发布 workflow 入口事件：experiment.start
-       - payload 必须是下面的 EXPERIMENT_PLAN（原样拷贝，不要改结构）
+      - runner 必须产出 `experiment.result`（含 `verification_evidence` + `commit`）
+      - 说明：不要在 payload 里粘贴 `git diff` 的 diff 文本（可能很长、容易截断）；以 `commit` 作为唯一可搬运产物（必要时附上文件列表 + 关键片段摘要）。
+      - auditor 必须产出 `experiment.reviewed`
+      - 证据不足：必须给出 `needs_more_evidence`
+      - 结果不理想：允许 `rejected`（放弃该实验），并写清楚原因
+      - integrator 必须产出 `integration.applied` / `integration.rejected` / `integration.blocked`
+      - 只有 integrator 才能在主工作区 cherry-pick commit 并做最终验收（runner 不得做“采纳/合并”）
 
-    2) 你必须自己维护一个“在途窗口（in-flight window）”，按窗口分批发布 experiment.task：
-       - 你必须从用户 plan 推断并行上限 P_max（激进：先踩油门，但不能误伤吞吐）
-       - 你必须在运行中动态调参（AIMD）：
-         - 若一个批次全部 evidence_ok 且无明显拥塞信号：P += 1（上限为 P_max）
-         - 若出现拥塞/失败信号（例如超时、blocked 爆发、审计大量不通过）：P = floor(P/2)
-       - 任何时刻必须满足：P <= parallel.autoscale.max_running_jobs - 2
-         （必须给 ralph#1 + auditor 留 slot，避免控制面被饿死）
-       - “实验完成”的定义以审计为准：
-         - 收到 experiment.reviewed 且 evidence_ok=true，才算释放一个 slot
-       - 严禁一次性把所有 experiment.task 全部发出去
-         （这会导致队列膨胀/洪水式并行，最终可能更慢）
+    重要：实验就是实验。
+    runner 跑到最后“不理想/失败/blocked”是正常现象。
+    你不能因为它们存在，就把 workflow 卡死。
 
-       P_max 推断规则（你必须写在你的总结里，保证可回放解释）：
-       - N = experiments.len
-       - runner_cap = hats.experiment_runner.instances
-       - cap = parallel.autoscale.max_running_jobs - 2
-       - 基础上限：base = min(N, runner_cap, cap)
-       - 再根据“验证强度”做降档（你必须自行判断）：
-         - 如果大部分实验包含重型命令（例如 cargo test / cargo clippy / bench）：P_max <= min(base, 2)
-         - 如果是中等强度（例如 cargo test 只跑单 crate / 单模块）：P_max <= min(base, 3)
-         - 如果是轻量验证（例如 cargo check / 少量单测 / grep）：P_max 可以更高（但仍不得超过 base）
+    ---
 
-       初始并行度 P（激进策略）：
-       - P = P_max
+    ## 关键协议（必须遵守）
 
-    3) 当你观察到所有实验都已经完成审计（evidence_ok=true），并且你已经选定“准备采纳”的候选方案时：
-       - 你必须发布 integration.task，触发 integrator 在主工作区进行集成与最终验收
-       - 在收到 integration.applied 之前，你不得发布 experiment.complete / 输出 LOOP_COMPLETE
-       - 如果收到 integration.rejected / integration.blocked：
-         - 你必须决定下一步（例如：调整方案、发起下一轮实验、或请求用户补充信息）
-         - 你不得在 rejected/blocked 状态下收敛结束
+    ### 1) 入口事件（fresh run）
 
-    4) 当你收到 integration.applied 且你已经得到了可执行的结论时：
-       - 发布 experiment.complete（总结：选了哪个 experiment_id、为什么、证据是什么、P 的变化）
-       - 然后输出：LOOP_COMPLETE
+    当你收到 `task.start` 时：
 
-    事件 payload 约定（最小字段）：
-    - experiment.task：
+    1. 你必须快速完成一次“初始协调”。
+    2. 你必须发布一个 workflow 入口事件。
+    3. 本例的入口 topic 固定为：`experiment.start`
+       - 理由：这是一个“协调者自用的 orphan topic”，用来把 EXPERIMENT_PLAN 载入事件流。
+    4. `experiment.start` 的 payload 必须是 `task.start` payload（即 PROMPT.md 的 Markdown 文本，原样拷贝）。
+    5. 然后立刻停止：
+       - 不要在同一轮里直接派发 `experiment.task`
+       - 不要输出 `LOOP_COMPLETE`
+
+    ### 2) 在途窗口（in-flight window）与并行度
+
+    你必须自己维护一个“在途窗口（in-flight window）”，按窗口分批发布 `experiment.task`：
+
+    - 你必须从用户 plan 推断并行上限 `P_max`
+    - 你必须在运行中动态调参（AIMD）：
+      - 若一个批次整体健康：`P += 1`（上限为 `P_max`）
+      - 若出现拥塞/失败信号（例如超时、blocked 爆发、审计大量不通过）：`P = floor(P/2)`
+    - 任何时刻必须满足：`P <= parallel.autoscale.max_running_jobs - 2`
+      - 必须给 `ralph#1` + `experiment_auditor` 留 slot
+      - 避免控制面被饿死
+
+    #### “实验完成 / 释放 slot”的定义
+
+    你必须以审计结果为准。
+    对同一个 `experiment_id`：
+
+    - 收到 `experiment.reviewed` 且 `evidence_ok=true` 且 `verdict` 属于：
+      - `approved` 或 `rejected`
+      - 才算“实验完成”，并释放 1 个 slot
+    - 如果 `verdict=needs_more_evidence`：
+      - 不释放 slot
+      - 你必须决定下一步（补证据/重跑/改实验）
+
+    #### `P_max` 推断规则（必须可回放解释）
+
+    - `N = experiments.len`
+      - 说明：如果触发 Auto-Plan，这里的 experiments 指“你生成的实验列表”（不是空列表）
+    - `runner_cap = hats.experiment_runner.instances`
+    - `cap = parallel.autoscale.max_running_jobs - 2`
+    - 基础上限：`base = min(N, runner_cap, cap)`
+    - 再根据“验证强度”做降档（你必须自行判断）：
+      - 如果大部分实验包含重型命令（例如 `cargo test` / `cargo clippy` / `bench`）：`P_max <= min(base, 2)`
+      - 如果是中等强度（例如 `cargo test` 只跑单 crate / 单模块）：`P_max <= min(base, 3)`
+      - 如果是轻量验证（例如 `cargo check` / 少量单测 / `rg`）：`P_max` 可以更高（但仍不得超过 base）
+
+    初始并行度 `P`（激进策略）：
+
+    - `P = P_max`
+
+    ### 3) 允许放弃（abandon / reject）
+
+    当 auditor 明确判定某个实验结果“不理想”时：
+
+    - auditor 可以输出 `verdict=rejected`
+    - 你必须把它当成“已完成实验”
+      - 释放 slot
+      - 不再等待它变成 “OK”
+    - 你可以继续派发其他实验，或进入 integration（见下一节）
+
+    ### 4) 进入集成（integration）
+
+    当你满足下面条件时，可以进入集成：
+
+    - 至少存在一个 `experiment.reviewed` 且 `evidence_ok=true` 且 `verdict=approved`
+    - 且你已根据 `selection_criteria` 选定“准备采纳”的候选 `experiment_id`
+
+    注意：你不需要等所有实验都 `approved`。
+    你允许在有足够把握时提前收敛（必须有清晰理由）。
+
+    进入集成时：
+
+    - 你必须发布 `integration.task`（驱动 integrator 在主工作区集成 + 最终验收）
+    - 在收到 `integration.applied` 之前：
+      - 你不得发布 `experiment.complete`
+      - 你不得输出 `LOOP_COMPLETE`
+    - 如果收到 `integration.rejected` / `integration.blocked`：
+      - 你必须决定下一步（调整方案、发起下一轮实验、或请求用户补充信息）
+      - 你不得在 rejected/blocked 状态下收敛结束
+
+    ### 5) 收敛结束（completion）
+
+    正常路径下，integrator 会在成功时发布：
+
+    - `integration.applied`（集成通过 + 最终验收证据）
+    - `experiment.complete`（作为 `event_loop.complete_publishes` 的候选事件）
+
+    当你观察到 `experiment.complete` 且你已经得到了可执行的结论时：
+
+    1. 输出 `LOOP_COMPLETE` 并停止。
+
+    兜底规则：
+    如果你收到了 `integration.applied`，但迟迟没有看到 `experiment.complete`，
+    你可以补发一次 `experiment.complete`（含结论与证据摘要），然后再输出 `LOOP_COMPLETE`。
+
+    ---
+
+    ## 事件 payload 约定（最小字段）
+
+    - `experiment.task`：
       - run_id / objective
       - experiment_id / title
       - implementation（做什么怎么做）
       - verification（怎么验证）
-    - integration.task：
+    - `integration.task`：
       - run_id / objective
       - experiment_id（被选中的候选）
-      - patch（来自该候选的 experiment.result）
+      - commit（来自该候选的 experiment.result）
       - final_verification（在主工作区集成后要跑的验收命令）
 
-    发事件必须使用如下格式（不要使用代码块）：
+    ---
+
+    ## 发事件格式（必须遵守）
+
+    你必须使用如下格式发事件（不要使用代码块）：
 
     <event topic="experiment.task">
     ...payload...
     </event>
 
-    EXPERIMENT_PLAN（YAML 模板，运行前请你按自己的任务改掉）：
-      run_id: "demo"
-      objective: "把你的目标写在这里"
-      selection_criteria: |
-        TODO: 选择“采纳哪个实验结果”的标准（例如：性能最好/风险最小/改动最少/体验最佳）
-      final_verification: |
-        TODO: 在主工作区集成后要跑的最终验收（例如：cargo test -p xxx / cargo clippy / bench）
-      experiments:
-        - experiment_id: "exp-001"
-          title: "实验 1：描述你要做的改动路径"
-          implementation: |
-            1) TODO: 写清楚要怎么改（可以包含命令/文件/步骤）
-            2) TODO: 如果需要多次试验，把每次试验拆成新的 experiment_id
-          verification: |
-            1) TODO: 写清楚怎么验证（例如：cargo test -p xxx）
-            2) TODO: 写清楚成功标准（输出包含什么、或测试全绿）
-          notes: |
-            可选：依赖、风险、注意事项
-
-        - experiment_id: "exp-002"
-          title: "实验 2：另一轮探索或另一组验证"
-          implementation: |
-            TODO
-          verification: |
-            TODO
+  prompt_file: "examples/parallel-experimental-dev-engine/PROMPT.md"
 
   completion_promise: "LOOP_COMPLETE"
-  # workflow entry event（协调后发出），不是 runtime 第一条事件（第一条永远是 task.start/task.resume）
-  starting_event: "experiment.start"
   # workflow completion candidate（出现该事件后，由 ralph#1 决定是否输出 LOOP_COMPLETE 结束）
   complete_publishes: "experiment.complete"
 
@@ -158,7 +275,7 @@ parallel:
 hats:
   experiment_runner:
     name: "🧪 实验执行器"
-    description: "在 worktree 中执行 experiment.task（实现 + 验证），并产出 experiment.result（含证据与 patch；commit 可选）。"
+    description: "在 worktree 中执行 experiment.task（实现 + 验证），并产出 experiment.result（含证据与 commit）。"
     triggers: ["experiment.task"]
     publishes: ["experiment.result"]
     # 说明：
@@ -189,9 +306,11 @@ hats:
       - status: "success" | "failed" | "blocked"
       - verification_evidence: |
           你跑了哪些命令、关键输出是什么、为何判定 success/failed
-      - patch（必须）：运行 `git diff` 得到的 unified diff（建议只包含必要文件）
-      - commit（可选）：如果你额外做了 commit，请输出 git commit hash（注意 worktree 是 detach HEAD）
-        - 重要：commit 不能替代 patch。auditor 与 integrator 都以 patch 作为最低审计/可搬运载体。
+      - commit（必须）：该实验最终改动对应的 git commit hash
+        - 建议：把实验改动压成 1 个 commit（更容易 cherry-pick/审计/回滚）
+        - 注意：避免环境缺少 git 身份导致 commit 失败，可用命令级配置（不依赖全局 git config）：
+          `git -c user.name="ralph" -c user.email="ralph@local" commit -m "..."`
+        - 重要：不要在 payload 里粘贴 `git diff` 的 diff 文本（可能非常长、容易截断）；最低可搬运产物以 commit 为准。
 
       重要规则：
       - 不要输出 LOOP_COMPLETE（只有 ralph#1 能结束整个 run）
@@ -224,16 +343,20 @@ hats:
       - experiment_id
       - status（success/failed/blocked）
       - verification_evidence（必须包含：执行过的命令 + 关键输出/结论）
-      - patch（必须）
-      - commit（可选）
+      - commit（必须）
 
       你的输出必须是 experiment.reviewed，且必须包含：
       - run_id
       - experiment_id
       - evidence_ok: true/false
-      - verdict: "approved" | "needs_more_evidence"
-      - missing: |（如果 evidence_ok=false，列出缺失项）
-      - notes: |（可选：你发现的可疑点/建议）
+      - verdict: "approved" | "rejected" | "needs_more_evidence"
+      - missing: |（如果 verdict=needs_more_evidence，列出缺失项）
+      - notes: |（可选：你发现的可疑点/建议；以及 rejected 的原因摘要）
+
+      判定建议（你必须遵守）：
+      - 如果缺少最低字段/证据：evidence_ok=false，verdict=needs_more_evidence
+      - 如果证据齐全但 status=failed/blocked：evidence_ok=true，verdict=rejected
+      - 如果证据齐全且 status=success：evidence_ok=true，verdict=approved
 
       重要规则：
       - 不要输出 LOOP_COMPLETE
@@ -247,9 +370,9 @@ hats:
 
   experiment_integrator:
     name: "🧩 集成验收员"
-    description: "评估是否采纳实验结果；在主工作区 apply patch 并做最终验收；产出 integration.applied/integration.rejected。"
+    description: "评估是否采纳实验结果；在主工作区 cherry-pick commit 并做最终验收；产出 integration.applied/integration.rejected。"
     triggers: ["integration.task"]
-    publishes: ["integration.applied", "integration.rejected", "integration.blocked"]
+    publishes: ["integration.applied", "integration.rejected", "integration.blocked", "experiment.complete"]
     instances: 1
     workspace:
       # 主工作区单写者：只允许 integrator 做最终 apply/验收，避免并行 runner 互相污染仓库
@@ -264,7 +387,7 @@ hats:
 
       你的职责（你是唯一允许触碰主工作区的人）：
       1) 评估是否采纳该实验结果（基于：objective + runner 的证据 + auditor 的 review）
-      2) 在主工作区 apply patch（必要时解决冲突）
+      2) 在主工作区集成 commit（优先用 `git cherry-pick`；必要时解决冲突）
       3) 严格执行 payload 里的 final_verification（必须真的跑命令）
       4) 产出 integration.applied / integration.rejected / integration.blocked（结构化证据）
 
@@ -276,7 +399,7 @@ hats:
       - run_id
       - objective
       - experiment_id（被选中的候选）
-      - patch（unified diff 文本）
+      - commit（git hash，来自该候选的 experiment.result）
       - final_verification（在主工作区集成后要跑的验收命令）
 
       integration.applied 的 payload 必须包含（最低要求）：
@@ -285,6 +408,10 @@ hats:
       - status: "applied"
       - verification_evidence: |（你跑了哪些命令、关键输出是什么、为何判定通过）
       - commit: |（推荐：在主工作区提交一个最终 commit，并提供 hash；便于后续审阅/回滚）
+
+      你在输出 integration.applied 后，还必须额外发布 experiment.complete：
+      - 目的：作为 `event_loop.complete_publishes` 的候选事件，触发 ralph#1 做最终收敛决策
+      - 你必须保证 experiment.complete 的 payload 可审计（至少包含 run_id、experiment_id、简要结论与证据摘要）
 
       integration.rejected 的 payload 必须包含（最低要求）：
       - run_id
@@ -302,6 +429,10 @@ hats:
       发事件必须使用如下格式（不要使用代码块）：
 
       <event topic="integration.applied">
+      ...payload...
+      </event>
+
+      <event topic="experiment.complete">
       ...payload...
       </event>
 

@@ -684,6 +684,38 @@ impl HatJobExecutor for StartEventCaptureExecutor {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PromptCaptureExecutor {
+    prompts: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    notify: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for PromptCaptureExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<HatJobResult> {
+        {
+            let mut prompts = self.prompts.lock().await;
+            prompts.insert(job.instance_id.to_string(), job.prompt);
+            if prompts.contains_key("ralph#1") && prompts.contains_key("writer#1") {
+                self.notify.notify_waiters();
+            }
+        }
+
+        Ok(HatJobResult {
+            output: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
+        })
+    }
+}
+
 fn base_parallel_config() -> ParallelConfig {
     ParallelConfig {
         enabled: true,
@@ -918,6 +950,72 @@ async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
     got.sort();
 
     assert_eq!(got, vec!["ralph#1".to_string()]);
+}
+
+#[tokio::test]
+async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = PromptCaptureExecutor {
+        prompts: Arc::clone(&prompts),
+        notify: Arc::clone(&notify),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.ralph_prompt = Some("RALPH_PROMPT_SENTINEL".to_string());
+
+    // 增加一个普通 hat：用于断言 ralph_prompt 不会污染其它 hat 的 prompt。
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
+
+    // 触发 ralph#1 与 writer#1 各执行一次 job（用 strict target 避免路由歧义）
+    let ralph_event = Event::new("task.start", "top-level prompt")
+        .with_id("e-task-start")
+        .with_target_instance(HatInstanceId::from_parts("ralph", "1"));
+    supervisor
+        .route_event(ralph_event)
+        .await
+        .expect("route_event (ralph) should succeed");
+
+    let writer_event = Event::new("build.task", "do it")
+        .with_id("e-build-task")
+        .with_target_instance(HatInstanceId::from_parts("writer", "1"));
+    supervisor
+        .route_event(writer_event)
+        .await
+        .expect("route_event (writer) should succeed");
+
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for prompts to be captured");
+
+    // 给 actor 留一点缓冲时间，避免 race（写入后立刻读取）
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let got = prompts.lock().await.clone();
+    let ralph_prompt = got
+        .get("ralph#1")
+        .expect("should have captured ralph#1 prompt");
+    let writer_prompt = got
+        .get("writer#1")
+        .expect("should have captured writer#1 prompt");
+
+    assert!(
+        ralph_prompt.contains("RALPH_PROMPT_SENTINEL"),
+        "ralph#1 prompt should contain event_loop.ralph_prompt"
+    );
+    assert!(
+        !writer_prompt.contains("RALPH_PROMPT_SENTINEL"),
+        "writer#1 prompt should NOT contain event_loop.ralph_prompt (no prompt pollution)"
+    );
 }
 
 #[tokio::test]

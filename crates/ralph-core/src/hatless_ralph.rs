@@ -18,6 +18,12 @@ pub struct HatlessRalph {
     /// Whether to include scratchpad instructions in the prompt.
     /// When memories are enabled, scratchpad is excluded (mutually exclusive).
     include_scratchpad: bool,
+    /// 额外的 Ralph prompt（仅注入协调者 Ralph，不影响其他 hats）。
+    ///
+    /// 说明：
+    /// - 该字段来自 `event_loop.ralph_prompt`，用于提供“协调者专属”的固定语义锚点；
+    /// - 不能写入事件 payload，否则会破坏并行模式的 prompt pollution 防线。
+    ralph_prompt: Option<String>,
 }
 
 /// Hat topology for multi-hat mode prompt generation.
@@ -90,6 +96,7 @@ impl HatlessRalph {
             hat_topology,
             starting_event,
             include_scratchpad: true, // Default: include scratchpad
+            ralph_prompt: None,
         }
     }
 
@@ -98,6 +105,12 @@ impl HatlessRalph {
     /// When memories are enabled, scratchpad should be excluded (mutually exclusive).
     pub fn with_scratchpad(mut self, include: bool) -> Self {
         self.include_scratchpad = include;
+        self
+    }
+
+    /// 设置一个仅注入 Ralph 的额外 prompt（来自 `event_loop.ralph_prompt`）。
+    pub fn with_ralph_prompt(mut self, ralph_prompt: Option<String>) -> Self {
+        self.ralph_prompt = ralph_prompt;
         self
     }
 
@@ -283,6 +296,19 @@ You MUST close all tasks before LOOP_COMPLETE.
 
 ",
             );
+        }
+
+        // =====================================================================
+        // Ralph-only prompt 注入（config: event_loop.ralph_prompt）
+        // - 只影响 Ralph 协调者，不进入事件 payload
+        // - 内容仅为空白时跳过，避免生成空标题
+        // =====================================================================
+        if let Some(extra) = self.ralph_prompt.as_deref()
+            && !extra.trim().is_empty()
+        {
+            prompt.push_str("### RALPH PROMPT\n\n");
+            prompt.push_str(extra);
+            prompt.push_str("\n\n");
         }
 
         // Add task breakdown guidance

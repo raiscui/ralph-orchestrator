@@ -106,3 +106,8 @@ The implementation **MATCHES** the spec requirements:
 8. ✅ Helpful error messages when no prompt found
 
 **No gaps found between spec and implementation.**
+
+## Additive Ralph Prompt (`event_loop.ralph_prompt`)
+
+This field is **additive** and is injected only into Ralph's coordinator prompt.
+It does **not** participate in prompt precedence and is **not** injected into non-Ralph hats.

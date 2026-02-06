@@ -483,11 +483,7 @@ impl RalphConfig {
     /// Returns a list of warnings that should be displayed to the user.
     pub fn validate(&self) -> Result<Vec<ConfigWarning>, ConfigError> {
         let mut warnings = Vec::new();
-
-        // Skip all warnings if suppressed
-        if self.suppress_warnings {
-            return Ok(warnings);
-        }
+        let warnings_enabled = !self.suppress_warnings;
 
         // Check for mutual exclusivity of prompt and prompt_file in config
         // Only error if both are explicitly set (not defaults)
@@ -511,20 +507,44 @@ impl RalphConfig {
             });
         }
 
+        // Hard gate: when using custom hats, `complete_publishes` 必须有“明确发布者”。
+        //
+        // 原因：
+        // - `complete_publishes` 是收敛候选事件 topic；
+        // - 如果没有任何 hat 声明发布它，收敛信号的“生产者”会变成隐式约定，
+        //   容易造成 workflow 卡死或拓扑图出现悬空终点。
+        if let Some(topic) = self.event_loop.complete_publishes.as_deref() {
+            let topic = topic.trim();
+            if !topic.is_empty() && !self.hats.is_empty() {
+                let has_publisher = self
+                    .hats
+                    .values()
+                    .any(|hat| hat.publishes.iter().any(|p| p == topic));
+                if !has_publisher {
+                    return Err(ConfigError::InvalidValue {
+                        field: "event_loop.complete_publishes".to_string(),
+                        message: format!(
+                            "topic `{topic}` must be declared in at least one hat's `publishes` (e.g. `hats.<hat_id>.publishes`)"
+                        ),
+                    });
+                }
+            }
+        }
+
         // Check custom backend has a command
         if self.cli.backend == "custom" && self.cli.command.as_ref().is_none_or(String::is_empty) {
             return Err(ConfigError::CustomBackendRequiresCommand);
         }
 
         // Check for deferred features
-        if self.archive_prompts {
+        if warnings_enabled && self.archive_prompts {
             warnings.push(ConfigWarning::DeferredFeature {
                 field: "archive_prompts".to_string(),
                 message: "Feature not yet available in v2".to_string(),
             });
         }
 
-        if self.enable_metrics {
+        if warnings_enabled && self.enable_metrics {
             warnings.push(ConfigWarning::DeferredFeature {
                 field: "enable_metrics".to_string(),
                 message: "Feature not yet available in v2".to_string(),
@@ -532,14 +552,14 @@ impl RalphConfig {
         }
 
         // Check for dropped fields
-        if self.max_tokens.is_some() {
+        if warnings_enabled && self.max_tokens.is_some() {
             warnings.push(ConfigWarning::DroppedField {
                 field: "max_tokens".to_string(),
                 reason: "Token limits are controlled by the CLI tool".to_string(),
             });
         }
 
-        if self.retry_delay.is_some() {
+        if warnings_enabled && self.retry_delay.is_some() {
             warnings.push(ConfigWarning::DroppedField {
                 field: "retry_delay".to_string(),
                 reason: "Retry logic handled differently in v2".to_string(),
@@ -547,10 +567,11 @@ impl RalphConfig {
         }
 
         // Check adapter tool_permissions (dropped field)
-        if self.adapters.claude.tool_permissions.is_some()
-            || self.adapters.gemini.tool_permissions.is_some()
-            || self.adapters.codex.tool_permissions.is_some()
-            || self.adapters.amp.tool_permissions.is_some()
+        if warnings_enabled
+            && (self.adapters.claude.tool_permissions.is_some()
+                || self.adapters.gemini.tool_permissions.is_some()
+                || self.adapters.codex.tool_permissions.is_some()
+                || self.adapters.amp.tool_permissions.is_some())
         {
             warnings.push(ConfigWarning::DroppedField {
                 field: "adapters.*.tool_permissions".to_string(),
@@ -678,6 +699,13 @@ pub struct EventLoopConfig {
     /// Inline prompt text (mutually exclusive with prompt_file).
     pub prompt: Option<String>,
 
+    /// Extra prompt text injected ONLY for Ralph (the coordinator).
+    ///
+    /// 说明：
+    /// - 该字段不参与 prompt precedence（不替代 `prompt/prompt_file`），而是“追加注入”。
+    /// - 用于并行/复杂工作流里给 ralph#1 提供固定语义锚点，避免污染其他 hats 的输入。
+    pub ralph_prompt: Option<String>,
+
     /// Path to the prompt file.
     #[serde(default = "default_prompt_file")]
     pub prompt_file: String,
@@ -749,6 +777,7 @@ impl Default for EventLoopConfig {
     fn default() -> Self {
         Self {
             prompt: None,
+            ralph_prompt: None,
             prompt_file: default_prompt_file(),
             completion_promise: default_completion_promise(),
             max_iterations: default_max_iterations(),
@@ -1386,6 +1415,49 @@ cli:
     }
 
     #[test]
+    fn test_validate_complete_publishes_requires_hat_publisher_when_custom_hats() {
+        // 回归测试（硬门禁）：
+        // - 当配置了 `event_loop.complete_publishes` 且存在自定义 hats 时，
+        //   completion candidate topic 必须在至少一个 hat 的 `publishes` 里声明。
+        let yaml = r#"
+event_loop:
+  complete_publishes: "fix.applied"
+hats:
+  runner:
+    name: "Runner"
+    description: "Does work"
+    triggers: ["work.start"]
+    publishes: ["work.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { field, .. }) if field == "event_loop.complete_publishes"
+        ));
+    }
+
+    #[test]
+    fn test_validate_complete_publishes_ok_when_hat_publishes_topic() {
+        // 正例：有 hat 明确声明发布 completion candidate topic。
+        let yaml = r#"
+event_loop:
+  complete_publishes: "fix.applied"
+hats:
+  integrator:
+    name: "Integrator"
+    description: "Applies patch"
+    triggers: ["fix.task"]
+    publishes: ["fix.applied"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let result = config.validate();
+        assert!(result.is_ok(), "expected config to validate successfully");
+    }
+
+    #[test]
     fn test_parse_yaml_v1_format() {
         // V1 flat format - identical to Python v1.x config
         let yaml = r#"
@@ -1793,6 +1865,29 @@ event_loop:
             "Should allow inline prompt with default prompt_file"
         );
         assert_eq!(config.event_loop.prompt, Some("inline text".to_string()));
+        assert_eq!(config.event_loop.prompt_file, "PROMPT.md");
+    }
+
+    #[test]
+    fn test_ralph_prompt_is_additive_and_does_not_affect_prompt_precedence() {
+        // `event_loop.ralph_prompt` 是 Ralph-only 的追加注入，不参与 prompt/prompt_file 的互斥与优先级。
+        let yaml = r#"
+event_loop:
+  prompt: "inline text"
+  ralph_prompt: "ralph only"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "Should allow ralph_prompt alongside inline prompt"
+        );
+        assert_eq!(config.event_loop.prompt, Some("inline text".to_string()));
+        assert_eq!(
+            config.event_loop.ralph_prompt,
+            Some("ralph only".to_string())
+        );
         assert_eq!(config.event_loop.prompt_file, "PROMPT.md");
     }
 

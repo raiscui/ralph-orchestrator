@@ -777,6 +777,19 @@ impl ParallelSupervisor {
         out.push_str("- You MUST coordinate by emitting events.\n");
         out.push_str("- You MUST keep output short and action-oriented.\n\n");
 
+        // =====================================================================
+        // Ralph-only prompt 注入（config: event_loop.ralph_prompt）
+        // - 只给 ralph#1（协调者），避免污染其他 hats
+        // - 内容仅为空白时跳过，避免生成空段落
+        // =====================================================================
+        if let Some(extra) = self.config.event_loop.ralph_prompt.as_deref()
+            && !extra.trim().is_empty()
+        {
+            out.push_str("## RALPH PROMPT (CONFIG)\n");
+            out.push_str(extra);
+            out.push_str("\n\n");
+        }
+
         out.push_str("## KEY SEMANTICS (OFFICIAL)\n");
         out.push_str("- Runtime handshake start topics are always: `task.start` (fresh) / `task.resume` (resume).\n");
         out.push_str("- `event_loop.starting_event` is an OPTIONAL workflow entry event after coordination.\n");

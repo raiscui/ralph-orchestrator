@@ -122,23 +122,23 @@ topic 扇出到 hats，hat 内按 instance-level queue（idle-first，determinis
 
 ### 4) “执行实验 + 执行验证”合并在同一个 runner job（避免跨 hat 共享 workspace）
 
-**选择**：每个实验任务由同一个 `experiment_runner` 实例完成“实现 + 实验内验证”，并产出可审计、可搬运的 patch：
+**选择**：每个实验任务由同一个 `experiment_runner` 实例完成“实现 + 实验内验证”，并产出可审计、可搬运的 commit：
 
 1. 按 `implementation` 指令进行改动
 2. 按 `verification` 指令运行验证
-3. 发布 `experiment.result`（结构化结果 + 关键日志摘要 + 验证证据 + `patch` 产物；`commit` 仅可选补充信息）
+3. 发布 `experiment.result`（结构化结果 + 关键日志摘要 + 验证证据 + `commit` 产物；并避免在 payload 里嵌入超长 `patch` 文本）
 
 **为什么这样选**：
 
 - worktree 隔离是“job 级别”的。
   如果把实现与验证拆到不同 hat，很难保证它们在同一个隔离工作区里执行。
 - 把实现与验证合并在同一个 job，可以直接在同一 worktree 里跑完验证并产出证据。
-- 由于 worktree 会在 job 结束后被回收，如果不导出 `patch`（或其他可搬运产物），改动会丢失；
+- 由于 worktree 会在 job 结束后被回收，如果不导出 `commit`（或其他可搬运产物），改动会丢失；
   因此把“产物导出”作为 result 的一部分是必要条件。
 
 **替代方案**：
 
--（已采用）引入独立的 `experiment_integrator`：在主工作区 apply patch 并做最终验收：
+-（已采用）引入独立的 `experiment_integrator`：在主工作区 cherry-pick commit 并做最终验收：
   - 优点：把“探索（并行 worktrees）”与“采纳（主工作区单写者）”硬隔离；
   - 代价：需要额外的集成阶段与事件契约（见下文 9）。
 
@@ -216,8 +216,8 @@ topic 扇出到 hats，hat 内按 instance-level queue（idle-first，determinis
 
 审计规则采用“硬门槛”（你确认的口径）：
 
-- 如果缺少关键字段（例如 run_id/experiment_id/status/verification_evidence/**patch**），则必须输出 `needs_more_evidence`；
-  - `commit` 允许作为可选补充信息（便于保留提交历史），但不能替代 patch。
+- 如果缺少关键字段（例如 run_id/experiment_id/status/verification_evidence/**commit**），则必须输出 `needs_more_evidence`；
+  - `commit` 是最低审计/可搬运产物；不要要求在 payload 里嵌入超长 `patch` 文本。
 - `ralph#1` 在未收齐所有实验的 `experiment.reviewed`（且 evidence_ok=true）前，**不得**发布 `experiment.complete` / 输出 `LOOP_COMPLETE`。
 
 **为什么这样选**：
@@ -236,12 +236,12 @@ topic 扇出到 hats，hat 内按 instance-level queue（idle-first，determinis
 
 - `experiment_runner` 的职责只到：
   - 在 worktree 内实现与验证
-  - 产出结构化证据 + **patch（必须）**
+  - 产出结构化证据 + **commit（必须）**
   - 绝不在主工作区做“采纳/合并/最终验收”
 - `experiment_auditor` 只做“证据是否足够”的硬门禁，不做“是否采纳”的决策
 - `experiment_integrator` 才负责：
   - 评估是否采纳某个实验产物（基于：用户目标 + runner 证据 + auditor 审计结论）
-  - 在主工作区 apply patch（或按需 cherry-pick commit，但 patch 仍作为最低审计载体）
+  - 在主工作区 cherry-pick commit（必要时解决冲突）
   - 跑用户指定的“最终验收验证”（例如全量 tests/bench/体验检查）
   - 给出可回放的集成结果（推荐：集成后在主工作区产出一个最终 commit hash）
 
@@ -249,7 +249,7 @@ topic 扇出到 hats，hat 内按 instance-level queue（idle-first，determinis
 
 - 这把“探索（并行 worktrees）”与“采纳（主工作区单写者）”硬隔离开：
   - 并行探索可以更激进、更高吞吐
-  - 采纳阶段保持单写者，避免多 patch 互相冲突把仓库弄乱
+  - 采纳阶段保持单写者，避免多 commit 互相冲突把仓库弄乱
 - auditor 可以保持“完全不跑工具”的纯审计角色；
   integrator 才是“会跑命令 + 会修改主工作区”的验收者，职责清晰。
 
@@ -294,11 +294,11 @@ topic 扇出到 hats，hat 内按 instance-level queue（idle-first，determinis
 # 目标：
 # - 给“并行实现 + 批量验证 + 多轮实验探索（自己摸索/自己探索）”提供一份可直接复制的 ralph.yml 配置方案
 # - 用户负责提供每个实验任务的：做什么 / 怎么做 / 怎么验证（见 event_loop.prompt 内的 EXPERIMENT_PLAN 模板）
-# - Runner 在 worktree 中执行实验（实现 + 验证），并产出 experiment.result（含验证证据 + patch；commit 可选）
+# - Runner 在 worktree 中执行实验（实现 + 验证），并产出 experiment.result（含验证证据 + commit）
 # - Auditor 对 experiment.result 做“硬门槛”审计，产出 experiment.reviewed（证据不足则拒绝）
 # - Integrator 在主工作区做“采纳/集成/最终验收”：
 #   - 消费 integration.task（ralph#1 选择候选后发布）
-#   - apply patch + 跑最终验收命令
+#   - cherry-pick commit + 跑最终验收命令
 #   - 产出 integration.applied / integration.rejected
 # - ralph#1 负责动态调参并收敛：
 #   - 根据用户计划推断并行上限（激进）
@@ -328,12 +328,12 @@ event_loop:
     并通过 auditor 做硬门禁审计，让整个流程可持续推进且可收敛。
 
 	    你必须把整个过程做成“强 backpressure（硬门槛）”：
-	    - runner 必须产出 experiment.result（含验证证据 + patch）。
-	      - `commit` 允许作为可选补充信息，但不能替代 patch。
+	    - runner 必须产出 experiment.result（含验证证据 + commit）。
+	      - 不要在 payload 里嵌入 patch 文本（可能很长、容易截断）。
 	    - auditor 必须产出 experiment.reviewed：
 	      - 若证据不足，必须标记 needs_more_evidence，并写清楚缺什么。
 	    - integrator 必须产出 integration.applied / integration.rejected：
-	      - integrator 才能在主工作区 apply patch 并做最终验收验证（runner 不得做“采纳/合并”）。
+	      - integrator 才能在主工作区 cherry-pick commit 并做最终验收验证（runner 不得做“采纳/合并”）。
 	    - 在所有实验都拿到 evidence_ok=true 的 experiment.reviewed 之前，你不得收敛结束。
 
     关键协议（必须遵守）：
@@ -419,7 +419,7 @@ parallel:
 hats:
 	  experiment_runner:
 	    name: "🧪 实验执行器"
-	    description: "在 worktree 中执行 experiment.task（实现 + 验证），并产出 experiment.result（含证据与 patch；commit 可选）。"
+	    description: "在 worktree 中执行 experiment.task（实现 + 验证），并产出 experiment.result（含证据与 commit）。"
     triggers: ["experiment.task"]
     publishes: ["experiment.result"]
     # 说明：
@@ -450,9 +450,9 @@ hats:
 	      - status: "success" | "failed" | "blocked"
 	      - verification_evidence: |
 	          你跑了哪些命令、关键输出是什么、为何判定 success/failed
-	      - patch（必须）：运行 `git diff` 得到的 unified diff（建议只包含必要文件）
-	      - commit（可选）：如果你额外做了 commit，请输出 git commit hash（注意 worktree 是 detach HEAD）
-	        - 重要：commit 不能替代 patch。auditor 与 integrator 都以 patch 作为最低审计/可搬运载体。
+	      - commit（必须）：该实验最终改动对应的 git commit hash
+	        - 建议：把实验改动压成 1 个 commit（更容易 cherry-pick/审计/回滚）
+	        - 重要：不要在 payload 里粘贴 `git diff` 的 patch 文本（可能非常长、容易截断）；最低可搬运产物以 commit 为准。
 
       重要规则：
       - 不要输出 LOOP_COMPLETE（只有 ralph#1 能结束整个 run）
@@ -485,8 +485,7 @@ hats:
 	      - experiment_id
 	      - status（success/failed/blocked）
 	      - verification_evidence（必须包含：执行过的命令 + 关键输出/结论）
-	      - patch（必须）
-	      - commit（可选）
+	      - commit（必须）
 
       你的输出必须是 experiment.reviewed，且必须包含：
       - run_id
@@ -508,7 +507,7 @@ hats:
 
 	  experiment_integrator:
 	    name: "🧩 集成验收员"
-	    description: "评估是否采纳实验结果；在主工作区 apply patch 并做最终验收；产出 integration.applied/integration.rejected。"
+	    description: "评估是否采纳实验结果；在主工作区 cherry-pick commit 并做最终验收；产出 integration.applied/integration.rejected。"
 	    triggers: ["integration.task"]
 	    publishes: ["integration.applied", "integration.rejected", "integration.blocked"]
 	    instances: 1
@@ -525,7 +524,7 @@ hats:
 
 	      你的职责（你是唯一允许触碰主工作区的人）：
 	      1) 评估是否采纳该实验结果（基于：objective + runner 的证据 + auditor 的 review）
-	      2) 在主工作区 apply patch（必要时解决冲突）
+	      2) 在主工作区集成 commit（优先用 `git cherry-pick`；必要时解决冲突）
 	      3) 严格执行 payload 里的 final_verification（必须真的跑命令）
 	      4) 产出 integration.applied / integration.rejected / integration.blocked（结构化证据）
 
@@ -537,7 +536,7 @@ hats:
 	      - run_id
 	      - objective
 	      - experiment_id（被选中的候选）
-	      - patch（unified diff 文本）
+	      - commit（git hash，来自该候选的 experiment.result）
 	      - final_verification（在主工作区集成后要跑的验收命令）
 
 	      integration.applied 的 payload 必须包含（最低要求）：
@@ -611,9 +610,9 @@ flowchart LR
 
 - `experiment.start`：入口事件（payload 是 EXPERIMENT_PLAN）
 - `experiment.task`：单个实验任务（包含 what/how/verify）
-- `experiment.result`：单个实验结果（包含验证证据 + patch；commit 可选）
+- `experiment.result`：单个实验结果（包含验证证据 + commit）
 - `experiment.reviewed`：审计结果（证据是否足够；证据不足则拒绝收敛）
-- `integration.task`：集成任务（由 ralph#1 发布，驱动 integrator 在主工作区 apply patch + 最终验收）
+- `integration.task`：集成任务（由 ralph#1 发布，驱动 integrator 在主工作区 cherry-pick commit + 最终验收）
 - `integration.applied`：集成成功（含最终验收证据，推荐包含最终 commit hash）
 - `integration.rejected`：不采纳/集成失败（含原因与证据；此时不得收敛）
 - `integration.blocked`：集成阻塞（外部依赖/权限/环境问题）

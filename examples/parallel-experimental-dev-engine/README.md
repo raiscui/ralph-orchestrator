@@ -24,20 +24,26 @@ flowchart LR
   Auditor -->|"experiment.reviewed"| Ralph
   Ralph -->|"integration.task"| Integrator["experiment_integrator"]
   Integrator -->|"integration.applied / rejected"| Ralph
-  Ralph -->|"experiment.complete"| End((LOOP_COMPLETE))
+  Ralph -->|"LOOP_COMPLETE"| End((LOOP_COMPLETE))
 ```
+
+补充说明：
+- `ralph hats graph` 默认输出的是 `--view physical`（会包含 `ralph#1`），因此与上图的“全貌工作流”一致。
+- 如果你只想看更干净的 Hat→Hat 逻辑连线（隐藏 `ralph#1`），使用：`ralph hats graph --view logical`。
 
 核心 topic：
 
 - `experiment.start`：入口事件（payload 是 EXPERIMENT_PLAN）
 - `experiment.task`：单个实验任务（包含 what/how/verify）
-- `experiment.result`：单个实验结果（包含验证证据 + patch；commit 可选）
+- `experiment.result`：单个实验结果（包含验证证据 + commit）
 - `experiment.reviewed`：审计结果（证据是否足够；证据不足则拒绝收敛）
-- `integration.task`：集成任务（由 ralph#1 发布，驱动 integrator 在主工作区 apply patch + 最终验收）
+- `integration.task`：集成任务（由 ralph#1 发布，驱动 integrator 在主工作区 cherry-pick commit + 最终验收）
 - `integration.applied`：集成成功（含最终验收证据，推荐包含最终 commit hash）
 - `integration.rejected`：不采纳/集成失败（含原因与证据；此时不得收敛）
 - `integration.blocked`：集成阻塞（外部依赖/权限/环境问题；此时不得收敛）
-- `experiment.complete`：收敛完成事件（由 ralph#1 发布）
+- `experiment.complete`：收敛完成候选事件
+  - 默认由 `experiment_integrator` 在成功集成后发布（配合 `event_loop.complete_publishes`）
+  - 若缺失，`ralph#1` 允许兜底补发（避免卡死）
 
 ---
 
@@ -45,22 +51,33 @@ flowchart LR
 
 ### 1) 填写你的实验计划（最重要）
 
-打开 `examples/parallel-experimental-dev-engine/ralph.yml`。
-在 `event_loop.prompt` 里找到 `EXPERIMENT_PLAN`。
-把里面的内容改成你自己的任务。
+打开 `examples/parallel-experimental-dev-engine/PROMPT.md`。
+它是一份 Markdown 的 `EXPERIMENT_PLAN` 模板。
+你只需要按模板把字段填成你自己的任务即可。
+如果你暂时不知道怎么拆实验，
+可以把 “实验任务（可选）” 留空，
+由 `ralph#1` 先分析项目再自动生成多条实验方案并派发。
 
 这个配置方案的核心约束是：
-“做什么 / 怎么做 / 怎么验证”都由你提供。
-Ralph 负责把它并行化、结构化。
+- 如果你写了实验任务条目：每个实验的 “做什么 / 怎么做 / 怎么验证” 由你提供。
+- 如果你没写（或只留 TODO 占位）：由 `ralph#1` 先分析项目并自动生成实验方案，再派发给 runner。
+
+无论走哪条路：
+- runner 都必须产出验证证据 + commit（强 backpressure）。
+- Ralph 负责把它并行化、结构化。
 并且会**自适应决定并行度**（激进起步 + AIMD 动态调参）。
 同时强制产出验证证据。
+
+说明（固定 vs 可变）：
+- `PROMPT.md`：只放你需要改的实验计划（Markdown，尽量别把“固定协议”写进来，避免误改）。
+- `ralph.yml`：固定协议/协调语义锚点在 `event_loop.ralph_prompt`（一般不需要改）。
 
 ### 2) 运行
 
 在仓库根目录执行：
 
 ```bash
-# 只使用配置（目标 prompt 已通过 event_loop.prompt 内联）
+# 只使用配置（目标 prompt 在 examples/parallel-experimental-dev-engine/PROMPT.md）
 cargo run --bin ralph -- run \
   -c examples/parallel-experimental-dev-engine/ralph.yml \
   --no-tui
@@ -85,17 +102,21 @@ cargo run --bin ralph -- run \
    - 并行度会运行中动态调参（激进 + AIMD），不会一次性洪水式派发
 2. 多个 `experiment_runner#*` 并行产出 `experiment.result`
 3. `experiment_auditor` 对每个 `experiment.result` 产出 `experiment.reviewed`
-   - 证据充分：`evidence_ok=true`
-   - 证据不足：`evidence_ok=false` + `needs_more_evidence`（此时不得收敛）
-4. 只有当所有实验都拿到 `evidence_ok=true` 的 `experiment.reviewed` 后：
-   - `ralph#1` 才会发布 `integration.task`（选择一个候选方案进入“主工作区集成/验收”）
-5. `experiment_integrator` 必须对 `integration.task` 产出：
-   - 成功：`integration.applied`
+   - 证据充分：`evidence_ok=true`，并给出 `verdict=approved|rejected`
+   - 证据不足：`verdict=needs_more_evidence`（此时不得收敛）
+4. 实验就是实验：
+   - runner 的结果可能不理想（failed/blocked），这是正常现象
+   - auditor 允许明确 `verdict=rejected` 放弃该实验
+   - workflow 不应因为“有实验不理想”而卡住
+5. 只要存在至少一个 `verdict=approved` 的候选实验结果：
+   - `ralph#1` 就可以发布 `integration.task`
+   - 不需要等待所有实验都变成 “OK”
+6. `experiment_integrator` 必须对 `integration.task` 产出：
+   - 成功：`integration.applied`（并额外发布 `experiment.complete`）
    - 失败：`integration.rejected`（此时不得收敛）
    - 阻塞：`integration.blocked`（此时不得收敛）
-6. 只有当收到 `integration.applied` 后：
-   - `ralph#1` 才会发布 `experiment.complete`
-   - 并输出 `LOOP_COMPLETE`
+7. 只有当收到 `experiment.complete` 后：
+   - `ralph#1` 才会输出 `LOOP_COMPLETE`
 
 ---
 

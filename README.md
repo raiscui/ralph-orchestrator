@@ -1079,6 +1079,9 @@ ralph hats graph --format mermaid
 # Deterministic text renderings (no backend required)
 ralph hats graph --format ascii
 ralph hats graph --format unicode
+
+# Optional: hide coordinator edges (clean Hat→Hat logical view)
+ralph hats graph --format mermaid --view logical
 ```
 
 ### `ralph tools` Subcommands

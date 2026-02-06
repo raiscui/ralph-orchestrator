@@ -322,7 +322,7 @@ fn test_full_replay_flow_with_parallel_experimental_dev_engine_fixture() {
         result.event_count()
     );
 
-    // 额外校验：fixture 文本里确实包含“并行归因前缀 + 关键 topic + patch + LOOP_COMPLETE”，锁死示例语义。
+    // 额外校验：fixture 文本里确实包含“并行归因前缀 + 关键 topic + commit + LOOP_COMPLETE”，锁死示例语义。
     let mut backend = ReplayBackend::from_file(&fixture).expect("Should load replay fixture");
     let output = String::from_utf8(backend.collect_all()).expect("Fixture output must be UTF-8");
     assert!(
@@ -368,8 +368,12 @@ fn test_full_replay_flow_with_parallel_experimental_dev_engine_fixture() {
         "Fixture should contain experiment.complete event"
     );
     assert!(
-        output.contains("patch: |"),
-        "Fixture should contain a patch payload"
+        output.contains("commit:"),
+        "Fixture should contain a commit payload"
+    );
+    assert!(
+        !output.contains("patch: |"),
+        "Fixture should not embed a patch payload"
     );
     assert!(
         output.contains("LOOP_COMPLETE"),

@@ -83,6 +83,8 @@ site/
 PROMPT.md
 # But allow benchmark task prompts
 !bench/tasks/**/PROMPT.md
+# Allow example prompts (committed templates)
+!examples/parallel-experimental-dev-engine/PROMPT.md
 .tmp-ralph-claude-code
 
 .agent/

@@ -52,3 +52,6 @@ cargo run --bin ralph -- run \
   - `event_loop.starting_event: "spec.start"`
   - `event_loop.complete_publishes: "spec.approved"`
 - 目标 prompt 内联在 `event_loop.prompt` 中，所以这个示例不依赖额外的 prompt 文件。
+- 如果你需要给协调者 ralph#1 注入一段“固定语义锚点/行为约束”，可以使用：
+  - `event_loop.ralph_prompt: | ...`
+  - 它只会注入给 ralph（协调者），不会污染其他 hats 的 prompt（避免 prompt pollution）。

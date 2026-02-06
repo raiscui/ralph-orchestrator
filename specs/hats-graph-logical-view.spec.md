@@ -1,4 +1,4 @@
-# Spec: `ralph hats graph` 输出“逻辑视图”（隐藏调度员 Ralph）
+# Spec: `ralph hats graph --view logical` 输出“逻辑视图”（隐藏调度员 Ralph）
 
 ## 背景 / 问题
 
@@ -12,13 +12,17 @@
 同时，用户侧希望表达的是 **Hat 与 Hat 之间的逻辑关系**。
 调度员在背后存在即可，不应出现在图的“明面上”。
 
+> 备注：
+> - 默认 view 是 `--view physical`（包含 coordinator，便于看全貌/看路由）。
+> - 本 spec 只约束 `--view logical`（可选：用于隐藏 coordinator，让图更干净）。
+
 ---
 
 ## 目标（Goals）
 
 ### G1：隐藏调度员（Ralph）
 
-`ralph hats graph --format mermaid` 输出中 **必须**不出现 `Ralph` 节点。
+`ralph hats graph --format mermaid --view logical` 输出中 **必须**不出现 `Ralph` 节点。
 同时 **必须**不出现任何 `Hat -> Ralph` 或 `Ralph -> Hat` 的边。
 
 ### G2：以 Hat→Hat 实线展示逻辑关系
@@ -55,6 +59,10 @@
 备注：
 - `complete_publishes` 作为“工作流完成候选事件”，它 **可能没有**任何 hat 订阅。
   因此它不能只依赖 Hat→Hat 的订阅关系推导，否则会在图上“消失”。
+- 配置硬门禁（config validate）：
+  - 当 `hats` 非空且你设置了 `event_loop.complete_publishes = C`，那么**必须**至少有一个 Hat 的 `publishes` 声明包含 `C`。
+  - 否则 Mermaid 图会出现 `Complete[complete]` 但没有任何入边，且 completion candidate 没有明确“生产者”。
+  - 为了避免这种“隐式收敛信号”导致 workflow 卡死，Ralph 会直接拒绝该配置并报错。
 
 ---
 
@@ -91,7 +99,7 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- `ralph hats graph --format mermaid` 输出中：
+- `ralph hats graph --format mermaid --view logical` 输出中：
   - 不包含字符串 `Ralph`
   - 不包含 `-.->`
   - 对于任意 `(A publishes T)` 与 `(B subscribes T)` 的组合，存在 `A -->|T| B`

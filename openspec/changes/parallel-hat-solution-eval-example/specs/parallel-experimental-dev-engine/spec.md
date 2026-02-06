@@ -46,14 +46,13 @@ The example workflow MUST define at least one multi-instance runner hat that is 
 ---
 
 ### Requirement: 并行隔离必须使用 worktree，且结果必须可带回主工作区
-The runner hat in the example configuration MUST use `workspace.strategy=worktree` for isolation, and MUST export its work product as an auditable, portable artifact that can be applied in the main workspace. The minimum portable artifact MUST be a unified diff `patch` (commit MAY be included as optional metadata).
+The runner hat in the example configuration MUST use `workspace.strategy=worktree` for isolation, and MUST export its work product as an auditable, portable artifact that can be applied in the main workspace. The minimum portable artifact MUST be a git commit hash `commit` (the example MUST NOT require embedding a unified diff `patch` in event payload).
 
 #### Scenario: worktree 隔离与产物导出在配置/事件中可观察
 - **WHEN** Ralph loads `examples/parallel-experimental-dev-engine/ralph.yml`
 - **THEN** the runner hat MUST set `workspace.strategy` to `worktree`
 - **WHEN** a runner publishes a result event
-- **THEN** the result payload MUST include a `patch` (unified diff)
-- **AND** the result payload MAY include a `commit` (git hash)
+- **THEN** the result payload MUST include a `commit` (git hash)
 
 ---
 
@@ -68,7 +67,7 @@ The example `README.md` MUST document the permission and gate trade-offs, and MU
 ---
 
 ### Requirement: 必须引入独立 integrator 在主工作区做采纳与最终验收
-The example workflow MUST define an independent integrator hat that is triggered by `integration.task`, applies the selected `patch` in the main workspace, runs final verification, and publishes `integration.applied` or `integration.rejected`. The runner MUST NOT perform main-workspace integration/acceptance work in this workflow.
+The example workflow MUST define an independent integrator hat that is triggered by `integration.task`, applies the selected `commit` in the main workspace, runs final verification, and publishes `integration.applied` or `integration.rejected`. The runner MUST NOT perform main-workspace integration/acceptance work in this workflow.
 
 #### Scenario: 配置包含 integrator 的触发与输出
 - **WHEN** Ralph loads `examples/parallel-experimental-dev-engine/ralph.yml`
@@ -94,7 +93,7 @@ The example workflow MUST define an independent auditor hat that is triggered by
 - **THEN** the review payload MUST include (at minimum): `run_id`, `experiment_id`, and `evidence_ok`
 
 #### Scenario: 证据不足时必须拒绝（硬门槛）
-- **WHEN** an experiment result payload is missing required evidence (e.g., `verification_evidence` or `patch`)
+- **WHEN** an experiment result payload is missing required evidence (e.g., `verification_evidence` or `commit`)
 - **THEN** the auditor MUST set `evidence_ok=false`
 - **THEN** the auditor MUST include a verdict such as `needs_more_evidence` and list what is missing
 
@@ -137,19 +136,19 @@ The repository MUST include a replay fixture that replays an end-to-end run of t
 ---
 
 ### Requirement: 必须提供该 example 的真后端 E2E 场景（Codex）
-The repository MUST include a dedicated `ralph-e2e` scenario that directly runs `examples/parallel-experimental-dev-engine/` against the Codex backend, and MUST assert the workflow emits the critical topic chain, includes an auditable `patch`, and converges to `LOOP_COMPLETE`.
+The repository MUST include a dedicated `ralph-e2e` scenario that directly runs `examples/parallel-experimental-dev-engine/` against the Codex backend, and MUST assert the workflow emits the critical topic chain, includes an auditable `commit`, and converges to `LOOP_COMPLETE`.
 
 #### Scenario: E2E 场景存在且只支持 Codex
 - **WHEN** a developer lists E2E scenarios
 - **THEN** there MUST be an E2E scenario for `parallel-experimental-dev-engine`
 - **AND** it MUST support `Backend::Codex` (and MAY restrict to Codex only)
 
-#### Scenario: E2E 断言覆盖关键 topic 链路与 patch
+#### Scenario: E2E 断言覆盖关键 topic 链路与 commit
 - **WHEN** the E2E scenario runs the example workflow
 - **THEN** it MUST observe events including:
   - `experiment.start`
   - `experiment.task`
-  - `experiment.result` (payload MUST include `patch`)
+  - `experiment.result` (payload MUST include `commit`)
   - `experiment.reviewed` (payload MUST indicate `evidence_ok=true`)
   - `integration.task`
   - `integration.applied`

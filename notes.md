@@ -26,7 +26,8 @@
 - `cargo fmt --check` ✅
 - `cargo clippy --all-targets --all-features -- -D warnings` ✅
 - `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
+
+---
 
 ## 2026-02-03 23:41 +0800｜调整：取消 Radar 扫描头“高对比模式”（c）
 
@@ -608,3 +609,391 @@
   - 或把 `EXPECTED_EXPERIMENTS` 从 2 调到 1（更宽松）
 - 如果仍然 flakey：
   - 把“硬约束”迁移到 replay fixtures（增加 `needs_more_evidence` / `integration.rejected` 分支 fixture）
+
+---
+
+## 2026-02-04 21:05 +0800｜调整：parallel-experimental-dev-engine example 改为 PROMPT.md 驱动 + auditor 可放弃不理想实验
+
+### 背景（你提出的约束）
+
+- 你希望开发者日常使用时：
+  - **实验计划/实验内容写在 PROMPT.md**，而不是写进 `ralph.yml`
+  - 理论上不需要改 `ralph.yml`
+- 你强调“实验就是实验”：
+  - runner 跑出来可能不理想，这是并行探索的常态
+  - 允许 `experiment_auditor` 对不理想结果明确放弃（reject/abandon）
+  - 不要把流程写成“必须等所有实验都 OK 才能继续”
+- 你指出 `starting_event: "experiment.start"` 也不应写死在配置里：
+  - 应该不写，由 ralph 决定（结合 prompt 与 hats 拓扑）
+
+### 我做了什么（落盘变更点）
+
+- 把原先内联在 `event_loop.prompt` 的整段 prompt 迁移到独立文件：
+  - 新增 `examples/parallel-experimental-dev-engine/PROMPT.md`
+  - 增加 `EXPERIMENT_PLAN_START/END` 标记，方便人类编辑与 E2E 预填
+- 更新示例配置：
+  - `examples/parallel-experimental-dev-engine/ralph.yml` 改为 `event_loop.prompt_file: examples/parallel-experimental-dev-engine/PROMPT.md`
+  - 移除 `event_loop.starting_event`，让 ralph 在 `task.start` 后自行选择入口事件
+- 更新审计语义（使“放弃不理想实验”成为一等能力）：
+  - `experiment_auditor` 的输出 `verdict` 扩展为：
+    - `approved | rejected | needs_more_evidence`
+  - 并明确：
+    - 证据齐全但 `failed/blocked` => `rejected`
+    - 证据不足 => `needs_more_evidence`
+- 同步 example 文档叙事：
+  - README 改为“编辑 PROMPT.md，而不是改 ralph.yml”
+  - 最小成功标准改为：有 `approved` 候选即可进入 integration，不要求所有实验都 OK
+- 同步 E2E 场景（避免示例结构变化导致 E2E 失真）：
+  - 预填逻辑从“改 ralph.yml 里的 block scalar”改为“改 PROMPT.md 里 markers”
+  - 在 E2E workspace 中复制 `examples/parallel-experimental-dev-engine/` 目录结构再运行
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+
+---
+
+## 2026-02-05 00:18 +0800｜补充：complete_publishes 的“配置自洽”规则与落盘位置
+
+### 规则（你提醒我必须记住的点）
+
+- 如果配置里定义了 `event_loop.complete_publishes = C`：
+  - **最佳实践**是至少有一个 Hat 的 `publishes` 显式包含 `C`。
+  - 否则：
+    - `ralph hats graph --view logical` 会出现 `Complete[complete]` 但没有任何入边；
+    - completion candidate 没有明确“生产者”，配置很容易写成“永远等不到的收敛事件”。
+  - 只有当你明确约定由协调者（`ralph#1`）在 prompt 中自行发布 `C` 时，才可以接受“没有 Hat 声明发布”的情况。
+
+### 我把它记录在哪里
+
+- 记录在 spec：`specs/hats-graph-logical-view.spec.md`
+  - 位置：G5（complete_publishes）备注区，紧挨着 `Complete[complete]` 与入边规则说明
+
+### 同步修正（让 example 自身也符合这条规则）
+
+- `examples/parallel-experimental-dev-engine/ralph.yml`：
+  - `experiment_integrator.publishes` 增加 `experiment.complete`
+  - integrator 成功时要求额外发布 `experiment.complete`（作为 `complete_publishes` 的候选事件）
+- `examples/parallel-experimental-dev-engine/PROMPT.md`：
+  - 收敛条件改为“观察到 experiment.complete -> 输出 LOOP_COMPLETE”
+  - 并保留兜底：integration.applied 但缺失 experiment.complete 时允许补发
+
+### 验证
+
+- Mermaid：已用 `mermaid-validator` 校验 example README 的 flowchart 语法 ✅
+
+---
+
+## 2026-02-05 00:40 +0800｜hats graph：logical view 在 coordinator-driven workflow 下“看起来断开”的根因与修复方向
+
+### 复现证据
+
+- 在 `examples/parallel-experimental-dev-engine/` 下运行：
+  - `ralph hats graph`（默认 logical view）
+  - 现象：只剩 `experiment_runner -> experiment_auditor`，`experiment_integrator` 与 `complete` 变成孤岛
+- `ralph hats graph --format mermaid` 可以更直观看到：图里没有 `ralph#1`（coordinator）节点，因此许多边天生画不出来。
+
+### 根因（不是渲染器坏了，是“视图语义”差异）
+
+- `ralph hats graph` 默认输出的是 **logical view**（见 `specs/hats-graph-logical-view.spec.md`）：
+  - **隐藏**调度员 `ralph#1`
+  - 只画 Hat→Hat（A publishes topic，B subscribes topic）
+  - `complete_publishes` 会画成 `Complete[complete]` 终点锚点
+- 但 `parallel-experimental-dev-engine` 这个 example 的工作流是典型的 **coordinator-driven**：
+  - `experiment.task` / `integration.task` / `experiment.complete` 是由 `ralph#1` 发布（不属于任何 hat publishes）
+  - `experiment.reviewed` / `integration.applied|rejected|blocked` 的消费方主要也是 `ralph#1`
+- 所以在 logical view 里：
+  - 只有 `experiment.result` 这种“hat↔hat 内部 topic”会显示成连线
+  - 其余边都被“隐藏调度员”的规则裁掉，视觉上就像“断开”
+
+### 解决方案（不改默认语义）
+
+- 增加 `--view physical`（物理视图）：
+  - 显式展示 `ralph#1 (coordinator)` 节点
+  - 只在“边界 topic”（无内部发布者/无内部订阅者）上画 Ralph↔Hat 边
+  - 让 coordinator-driven workflow 能在拓扑图里恢复“全貌视图”
+- 默认仍是 `--view logical`，保持干净、确定性输出，不破坏既有 spec/回归测试。
+
+### 落地细节（渲染稳定性）
+
+- 在 physical view 初版里，我遇到过 `beautiful-mermaid-rs --ascii` 对“Ralph 同一对节点多条边”的不稳定（QuickJS exception）。
+- 因此实现里对 **涉及 Ralph 的多条边** 做了折叠（label 用 `" / "` 拼接），让 unicode/ascii/compact 渲染稳定可用。
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-05 09:12 +0800｜hats graph：让 Unicode/ASCII 图里 ralph#1 更靠左/靠上
+
+### 现象
+
+- `ralph hats graph --format unicode --view physical` 的 Unicode 图里：
+  - `ralph#1 (coordinator)` 经常被布局到图的右侧或中下方；
+  - 直觉上更希望它在图的左侧/上方，作为“调度员/起点”。
+
+### 关键发现（最重要）
+
+- `beautiful-mermaid-rs` 的 flowchart 布局对“Mermaid 节点声明顺序”非常敏感：
+  - 同一张拓扑图，仅仅把 `Hat_ralph[...]` 放到 Mermaid 文本更前面，
+    就能显著改变渲染布局；
+  - 把 `Hat_ralph` 优先声明后，Unicode/ASCII 图里 `ralph#1` 更稳定地靠左/靠上（best-effort）。
+
+### 落地做法
+
+- 只改 physical view 的 Mermaid 生成：
+  - `generate_mermaid_string_physical` 里先输出 `Hat_ralph[ralph#1 (coordinator)]`，
+    再输出其它 hats 节点声明与边；
+  - 并补回归测试，锁死“physical view 必须优先声明 Hat_ralph”这一约束。
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-05 15:55 +0800｜PROMPT 注入优先级 & `ralph_prompt` 语义澄清
+
+### Prompt 内容来源优先级（`resolve_prompt_content`）
+
+- 优先级（高 → 低）：
+  1. CLI `-p "text"`（inline prompt）
+  2. CLI `-P path`（prompt file）
+  3. config `event_loop.prompt`（inline prompt）
+  4. config `event_loop.prompt_file`（prompt file）
+  5. 默认 `PROMPT.md`
+- 结论：
+  - 只要 `event_loop.prompt` 存在，就不会再读取/注入 `PROMPT.md`（或其它 prompt_file）。
+  - 只要走 prompt_file，就不会再注入 `event_loop.prompt`（二选一）。
+
+### `event_loop.ralph_prompt` 的定位
+
+- `event_loop.ralph_prompt`：始终追加注入给 Ralph（协调者）。
+- 并行模式：只注入给 `ralph#1`，不注入其它 hats（避免 prompt pollution）。
+
+### example 约定
+
+- `examples/parallel-experimental-dev-engine/PROMPT.md`：应是 Markdown 的实验计划 prompt（模板），不是 YAML 配置文件。
+
+---
+
+## 2026-02-05 15:10 +0800｜example：`parallel-experimental-dev-engine` 的 `PROMPT.md` 改为纯 YAML（无说明/无 marker）
+
+### 变更点
+
+- `examples/parallel-experimental-dev-engine/PROMPT.md` 现在是纯 YAML 模板：
+  - 不包含任何 Markdown 说明段落
+  - 不包含 `<!-- ... -->` marker
+- `examples/parallel-experimental-dev-engine/ralph.yml` 的 `event_loop.ralph_prompt`：
+  - 去掉了“不要拷贝 marker 行”的旧描述（因为已不存在 marker）
+- `examples/parallel-experimental-dev-engine/README.md`：
+  - 不再要求“编辑 marker 区间”，而是直接编辑 PROMPT.md 的 YAML 字段
+- `crates/ralph-e2e/src/scenarios/parallel_experimental_dev_engine_example.rs`：
+  - E2E 预填不再依赖 marker 截取模板，而是直接覆写 workspace 里的 PROMPT.md 为确定性 YAML
+
+### 验证
+
+- `cargo test` ✅
+
+---
+
+## 2026-02-05 11:15 +0800｜Example 结构调整：`parallel-experimental-dev-engine`（固定协议 -> `event_loop.ralph_prompt`）
+
+### 目标（用户需求）
+
+- 把 `examples/parallel-experimental-dev-engine/PROMPT.md` 中“开发者不需要改”的固定协议迁移到 `examples/parallel-experimental-dev-engine/ralph.yml` 的 `event_loop.ralph_prompt`。
+- 让 `PROMPT.md` 只保留“演示型范例/模板”，告诉开发者应填写什么（`EXPERIMENT_PLAN` YAML）。
+
+### 关键点（为什么这样做）
+
+- `event_loop.ralph_prompt` 是 **Ralph-only 的追加注入**：
+  - 并行模式下只进入 ralph#1 的 coordinator instructions；
+  - 不会污染其它 hats 的 prompt（避免 prompt pollution）。
+- `PROMPT.md` 只承载“可变的实验计划”，能把日常改动面压到最小：
+  - 不易误改协议；
+  - E2E 可以继续通过 marker 预填计划（`EXPERIMENT_PLAN_START/END`）。
+
+### 实施摘要（做了什么）
+
+- `examples/parallel-experimental-dev-engine/ralph.yml`：
+  - 新增 `event_loop.ralph_prompt`，承载原 PROMPT.md 中的固定协议：
+    - 强 backpressure 规则
+    - task.start -> experiment.start 的入口约定
+    - in-flight window / AIMD / P_max 推断
+    - abandon/reject、integration、completion 的收敛语义
+    - 最小 payload 字段与事件输出格式
+- `examples/parallel-experimental-dev-engine/PROMPT.md`：
+  - 精简为“计划模板文件”：
+    - 只保留短说明 + `EXPERIMENT_PLAN` YAML（保留 marker 行，兼容 E2E 预填）
+- `examples/parallel-experimental-dev-engine/README.md`：
+  - 明确固定 vs 可变分工：
+    - PROMPT.md 只改计划
+    - ralph.yml 的 ralph_prompt 固定协议通常不改
+
+### 验证
+
+- `cargo test` ✅（确保不影响编译与现有测试）
+
+---
+
+## 2026-02-05 11:40 +0800｜parallel-experimental-dev-engine：用 `commit` 取代 `patch` 作为实验产物
+
+### 背景 / 动机
+
+- 旧约定要求 runner 在 `experiment.result` 里嵌入 `git diff` 的 unified diff patch 文本。
+- 在真实改动里，patch 很容易变成几千行：
+  - event payload 膨胀；
+  - 模型输出易截断；
+  - 审计/集成阶段反而难以“可搬运、可回放”。
+
+### 新约定（commit-only）
+
+- `experiment.result` **必须**包含 `commit`（git hash）。
+- `integration.task` 通过 `commit` 传递候选产物，integrator 在主工作区执行 `git cherry-pick <hash>` 做集成与最终验收。
+- 约定不再要求（也不建议）在 payload 里粘贴 patch 文本。
+
+### Trade-offs
+
+- 优点：
+  - payload 很小；
+  - 更贴近真实开发工作流（review / cherry-pick / 回滚）。
+- 代价：
+  - runner/integrator 需要能成功执行 `git commit`（存在 git 身份依赖）。
+  - 推荐用“命令级 git 身份”避免依赖全局配置：
+    - `git -c user.name="ralph" -c user.email="ralph@local" commit -m "..."`
+- worktree 回收影响：
+  - worktree 的改动若不提交，会随 worktree 回收而丢失；
+  - 一旦提交，commit 对象落在共享 `.git` 的 object DB 中，worktree 回收不影响短期可用性。
+
+### 受影响位置（同步点）
+
+- example：`examples/parallel-experimental-dev-engine/ralph.yml` / `PROMPT.md` / `README.md`
+- replay + smoke：`crates/ralph-core/tests/fixtures/parallel_experimental_dev_engine.jsonl`、`crates/ralph-core/tests/smoke_runner.rs`
+- E2E（真后端场景）：`crates/ralph-e2e/src/scenarios/parallel_experimental_dev_engine_example.rs`
+- OpenSpec change：`openspec/changes/parallel-hat-solution-eval-example/`（spec/design/proposal/tasks）
+
+---
+
+## 2026-02-05 10:44 +0800｜调研：prompt precedence 与 “只注入 Ralph” 的现有语义锚点
+
+### 现状（代码事实）
+
+- Prompt 来源优先级在 `crates/ralph-cli/src/loop_runner.rs` 的 `resolve_prompt_content()`：
+  - 只要 `event_loop.prompt`（inline）有值，就会 **直接返回**，不会再读 `PROMPT.md`。
+  - 只有当 inline 为空时，才会去读 `event_loop.prompt_file`（默认值就是 `PROMPT.md`）。
+- 非并行（EventLoop）里，Ralph 的 prompt 是通过 `HatlessRalph::build_prompt()` 生成：
+  - 入口：`crates/ralph-core/src/event_loop/mod.rs` 的 `EventLoop::build_prompt()`（hat_id == "ralph" 分支）
+  - 组装：`crates/ralph-core/src/hatless_ralph.rs` 的 `HatlessRalph::core_prompt()` + `build_prompt()`
+- 并行（ParallelSupervisor）里，已经有明确的“防 prompt pollution”规则：
+  - `crates/ralph-core/src/parallel/instance.rs` 的 `build_prompt()`：**只给 ralph#1 注入 `prompt_prelude`**，其他 hat 强制为空字符串。
+  - `crates/ralph-core/src/parallel/supervisor.rs` 会为 ralph#1 生成一份“强约束协调语义”的 instructions（`build_ralph_coordinator_instructions()`）。
+
+### 推论（对本次需求的直接影响）
+
+- 如果我们要新增 `event_loop.ralph_prompt` 并要求“始终注入给 Ralph”，最佳注入点是：
+  - 非并行：HatlessRalph 组装 prompt 时插入（不会污染事件 payload）
+  - 并行：把它拼进 ralph#1 的 coordinator instructions（或仅 ralph#1 prompt 组装路径），保持“只注入 Ralph”的污染防线不被破坏
+
+---
+
+## 2026-02-05 10:45 +0800｜`complete_publishes` 的“明确发布者”硬门禁（validate）+ example/E2E 对齐
+
+### 背景
+
+- 用户提出一条“配置自洽”规则：
+  - 如果 `examples/.../ralph.yml` 里定义了 `event_loop.complete_publishes = C`，
+    那么必须有一个 hat 的 `publishes` 声明包含同一个 `C`。
+- 这条规则的动机很明确：
+  - completion candidate 如果没有明确生产者，会把收敛信号变成隐式约定；
+  - 最终表现为：workflow 卡死、拓扑图出现悬空终点、排查成本变高。
+
+### 结论（硬门禁规则）
+
+- 当且仅当存在自定义 hats（`hats` 非空）时：
+  - 如果配置了 `event_loop.complete_publishes = C`，
+    那么 **MUST** 至少有一个 hat 的 `publishes` 包含 `C`；
+  - 否则 `RalphConfig::validate()` 直接报错拒绝配置。
+
+### 并行模式下的 prompt 注入语义（确认“PROMPT.md 会注入给谁”）
+
+- 关键代码在 `crates/ralph-core/src/parallel/instance.rs` 的 `build_prompt()` 注释里已经写死：
+  - `"只有 ralph#1 注入 prompt_prelude"`
+  - `"其他 hat 只看自己的 instructions + incoming events"`
+- 所以：
+  - `event_loop.prompt` / `event_loop.prompt_file` / 仓库根目录 `PROMPT.md`（默认 prompt_file）
+    只会影响 `ralph#1`（协调者），不会污染其它 worker hats。
+
+### 对齐动作（E2E + example）
+
+- E2E：`parallel/hat_instances` 场景原先用 `complete_publishes: routing.escalate`，
+  但 `routing.escalate` 本质是 supervisor 直投给 `ralph#1` 的升级事件。
+  - 为了满足 hard gate，不改 completion candidate topic，
+    让 `collector` 同时“声明并发出”一个 `routing.escalate`（使其具备明确 hat publisher）。
+- Example：`parallel-experimental-dev-engine`
+  - 实验计划迁移到 `examples/parallel-experimental-dev-engine/PROMPT.md`（用 marker 包裹，便于 E2E 预填）
+  - 移除 `starting_event`（由 `ralph#1` 自行决定入口事件）
+  - auditor verdict 增加 `rejected`（允许放弃不理想实验）
+  - integrator 明确 `publishes` + 发布 `experiment.complete`（作为 `complete_publishes` 的 completion candidate）
+
+---
+
+## 2026-02-05 09:30 +0800｜调整：默认 physical view（取消必须写 `--view physical`），Radar 也默认 physical
+
+### 结论
+
+- `ralph hats graph` 默认 view 切到 physical：
+  - 用户不需要再手写 `--view physical`。
+  - `--view logical` 保留为“更干净的 Hat→Hat 逻辑边”视图。
+- TUI 右上角 Hats Graph Radar 与 CLI 默认对齐：
+  - 默认 physical view；
+  - 同时支持单 topic 匹配 `"a / b / c"` 这类折叠 label（避免事件线动画匹配失败）。
+
+### 复现/对照（命令行证据）
+
+- physical（默认）：
+  - `cargo run --bin ralph -- -c examples/parallel-experimental-dev-engine/ralph.yml hats graph --format mermaid`
+- logical（更干净，但 coordinator-driven 会天然“断开”）：
+  - `cargo run --bin ralph -- -c examples/parallel-experimental-dev-engine/ralph.yml hats graph --view logical`
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-core kiro` ✅
+
+---
+
+## 2026-02-05 16:35 +0800｜parallel-experimental-dev-engine：Experiments 为空时的 Auto-Plan 语义
+
+### 需求摘要
+
+- 当用户在 `PROMPT.md` 里不写（或只保留 TODO 占位）“实验列表（Experiments）”时：
+  - 由 `ralph#1` 先做只读扫描（根据 objective/约束分析项目）。
+  - 自动生成 2~5 个实验方案（多条路径）。
+  - 再按窗口（AIMD）派发 `experiment.task` 给 runner 去跑。
+
+### 落盘位置
+
+- `examples/parallel-experimental-dev-engine/ralph.yml`：在 `event_loop.ralph_prompt` 里定义 Auto-Plan 触发条件与生成规则。
+- `examples/parallel-experimental-dev-engine/PROMPT.md`：把 Experiments 标为可选，并补充可选约束（Constraints）字段。
+- `examples/parallel-experimental-dev-engine/README.md`：同步使用说明（Experiments 可留空）。
+
+---
+
+## 2026-02-05 16:58 +0800｜PROMPT 实验任务：从“硬列表”改为“可选条目 + 默认 Auto-Plan”
+
+- PROMPT.md 默认不再包含任何 `exp-001/exp-002` 这类实验条目。
+- `ralph_prompt` 规则改为：
+  - 用户写了可执行实验条目 → 优先按条目派发 `experiment.task`。
+  - 用户没写（或全是 TODO 占位）→ Auto-Plan：先分析项目再生成 2~5 个实验。
+
+## 2026-02-06 12:00 +0800｜hats graph Mermaid：`Node[label (x)]` 在 mermaid-cli 下会 Parse error
+
+- `Hat_ralph[ralph#1 (coordinator)]` ❌；`Hat_ralph["ralph#1 (coordinator)"]` ✅
+- 实现：`MermaidLabelMode::Strict` 下 `format_mermaid_node_label` 遇到 `(` / `)` 自动加引号（`crates/ralph-cli/src/hats.rs`）。
