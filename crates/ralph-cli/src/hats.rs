@@ -23,7 +23,7 @@ use ralph_tui::state::{
     HatGraphRadar, HatGraphRadarEdgeMeta, HatGraphRadarMeta, HatGraphRadarNodeMeta,
     HatGraphRadarPoint, HatGraphRadarRect,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::io::Write;
 use tracing::warn;
 
@@ -386,6 +386,37 @@ fn graph_hats<W: Write>(
     Ok(())
 }
 
+// ============================================================================
+// ASCII/Unicode 渲染选项构造器
+//
+// 设计意图:
+// - 统一 `AsciiRenderOptions` 初始化入口,避免散落的字面量初始化在字段演进时漏改;
+// - 当上游新增字段时,基于 `Default::default()` 再按需覆盖字段,可自动承接默认值,降低 E0063 风险。
+// ============================================================================
+fn unicode_render_options() -> AsciiRenderOptions {
+    let mut options = AsciiRenderOptions::default();
+    options.use_ascii = Some(false);
+    options
+}
+
+fn ascii_render_options() -> AsciiRenderOptions {
+    let mut options = AsciiRenderOptions::default();
+    options.use_ascii = Some(true);
+    options
+}
+
+fn compact_unicode_render_options() -> AsciiRenderOptions {
+    let mut options = AsciiRenderOptions::default();
+    options.use_ascii = Some(false);
+    options.padding_x = Some(0);
+    // 备注:
+    // - 方向已统一为 TD,physical view 常见回边(backlink).
+    // - `padding_y=0` 在某些图形下会触发渲染器异常,因此这里保留最小垂直间距.
+    options.padding_y = Some(1);
+    options.box_border_padding = Some(0);
+    options
+}
+
 fn render_hat_dag_via_mermaid(
     config: &RalphConfig,
     registry: &HatRegistry,
@@ -398,23 +429,9 @@ fn render_hat_dag_via_mermaid(
 
     let diagram = generate_mermaid_string(config, registry, view, MermaidLabelMode::TerminalPretty);
     let options = match format {
-        GraphFormat::Unicode => AsciiRenderOptions {
-            use_ascii: Some(false),
-            ..Default::default()
-        },
-        GraphFormat::Ascii => AsciiRenderOptions {
-            use_ascii: Some(true),
-            ..Default::default()
-        },
-        GraphFormat::Compact => AsciiRenderOptions {
-            use_ascii: Some(false),
-            padding_x: Some(0),
-            // 备注:
-            // - 方向已统一为 TD,physical view 常见回边(backlink).
-            // - `padding_y=0` 在某些图形下会触发渲染器异常,因此这里保留最小垂直间距.
-            padding_y: Some(1),
-            box_border_padding: Some(0),
-        },
+        GraphFormat::Unicode => unicode_render_options(),
+        GraphFormat::Ascii => ascii_render_options(),
+        GraphFormat::Compact => compact_unicode_render_options(),
         GraphFormat::Mermaid => AsciiRenderOptions::default(),
     };
 
@@ -463,16 +480,11 @@ pub(crate) fn render_hat_graph_radar_ascii(
         MermaidLabelMode::TerminalPretty,
     );
 
-    let compact_options = AsciiRenderOptions {
-        use_ascii: Some(false),
-        padding_x: Some(0),
-        // 重要:
-        // - physical view 通常存在 "Hat -> ralph#1" 的回边(backlink).
-        // - 在 TD 方向下,`padding_y=0` 容易让渲染器找不到可走的路径并触发 QuickJS exception.
-        // - 因此这里保留水平紧凑(padding_x=0),但给垂直方向留出最小余量(padding_y=1).
-        padding_y: Some(1),
-        box_border_padding: Some(0),
-    };
+    // 重要:
+    // - physical view 通常存在 "Hat -> ralph#1" 的回边(backlink).
+    // - 在 TD 方向下,`padding_y=0` 容易让渲染器找不到可走的路径并触发 QuickJS exception.
+    // - 构造器里保留水平紧凑(padding_x=0),并给垂直方向最小余量(padding_y=1).
+    let compact_options = compact_unicode_render_options();
 
     // 说明:
     // - `beautiful-mermaid-rs` 的 meta 渲染在某些布局下会触发 QuickJS exception(已知不稳定点).
@@ -500,10 +512,7 @@ pub(crate) fn render_hat_graph_radar_ascii(
         ascii_compact.push('\n');
     }
 
-    let full_options = AsciiRenderOptions {
-        use_ascii: Some(false),
-        ..Default::default()
-    };
+    let full_options = unicode_render_options();
 
     let (mut ascii_full, meta_full) = match render_mermaid_ascii_with_meta(&diagram, &full_options)
     {
@@ -921,27 +930,10 @@ fn generate_mermaid_string_physical(
     edges.sort();
     edges.dedup();
 
-    // `beautiful-mermaid-rs --ascii` 在某些布局下对“同一对节点之间的多条边”不够稳定，
-    // 可能直接触发 QuickJS exception（我们在 parallel-experimental-dev-engine 的 physical view 里复现过）。
-    //
-    // 物理视图本身是“看全貌/看路由”的辅助视角。
-    // 这里把涉及 Ralph 的多条边折叠成一条（label 用 " / " 拼接），既降低噪声，也规避渲染器的不稳定点。
-    let mut collapsed_by_pair: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    let mut final_edges: Vec<(String, String, String)> = Vec::new();
-
-    for (from, topic, to) in edges {
-        if from == ralph_node_id || to == ralph_node_id {
-            collapsed_by_pair.entry((from, to)).or_default().push(topic);
-        } else {
-            final_edges.push((from, topic, to));
-        }
-    }
-
-    for ((from, to), mut topics) in collapsed_by_pair {
-        topics.sort();
-        topics.dedup();
-        final_edges.push((from, topics.join(" / "), to));
-    }
+    // 物理视图边策略:
+    // - 无论 Strict 还是 TerminalPretty,都保持“一 topic 一条边”。
+    // - 这样可避免边标签过长导致图被横向拉宽,并与 `--format mermaid` 表现一致。
+    let mut final_edges: Vec<(String, String, String)> = edges;
 
     final_edges.sort();
     final_edges.dedup();
@@ -1092,6 +1084,30 @@ mod tests {
         assert_eq!(sanitize_mermaid_identifier("Hat!@#"), "Hat");
         assert_eq!(sanitize_mermaid_identifier("123"), "123");
         assert_eq!(sanitize_mermaid_identifier("___"), "___");
+    }
+
+    #[test]
+    fn test_ascii_render_option_builders_are_default_plus_overrides() {
+        // 回归测试:
+        // - 统一构造函数必须保留关键参数,并让“新增字段”走默认值承接;
+        // - 用 “Default + 覆盖” 的形式,可以天然承接未来字段扩展,避免 E0063。
+        let unicode = unicode_render_options();
+        let mut expected_unicode = AsciiRenderOptions::default();
+        expected_unicode.use_ascii = Some(false);
+        assert_eq!(unicode, expected_unicode);
+
+        let ascii = ascii_render_options();
+        let mut expected_ascii = AsciiRenderOptions::default();
+        expected_ascii.use_ascii = Some(true);
+        assert_eq!(ascii, expected_ascii);
+
+        let compact = compact_unicode_render_options();
+        let mut expected_compact = AsciiRenderOptions::default();
+        expected_compact.use_ascii = Some(false);
+        expected_compact.padding_x = Some(0);
+        expected_compact.padding_y = Some(1);
+        expected_compact.box_border_padding = Some(0);
+        assert_eq!(compact, expected_compact);
     }
 
     #[test]
@@ -1361,6 +1377,75 @@ mod tests {
         assert!(output.contains("Start --> Hat_ralph"));
         assert!(output.contains("Hat_ralph -->|work.task| Hat_Runner"));
         assert!(output.contains("Hat_ralph -->|work.complete| Complete"));
+    }
+
+    #[test]
+    fn test_generate_mermaid_string_physical_strict_does_not_collapse_ralph_topics() {
+        // 回归测试（Strict Mermaid 输出）：
+        // - 目标是给标准 Mermaid 渲染器消费，可读性优先；
+        // - Ralph 相关多 topic 不应折叠为一条超长 label，避免图被横向拉宽。
+        let mut registry = HatRegistry::new();
+        registry.register(mock_hat(
+            "experiment_integrator",
+            &["integration.task"],
+            &[
+                "experiment.complete",
+                "integration.applied",
+                "integration.blocked",
+                "integration.rejected",
+            ],
+        ));
+
+        let config = RalphConfig::default();
+        let output = generate_mermaid_string(
+            &config,
+            &registry,
+            GraphView::Physical,
+            MermaidLabelMode::Strict,
+        );
+
+        assert!(output.contains("Hat_experiment_integrator -->|experiment.complete| Hat_ralph"));
+        assert!(output.contains("Hat_experiment_integrator -->|integration.applied| Hat_ralph"));
+        assert!(output.contains("Hat_experiment_integrator -->|integration.blocked| Hat_ralph"));
+        assert!(output.contains("Hat_experiment_integrator -->|integration.rejected| Hat_ralph"));
+        assert!(!output.contains(
+            "Hat_experiment_integrator -->|experiment.complete / integration.applied / integration.blocked / integration.rejected| Hat_ralph"
+        ));
+    }
+
+    #[test]
+    fn test_generate_mermaid_string_physical_terminal_pretty_does_not_collapse_ralph_topics() {
+        // 回归测试（TerminalPretty）：
+        // - 你要求默认 `ralph hats graph` 也不要合并边。
+        // - 因此 TerminalPretty 下也必须保持一 topic 一条边。
+        let mut registry = HatRegistry::new();
+        registry.register(mock_hat(
+            "experiment_integrator",
+            &["integration.task"],
+            &[
+                "experiment.complete",
+                "integration.applied",
+                "integration.blocked",
+                "integration.rejected",
+            ],
+        ));
+
+        let config = RalphConfig::default();
+        let output = generate_mermaid_string(
+            &config,
+            &registry,
+            GraphView::Physical,
+            MermaidLabelMode::TerminalPretty,
+        );
+
+        assert!(output.contains("Hat_experiment_integrator -->|experiment.complete| Hat_ralph"));
+        assert!(output.contains("Hat_experiment_integrator -->|integration.applied| Hat_ralph"));
+        assert!(output.contains("Hat_experiment_integrator -->|integration.blocked| Hat_ralph"));
+        assert!(output.contains("Hat_experiment_integrator -->|integration.rejected| Hat_ralph"));
+        assert!(!output.contains(" / +3 more"));
+        assert!(!output.contains(
+            "Hat_experiment_integrator -->|experiment.complete / integration.applied / integration.blocked / integration.rejected| Hat_ralph"
+        ));
     }
 
     #[test]

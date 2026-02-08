@@ -894,3 +894,128 @@
 ### 当前状态
 
 **已完成**：ASCII/Unicode/Compact/Radar 现在也统一基于 `flowchart TD`; 同时为 TD + 回边(backlink) 的 compact 渲染把 `padding_y` 调整到 `1` 规避 QuickJS exception; 已通过 fmt/clippy/test/smoke 验证,WORKLOG 已追加。
+
+---
+
+## 2026-02-07 12:33 +0800｜修复: `AsciiRenderOptions` 新增 `max_width` 字段导致 release 构建失败
+
+### 我正在做什么 & 为什么
+
+- 我正在处理你给出的 `cargo build --release` 编译失败,错误是 `E0063` 提示 `AsciiRenderOptions` 初始化缺失 `max_width` 字段。
+- 这类错误说明上游结构体字段已经演进,而调用侧仍是旧初始化写法。必须在所有初始化点补齐字段,否则 `ralph-cli` 无法构建。
+- 我会先精确定位全部初始化点,避免只改一处留下隐藏故障。
+
+### 阶段
+
+- [ ] 阶段1: 定位 `AsciiRenderOptions` 所有初始化点
+- [ ] 阶段2: 设计字段赋值策略并补丁实现
+- [ ] 阶段3: 验证 `cargo build --release`
+- [ ] 阶段4: 运行 `cargo test`(含 smoke)确保无回归
+- [ ] 阶段5: 更新 notes/WORKLOG/ERRORFIX 收尾
+
+### 方案方向(两条路)
+
+- 方案 A(不惜代价,最佳方案): 为 `AsciiRenderOptions` 增加构造器或 `Default + builder` 封装,统一字段初始化来源。
+  - 优点: 后续字段变更时更稳,减少重复字面量初始化。
+  - 风险: 改动面较大,需要同步改多处调用和测试。
+- 方案 B(先能用,后面再优雅): 在现有初始化点补齐 `max_width`,与当前逻辑保持一致。
+  - 优点: 改动最小,最快恢复构建。
+  - 风险: 未来字段再次变化仍可能重复报错。
+
+### 决定
+
+- 先采用方案 B 立即恢复可构建状态; 待本次故障闭环后,可再评估是否需要引入构造器重构。
+
+### 当前状态
+
+**目前在阶段1** - 使用 ast-grep 精确扫描初始化点并核对上下文。
+
+### 进展更新(阶段1完成)
+
+- 已用 ast-grep 在 `crates/ralph-cli/src/hats.rs` 定位到 5 处 `AsciiRenderOptions` 初始化。
+- 其中 3 处使用 `..Default::default()` 已自动覆盖新增字段,不会触发 E0063。
+- 2 处为显式字面量初始化(约 409 行与 466 行),确认为当前编译错误根因。
+- 下一步进入阶段2:确认 `max_width` 字段类型与期望值后补丁。
+
+### 行动记录(阶段2开始)
+
+- 采用统一策略:将两处显式初始化改为补 `..Default::default()`。
+- 这样不仅补齐 `max_width`,也能避免未来新增字段再次触发 `E0063`。
+
+### 进展更新(阶段2完成)
+
+- 已在 `crates/ralph-cli/src/hats.rs` 两处字面量初始化补上 `..Default::default()`。
+- 新增字段 `max_width` 现由默认值承接(`None` -> 库默认 200),与既有行为一致。
+- 下一步进入阶段3:执行 `cargo build --release` 验证修复。
+
+### 进展更新(阶段3完成)
+
+- 已执行 `cargo build --release`。
+- 结果: 构建成功,`ralph-cli` 不再出现 `E0063 missing field max_width`。
+- 下一步进入阶段4:执行 `cargo test` 做回归验证(含 smoke tests)。
+
+### 进展更新(阶段4完成)
+
+- 已执行 `cargo test` 全量回归。
+- 结果: 全部通过(含 `ralph-core` smoke tests 与 doctests),未出现新的 error。
+- 下一步进入阶段5:追加 notes/WORKLOG/ERRORFIX 并整理交付摘要。
+
+### 进展更新(阶段5完成)
+
+- 已追加 `notes.md`(修复经验摘要)、`WORKLOG.md`(实施与验证记录)、`ERRORFIX.md`(问题-原因-修复-验证闭环)。
+- 本次任务全部阶段完成,进入交付。
+
+### 附加验证
+
+- 已执行 `cargo fmt --check` 并通过,代码格式符合仓库门禁。
+
+---
+
+## 2026-02-07 12:42 +0800｜继续执行: 方案A 统一 `AsciiRenderOptions` 构造入口
+
+### 我正在做什么 & 为什么
+
+- 你要求“继续”,我按上次未展开的后续建议继续做方案A。
+- 目标是把 `AsciiRenderOptions` 的分散字面量初始化收敛到统一函数,降低未来字段演进时的回归风险。
+
+### 阶段
+
+- [x] 阶段1: 提炼构造函数并替换调用
+- [x] 阶段2: 增加回归测试
+- [x] 阶段3: build/test/fmt 验证
+
+### 当前状态
+
+**目前在阶段1** - 准备定位所有调用并重构。
+
+### 进展(方案A)
+
+- 阶段1完成: 已抽取统一构造函数并替换调用。
+- 阶段2完成: 已新增回归测试,锁定 `max_width` 默认承接行为。
+- 进入阶段3: 执行 build/test/fmt 验证。
+### 阶段完成
+- 阶段3完成: build/test/fmt 全通过。
+- 方案A完成,进入交付。
+2026-02-07 13:01 +0800 | 继续修复: mermaid strict 模式下 Ralph 边标签过长,改为 strict 不折叠/terminalpretty 保持折叠。
+2026-02-07 13:08 +0800 | 结果: strict 模式不再折叠 Ralph 多topic边,避免超长标签拉宽图; terminalpretty 保持折叠稳定性。
+
+## 2026-02-08 15:16:57 任务: git 提交
+
+### 目标
+把当前工作区变更整理为一个干净的提交,并保证 cargo test 通过.
+
+### 方案
+- 方案A(推荐): 先审查 diff(含 submodule) -> 运行 fmt/clippy/test -> 再提交. 优点: 失败早发现,提交更稳. 缺点: 更耗时.
+- 方案B: 先直接提交(依赖 pre-commit hook) -> 再补测试. 优点: 快. 缺点: 可能留下坏提交,需要返工.
+
+我将默认采用方案A. 如果你希望改用方案B,告诉我.
+
+### 阶段
+- [x] 阶段1: 初始化四文件 + 刷新目标
+- [x] 阶段2: 检查 git 变更(含 submodule)
+- [x] 阶段3: 运行 fmt/clippy/test(含 smoke tests)
+- [x] 阶段4: 选择范围并提交
+- [x] 阶段5: 记录 WORKLOG 并收尾
+
+### 状态
+**已完成**: 已完成提交,并把验证结果与过程追加到 WORKLOG/ERRORFIX,保证可追溯与可回滚.

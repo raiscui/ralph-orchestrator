@@ -997,3 +997,4 @@
 
 - `Hat_ralph[ralph#1 (coordinator)]` ❌；`Hat_ralph["ralph#1 (coordinator)"]` ✅
 - 实现：`MermaidLabelMode::Strict` 下 `format_mermaid_node_label` 遇到 `(` / `)` 自动加引号（`crates/ralph-cli/src/hats.rs`）。
+2026-02-07 12:37 +0800 | 修复笔记: AsciiRenderOptions 新增 max_width 后,显式字面量初始化必须补 ..Default::default() 或显式给 max_width,本次选择 ..Default::default() 以同时规避未来字段演进造成的 E0063。

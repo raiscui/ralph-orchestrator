@@ -673,3 +673,161 @@
 - 单测：新增 `test_generate_mermaid_string_strict_quotes_parentheses_in_node_labels` ✅
 - `cargo fmt` ✅
 - `cargo test` ✅
+
+## 2026-02-07 12:37 +0800 | `E0063 missing field max_width` 修复记录
+
+### 问题
+
+- 命令: `cargo build --release`
+- 错误: `missing field max_width in initializer of AsciiRenderOptions`
+- 位置: `crates/ralph-cli/src/hats.rs:409` 与 `crates/ralph-cli/src/hats.rs:466`
+
+### 原因
+
+- 上游 `beautiful-mermaid-rs` 给 `AsciiRenderOptions` 新增 `max_width: Option<usize>`。
+- 本仓库调用点仍保留旧的完整结构体字面量初始化,未补齐字段。
+
+### 修复
+
+- 将两处完整字面量初始化改为追加 `..Default::default()`。
+- 保持既有参数(`use_ascii/padding_x/padding_y/box_border_padding`)不变。
+- 让新增字段 `max_width` 由默认值接管,避免语义漂移。
+
+### 验证
+
+- `cargo build --release` -> 通过。
+- `cargo test` -> 全量通过(含 smoke tests 与 doctests)。
+
+### 复盘与防再发
+
+- 对第三方或兄弟仓库导出的 options struct,优先使用 `..Default::default()` 承接未来字段扩展。
+- 对“完整字面量初始化”定期做静态扫描,减少依赖升级时的结构体字段缺失回归。
+
+## 2026-02-07 12:52 +0800 | 继续优化: 从“局部补字段”升级为“统一构造入口”
+
+### 问题演进
+
+- 初次修复通过补 `..Default::default()` 解决了 `E0063`。
+- 但 `AsciiRenderOptions` 初始化仍分散在多个位置,未来字段继续演进时仍有漏改风险。
+
+### 根因本质
+
+- 问题本质不是某一个字段缺失,而是“同一配置对象在多个调用点重复构造”。
+- 当结构体字段变化时,重复初始化天然脆弱。
+
+### 升级修复
+
+- 引入统一构造函数:
+  - `unicode_render_options()`
+  - `ascii_render_options()`
+  - `compact_unicode_render_options()`
+- 统一替换调用点,将字段演进风险收敛到单点。
+- 增加回归测试锁定 `max_width=None` 等默认承接行为。
+
+### 验证
+
+- `cargo build --release` 通过。
+- `cargo test` 全量通过。
+- `cargo fmt --check` 通过。
+
+## 2026-02-07 13:08 +0800 | Mermaid 边标签过长导致图横向拉宽
+
+### 问题
+
+- 命令: `ralph hats graph --format mermaid`
+- 现象: `Hat_experiment_integrator -->|experiment.complete / integration.applied / integration.blocked / integration.rejected| Hat_ralph` 这类长标签导致图被拉得很宽。
+
+### 原因
+
+- `generate_mermaid_string_physical` 对 Ralph 相关边做了统一折叠,把多个 topic 用 `" / "` 拼成单个 edge label。
+- 该逻辑最初是为 TerminalPretty 渲染稳定性服务,但被同样用于 Strict mermaid 输出,引发可读性问题。
+
+### 修复
+
+- 按 `MermaidLabelMode` 分层处理:
+  - Strict: 不折叠 Ralph 多 topic 边。
+  - TerminalPretty: 继续折叠 Ralph 多 topic 边。
+- 新增回归测试:
+  - `test_generate_mermaid_string_physical_strict_does_not_collapse_ralph_topics`
+  - `test_generate_mermaid_string_physical_terminal_pretty_keeps_ralph_topic_collapsed`
+
+### 验证
+
+- `cargo build --release` 通过。
+- `cargo test` 全量通过。
+- `cargo fmt --check` 通过。
+
+## 2026-02-07 13:21 +0800 | 默认 `ralph hats graph` 仍出现超长边标签
+
+### 问题
+
+- `--format mermaid` 已不折叠 Ralph 多 topic 边,标签不长。
+- 但默认 `ralph hats graph`(TerminalPretty) 仍会把多 topic 全量拼接为单条超长 label,终端图被横向拉宽。
+
+### 原因
+
+- TerminalPretty 分支虽保留“单边折叠”稳定性策略,但折叠后的 label 没有长度治理。
+
+### 修复
+
+- 新增 `summarize_terminal_pretty_collapsed_topics`。
+- 逻辑:
+  - 折叠后短标签保持完整。
+  - 折叠后长标签压缩为 `first_topic / +N more`。
+- 保持 Strict/TerminalPretty 分层策略不变:
+  - Strict: 不折叠 Ralph 多 topic 边。
+  - TerminalPretty: 折叠但摘要长标签。
+
+### 验证
+
+- `cargo build --release` 通过。
+- `cargo test` 全量通过。
+- `cargo fmt --check` 通过。
+
+## 2026-02-07 13:33 +0800 | 用户要求默认终端图也必须拆分多边
+
+### 问题
+
+- 默认 `ralph hats graph` 仍输出合并边标签(此前是全量拼接,后是 `+N more` 摘要)。
+- 用户明确要求: 默认图也不要合并,必须拆分多边。
+
+### 修复
+
+- 删除 TerminalPretty 的 Ralph 边折叠逻辑。
+- 现在 Strict 与 TerminalPretty 都是一 topic 一条边。
+- 同步更新回归测试,禁止出现 ` / +N more` 与全量合并标签。
+
+### 验证
+
+- `cargo build --release` 通过。
+- `cargo test` 全量通过。
+- `cargo fmt --check` 通过。
+
+## 2026-02-08 15:24 +0800 |  修复记录
+
+### 问题
+
+- 命令: cargo clippy --all-targets --all-features -- -D warnings
+- 错误: AsciiRenderOptions 没有 max_width 字段
+- 位置: crates/ralph-cli/src/hats.rs(回归测试)
+
+### 原因
+
+- 当前仓库依赖的 beautiful-mermaid-rs 中, AsciiRenderOptions 仅包含 use_ascii/padding_x/padding_y/box_border_padding。
+- 回归测试引用了不存在的字段,导致编译失败。
+- 同时 compact options 使用 ..Default::default() 会触发 clippy needless_update(因为当前 struct 字段已被完全显式赋值)。
+
+### 修复
+
+- 构造器改为 Default + 覆盖字段(let mut options = AsciiRenderOptions::default(); ...),同时满足:
+  - 未来字段扩展可自动承接默认值。
+  - 当前字段齐全时不会触发 clippy needless_update。
+- 回归测试改为断言 Default + 覆盖后的整体相等,不再引用 max_width。
+
+### 验证
+
+- cargo fmt --check ✅
+- cargo clippy --all-targets --all-features -- -D warnings ✅
+- cargo test ✅
+
+备注: 上条记录对应 Rust 错误码 E0609(no field max_width)。
