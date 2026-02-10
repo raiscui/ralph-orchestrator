@@ -26,3 +26,18 @@
   - cargo fmt --check ✅
   - cargo clippy --all-targets --all-features -- -D warnings ✅
   - cargo test ✅
+
+## 2026-02-11 00:26 +0800 | git 提交: 归档四文件历史版本 + 更新 example PROMPT
+
+- 变更点:
+  - 将根目录历史四文件版本文件移动到 `archive/`(git rename),降低根目录噪音,便于后续检索.
+  - `task_plan.md` 已按"超过 1000 行续档"规则重新开始,旧版本存档为 `archive/task_plan_2026-02-11_001538.md`.
+  - `examples/parallel-experimental-dev-engine/PROMPT.md` 从 TODO 模板更新为一份具体的实验目标与约束示例.
+- 验证:
+  - `cargo fmt --check` ✅
+  - `cargo clippy --all-targets --all-features -- -D warnings` ✅
+  - `cargo test` ✅
+- 提交:
+  - `2b9e508 chore: archive four-file history and update example prompt`
+- 备注:
+  - 当前仍存在未跟踪文件:`examples/parallel-experimental-dev-engine/PROMPT copy.md`(本次未提交).

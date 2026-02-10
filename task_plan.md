@@ -22,11 +22,11 @@
 ## 阶段
 
 - [x] 阶段0: 续档 task_plan 并做 continuous-learning(因旧文件>1000行)
-- [ ] 阶段1: 检查 git 状态与 diff(含 submodule)
-- [ ] 阶段2: 运行 fmt/clippy/test(按改动范围选择,至少跑 cargo test)
-- [ ] 阶段3: stage 变更(排除临时文件)并处理 submodule 提交
-- [ ] 阶段4: 执行 git commit(写清晰的 message)
-- [ ] 阶段5: 追加记录到 WORKLOG.md 收尾
+- [x] 阶段1: 检查 git 状态与 diff(含 submodule)
+- [x] 阶段2: 运行 fmt/clippy/test(按改动范围选择,至少跑 cargo test)
+- [x] 阶段3: stage 变更(排除临时文件)并处理 submodule 提交
+- [x] 阶段4: 执行 git commit(写清晰的 message)
+- [x] 阶段5: 追加记录到 WORKLOG.md 收尾
 
 ## 关键问题
 1. 当前是否存在 submodule 改动? 如果有,需要先在 submodule 内提交,再提交父仓库指针.
@@ -40,4 +40,14 @@
 - (暂无)
 
 ## 状态
-**目前在阶段1** - 已完成续档与 continuous-learning(含归档历史版本文件到 `archive/`),现在开始盘点本次需要提交的实际改动.
+**已完成** - 已完成盘点/验证/提交,并把过程追加记录到 `WORKLOG.md`.
+
+## 结果(2026-02-11 00:26 +0800)
+
+- 已提交:`2b9e508 chore: archive four-file history and update example prompt`
+- 已验证:
+  - `cargo fmt --check` ✅
+  - `cargo clippy --all-targets --all-features -- -D warnings` ✅
+  - `cargo test` ✅
+- 未纳入提交:
+  - 未跟踪文件:`examples/parallel-experimental-dev-engine/PROMPT copy.md`
