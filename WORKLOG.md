@@ -62,3 +62,6 @@
   - `cargo fmt` ✅
   - `cargo clippy --all-targets --all-features -- -D warnings` ✅
   - `cargo test` ✅
+
+- 提交:
+  - `6bae384 fix(parallel): add clone worktree backend for sandboxed runners`

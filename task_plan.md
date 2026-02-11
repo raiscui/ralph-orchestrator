@@ -79,3 +79,9 @@
 ### 状态
 
 - 目前在阶段5: 准备提交代码与文档变更.
+
+### 阶段完成(阶段5)
+
+- 2026-02-11 11:56 +0800 已完成: git commit
+  - `6bae384 fix(parallel): add clone worktree backend for sandboxed runners`
+- 状态切换: 本任务已完成.
