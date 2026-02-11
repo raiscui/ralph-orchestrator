@@ -41,3 +41,24 @@
   - `2b9e508 chore: archive four-file history and update example prompt`
 - 备注:
   - 当前仍存在未跟踪文件:`examples/parallel-experimental-dev-engine/PROMPT copy.md`(本次未提交).
+
+## 2026-02-11 11:54 +0800 | 修补: parallel worktree sandbox commit + 整理 PROMPT 模板
+
+- 背景:
+  - 你反馈在 `parallel-experimental-dev-engine` 的 worktree 中 `git commit` 会因为 sandbox 权限失败.
+  - 同时你希望 runner 真正并行跑起来,而不是把多个实验塞到一个 event 里导致串行.
+
+- 实施:
+  - 新增 `parallel.workspace.worktree_backend`:
+    - `worktree`: 继续用 `git worktree`.
+    - `clone`: 用 `git clone --no-hardlinks` 创建独立 `.git`,并在回收前把 clone 的 HEAD fetch 进主仓库(refs/ralph/workspaces/...).
+  - example 同步:
+    - `examples/parallel-experimental-dev-engine/PROMPT.md` 恢复为可复用模板.
+    - `examples/parallel-experimental-dev-engine/ralph.yml` 默认启用 `worktree_backend: clone`.
+    - `event_loop.ralph_prompt` 增强: 明确 1 个 `experiment.task` 只能包含 1 个实验;批次派发必须输出多个 `<event ...>` block.
+    - `examples/parallel-experimental-dev-engine/README.md` 补充 `worktree_backend` 的取舍与切换方法.
+
+- 验证:
+  - `cargo fmt` ✅
+  - `cargo clippy --all-targets --all-features -- -D warnings` ✅
+  - `cargo test` ✅

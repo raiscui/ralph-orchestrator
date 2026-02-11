@@ -8,6 +8,7 @@
 use super::{HatJob, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend};
 use crate::config::{
     HatConfig, PermissionMode, PermissionsConfig, WorkspaceRuntimeConfig, WorkspaceStrategy,
+    WorktreeBackend,
 };
 use crate::event_parser::EventParser;
 use crate::instructions::InstructionBuilder;
@@ -751,19 +752,40 @@ impl HatInstanceActor {
                 .with_context(|| format!("Failed to create worktree parent dir: {parent:?}"))?;
         }
 
-        // 若目录已存在，说明上次可能异常退出，先 best-effort 清理，避免 git worktree add 直接失败。
+        // 若目录已存在，说明上次可能异常退出。
+        // 我们先清理旧目录，避免 acquire 直接失败。
         if tokio::fs::try_exists(&workdir).await.unwrap_or(false) {
             tracing::warn!(
                 instance = %self.instance_id,
                 job_id,
                 path = ?workdir,
+                backend = ?self.workspace_runtime.worktree_backend,
                 "worktree dir already exists; attempting cleanup before acquire"
             );
-            let _ = self.git_worktree_remove(&repo_root, &workdir).await;
-            let _ = tokio::fs::remove_dir_all(&workdir).await;
+
+            match self.workspace_runtime.worktree_backend {
+                WorktreeBackend::Worktree => {
+                    // git worktree 模式下，目录可能仍被主仓库登记为 worktree，需要先 remove。
+                    let _ = self.git_worktree_remove(&repo_root, &workdir).await;
+                }
+                WorktreeBackend::Clone => {
+                    // clone 模式下，没有主仓库 worktree 登记，直接删目录即可。
+                }
+            }
+
+            tokio::fs::remove_dir_all(&workdir).await.with_context(|| {
+                format!("Failed to cleanup existing workdir before acquire: {workdir:?}")
+            })?;
         }
 
-        self.git_worktree_add(&repo_root, &workdir).await?;
+        match self.workspace_runtime.worktree_backend {
+            WorktreeBackend::Worktree => {
+                self.git_worktree_add(&repo_root, &workdir).await?;
+            }
+            WorktreeBackend::Clone => {
+                self.git_clone_repo(&repo_root, &workdir).await?;
+            }
+        }
 
         // hooks（on_acquire）
         if hooks_allowed && let Some(cmd) = on_acquire_hook {
@@ -772,8 +794,16 @@ impl HatInstanceActor {
                 .run_hook_with_retry(job_id, "on_acquire", cmd, &workdir, max_attempts, true)
                 .await
             {
-                // hook 失败时要尽量回收 worktree，避免留下脏目录
-                let _ = self.git_worktree_remove(&repo_root, &workdir).await;
+                // hook 失败时要尽量回收 workdir，避免留下脏目录
+                match self.workspace_runtime.worktree_backend {
+                    WorktreeBackend::Worktree => {
+                        let _ = self.git_worktree_remove(&repo_root, &workdir).await;
+                    }
+                    WorktreeBackend::Clone => {
+                        let _ = tokio::fs::remove_dir_all(&workdir).await;
+                    }
+                }
+
                 return Err(e);
             }
         }
@@ -788,7 +818,7 @@ impl HatInstanceActor {
         hooks_allowed: bool,
         on_release_hook: Option<&String>,
     ) -> anyhow::Result<()> {
-        // hooks（on_release）：release hook 失败不应阻止 worktree remove（best-effort）
+        // hooks（on_release）：release hook 失败不应阻止 workdir 回收（best-effort）
         if hooks_allowed && let Some(cmd) = on_release_hook {
             let max_attempts = 3;
             let _ = self
@@ -797,7 +827,23 @@ impl HatInstanceActor {
         }
 
         let repo_root = self.git_repo_root().await?;
-        self.git_worktree_remove(&repo_root, workdir).await?;
+
+        match self.workspace_runtime.worktree_backend {
+            WorktreeBackend::Worktree => {
+                self.git_worktree_remove(&repo_root, workdir).await?;
+            }
+            WorktreeBackend::Clone => {
+                // clone 模式下: runner 的 commit 在 clone repo 内。
+                // 为了让 integrator 仍能用 commit hash cherry-pick,我们在删除目录前把 HEAD 引入主仓库。
+                self.import_clone_head_into_main_repo(job_id, &repo_root, workdir)
+                    .await?;
+
+                tokio::fs::remove_dir_all(workdir)
+                    .await
+                    .with_context(|| format!("Failed to remove clone workdir: {workdir:?}"))?;
+            }
+        }
+
         Ok(())
     }
 
@@ -826,6 +872,100 @@ impl HatInstanceActor {
             .join(&self.workspace_runtime.worktree_base_dir)
             .join(instance_dir)
             .join(format!("job-{job_id}"))
+    }
+
+    async fn git_clone_repo(&self, repo_root: &PathBuf, workdir: &PathBuf) -> anyhow::Result<()> {
+        let output = Command::new("git")
+            .args(["clone", "--no-hardlinks"])
+            .arg(repo_root)
+            .arg(workdir)
+            .output()
+            .await
+            .with_context(|| format!("Failed to run git clone for {workdir:?}"))?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "git clone failed: workdir={workdir:?} exit_code={:?} stdout={} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn import_clone_head_into_main_repo(
+        &self,
+        job_id: u64,
+        repo_root: &PathBuf,
+        workdir: &PathBuf,
+    ) -> anyhow::Result<()> {
+        let repo_head = self.git_rev_parse_head(repo_root).await?;
+        let clone_head = self.git_rev_parse_head(workdir).await?;
+
+        // 没有产生新 commit 时,无需引入。
+        if repo_head == clone_head {
+            return Ok(());
+        }
+
+        // 说明：
+        // - clone 模式下，commit 对象只存在于 workdir 的 `.git/`。
+        // - 如果我们直接删除 workdir，integrator 将无法按 hash cherry-pick。
+        // - 因此这里把 clone 的 HEAD 显式 fetch 进主仓库,并写入一个可追溯 ref。
+        let instance_dir = self.instance_id.to_string().replace('#', "_");
+        let refname = format!("refs/ralph/workspaces/{instance_dir}/job-{job_id}");
+
+        let output = Command::new("git")
+            .current_dir(repo_root)
+            .args(["fetch", "--no-tags"])
+            .arg(workdir)
+            .arg(format!("+HEAD:{refname}"))
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to fetch clone HEAD into main repo: workdir={workdir:?} ref={refname}"
+                )
+            })?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "git fetch (clone->main) failed: workdir={workdir:?} ref={refname} exit_code={:?} stdout={} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+
+        tracing::info!(
+            instance = %self.instance_id,
+            job_id,
+            clone_head = %clone_head,
+            refname = %refname,
+            "Imported clone HEAD into main repo before cleanup"
+        );
+
+        Ok(())
+    }
+
+    async fn git_rev_parse_head(&self, dir: &PathBuf) -> anyhow::Result<String> {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await
+            .with_context(|| format!("Failed to run git rev-parse HEAD in {dir:?}"))?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "git rev-parse HEAD failed: dir={dir:?} exit_code={:?} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     async fn git_worktree_add(&self, repo_root: &PathBuf, workdir: &PathBuf) -> anyhow::Result<()> {

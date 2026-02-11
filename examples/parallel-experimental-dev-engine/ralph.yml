@@ -234,6 +234,11 @@ event_loop:
 
     你必须使用如下格式发事件（不要使用代码块）：
 
+    - 1 个 `experiment.task` = 1 个实验（1 个 experiment_id）。
+    - 同一条输出里允许连续写多个 `<event ...>` block，Supervisor 会逐条解析并路由。
+    - 当你要派发一个批次（P 个实验）时，你必须输出 P 个独立的 `experiment.task` 事件。
+      - 不要把多个实验塞进同一个 `experiment.task` payload，否则 runner 会被迫串行处理，达不到并行目的。
+
     <event topic="experiment.task">
     ...payload...
     </event>
@@ -265,6 +270,9 @@ parallel:
   workspace:
     # worktree 的创建目录（每个 job 一次，结束后回收）
     worktree_base_dir: ".ralph/worktrees"
+    # 兼容某些工具沙箱: runner 只能写当前目录,无法写上级仓库的 .git/worktrees/...
+    # 选择 clone 后,每个 job 会用 `git clone` 创建独立 .git,并在回收前把 HEAD 引入主仓库.
+    worktree_backend: clone
 
   # 作为 example：默认 allow，确保“一条命令跑通”
   # 生产/团队协作建议：至少把 worktree 改为 ask；hooks 可保持 allow（避免每次 hook 都打断流程）

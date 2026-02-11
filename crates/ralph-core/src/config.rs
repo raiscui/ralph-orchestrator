@@ -142,6 +142,26 @@ fn default_worktree_base_dir() -> String {
     ".ralph/worktrees".to_string()
 }
 
+/// worktree 的获取方式（影响 sandbox 兼容性与产物可搬运性）。
+///
+/// 说明：
+/// - `worktree`：使用 `git worktree add/remove`。
+///   - 优点：创建快、磁盘占用小、commit 天然在同一仓库里（易 cherry-pick）。
+///   - 缺点：workdir 的 `.git` 会指向上级仓库的 `.git/worktrees/...`。
+///     - 某些工具沙箱只允许写当前目录,会导致 `git commit` 报 `index.lock` 无法创建。
+/// - `clone`：使用 `git clone` 创建独立 `.git`。
+///   - 优点：更兼容“只能写当前目录”的 sandbox。
+///   - 代价：release 时需要把 HEAD 引入主仓库(否则 integrator 无法按 hash cherry-pick)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeBackend {
+    /// 使用 `git worktree add/remove`。
+    #[default]
+    Worktree,
+    /// 使用 `git clone`(独立 `.git`)。
+    Clone,
+}
+
 /// Permission mode for orchestrator-managed actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -189,12 +209,17 @@ pub struct WorkspaceRuntimeConfig {
     /// worktree 的落盘目录（相对仓库根目录）。
     #[serde(default = "default_worktree_base_dir")]
     pub worktree_base_dir: String,
+
+    /// worktree 的获取方式（见 `WorktreeBackend` 注释）。
+    #[serde(default)]
+    pub worktree_backend: WorktreeBackend,
 }
 
 impl Default for WorkspaceRuntimeConfig {
     fn default() -> Self {
         Self {
             worktree_base_dir: default_worktree_base_dir(),
+            worktree_backend: WorktreeBackend::default(),
         }
     }
 }
@@ -1358,6 +1383,30 @@ mod tests {
         assert!(config.hats.is_empty());
         assert_eq!(config.event_loop.max_iterations, 100);
         assert!(!config.verbose);
+    }
+
+    #[test]
+    fn test_default_worktree_backend_is_worktree() {
+        let config = RalphConfig::default();
+        assert_eq!(
+            config.parallel.workspace.worktree_backend,
+            WorktreeBackend::Worktree
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_with_worktree_backend_clone() {
+        let yaml = r"
+parallel:
+  enabled: true
+  workspace:
+    worktree_backend: clone
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.parallel.workspace.worktree_backend,
+            WorktreeBackend::Clone
+        );
     }
 
     #[test]

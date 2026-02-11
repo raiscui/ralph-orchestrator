@@ -144,3 +144,30 @@ parallel:
 
 - `default_timeout_secs: 0` 表示不超时（一直等）
 - `default_timeout_secs: 60` 表示等 60 秒后超时（会触发 `gate.timeout` 语义）
+
+---
+
+### 工具沙箱兼容性(worktree_backend)
+
+如果你的 runner 后端运行在"只能写当前目录"的沙箱里,`git worktree` 会出现一个典型问题:
+
+- workdir 的 `.git` 会指向上级仓库的 `.git/worktrees/...`
+- runner 在 worktree 内执行 `git commit` 时,会尝试写入上级路径
+- 结果可能报错类似:
+  - `fatal: Unable to create .../.git/worktrees/.../index.lock: Operation not permitted`
+
+因此,本 example 默认启用 `worktree_backend: clone`:
+
+```yaml
+parallel:
+  workspace:
+    worktree_backend: clone
+```
+
+如果你在本机/CI 环境里没有上述限制,并且更看重速度与磁盘占用,可以切回 `worktree`:
+
+```yaml
+parallel:
+  workspace:
+    worktree_backend: worktree
+```

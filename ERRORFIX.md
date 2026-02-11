@@ -831,3 +831,43 @@
 - cargo test ✅
 
 备注: 上条记录对应 Rust 错误码 E0609(no field max_width)。
+
+## 2026-02-11 12:05 +0800 | parallel-experimental-dev-engine: worktree 在工具沙箱下无法 git commit
+
+### 现象
+
+- 在 `examples/parallel-experimental-dev-engine` 的 runner worktree 中执行 `git commit` 可能失败.
+- 典型报错:
+  - `fatal: Unable to create .../.git/worktrees/.../index.lock: Operation not permitted`
+
+### 根因
+
+- `git worktree` 的 `.git` 并不在 workdir 内.
+- workdir 的 `.git` 会指向上级仓库的 `.git/worktrees/<name>/...`.
+- 当 runner 运行在"只能写当前目录"的工具沙箱里时,写入上级 `.git/worktrees/...` 会被拒绝.
+- 结果是 commit-only 协议被卡死,runner 无法产出可搬运的 commit hash.
+
+### 修复
+
+- 新增并行 workspace 运行时配置 `parallel.workspace.worktree_backend`:
+  - `worktree`(默认): 仍使用 `git worktree add/remove`.
+  - `clone`: 使用 `git clone --no-hardlinks` 创建独立 `.git`,兼容 sandbox.
+- clone 模式下,在回收 workdir 前由 orchestrator 自动把 clone 的 HEAD 引入主仓库:
+  - fetch 到 `refs/ralph/workspaces/<instance>/job-<job_id>`.
+  - 这样即使删除 clone 目录,integrator 仍可按 commit hash cherry-pick.
+- example 同步:
+  - `examples/parallel-experimental-dev-engine/ralph.yml` 默认启用 `worktree_backend: clone`.
+  - `event_loop.ralph_prompt` 增强: 明确"1 个 experiment.task = 1 个实验",批次派发必须输出多个 `<event ...>` block,避免把多个实验塞进一个 payload 导致串行.
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+- `cargo test` ✅
+
+### 补充(你反馈的两类流程坑)
+
+- [记录写入错误]: 使用未加引号 heredoc 时,反引号会触发命令替换.
+  - 建议固定使用 `<<'EOF'` 写入/追加 Markdown,避免意外执行.
+- [二次写入偏差]: 阻塞信息追加时再次触发命令替换.
+  - 同上,一律用带引号 heredoc,并尽量避免在 heredoc 内容里出现反引号.
