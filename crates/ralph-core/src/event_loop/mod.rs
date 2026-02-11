@@ -15,6 +15,7 @@ use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
 use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget};
+use crate::prompt_overlay;
 use ralph_proto::{Event, EventBus, Hat, HatId};
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -100,6 +101,7 @@ pub struct EventLoop {
     ralph: HatlessRalph,
     event_reader: EventReader,
     diagnostics: crate::diagnostics::DiagnosticsCollector,
+    all_hat_prompt: Option<String>,
 }
 
 impl EventLoop {
@@ -170,6 +172,7 @@ impl EventLoop {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| ".ralph/events.jsonl".to_string());
         let event_reader = EventReader::new(&events_path);
+        let all_hat_prompt = prompt_overlay::load_all_hat_prompt(&config.core.workspace_root);
 
         Self {
             config,
@@ -180,6 +183,7 @@ impl EventLoop {
             ralph,
             event_reader,
             diagnostics,
+            all_hat_prompt,
         }
     }
 
@@ -407,6 +411,8 @@ impl EventLoop {
                 let base_prompt = self.ralph.build_prompt(&events_context, &[]);
                 let with_memories = self.prepend_memories(base_prompt);
                 let final_prompt = self.prepend_scratchpad(with_memories);
+                let final_prompt = Self::inject_hat_instance_id(final_prompt, hat_id.as_str());
+                let final_prompt = self.inject_all_hat_prompt(final_prompt);
 
                 debug!("build_prompt: routing to HatlessRalph (solo mode)");
                 return Some(final_prompt);
@@ -460,6 +466,8 @@ impl EventLoop {
                 let base_prompt = self.ralph.build_prompt(&events_context, &active_hats);
                 let with_memories = self.prepend_memories(base_prompt);
                 let final_prompt = self.prepend_scratchpad(with_memories);
+                let final_prompt = Self::inject_hat_instance_id(final_prompt, hat_id.as_str());
+                let final_prompt = self.inject_all_hat_prompt(final_prompt);
 
                 // Build prompt with active hats - filters instructions to only active hats
                 debug!(
@@ -497,10 +505,24 @@ impl EventLoop {
             "build_prompt: routing to build_custom_hat() for '{}'",
             hat_id.as_str()
         );
-        Some(
-            self.instruction_builder
-                .build_custom_hat(hat, &events_context),
-        )
+        let prompt = self
+            .instruction_builder
+            .build_custom_hat(hat, &events_context);
+        let prompt = Self::inject_hat_instance_id(prompt, hat_id.as_str());
+        Some(self.inject_all_hat_prompt(prompt))
+    }
+
+    /// 在 prompt 顶部注入运行时实例标识,让 hat 能明确识别“我是谁”。
+    ///
+    /// 约定格式(用户侧可稳定解析):
+    /// `ralph_hat_instance_id:"<hat_or_instance_id>"`
+    fn inject_hat_instance_id(prompt: String, hat_instance_id: &str) -> String {
+        format!("ralph_hat_instance_id:\"{hat_instance_id}\"\n\n{prompt}")
+    }
+
+    /// 把 `config/all_hat.md` 统一注入到所有 hat prompt.
+    fn inject_all_hat_prompt(&self, prompt: String) -> String {
+        prompt_overlay::inject_all_hat_prompt(prompt, self.all_hat_prompt.as_deref())
     }
 
     /// Prepends memories and usage skill to the prompt if auto-injection is enabled.
@@ -644,7 +666,9 @@ impl EventLoop {
 
     /// Builds the Ralph prompt (coordination mode).
     pub fn build_ralph_prompt(&self, prompt_content: &str) -> String {
-        self.ralph.build_prompt(prompt_content, &[])
+        let prompt = self.ralph.build_prompt(prompt_content, &[]);
+        let prompt = Self::inject_hat_instance_id(prompt, "ralph");
+        self.inject_all_hat_prompt(prompt)
     }
 
     /// Determines which hats should be active based on pending events.

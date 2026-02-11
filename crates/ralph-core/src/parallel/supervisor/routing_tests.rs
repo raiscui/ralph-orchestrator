@@ -956,6 +956,9 @@ async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
 async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
+    let config_dir = temp_dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("all_hat.md"), "ALL_HAT_PARALLEL_SENTINEL").unwrap();
 
     let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
     let notify = Arc::new(Notify::new());
@@ -967,6 +970,7 @@ async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
     let mut config = RalphConfig::default();
     config.parallel = base_parallel_config();
     config.event_loop.ralph_prompt = Some("RALPH_PROMPT_SENTINEL".to_string());
+    config.core = config.core.with_workspace_root(temp_dir.path());
 
     // 增加一个普通 hat：用于断言 ralph_prompt 不会污染其它 hat 的 prompt。
     config.hats.insert(
@@ -1013,8 +1017,24 @@ async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
         "ralph#1 prompt should contain event_loop.ralph_prompt"
     );
     assert!(
+        ralph_prompt.contains("ralph_hat_instance_id:\"ralph#1\""),
+        "ralph#1 prompt should include injected runtime identity"
+    );
+    assert!(
+        ralph_prompt.contains("ALL_HAT_PARALLEL_SENTINEL"),
+        "ralph#1 prompt should include all-hat overlay content"
+    );
+    assert!(
         !writer_prompt.contains("RALPH_PROMPT_SENTINEL"),
         "writer#1 prompt should NOT contain event_loop.ralph_prompt (no prompt pollution)"
+    );
+    assert!(
+        writer_prompt.contains("ralph_hat_instance_id:\"writer#1\""),
+        "writer#1 prompt should include injected runtime identity"
+    );
+    assert!(
+        writer_prompt.contains("ALL_HAT_PARALLEL_SENTINEL"),
+        "writer#1 prompt should include all-hat overlay content"
     );
 }
 

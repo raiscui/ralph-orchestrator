@@ -65,3 +65,83 @@
 
 - 提交:
   - `6bae384 fix(parallel): add clone worktree backend for sandboxed runners`
+
+## 2026-02-11 16:11 +0800 | 修正示例协议: 完成总结先于 LOOP_COMPLETE + 禁止 experiment.start 空转
+
+- 变更背景:
+  - 用户指出 `parallel-experimental-dev-engine` 示例应满足:
+    - 发 `LOOP_COMPLETE` 前必须有完成总结.
+    - 不要发没有接收器的 `experiment.start`.
+
+- 实施内容:
+  - `examples/parallel-experimental-dev-engine/ralph.yml`
+    - 改写 Auto-Plan 触发口径: 从 `task.start` payload 直接解析计划.
+    - 入口处理改为首发 `experiment.task`，并明确禁止发布 `experiment.start` 这类无人接收 topic.
+    - 收敛规则改为“先完成总结,后单独一行 LOOP_COMPLETE”。
+  - `examples/parallel-experimental-dev-engine/README.md`
+    - 核心 topic 与成功标准同步更新上述规则.
+
+- 验证:
+  - `cargo fmt --check` ✅
+  - `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-02-11 16:39 +0800 | 新增统一运行时身份字段: `ralph_hat_instance_id`
+
+- 背景:
+  - 需要让所有 hat(含 ralph)在 prompt 中可识别自己的运行时身份.
+
+- 实施:
+  - 串行 EventLoop:
+    - `build_prompt`(ralph/非ralph)统一注入 `ralph_hat_instance_id:"<hat_id>"`.
+    - `build_ralph_prompt` 注入 `ralph_hat_instance_id:"ralph"`.
+  - 并行 Instance:
+    - `HatInstanceActor::build_prompt` 注入 `ralph_hat_instance_id:"<instance_id>"`.
+  - 并行 LLM decider:
+    - dispatch decider prompt 注入 `ralph_hat_instance_id:"ralph#decider-<job_id>"`.
+
+- 测试:
+  - 更新 event_loop/event_loop_ralph/parallel routing 相关断言.
+  - 全量 `cargo test` 通过.
+
+## 2026-02-11 19:06 +0800 | 功能: `config/all_hat.md` 统一注入所有 hat prompt
+
+- 背景:
+  - 需要把项目级共享提示(位于 `config/all_hat.md`)注入给所有 hat(含 ralph),并在运行时统一生效.
+
+- 实施:
+  - 新增 `prompt_overlay` 模块:
+    - 负责加载 `${workspace_root}/config/all_hat.md`.
+    - 负责把内容以固定标题段落注入 prompt.
+  - EventLoop:
+    - 启动时一次加载 overlay,缓存到 `all_hat_prompt`.
+    - `build_prompt` 与 `build_ralph_prompt` 统一注入.
+  - Parallel:
+    - Supervisor 启动时加载 overlay 并下发到所有实例.
+    - Instance prompt 与 dispatch decider prompt 都会注入 overlay.
+
+- 测试:
+  - 新增 EventLoop overlay 注入测试.
+  - 扩展并行 routing 测试,确认 `ralph#1` 与普通 hat 均收到 overlay.
+
+- 验证:
+  - `cargo fmt --check` ✅
+  - `cargo test` ✅
+
+## 2026-02-11 19:01 +0800 | 复核交付: LOOP_COMPLETE 规则 + prompt 注入范围确认
+
+- 复核内容:
+  - `LOOP_COMPLETE` 检测规则是否要求“独占整行/结尾”.
+  - `parallel-experimental-dev-engine` 是否已强制“先总结再 LOOP_COMPLETE”且禁止 `experiment.start`.
+  - `ralph_hat_instance_id` 是否已覆盖所有 hat(含 ralph).
+  - 是否存在“注入给所有 hat 但不包括 ralph”的变量.
+  - `config/all_hat.md` 是否已注入全部路径.
+
+- 结论:
+  - `LOOP_COMPLETE` 当前是“event block 外的子串匹配”,非“整行唯一匹配”.
+  - example 已写死“先完成总结,最后一行 LOOP_COMPLETE”,且禁止无人接收 topic(`experiment.start`).
+  - `ralph_hat_instance_id` 已覆盖串行/并行/decider,并包含 ralph.
+  - 不存在“全 hat 但排除 ralph”的通用注入变量.
+  - `config/all_hat.md` 已注入 EventLoop + Parallel Instance + Parallel Decider.
+
+- 验证:
+  - `cargo test` 全量通过.

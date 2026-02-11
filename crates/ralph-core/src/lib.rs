@@ -24,6 +24,7 @@ mod memory;
 pub mod memory_parser;
 mod memory_store;
 mod parallel;
+mod prompt_overlay;
 mod session_player;
 mod session_recorder;
 mod summary_writer;

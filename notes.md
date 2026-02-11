@@ -998,3 +998,154 @@
 - `Hat_ralph[ralph#1 (coordinator)]` ❌；`Hat_ralph["ralph#1 (coordinator)"]` ✅
 - 实现：`MermaidLabelMode::Strict` 下 `format_mermaid_node_label` 遇到 `(` / `)` 自动加引号（`crates/ralph-cli/src/hats.rs`）。
 2026-02-07 12:37 +0800 | 修复笔记: AsciiRenderOptions 新增 max_width 后,显式字面量初始化必须补 ..Default::default() 或显式给 max_width,本次选择 ..Default::default() 以同时规避未来字段演进造成的 E0063。
+
+---
+
+## 2026-02-11 16:10 +0800｜parallel-experimental-dev-engine 语义收敛修正
+
+### 目标
+
+- 修正示例里两处容易误导的协议:
+  - `LOOP_COMPLETE` 前必须先输出完成总结.
+  - 不再引导发 `experiment.start`（该 topic 在本 example 无接收器）.
+
+### 改动摘要
+
+- `examples/parallel-experimental-dev-engine/ralph.yml`
+  - Auto-Plan 触发语义从 `experiment.start` payload 改为直接基于 `task.start` payload.
+  - 入口处理改为首发 `experiment.task`，并显式禁止发无人接收 topic（示例: `experiment.start`）。
+  - completion 规则改为: 先输出完成总结（run_id/experiment_id/证据摘要/风险），最后单独一行 `LOOP_COMPLETE`。
+  - completion 兜底路径同样要求先总结再 `LOOP_COMPLETE`。
+
+- `examples/parallel-experimental-dev-engine/README.md`
+  - 核心 topic 说明改为 `task.start` 直达 `experiment.task`。
+  - 增加“不再发布 experiment.start”的明确说明。
+  - 最小成功标准补充“先完成总结,后 LOOP_COMPLETE”。
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-11 16:38 +0800｜运行时身份注入: `ralph_hat_instance_id`
+
+### 目标
+
+- 给所有 hat(包括 ralph)的 prompt 注入统一运行时身份字段:
+  - `ralph_hat_instance_id:"<id>"`
+- 让 agent 在运行时可稳定识别"我是谁"(特别是并行多实例).
+
+### 实现点
+
+- `crates/ralph-core/src/event_loop/mod.rs`
+  - 新增 `inject_hat_instance_id(prompt, hat_instance_id)`.
+  - 在 `build_prompt` 的 ralph/非ralph 分支统一注入.
+  - 在 `build_ralph_prompt` 注入固定 `ralph` 身份.
+
+- `crates/ralph-core/src/parallel/instance.rs`
+  - 在 `HatInstanceActor::build_prompt` 顶部注入当前 `instance_id`.
+  - 覆盖并行下所有实例(`ralph#1`、`writer#1`、`experiment_runner#1` 等).
+
+- `crates/ralph-core/src/parallel/supervisor/routing.rs`
+  - 在 LLM dispatch decider prompt 注入 `ralph#decider-<job_id>` 身份.
+
+### 测试调整
+
+- `crates/ralph-core/src/event_loop/tests.rs`
+  - 增加 ralph/reviewer/planner(or monitor) prompt 的身份字段断言.
+- `crates/ralph-core/tests/event_loop_ralph.rs`
+  - 增加 `build_ralph_prompt` 身份字段断言.
+- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+  - 增加 `ralph#1` 与 `writer#1` 的身份字段断言.
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo test` ✅
+
+---
+
+## 2026-02-11 19:05 +0800｜统一注入 `config/all_hat.md` 到所有 hat prompt
+
+### 目标
+
+- 将 `config/all_hat.md` 作为所有 hat(含 ralph)共享补充内容.
+- 在 prompt 加载时统一注入,避免不同执行路径语义漂移.
+
+### 实现
+
+- 新增模块: `crates/ralph-core/src/prompt_overlay.rs`
+  - `load_all_hat_prompt(workspace_root)`:
+    - 从 `${workspace_root}/config/all_hat.md` 读取.
+    - 文件不存在或仅空白时跳过注入.
+  - `inject_all_hat_prompt(prompt, all_hat_prompt)`:
+    - 以 `## ALL HAT PROMPT (config/all_hat.md)` 段落形式注入到 prompt 顶部.
+
+- `EventLoop`:
+  - 结构体新增 `all_hat_prompt` 缓存字段(启动时加载一次).
+  - 在 `build_prompt`(ralph/非ralph)与 `build_ralph_prompt` 统一注入.
+
+- `ParallelSupervisor` + `HatInstanceActor`:
+  - Supervisor 启动时加载 `all_hat_prompt` 并传给每个实例.
+  - `HatInstanceActor::build_prompt` 在 `ralph_hat_instance_id` 后注入 all-hat 内容.
+
+- `parallel dispatch decider`:
+  - `choose_llm` 生成的 ralph decider prompt 同步注入 all-hat 内容.
+
+### 测试
+
+- 新增/调整断言:
+  - `crates/ralph-core/tests/event_loop_ralph.rs`
+    - 新增 workspace 临时 `config/all_hat.md` 场景,验证注入生效.
+  - `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+    - 验证 `ralph#1` 和 `writer#1` 都能看到 all-hat 内容.
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo test` ✅
+
+---
+
+## 2026-02-11 19:01 +0800 | LOOP_COMPLETE 判定与注入变量复核
+
+### LOOP_COMPLETE 判定规则(代码事实)
+
+- 入口函数: `crates/ralph-core/src/event_parser.rs` -> `EventParser::contains_promise`.
+- 判定方式:
+  - 先检查 promise 是否出现在任意 `<event ...>...</event>` payload 内.
+  - 只要出现在 event payload 内,直接返回 false.
+  - 否则把所有 event block 剥离后,对剩余文本做 `stripped.contains(promise)` 子串匹配.
+- 结论:
+  - 不是要求“必须整行等于 LOOP_COMPLETE”.
+  - 也不是要求“必须结尾是 LOOP_COMPLETE”.
+  - 只要在 event block 之外出现该子串就会命中.
+
+### 谁能触发终止
+
+- 串行 EventLoop 只接受 `hat_id == "ralph"` 的 completion promise.
+- 另外还要求任务状态通过校验,并且连续 2 次确认才终止.
+- 并行 Supervisor 也只看 `hat_id == "ralph"` 的 completion promise.
+
+### parallel-experimental-dev-engine 语义收敛
+
+- `examples/parallel-experimental-dev-engine/ralph.yml` 已写死:
+  - 收敛前必须先输出完成总结,最后一行再输出 `LOOP_COMPLETE`.
+  - 明确禁止发送无人接收 topic,示例中点名 `experiment.start`.
+- `examples/parallel-experimental-dev-engine/README.md` 已同步同口径说明.
+
+### 注入变量结论
+
+- 已统一注入给所有 hat(含 ralph):
+  - `ralph_hat_instance_id:"<id>"`
+  - 串行/并行/decider 都覆盖.
+- 当前代码中,没有发现“注入给所有 hat 但不包括 ralph”的通用变量.
+- 并行里存在一个反向特例:
+  - `prompt_prelude` 只给 `ralph#1` 注入,普通 hat 不注入(用于避免顶层 prompt 污染 worker).
+
+### all_hat 覆盖注入
+
+- `config/all_hat.md` 通过 `prompt_overlay` 模块加载.
+- EventLoop, Parallel HatInstance, dispatch decider 均会注入 `## ALL HAT PROMPT (config/all_hat.md)` 段落.

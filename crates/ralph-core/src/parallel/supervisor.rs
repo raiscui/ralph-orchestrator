@@ -19,6 +19,7 @@ use crate::config::{HatBackend, HatConfig, RalphConfig};
 use crate::event_logger::EventLogger;
 use crate::hat_registry::HatRegistry;
 use crate::instructions::InstructionBuilder;
+use crate::prompt_overlay;
 use crate::{EventParser, EventReader as FileEventReader, TerminationReason};
 use ralph_proto::{Event, Hat, HatId, HatInstanceId, HatInstanceState, WorkspaceStrategy};
 use std::collections::{HashMap, HashSet};
@@ -40,6 +41,7 @@ pub struct ParallelSupervisor {
     registry: HatRegistry,
     instruction_builder: Arc<InstructionBuilder>,
     prompt_prelude: String,
+    all_hat_prompt: Option<String>,
     executor: Arc<dyn HatJobExecutor>,
     contracts: TopicContractStore,
     event_logger: EventLogger,
@@ -114,12 +116,14 @@ impl ParallelSupervisor {
         let contracts = TopicContractStore::new(&config.parallel.topic_contracts);
         let max_running_jobs = config.parallel.autoscale.max_running_jobs.max(1);
         let job_semaphore = Arc::new(Semaphore::new(max_running_jobs));
+        let all_hat_prompt = prompt_overlay::load_all_hat_prompt(&config.core.workspace_root);
 
         Ok(Self {
             config,
             registry,
             instruction_builder,
             prompt_prelude,
+            all_hat_prompt,
             executor,
             contracts,
             event_logger: EventLogger::default_path(),
@@ -655,6 +659,7 @@ impl ParallelSupervisor {
                     job_timeout,
                     job_output_stale_timeout,
                     self.prompt_prelude.clone(),
+                    self.all_hat_prompt.clone(),
                     Arc::clone(&self.instruction_builder),
                     Arc::clone(&self.executor),
                     output_tx.clone(),
@@ -696,6 +701,7 @@ impl ParallelSupervisor {
             ralph_job_timeout,
             ralph_job_output_stale_timeout,
             self.prompt_prelude.clone(),
+            self.all_hat_prompt.clone(),
             Arc::clone(&self.instruction_builder),
             Arc::clone(&self.executor),
             output_tx,

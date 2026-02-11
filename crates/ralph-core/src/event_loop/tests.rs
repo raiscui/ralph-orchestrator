@@ -31,6 +31,10 @@ hats:
         prompt.contains("task.start"),
         "Ralph's prompt should include the event"
     );
+    assert!(
+        prompt.contains("ralph_hat_instance_id:\"ralph\""),
+        "Ralph prompt should include injected runtime identity"
+    );
 }
 
 #[test]
@@ -501,6 +505,10 @@ hats:
         prompt.contains("### GUARDRAILS"),
         "Should include guardrails section"
     );
+    assert!(
+        prompt.contains("ralph_hat_instance_id:\"reviewer\""),
+        "Reviewer prompt should include injected runtime identity"
+    );
 
     // Should include event context
     assert!(
@@ -681,6 +689,10 @@ hats:
     assert!(
         prompt.contains("Check system health"),
         "Should include event context"
+    );
+    assert!(
+        prompt.contains("ralph_hat_instance_id:\"monitor\""),
+        "Monitor prompt should include injected runtime identity"
     );
 }
 

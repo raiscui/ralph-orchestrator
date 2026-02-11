@@ -1,23 +1,11 @@
-# Parallel Experimental Dev Engine example
-#
-# 目标：
-# - 把“并行实现 + 批量验证 + 多轮实验探索（自己摸索/自己探索）”固化成一份可直接复制的 ralph.yml 配置范式
-# - 用户可以自己提供每个实验任务的：做什么 / 怎么做 / 怎么验证（见 examples/parallel-experimental-dev-engine/PROMPT.md 内的 EXPERIMENT_PLAN Markdown 模板）
-#   - 或者不写实验任务（或只留 TODO 占位），由 ralph#1 先分析项目并自动生成多道实验方案，再派发给 runner
-# - Runner 在 worktree 中执行实验（实现 + 验证），并产出 experiment.result（含验证证据 + commit）
-# - Auditor 对 experiment.result 做“硬门槛”审计，产出 experiment.reviewed（证据不足则拒绝收敛）
-# - Integrator 在主工作区做“采纳/集成/最终验收”，产出 integration.applied / integration.rejected
-# - ralph#1 负责动态调参并收敛（窗口派发 + AIMD），最终输出 LOOP_COMPLETE
-#
-# 运行（仓库根目录）：
-#   cargo run --bin ralph -- run -c examples/parallel-experimental-dev-engine/ralph.yml --no-tui
-#
-# 可选：覆盖 backend（如果你默认 backend 没配好）
-#   cargo run --bin ralph -- run -c examples/parallel-experimental-dev-engine/ralph.yml -b codex --no-tui
-
 cli:
-  # 建议显式指定一个可执行工具的 backend；也可以在命令行用 `-b ...` 覆盖
-  backend: "codex"
+  backend: "custom"
+  command: "codex"
+  prompt_mode: "arg"
+  args:
+    - "exec"
+    - "--sandbox"
+    - "danger-full-access"
 
 event_loop:
   # 说明：
@@ -59,11 +47,10 @@ event_loop:
     ## Auto-Plan（当实验任务为空/缺失）
 
     注意：
-    - `task.start` 阶段你只负责发布 `experiment.start` 并停止。
-    - Auto-Plan 只在你收到 `experiment.start` 后执行（避免把“入口事件”与“任务派发”混在同一轮）。
+    - `task.start` 阶段你必须直接基于 `task.start` payload 解析计划,并决定是按用户条目派发还是进入 Auto-Plan。
 
     触发条件（满足其一即可）：
-    - 在 `experiment.start` payload 中找不到任何你能可靠解析为“实验任务条目”的结构；
+    - 在 `task.start` payload（PROMPT.md 文本）中找不到任何你能可靠解析为“实验任务条目”的结构；
       - 参考：推荐格式是 `### exp-...` 的三级标题（但不强制必须用 exp- 前缀）
     - 或者：虽然看起来有实验条目，但全部明显是“模板占位”（例如仍是 TODO，没有可执行步骤）。
 
@@ -115,17 +102,16 @@ event_loop:
 
     ## 关键协议（必须遵守）
 
-    ### 1) 入口事件（fresh run）
+    ### 1) 入口处理（fresh run）
 
     当你收到 `task.start` 时：
 
     1. 你必须快速完成一次“初始协调”。
-    2. 你必须发布一个 workflow 入口事件。
-    3. 本例的入口 topic 固定为：`experiment.start`
-       - 理由：这是一个“协调者自用的 orphan topic”，用来把 EXPERIMENT_PLAN 载入事件流。
-    4. `experiment.start` 的 payload 必须是 `task.start` payload（即 PROMPT.md 的 Markdown 文本，原样拷贝）。
+    2. 你必须直接基于 `task.start` payload 解析 EXPERIMENT_PLAN。
+    3. 你必须发布有接收器的入口事件,本例入口 topic 固定为：`experiment.task`。
+       - 要求：1 个 `experiment.task` 只承载 1 个实验（1 个 experiment_id）。
+    4. 你不得发布任何无人接收 topic（例如 `experiment.start`）。
     5. 然后立刻停止：
-       - 不要在同一轮里直接派发 `experiment.task`
        - 不要输出 `LOOP_COMPLETE`
 
     ### 2) 在途窗口（in-flight window）与并行度
@@ -207,11 +193,18 @@ event_loop:
 
     当你观察到 `experiment.complete` 且你已经得到了可执行的结论时：
 
-    1. 输出 `LOOP_COMPLETE` 并停止。
+    1. 先输出“完成总结”（普通文本,不是 event）,至少包含：
+       - run_id
+       - 被采纳的 experiment_id
+       - 为什么选择该方案（对应 selection_criteria）
+       - 关键验证证据摘要（来自 integration.applied / experiment.complete）
+       - 已知风险与后续建议（如果有）
+    2. 最后一行再输出 `LOOP_COMPLETE` 并停止。
+       - 禁止在完成总结之前输出 `LOOP_COMPLETE`。
 
     兜底规则：
     如果你收到了 `integration.applied`，但迟迟没有看到 `experiment.complete`，
-    你可以补发一次 `experiment.complete`（含结论与证据摘要），然后再输出 `LOOP_COMPLETE`。
+    你可以补发一次 `experiment.complete`（含结论与证据摘要），并仍然必须先输出完成总结,最后再输出 `LOOP_COMPLETE`。
 
     ---
 
@@ -243,7 +236,7 @@ event_loop:
     ...payload...
     </event>
 
-  prompt_file: "examples/parallel-experimental-dev-engine/PROMPT.md"
+  prompt_file: "PROMPT.md"
 
   completion_promise: "LOOP_COMPLETE"
   # workflow completion candidate（出现该事件后，由 ralph#1 决定是否输出 LOOP_COMPLETE 结束）
@@ -270,9 +263,10 @@ parallel:
   workspace:
     # worktree 的创建目录（每个 job 一次，结束后回收）
     worktree_base_dir: ".ralph/worktrees"
+    # worktree / clone
     # 兼容某些工具沙箱: runner 只能写当前目录,无法写上级仓库的 .git/worktrees/...
     # 选择 clone 后,每个 job 会用 `git clone` 创建独立 .git,并在回收前把 HEAD 引入主仓库.
-    worktree_backend: clone
+    worktree_backend: worktree
 
   # 作为 example：默认 allow，确保“一条命令跑通”
   # 生产/团队协作建议：至少把 worktree 改为 ask；hooks 可保持 allow（避免每次 hook 都打断流程）

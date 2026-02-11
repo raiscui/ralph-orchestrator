@@ -12,6 +12,7 @@ use super::ParallelSupervisor;
 use crate::EventParser;
 use crate::config::HatConfig;
 use crate::event_logger::EventHistory;
+use crate::prompt_overlay;
 use anyhow::Context;
 use ralph_proto::{
     Delivery, Event, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
@@ -807,8 +808,12 @@ impl ParallelSupervisor {
             candidate_lines.push_str(&format!("- {id} (state={state})\n"));
         }
 
+        let job_id = self.next_decision_job_id;
+        self.next_decision_job_id = self.next_decision_job_id.saturating_add(1);
+        let decider_instance_id = HatInstanceId::from_parts("ralph", format!("decider-{job_id}"));
         let prompt = format!(
-            "You are Ralph acting ONLY as a dispatch decider.\n\
+            "ralph_hat_instance_id:\"{hat_instance_id}\"\n\n\
+You are Ralph acting ONLY as a dispatch decider.\n\
 Return exactly ONE <event> tag with topic=\"{topic}\".\n\
 \n\
 The payload MUST be valid JSON with fields:\n\
@@ -828,19 +833,18 @@ Event:\n\
 \n\
 Candidates:\n\
 {candidates}\n",
+            hat_instance_id = decider_instance_id,
             topic = TOPIC_DISPATCH_DECISION,
             event_id = event_id,
             event_topic = event.topic,
             event_payload = event.payload,
             candidates = candidate_lines
         );
-
-        let job_id = self.next_decision_job_id;
-        self.next_decision_job_id = self.next_decision_job_id.saturating_add(1);
+        let prompt = prompt_overlay::inject_all_hat_prompt(prompt, self.all_hat_prompt.as_deref());
 
         let job = HatJob {
             job_id,
-            instance_id: HatInstanceId::from_parts("ralph", format!("decider-{job_id}")),
+            instance_id: decider_instance_id,
             hat_id: HatId::new("ralph"),
             prompt,
             backend: JobBackend::Default,
@@ -979,6 +983,7 @@ Candidates:\n\
             job_timeout,
             job_output_stale_timeout,
             self.prompt_prelude.clone(),
+            self.all_hat_prompt.clone(),
             Arc::clone(&self.instruction_builder),
             Arc::clone(&self.executor),
             output_tx,

@@ -113,6 +113,10 @@ tasks:
 
     // Verify prompt includes RFC2119-style structure
     assert!(
+        prompt.contains("ralph_hat_instance_id:\"ralph\""),
+        "Prompt should include injected runtime identity for Ralph"
+    );
+    assert!(
         prompt.contains("You are Ralph"),
         "Prompt should identify Ralph with RFC2119 style"
     );
@@ -139,6 +143,28 @@ tasks:
     assert!(
         prompt.contains("LOOP_COMPLETE"),
         "Prompt should include completion promise"
+    );
+}
+
+#[test]
+fn test_ralph_prompt_includes_all_hat_overlay_from_workspace_config() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(config_dir.join("all_hat.md"), "ALL_HAT_SENTINEL_LINE").unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core = config.core.with_workspace_root(temp_dir.path());
+    let event_loop = EventLoop::new(config);
+
+    let prompt = event_loop.build_ralph_prompt("Test context");
+    assert!(
+        prompt.contains("## ALL HAT PROMPT (config/all_hat.md)"),
+        "Prompt should contain all-hat overlay section"
+    );
+    assert!(
+        prompt.contains("ALL_HAT_SENTINEL_LINE"),
+        "Prompt should contain loaded all-hat overlay content"
     );
 }
 

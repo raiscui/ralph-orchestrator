@@ -33,7 +33,8 @@ flowchart LR
 
 核心 topic：
 
-- `experiment.start`：入口事件（payload 是 EXPERIMENT_PLAN）
+- `task.start`：控制面入口事件（由 `ralph#1` 直接解析为首批 `experiment.task`）
+  - 不再发布 `experiment.start`，因为该 topic 在本 example 中没有接收器
 - `experiment.task`：单个实验任务（包含 what/how/verify）
 - `experiment.result`：单个实验结果（包含验证证据 + commit）
 - `experiment.reviewed`：审计结果（证据是否足够；证据不足则拒绝收敛）
@@ -116,7 +117,8 @@ cargo run --bin ralph -- run \
    - 失败：`integration.rejected`（此时不得收敛）
    - 阻塞：`integration.blocked`（此时不得收敛）
 7. 只有当收到 `experiment.complete` 后：
-   - `ralph#1` 才会输出 `LOOP_COMPLETE`
+   - `ralph#1` 必须先输出完成总结（run_id、被采纳实验、证据摘要、剩余风险）
+   - 然后才在最后单独一行输出 `LOOP_COMPLETE`
 
 ---
 

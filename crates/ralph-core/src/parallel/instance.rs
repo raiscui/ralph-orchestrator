@@ -12,6 +12,7 @@ use crate::config::{
 };
 use crate::event_parser::EventParser;
 use crate::instructions::InstructionBuilder;
+use crate::prompt_overlay;
 use anyhow::Context;
 use ralph_proto::{
     Event, GateKind, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
@@ -81,6 +82,7 @@ impl HatInstanceHandle {
         job_timeout: Option<Duration>,
         job_output_stale_timeout: Option<Duration>,
         prompt_prelude: String,
+        all_hat_prompt: Option<String>,
         instruction_builder: Arc<InstructionBuilder>,
         executor: Arc<dyn HatJobExecutor>,
         output_tx: mpsc::Sender<HatJobOutputChunk>,
@@ -103,6 +105,7 @@ impl HatInstanceHandle {
                 job_timeout,
                 job_output_stale_timeout,
                 prompt_prelude,
+                all_hat_prompt,
                 instruction_builder,
                 executor,
                 output_tx,
@@ -161,6 +164,7 @@ struct HatInstanceActor {
     /// - 只有当 stdout/stderr 输出在该阈值内没有任何变化，才会判定为超时并终止。
     job_output_stale_timeout: Option<Duration>,
     prompt_prelude: String,
+    all_hat_prompt: Option<String>,
     instruction_builder: Arc<InstructionBuilder>,
     executor: Arc<dyn HatJobExecutor>,
     output_tx: mpsc::Sender<HatJobOutputChunk>,
@@ -1173,12 +1177,19 @@ impl HatInstanceActor {
                 .build_custom_hat(&self.hat, &events_context)
         };
 
-        format!(
+        let prompt_body = format!(
             "{prelude}\n\n{instructions}\n\n### Incoming Events\n{events}\n",
             prelude = prelude,
             instructions = hat_instructions,
             events = events_context
-        )
+        );
+        // 在并行模式里,每个实例都注入自己的实例ID,便于运行时自识别。
+        let prompt_with_id = format!(
+            "ralph_hat_instance_id:\"{hat_instance_id}\"\n\n{prompt}",
+            hat_instance_id = self.instance_id,
+            prompt = prompt_body
+        );
+        prompt_overlay::inject_all_hat_prompt(prompt_with_id, self.all_hat_prompt.as_deref())
     }
 
     async fn on_job_completed(&mut self, result: HatJobResult) -> anyhow::Result<()> {
@@ -1313,6 +1324,7 @@ mod tests {
             None,
             None,
             String::new(),
+            None,
             instruction_builder,
             Arc::new(NoopExecutor),
             output_tx,
@@ -1396,6 +1408,7 @@ mod tests {
             job_timeout: None,
             job_output_stale_timeout: None,
             prompt_prelude: String::new(),
+            all_hat_prompt: None,
             instruction_builder,
             executor: Arc::new(NoopExecutor),
             output_tx,
@@ -1457,6 +1470,7 @@ mod tests {
             job_timeout: None,
             job_output_stale_timeout: None,
             prompt_prelude: String::new(),
+            all_hat_prompt: None,
             instruction_builder,
             executor: Arc::new(NoopExecutor),
             output_tx,
