@@ -1773,7 +1773,7 @@ impl App {
                                                             }
 
                                                             match parse_chat_submit(&raw) {
-                                                                Ok(ChatSubmit::HumanMessage { target_instance, payload }) => {
+                                                                Ok(ChatSubmit::HumanMessage { target_instance, payload, session_strategy, turn_action }) => {
                                                                     // 默认消息（不写 @...）需要定向到当前选中实例，
                                                                     // 避免 human.message 在并行模式下“意外广播”。
                                                                     let resolved_target = resolve_human_message_target_instance(
@@ -1786,7 +1786,7 @@ impl App {
                                                                         continue;
                                                                     }
                                                                     let writer = ExternalEventWriter::new();
-                                                                    match writer.append("human.message", payload, resolved_target) {
+                                                                    match writer.append("human.message", payload, resolved_target, session_strategy, turn_action) {
                                                                         Ok(()) => {
                                                                             state.parallel.chat_status = Some(format!(
                                                                                 "sent human.message -> {}",
@@ -1812,17 +1812,17 @@ impl App {
                                                                         requested_by,
                                                                     };
 
-                                                                    match serde_json::to_string(&resolve) {
-                                                                        Ok(payload) => {
-                                                                            let writer = ExternalEventWriter::new();
-                                                                            match writer.append(TOPIC_GATE_RESOLVE, payload, None) {
-                                                                                Ok(()) => {
-                                                                                    state.parallel.chat_status = Some(format!(
-                                                                                        "sent gate.resolve -> {}",
-                                                                                        writer.path().display()
-                                                                                    ));
-                                                                                }
-                                                                                Err(e) => {
+                                                                            match serde_json::to_string(&resolve) {
+                                                                                Ok(payload) => {
+                                                                                    let writer = ExternalEventWriter::new();
+                                                                                    match writer.append(TOPIC_GATE_RESOLVE, payload, None, None, None) {
+                                                                                        Ok(()) => {
+                                                                                            state.parallel.chat_status = Some(format!(
+                                                                                                "sent gate.resolve -> {}",
+                                                                                                writer.path().display()
+                                                                                            ));
+                                                                                        }
+                                                                                        Err(e) => {
                                                                                     state.parallel.chat_status = Some(format!("send failed: {e:#}"));
                                                                                 }
                                                                             }

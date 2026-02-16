@@ -36,6 +36,15 @@ pub struct TerminalWrite {
     /// Base64-encoded raw bytes.
     pub bytes: String,
 
+    /// 可读文本(用于诊断).
+    ///
+    /// 说明:
+    /// - 这是对原始 bytes 的 UTF-8 lossy 视图,便于直接阅读 JSONL.
+    /// - 回放与事件解析仍应以 `bytes` 为准,不要依赖该字段做字节级语义.
+    /// - 旧 cassette 可能没有该字段,因此保持为可选.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+
     /// True for stdout, false for stderr.
     pub stdout: bool,
 
@@ -58,6 +67,7 @@ impl TerminalWrite {
         use base64::Engine;
         Self {
             bytes: base64::engine::general_purpose::STANDARD.encode(raw_bytes),
+            text: Some(String::from_utf8_lossy(raw_bytes).into_owned()),
             stdout,
             offset_ms,
             instance_id: None,
@@ -192,6 +202,19 @@ mod tests {
 
         let decoded = write.decode_bytes().unwrap();
         assert_eq!(decoded, original);
+
+        // 诊断字段: 便于直接阅读 JSONL,不影响回放字节保真.
+        let expected = String::from_utf8_lossy(original);
+        assert_eq!(write.text.as_deref(), Some(expected.as_ref()));
+    }
+
+    #[test]
+    fn test_terminal_write_backward_compat_without_text() {
+        // 旧 cassette 里没有 text 字段,必须仍然可解析.
+        let json = r#"{"bytes":"SGVsbG8=","stdout":true,"offset_ms":0}"#;
+        let write: TerminalWrite = serde_json::from_str(json).unwrap();
+        assert!(write.text.is_none());
+        assert_eq!(write.decode_bytes().unwrap(), b"Hello");
     }
 
     #[test]
@@ -200,6 +223,7 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
 
         assert!(json.contains("ux.terminal.write"));
+        assert!(json.contains("\"text\""));
 
         let parsed: UxEvent = serde_json::from_str(&json).unwrap();
         if let UxEvent::TerminalWrite(write) = parsed {

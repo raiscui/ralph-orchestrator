@@ -92,6 +92,9 @@ clap = { version = "4", features = ["derive"] }
 # Regex for text processing
 regex = "1"
 
+# Unique id generator (URL-safe, compact)
+nanoid = "0.4"
+
 # HTTP client for remote presets
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 

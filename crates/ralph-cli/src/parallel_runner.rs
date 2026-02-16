@@ -4,15 +4,18 @@
 //! - 该模块把“调度/路由”交给 `ralph-core::ParallelSupervisor`。
 //! - 这里实现 `HatJobExecutor`：spawn 外部 headless CLI 进程，流式采集 stdout/stderr。
 
+use crate::codex_app_server_session::CodexAppServerRuntime;
+use crate::codex_mcp_session::CodexMcpRuntime;
 use anyhow::{Context, Result};
 use ralph_adapters::CliBackend;
 use ralph_core::{
-    HatJob, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend, OutputStream,
+    HatJob, HatJobControl, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend,
+    OutputStream,
 };
 use ralph_core::{
     HatRegistry, ParallelSupervisor, RalphConfig, Record, SessionRecorder, TerminationReason,
 };
-use ralph_proto::{HatInstanceId, HatInstanceState, TerminalWrite, UxEvent};
+use ralph_proto::{HatInstanceId, HatInstanceState, SessionStrategy, TerminalWrite, UxEvent};
 use ralph_tui::{Tui, TuiUpdate};
 use std::fs::File;
 use std::io::{IsTerminal, Write, stdin, stdout};
@@ -51,6 +54,10 @@ struct CliHatJobExecutor {
     /// - 这对并行模式同样重要（否则行为与串行不一致）。
     /// - 追加顺序：backend 默认 args / hat-level args 在前，custom_args 在后（更像“命令行最终覆盖”）。
     custom_args: Vec<String>,
+    /// Ralph 实例专用: Codex MCP 常驻会话运行时。
+    codex_mcp_runtime: Arc<CodexMcpRuntime>,
+    /// Codex App Server 常驻会话运行时（支持 turn/steer/interrupt）。
+    codex_app_server_runtime: Arc<CodexAppServerRuntime>,
 }
 
 #[async_trait::async_trait]
@@ -60,6 +67,7 @@ impl HatJobExecutor for CliHatJobExecutor {
         job: HatJob,
         output_tx: tokio::sync::mpsc::Sender<HatJobOutputChunk>,
         mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+        control_rx: tokio::sync::mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         let mut backend = match &job.backend {
             JobBackend::Default => self.default_backend.clone(),
@@ -70,6 +78,25 @@ impl HatJobExecutor for CliHatJobExecutor {
         if !self.custom_args.is_empty() {
             backend.args.extend(self.custom_args.iter().cloned());
         }
+
+        if Self::should_use_codex_app_server(&job, &backend) {
+            return self
+                .codex_app_server_runtime
+                .execute_job(&job, &backend, output_tx, cancel_rx, control_rx)
+                .await;
+        }
+
+        if Self::should_use_codex_mcp(&job, &backend) {
+            // 当前 Codex MCP runtime 不支持 in-flight steer；控制消息会在 core 侧被降级为普通事件入队。
+            let _ = control_rx;
+            return self
+                .codex_mcp_runtime
+                .execute_job(&job, &backend, output_tx, cancel_rx)
+                .await;
+        }
+
+        // 非 app_server 的后端不支持 in-flight steer: 避免 control_rx 堵塞,直接丢弃即可。
+        let _ = control_rx;
 
         let (cmd, args, stdin_input, _temp_file) = backend.build_command(&job.prompt, false);
 
@@ -255,6 +282,33 @@ impl HatJobExecutor for CliHatJobExecutor {
 }
 
 impl CliHatJobExecutor {
+    fn should_use_codex_mcp(job: &HatJob, backend: &CliBackend) -> bool {
+        // ------------------------------------------------------------------
+        // 说明:
+        // - 默认走一次性 exec.
+        // - 只有当事件显式请求 `session_strategy=mcp` 时才升级为 Codex MCP 常驻模式.
+        // - 方案1(只升级,不降级): instance 一旦进入 mcp,后续 job 会 sticky 到 mcp(由 core 侧合并).
+        // ------------------------------------------------------------------
+        if backend.command != "codex" {
+            return false;
+        }
+
+        // 显式请求 app_server 时,必须让 app_server 通道接管（优先级高于 mcp）。
+        if job.session_strategy == SessionStrategy::AppServer {
+            return false;
+        }
+
+        job.session_strategy == SessionStrategy::Mcp
+    }
+
+    fn should_use_codex_app_server(job: &HatJob, backend: &CliBackend) -> bool {
+        if backend.command != "codex" {
+            return false;
+        }
+
+        job.session_strategy == SessionStrategy::AppServer
+    }
+
     async fn handle_output_line(
         job_id: u64,
         instance_id: &HatInstanceId,
@@ -433,10 +487,14 @@ pub async fn run_parallel_loop_impl(
 
     let default_backend = CliBackend::from_config(&config.cli)
         .map_err(|e| anyhow::anyhow!("Failed to create backend from config: {e}"))?;
+    let codex_mcp_runtime = Arc::new(CodexMcpRuntime::default());
+    let codex_app_server_runtime = Arc::new(CodexAppServerRuntime::default());
 
     let executor = Arc::new(CliHatJobExecutor {
         default_backend,
         custom_args,
+        codex_mcp_runtime: Arc::clone(&codex_mcp_runtime),
+        codex_app_server_runtime: Arc::clone(&codex_app_server_runtime),
     });
 
     let instance_filter_set: std::collections::HashSet<String> =
@@ -512,23 +570,26 @@ pub async fn run_parallel_loop_impl(
         let output_tx = update_tx.clone();
         let recorder_for_output = session_recorder.clone();
         let observer: OutputObserver = Arc::new(move |chunk: &HatJobOutputChunk| {
-            // 默认显示 stderr，便于调试。
-            // 如需降噪，用 `ralph run --hide-stderr` 显式隐藏。
-            if !show_stderr && matches!(chunk.stream, OutputStream::Stderr) {
-                return;
-            }
-
-            // best-effort：把 stdout 写入 cassette（并行回放用）
-            if let Some(recorder) = &recorder_for_output
-                && chunk.stream == OutputStream::Stdout
-            {
+            // best-effort：把 stdout/stderr 写入 cassette（并行回放用）
+            if let Some(recorder) = &recorder_for_output {
                 let offset_ms = recorder.elapsed().as_millis() as u64;
                 let mut line = chunk.line.clone();
                 line.push('\n');
+                let is_stdout = matches!(chunk.stream, OutputStream::Stdout);
                 recorder.record_ux_event(&UxEvent::TerminalWrite(
-                    TerminalWrite::new(line.as_bytes(), true, offset_ms)
+                    TerminalWrite::new(line.as_bytes(), is_stdout, offset_ms)
                         .with_instance_id(chunk.instance_id.to_string()),
                 ));
+            }
+
+            // 默认显示 stderr，便于调试。
+            // 如需降噪，用 `ralph run --hide-stderr` 显式隐藏。
+            //
+            // 注意:
+            // - 录制 cassette 与 "是否显示" 是两件事。
+            // - 因此即使 hide stderr,我们仍然会把 stderr 写入 cassette(用于回放/诊断)。
+            if !show_stderr && matches!(chunk.stream, OutputStream::Stderr) {
+                return;
             }
 
             let _ = output_tx.send(TuiUpdate::ParallelOutputChunk(chunk.clone()));
@@ -574,15 +635,14 @@ pub async fn run_parallel_loop_impl(
         let stderr_hidden_hint_printed = Arc::new(AtomicBool::new(false));
         let recorder_for_output = session_recorder.clone();
         let observer: OutputObserver = Arc::new(move |chunk: &HatJobOutputChunk| {
-            // best-effort：把 stdout 写入 cassette（并行回放用）
-            if let Some(recorder) = &recorder_for_output
-                && chunk.stream == OutputStream::Stdout
-            {
+            // best-effort：把 stdout/stderr 写入 cassette（并行回放用）
+            if let Some(recorder) = &recorder_for_output {
                 let offset_ms = recorder.elapsed().as_millis() as u64;
                 let mut line = chunk.line.clone();
                 line.push('\n');
+                let is_stdout = matches!(chunk.stream, OutputStream::Stdout);
                 recorder.record_ux_event(&UxEvent::TerminalWrite(
-                    TerminalWrite::new(line.as_bytes(), true, offset_ms)
+                    TerminalWrite::new(line.as_bytes(), is_stdout, offset_ms)
                         .with_instance_id(chunk.instance_id.to_string()),
                 ));
             }
@@ -700,7 +760,7 @@ pub async fn run_parallel_loop_impl(
 
     let result = loop {
         tokio::select! {
-            res = &mut supervisor_future => break res?,
+            res = &mut supervisor_future => break res,
             changed = interrupt_rx.changed() => {
                 if changed.is_ok() && *interrupt_rx.borrow() {
                     #[cfg(unix)]
@@ -715,9 +775,19 @@ pub async fn run_parallel_loop_impl(
 
                     // 让 TUI 立即退出（如果还在跑）
                     let _ = terminated_tx.send(true);
+                    codex_mcp_runtime.shutdown_all().await;
+                    codex_app_server_runtime.shutdown_all().await;
                     return Ok(TerminationReason::Interrupted);
                 }
             }
+        }
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(e) => {
+            codex_mcp_runtime.shutdown_all().await;
+            codex_app_server_runtime.shutdown_all().await;
+            return Err(e);
         }
     };
 
@@ -751,6 +821,9 @@ pub async fn run_parallel_loop_impl(
         ));
         let _ = recorder.flush();
     }
+
+    codex_mcp_runtime.shutdown_all().await;
+    codex_app_server_runtime.shutdown_all().await;
 
     Ok(reason)
 }

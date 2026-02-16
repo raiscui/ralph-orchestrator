@@ -56,7 +56,7 @@ pub use memory_store::{
     DEFAULT_MEMORIES_PATH, MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget,
 };
 pub use parallel::{
-    HatInstanceCommand, HatInstanceEvent, HatInstanceHandle, HatJob, HatJobExecutor,
+    HatInstanceCommand, HatInstanceEvent, HatInstanceHandle, HatJob, HatJobControl, HatJobExecutor,
     HatJobOutputChunk, HatJobResult, JobBackend, OutputStream, ParallelRunResult,
     ParallelSupervisor, TopicContractStore,
 };

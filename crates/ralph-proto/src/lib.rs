@@ -19,7 +19,7 @@ mod topic;
 mod ux_event;
 
 pub use error::{Error, Result};
-pub use event::{Event, WorkspaceStrategy};
+pub use event::{Event, SessionStrategy, TurnAction, WorkspaceStrategy, new_event_id};
 pub use event_bus::EventBus;
 pub use gate::{
     GateKind, GateRequest, GateResolve, GateResolvedBy, GateTimeout, TOPIC_GATE_REQUEST,

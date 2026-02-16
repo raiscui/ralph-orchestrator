@@ -261,6 +261,7 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
         assert!(output_str.contains("ux.terminal.write"));
         assert!(output_str.contains("SGVsbG8=")); // "Hello" in base64
+        assert!(output_str.contains("\"text\":\"Hello\"")); // 便于直接读 cassette 做诊断
     }
 
     #[test]

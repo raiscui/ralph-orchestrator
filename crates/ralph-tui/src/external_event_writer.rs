@@ -99,6 +99,8 @@ impl ExternalEventWriter {
         topic: &str,
         payload: String,
         target_instance: Option<String>,
+        session_strategy: Option<String>,
+        turn_action: Option<String>,
     ) -> Result<()> {
         let event = JsonlEvent {
             topic: topic.to_string(),
@@ -106,6 +108,8 @@ impl ExternalEventWriter {
             ts: Utc::now().to_rfc3339(),
             target_instance,
             workspace_strategy: None,
+            session_strategy,
+            turn_action,
         };
         self.append_event(&event)
     }
@@ -154,6 +158,8 @@ mod tests {
                 "human.message",
                 "hello".to_string(),
                 Some("writer#1".to_string()),
+                None,
+                None,
             )
             .unwrap();
 
@@ -164,6 +170,8 @@ mod tests {
         assert_eq!(parsed.topic, "human.message");
         assert_eq!(parsed.payload, Some("hello".to_string()));
         assert_eq!(parsed.target_instance, Some("writer#1".to_string()));
+        assert_eq!(parsed.session_strategy, None);
+        assert_eq!(parsed.turn_action, None);
         assert!(
             parsed.ts.len() >= 10,
             "ts should be non-empty rfc3339 string"

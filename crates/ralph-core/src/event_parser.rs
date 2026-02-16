@@ -6,7 +6,9 @@
 //! <event topic="handoff" target="reviewer">payload</event>
 //! ```
 
-use ralph_proto::{AudienceOverride, Event, HatId, HatInstanceId, WorkspaceStrategy};
+use ralph_proto::{
+    AudienceOverride, Event, HatId, HatInstanceId, SessionStrategy, TurnAction, WorkspaceStrategy,
+};
 
 /// Strips ANSI escape sequences from a string.
 ///
@@ -119,12 +121,15 @@ impl EventParser {
 
             // Parse attributes from opening tag
             let id = Self::extract_attr(opening_tag, "id");
+            let reply = Self::extract_attr(opening_tag, "reply");
             let topic = Self::extract_attr(opening_tag, "topic");
             let target = Self::extract_attr(opening_tag, "target");
             let target_instance = Self::extract_attr(opening_tag, "target_instance");
             let audience_instances = Self::extract_attr(opening_tag, "audience_instances");
             let require_delivery = Self::extract_attr(opening_tag, "require_delivery");
             let workspace_strategy = Self::extract_attr(opening_tag, "workspace_strategy");
+            let session_strategy = Self::extract_attr(opening_tag, "session_strategy");
+            let turn_action = Self::extract_attr(opening_tag, "turn_action");
 
             let Some(topic) = topic else {
                 remaining = &remaining[start_idx + tag_end + 1..];
@@ -148,6 +153,10 @@ impl EventParser {
 
             if let Some(id) = id {
                 event = event.with_id(id);
+            }
+
+            if let Some(reply) = reply {
+                event = event.with_reply(reply);
             }
 
             if let Some(target) = target {
@@ -183,6 +192,14 @@ impl EventParser {
                 .and_then(parse_workspace_strategy)
             {
                 event = event.with_workspace_strategy(strategy);
+            }
+
+            if let Some(strategy) = session_strategy.as_deref().and_then(parse_session_strategy) {
+                event = event.with_session_strategy(strategy);
+            }
+
+            if let Some(action) = turn_action.as_deref().and_then(parse_turn_action) {
+                event = event.with_turn_action(action);
             }
 
             events.push(event);
@@ -329,6 +346,24 @@ fn parse_workspace_strategy(raw: &str) -> Option<WorkspaceStrategy> {
     }
 }
 
+fn parse_session_strategy(raw: &str) -> Option<SessionStrategy> {
+    match raw.trim() {
+        "exec" => Some(SessionStrategy::Exec),
+        "mcp" => Some(SessionStrategy::Mcp),
+        "app_server" => Some(SessionStrategy::AppServer),
+        _ => None,
+    }
+}
+
+fn parse_turn_action(raw: &str) -> Option<TurnAction> {
+    match raw.trim() {
+        "start" => Some(TurnAction::Start),
+        "steer" => Some(TurnAction::Steer),
+        "interrupt" => Some(TurnAction::Interrupt),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +393,41 @@ Some trailing text.
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].target.as_ref().unwrap().as_str(), "reviewer");
+    }
+
+    #[test]
+    fn test_parse_event_with_session_strategy() {
+        let output = r#"<event topic="build.task" session_strategy="mcp">Do it</event>"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].session_strategy,
+            Some(SessionStrategy::Mcp),
+            "session_strategy should be parsed from event attributes"
+        );
+    }
+
+    #[test]
+    fn test_parse_event_with_reply() {
+        let output = r#"<event topic="build.done" reply="writer#1:7">Done</event>"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].reply.as_deref(), Some("writer#1:7"));
+    }
+
+    #[test]
+    fn test_parse_event_with_empty_reply_is_ignored() {
+        // reply 为空字符串时,等价于没有 reply(避免落盘/传递无意义的 Some("")).
+        let output = r#"<event topic="build.done" reply="">Done</event>"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].reply, None);
     }
 
     #[test]

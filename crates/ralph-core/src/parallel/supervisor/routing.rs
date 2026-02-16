@@ -16,18 +16,26 @@ use crate::prompt_overlay;
 use anyhow::Context;
 use ralph_proto::{
     Delivery, Event, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
-    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TOPIC_DISPATCH_DECISION,
-    TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT, Topic, TopicContract,
+    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, SessionStrategy,
+    TOPIC_DISPATCH_DECISION, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT, Topic,
+    TopicContract, new_event_id,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 impl ParallelSupervisor {
     pub(super) async fn route_event(&mut self, event: Event) -> anyhow::Result<()> {
         let mut event = event;
         self.ensure_event_id(&mut event);
+        // ---------------------------------------------------------------------
+        // Ralph 双实例路由补偿:
+        // - 如果事件显式指向 ralph#1,但它当前正在 Running,
+        //   则自动改投 ralph#2(按需创建)。
+        // - 这样可避免“协调面事件全部堵在 ralph#1”。
+        // ---------------------------------------------------------------------
+        self.rewrite_target_for_busy_ralph(&mut event)?;
 
         // 内部“纯记录”事件：dispatch.decision 不参与业务路由，只用于 replay/观测。
         if event.topic.as_str() == TOPIC_DISPATCH_DECISION {
@@ -306,6 +314,17 @@ impl ParallelSupervisor {
         let mut chosen_instances: Vec<HatInstanceId> = Vec::new();
 
         for hat_id in recipient_hats {
+            // -----------------------------------------------------------------
+            // Ralph 专用实例选择策略:
+            // - ralph#1 非 Running: 一律优先 ralph#1
+            // - ralph#1 Running: 尝试切给 ralph#2(按需创建)
+            // - 两个都 Running: 回退 ralph#1(由实例内 pending 队列吸收)
+            // -----------------------------------------------------------------
+            if hat_id.as_str() == "ralph" {
+                chosen_instances.push(self.choose_ralph_instance_for_delivery()?);
+                continue;
+            }
+
             let Some(instances) = self.instances_by_hat.get(&hat_id) else {
                 tracing::warn!(
                     event_id = %event.id.as_deref().unwrap_or("<none>"),
@@ -433,11 +452,9 @@ impl ParallelSupervisor {
         }
 
         // 说明：
-        // - HatInstance 产出的事件 id 由实例侧补齐（{instance}:{seq}）。
-        // - Supervisor 自己生成的事件（例如 task.start）也需要稳定 id，便于决策记录关联。
-        let id = format!("supervisor:{}", self.next_supervisor_event_seq);
-        self.next_supervisor_event_seq = self.next_supervisor_event_seq.saturating_add(1);
-        event.id = Some(id);
+        // - HatInstance 产出的事件 id 通常由实例侧补齐.
+        // - Supervisor 自己生成的事件（例如 task.start）也需要可引用 id，便于 reply/诊断/决策记录关联。
+        event.id = Some(new_event_id());
     }
 
     fn available_permits_for_routing(&self) -> usize {
@@ -848,6 +865,7 @@ Candidates:\n\
             hat_id: HatId::new("ralph"),
             prompt,
             backend: JobBackend::Default,
+            session_strategy: SessionStrategy::Exec,
             timeout: Some(Duration::from_secs(20)),
             // decider job 保持“硬超时”语义：到时间就终止（避免决策 job 挂住拖垮并行调度）。
             output_stale_timeout: None,
@@ -855,7 +873,11 @@ Candidates:\n\
         };
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let result = self.executor.execute(job, output_tx, cancel_rx).await?;
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let result = self
+            .executor
+            .execute(job, output_tx, cancel_rx, control_rx)
+            .await?;
 
         if !result.success {
             anyhow::bail!(
@@ -1058,17 +1080,64 @@ Candidates:\n\
             Some(&HatId::new("ralph")),
         );
 
-        // 直接投递到 ralph#1（不走 TopicContract，避免“配置没写 gate topic”导致二次失败）
-        let ralph_instance = HatInstanceId::from_parts("ralph", "1");
+        // 直接投递到 ralph 协调实例（不走 TopicContract，避免“配置没写 gate topic”导致二次失败）
+        let ralph_instance = self.choose_ralph_instance_for_delivery()?;
         if let Some(handle) = self.instances.get(&ralph_instance) {
             handle
                 .cmd_tx
                 .send(HatInstanceCommand::Deliver(Box::new(escalation_event)))
                 .await?;
         } else {
-            tracing::warn!("ralph#1 instance not found; escalation event was not delivered");
+            tracing::warn!("No available ralph instance found; escalation event was not delivered");
         }
 
         Ok(())
+    }
+
+    fn rewrite_target_for_busy_ralph(&mut self, event: &mut Event) -> anyhow::Result<()> {
+        let Some(target_instance) = event.target_instance.clone() else {
+            return Ok(());
+        };
+
+        if target_instance.as_str() != "ralph#1" {
+            return Ok(());
+        }
+
+        let primary = HatInstanceId::from_parts("ralph", "1");
+        if self.effective_state(&primary) != HatInstanceState::Running {
+            return Ok(());
+        }
+
+        let chosen = self.choose_ralph_instance_for_delivery()?;
+        if chosen.as_str() != primary.as_str() {
+            event.target_instance = Some(chosen);
+            event.target = None;
+        }
+
+        Ok(())
+    }
+
+    fn choose_ralph_instance_for_delivery(&mut self) -> anyhow::Result<HatInstanceId> {
+        let primary = HatInstanceId::from_parts("ralph", "1");
+        if !self.instances.contains_key(&primary) {
+            self.spawn_instance(primary.clone(), false)?;
+        }
+
+        // 主实例优先: 只要不是 Running,就固定走 ralph#1。
+        if self.effective_state(&primary) != HatInstanceState::Running {
+            return Ok(primary);
+        }
+
+        let secondary = HatInstanceId::from_parts("ralph", "2");
+        if !self.instances.contains_key(&secondary) {
+            self.spawn_instance(secondary.clone(), false)?;
+        }
+
+        if self.effective_state(&secondary) != HatInstanceState::Running {
+            return Ok(secondary);
+        }
+
+        // 双忙兜底: 保持主实例优先,由实例内部 pending 队列吸收。
+        Ok(primary)
     }
 }

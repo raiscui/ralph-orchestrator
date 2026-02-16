@@ -367,6 +367,16 @@ impl RalphExecutor {
         let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
         let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
+        // -----------------------------------------------------------------
+        // E2E 调试产物: 落盘 stdout/stderr
+        //
+        // 说明：
+        // - E2E runner 的报告通常只展示“断言摘要”，stdout 的全文不一定会写入 report.json。
+        // - 当场景在真实后端上漂移/失败时，stdout/stderr 是定位根因的最高价值证据。
+        // - 因此这里做 best-effort 落盘(失败不影响测试结果)。
+        // -----------------------------------------------------------------
+        self.write_e2e_output_artifacts(&stdout, &stderr).await;
+
         // Read scratchpad if it exists
         let scratchpad = self.read_scratchpad().await;
 
@@ -394,6 +404,27 @@ impl RalphExecutor {
             termination_reason,
             timed_out,
         })
+    }
+
+    async fn write_e2e_output_artifacts(&self, stdout: &str, stderr: &str) {
+        // 说明：
+        // - 防止极端情况下 stdout/stderr 爆量把 workspace 撑大，这里做一个字符级上限。
+        // - 200k 对排障足够(包含多个实例的归因前缀 + 关键事件),同时避免无意义的超大文件。
+        const MAX_CHARS: usize = 200_000;
+
+        let dir = self.workspace.join(".e2e");
+        if tokio::fs::create_dir_all(&dir).await.is_err() {
+            return;
+        }
+
+        let stdout_path = dir.join("stdout.txt");
+        let stderr_path = dir.join("stderr.txt");
+
+        let stdout_text = truncate_with_notice(stdout, MAX_CHARS);
+        let stderr_text = truncate_with_notice(stderr, MAX_CHARS);
+
+        let _ = tokio::fs::write(stdout_path, stdout_text).await;
+        let _ = tokio::fs::write(stderr_path, stderr_text).await;
     }
 
     /// 终止 `ralph run` 的进程组（Unix）或单进程（非 Unix）。
@@ -557,6 +588,23 @@ mod duration_serde {
         let secs = f64::deserialize(deserializer)?;
         Ok(Duration::from_secs_f64(secs))
     }
+}
+
+fn truncate_with_notice(input: &str, max_chars: usize) -> String {
+    // 说明：
+    // - 这里按“字符数”裁剪,避免把多字节 UTF-8 截断成非法字节序列。
+    // - 为了让排障者知道这是被截断的,会追加一个固定尾注。
+    let count = input.chars().count();
+    if count <= max_chars {
+        return input.to_string();
+    }
+
+    let mut out = input.chars().take(max_chars).collect::<String>();
+    out.push_str(&format!(
+        "\n... [truncated for e2e artifact, {} chars total]\n",
+        count
+    ));
+    out
 }
 
 #[cfg(test)]

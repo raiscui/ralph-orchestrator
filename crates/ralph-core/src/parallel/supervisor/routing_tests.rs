@@ -9,11 +9,12 @@ use crate::TerminationReason;
 use crate::config::{HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig};
 use crate::event_logger::EventLogger;
 use crate::parallel::{
-    HatInstanceCommand, HatInstanceHandle, HatJob, HatJobExecutor, HatJobOutputChunk, HatJobResult,
+    HatInstanceCommand, HatInstanceHandle, HatJob, HatJobControl, HatJobExecutor,
+    HatJobOutputChunk, HatJobResult,
 };
 use anyhow::Context;
 use ralph_proto::{
-    AudienceOverride, AudienceSelector, Delivery, Event, HatInstanceId, HatInstanceState,
+    AudienceOverride, AudienceSelector, Delivery, Event, HatId, HatInstanceId, HatInstanceState,
     MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TopicContract,
 };
 use std::collections::HashMap;
@@ -50,6 +51,7 @@ impl HatJobExecutor for PauseOnCompletionExecutor {
         job: HatJob,
         _output_tx: mpsc::Sender<HatJobOutputChunk>,
         mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         // 说明：
         // - 该 executor 专门用于验证：parallel-tui 下 `LOOP_COMPLETE` 不会让 Supervisor 退出，
@@ -96,6 +98,7 @@ impl HatJobExecutor for PauseMaxRuntimeExecutor {
         job: HatJob,
         _output_tx: mpsc::Sender<HatJobOutputChunk>,
         mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         if job.instance_id.as_str() != "ralph#1" {
             return Ok(HatJobResult {
@@ -154,6 +157,7 @@ impl HatJobExecutor for NotifyExecutor {
         job: HatJob,
         _output_tx: mpsc::Sender<HatJobOutputChunk>,
         mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         {
             let mut seen = self.seen.lock().await;
@@ -213,6 +217,7 @@ impl HatJobExecutor for BlockingExecutor {
         _job: HatJob,
         _output_tx: mpsc::Sender<HatJobOutputChunk>,
         mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         let now = self.started.fetch_add(1, Ordering::SeqCst) + 1;
         if now >= 1 {
@@ -502,6 +507,7 @@ impl HatJobExecutor for CompletionStopsRoutingExecutor {
         job: HatJob,
         _output_tx: mpsc::Sender<HatJobOutputChunk>,
         mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         // 记录启动次数：用于测试断言
         let instance_id = job.instance_id.to_string();
@@ -638,6 +644,7 @@ impl HatJobExecutor for TimeoutCaptureExecutor {
         job: HatJob,
         _output_tx: mpsc::Sender<HatJobOutputChunk>,
         mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        _control_rx: mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         {
             let mut seen = self.seen.lock().await;
@@ -667,6 +674,7 @@ impl HatJobExecutor for StartEventCaptureExecutor {
         job: HatJob,
         _output_tx: mpsc::Sender<HatJobOutputChunk>,
         mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        _control_rx: mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         {
             let mut seen = self.seen.lock().await;
@@ -697,6 +705,7 @@ impl HatJobExecutor for PromptCaptureExecutor {
         job: HatJob,
         _output_tx: mpsc::Sender<HatJobOutputChunk>,
         mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        _control_rx: mpsc::Receiver<HatJobControl>,
     ) -> anyhow::Result<HatJobResult> {
         {
             let mut prompts = self.prompts.lock().await;
@@ -953,12 +962,93 @@ async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
 }
 
 #[tokio::test]
+async fn busy_ralph_primary_explicit_target_is_redirected_to_secondary() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+
+    // ---------------------------------------------------------------------
+    // 说明:
+    // - 这里直接把 ralph#1 状态标记为 Running,模拟“主协调实例正在执行中”。
+    // - 目标是验证: 显式 target_instance=ralph#1 时也会切到 ralph#2。
+    // ---------------------------------------------------------------------
+    supervisor
+        .instance_states
+        .insert(HatInstanceId::new("ralph#1"), HatInstanceState::Running);
+
+    let event = Event::new("routing.escalate", "needs coordinator")
+        .with_id("e-ralph-busy-explicit")
+        .with_target_instance(HatInstanceId::new("ralph#1"));
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seen = executor.seen.lock().await.clone();
+    assert_eq!(seen, vec!["ralph#2".to_string()]);
+}
+
+#[tokio::test]
+async fn idle_ralph_prefers_primary_instance() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+
+    // 指向 ralph hat(非实例),用于触发 trigger-driven 的实例选择分支。
+    let event = Event::new("orphan.topic", "route to ralph")
+        .with_id("e-ralph-idle")
+        .with_target(HatId::new("ralph"));
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seen = executor.seen.lock().await.clone();
+    assert_eq!(seen, vec!["ralph#1".to_string()]);
+
+    // 主实例空闲时不应提前创建 ralph#2(保持按需扩容语义)。
+    assert!(
+        !supervisor
+            .instances
+            .contains_key(&HatInstanceId::new("ralph#2"))
+    );
+}
+
+#[tokio::test]
 async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
-    let config_dir = temp_dir.path().join("config");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("all_hat.md"), "ALL_HAT_PARALLEL_SENTINEL").unwrap();
+
+    // 验证编译期语义：从已内嵌 overlay 中提取一行稳定文本作为断言锚点。
+    let all_hat_overlay = crate::prompt_overlay::load_all_hat_prompt()
+        .expect("compiled all-hat overlay should not be empty");
+    let overlay_anchor = all_hat_overlay
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("compiled all-hat overlay should contain at least one non-empty line")
+        .to_string();
 
     let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
     let notify = Arc::new(Notify::new());
@@ -1021,7 +1111,7 @@ async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
         "ralph#1 prompt should include injected runtime identity"
     );
     assert!(
-        ralph_prompt.contains("ALL_HAT_PARALLEL_SENTINEL"),
+        ralph_prompt.contains(&overlay_anchor),
         "ralph#1 prompt should include all-hat overlay content"
     );
     assert!(
@@ -1033,7 +1123,7 @@ async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
         "writer#1 prompt should include injected runtime identity"
     );
     assert!(
-        writer_prompt.contains("ALL_HAT_PARALLEL_SENTINEL"),
+        writer_prompt.contains(&overlay_anchor),
         "writer#1 prompt should include all-hat overlay content"
     );
 }
@@ -1681,6 +1771,7 @@ mod test_executors {
             job: HatJob,
             _output_tx: mpsc::Sender<HatJobOutputChunk>,
             mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+            _control_rx: mpsc::Receiver<HatJobControl>,
         ) -> anyhow::Result<HatJobResult> {
             let _ = self.tx.send(job.instance_id.to_string()).await;
             Ok(HatJobResult {
@@ -1712,6 +1803,7 @@ mod test_executors {
             job: HatJob,
             _output_tx: mpsc::Sender<HatJobOutputChunk>,
             mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+            _control_rx: mpsc::Receiver<HatJobControl>,
         ) -> anyhow::Result<HatJobResult> {
             assert!(
                 !job.instance_id.as_str().contains("decider-"),

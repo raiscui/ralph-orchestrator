@@ -12,6 +12,8 @@
 //! - Code task generation via `ralph code-task`
 //! - Work item tracking via `ralph task`
 
+mod codex_app_server_session;
+mod codex_mcp_session;
 mod display;
 mod hats;
 mod init;
@@ -516,6 +518,99 @@ struct EmitArgs {
     /// Example: `--target-instance writer#1`
     #[arg(long, value_name = "HAT#KEY")]
     pub target_instance: Option<String>,
+
+    /// Optional workspace strategy override (parallel mode).
+    ///
+    /// 说明:
+    /// - 这是“提示执行环境”的信号,最终仍需 capability/permission gate 判定。
+    /// - 值为 snake_case: shared / patch / worktree
+    #[arg(long, value_enum, value_name = "STRATEGY")]
+    pub workspace_strategy: Option<EmitWorkspaceStrategy>,
+
+    /// Optional session strategy override (parallel mode).
+    ///
+    /// 说明:
+    /// - 用于显式指定本条事件的会话形态,确保 replay/诊断一致性。
+    /// - 值为 snake_case: exec / mcp / app_server
+    #[arg(long, value_enum, value_name = "STRATEGY")]
+    pub session_strategy: Option<EmitSessionStrategy>,
+
+    /// Optional turn action (App Server only).
+    ///
+    /// 说明:
+    /// - 用于 steer/interrupt 这类“运行时控制信号”。
+    /// - 值为 snake_case: start / steer / interrupt
+    #[arg(long, value_enum, value_name = "ACTION")]
+    pub turn_action: Option<EmitTurnAction>,
+}
+
+/// `ralph emit` 的 workspace_strategy 可选值.
+///
+/// 说明:
+/// - 这些值必须与 `ralph_core::event_reader::Event.workspace_strategy` 的 snake_case 约定一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum EmitWorkspaceStrategy {
+    Shared,
+    Patch,
+    Worktree,
+}
+
+impl std::fmt::Display for EmitWorkspaceStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raw = match self {
+            EmitWorkspaceStrategy::Shared => "shared",
+            EmitWorkspaceStrategy::Patch => "patch",
+            EmitWorkspaceStrategy::Worktree => "worktree",
+        };
+        write!(f, "{raw}")
+    }
+}
+
+/// `ralph emit` 的 session_strategy 可选值.
+///
+/// 说明:
+/// - 这些值必须与 `ralph_core::event_reader::Event.session_strategy` 的 snake_case 约定一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum EmitSessionStrategy {
+    Exec,
+    Mcp,
+    AppServer,
+}
+
+impl std::fmt::Display for EmitSessionStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raw = match self {
+            EmitSessionStrategy::Exec => "exec",
+            EmitSessionStrategy::Mcp => "mcp",
+            EmitSessionStrategy::AppServer => "app_server",
+        };
+        write!(f, "{raw}")
+    }
+}
+
+/// `ralph emit` 的 turn_action 可选值.
+///
+/// 说明:
+/// - 这些值必须与 `ralph_core::event_reader::Event.turn_action` 的 snake_case 约定一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum EmitTurnAction {
+    Start,
+    Steer,
+    Interrupt,
+}
+
+impl std::fmt::Display for EmitTurnAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raw = match self {
+            EmitTurnAction::Start => "start",
+            EmitTurnAction::Steer => "steer",
+            EmitTurnAction::Interrupt => "interrupt",
+        };
+        write!(f, "{raw}")
+    }
 }
 
 /// Arguments for the plan subcommand.
@@ -1334,6 +1429,16 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
     // Generate timestamp if not provided
     let ts = args.ts.unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
+    // ------------------------------------------------------------------
+    // 说明:
+    // - 这些可选字段会直接写入外部事件 JSONL。
+    // - 字段名与取值必须与 `ralph_core::event_reader::Event` 对齐,
+    //   否则 Supervisor/EventReader 将读不到这些信号。
+    // ------------------------------------------------------------------
+    let workspace_strategy = args.workspace_strategy.map(|v| v.to_string());
+    let session_strategy = args.session_strategy.map(|v| v.to_string());
+    let turn_action = args.turn_action.map(|v| v.to_string());
+
     // Validate JSON payload if --json flag is set
     let payload = if args.json && !args.payload.is_empty() {
         // Validate it's valid JSON
@@ -1356,7 +1461,10 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
             serde_json::Value::String(payload)
         },
         "ts": ts,
-        "target_instance": args.target_instance
+        "target_instance": args.target_instance,
+        "workspace_strategy": workspace_strategy,
+        "session_strategy": session_strategy,
+        "turn_action": turn_action,
     });
 
     // Read events path from marker file, fall back to CLI arg if marker doesn't exist

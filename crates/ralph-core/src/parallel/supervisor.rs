@@ -21,7 +21,10 @@ use crate::hat_registry::HatRegistry;
 use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
 use crate::{EventParser, EventReader as FileEventReader, TerminationReason};
-use ralph_proto::{Event, Hat, HatId, HatInstanceId, HatInstanceState, WorkspaceStrategy};
+use ralph_proto::{
+    Event, Hat, HatId, HatInstanceId, HatInstanceState, SessionStrategy, TurnAction,
+    WorkspaceStrategy,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,8 +78,7 @@ pub struct ParallelSupervisor {
     // Human gate 状态机（open gates + timeout）
     gates: gate::GateManager,
 
-    // Supervisor 自己生成的事件/任务序号（用于稳定 id 与临时实例名）
-    next_supervisor_event_seq: u64,
+    // Supervisor 自己生成的任务序号（用于 decider job 的稳定命名）
     next_decision_job_id: u64,
 
     // UX/运行策略（由 ralph-cli 在启动时注入；不落盘到配置文件）
@@ -116,7 +118,7 @@ impl ParallelSupervisor {
         let contracts = TopicContractStore::new(&config.parallel.topic_contracts);
         let max_running_jobs = config.parallel.autoscale.max_running_jobs.max(1);
         let job_semaphore = Arc::new(Semaphore::new(max_running_jobs));
-        let all_hat_prompt = prompt_overlay::load_all_hat_prompt(&config.core.workspace_root);
+        let all_hat_prompt = prompt_overlay::load_all_hat_prompt();
 
         Ok(Self {
             config,
@@ -140,7 +142,6 @@ impl ParallelSupervisor {
             instance_tx: None,
             queue_decisions: HashMap::new(),
             gates: gate::GateManager::new(),
-            next_supervisor_event_seq: 1,
             next_decision_job_id: 1,
             pause_on_completion_promise: false,
             disable_dynamic_instance_reap: false,
@@ -491,6 +492,18 @@ impl ParallelSupervisor {
                                 {
                                     event = event.with_workspace_strategy(strategy);
                                 }
+                                if let Some(strategy) = raw
+                                    .session_strategy
+                                    .as_deref()
+                                    .and_then(parse_session_strategy)
+                                {
+                                    event = event.with_session_strategy(strategy);
+                                }
+                                if let Some(action) =
+                                    raw.turn_action.as_deref().and_then(parse_turn_action)
+                                {
+                                    event = event.with_turn_action(action);
+                                }
                                 self.ensure_event_id(&mut event);
 
                                 // 外部事件同样写入 observer 日志，便于回放/排查（best-effort）
@@ -813,6 +826,13 @@ impl ParallelSupervisor {
         out.push_str(
             "<event topic=\"build.task\" target_instance=\"builder#1\">payload</event>\n\n",
         );
+        out.push_str("Optional: reply to a specific incoming event id (single value):\n\n");
+        out.push_str("<event topic=\"build.done\" reply=\"EVENT_ID\">done</event>\n\n");
+        out.push_str("Notes:\n");
+        out.push_str(
+            "- You do NOT need to set `id` manually; runtime will assign one if missing.\n",
+        );
+        out.push_str("- When replying, use exactly ONE reply id (no multi-reply).\n\n");
         out.push_str("After emitting an event, you MUST stop. The supervisor will route it and run the next job with fresh context.\n\n");
 
         out.push_str("## CONFIG (THIS RUN)\n");
@@ -1029,6 +1049,24 @@ fn parse_workspace_strategy(raw: &str) -> Option<WorkspaceStrategy> {
         "shared" => Some(WorkspaceStrategy::Shared),
         "patch" => Some(WorkspaceStrategy::Patch),
         "worktree" => Some(WorkspaceStrategy::Worktree),
+        _ => None,
+    }
+}
+
+fn parse_session_strategy(raw: &str) -> Option<SessionStrategy> {
+    match raw.trim() {
+        "exec" => Some(SessionStrategy::Exec),
+        "mcp" => Some(SessionStrategy::Mcp),
+        "app_server" => Some(SessionStrategy::AppServer),
+        _ => None,
+    }
+}
+
+fn parse_turn_action(raw: &str) -> Option<TurnAction> {
+    match raw.trim() {
+        "start" => Some(TurnAction::Start),
+        "steer" => Some(TurnAction::Steer),
+        "interrupt" => Some(TurnAction::Interrupt),
         _ => None,
     }
 }

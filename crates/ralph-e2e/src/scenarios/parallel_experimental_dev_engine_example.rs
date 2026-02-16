@@ -6,7 +6,7 @@
 //!   experiment.* -> review -> integration.* -> experiment.complete -> LOOP_COMPLETE
 //! - 断言尽量“硬”，优先用 `.ralph/events.jsonl`（比 stdout 更稳）
 
-use super::parallel::parse_parallel_job_line;
+use super::parallel::{parse_parallel_job_line, replace_top_level_yaml_block};
 use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
 use crate::Backend;
 use crate::executor::{ExecutionResult, PromptSource, RalphExecutor, ScenarioConfig};
@@ -15,6 +15,13 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
+
+// 这里的实验数量与 `fill_experiment_plan` 的预填内容对齐。
+//
+// 说明：
+// - 该 example 的目的是验证“多实验 -> 审计 -> 集成 -> 收敛”的完整闭环。
+// - 我们在 E2E 里强制预填 2 个实验，避免真实后端漂移导致“只跑 1 个实验”却误判通过。
+const EXPECTED_EXPERIMENTS: usize = 2;
 
 /// 直接覆盖 `examples/parallel-experimental-dev-engine` 的端到端（E2E）场景。
 ///
@@ -42,6 +49,46 @@ impl ParallelExperimentalDevEngineExampleScenario {
         }
     }
 
+    fn patch_example_config_for_e2e(
+        config_content: &str,
+        backend: Backend,
+    ) -> Result<String, ScenarioError> {
+        // ---------------------------------------------------------------------
+        // 说明：
+        // - 我们不修改仓库内的 example 文件。
+        // - 但 E2E 运行时会受到本机 `~/.codex/config.toml` 的推理强度/总结输出影响，导致噪音与耗时抖动。
+        // - 因此这里仅在 E2E workspace 覆写 `cli` 段，注入 `-c ...` 降噪/提速参数。
+        // ---------------------------------------------------------------------
+        if backend != Backend::Codex {
+            return Ok(config_content.to_string());
+        }
+
+        // 注意：该 example 需要更高权限来跑 git/文件写入，因此保留 `--sandbox danger-full-access`。
+        let cli_block = r#"cli:
+  # E2E: 覆写 Codex 参数,降噪/提速(不影响仓库 example 原文件).
+  backend: "custom"
+  command: "codex"
+  prompt_mode: "arg"
+  args:
+    - "exec"
+    - "--sandbox"
+    - "danger-full-access"
+    - "-c"
+    - 'model_reasoning_effort="low"'
+    - "-c"
+    - 'model_reasoning_summary="none"'
+    - "-c"
+    - 'rmcp_client=false'
+
+"#;
+
+        replace_top_level_yaml_block(config_content, "cli:", cli_block).map_err(|e| {
+            ScenarioError::SetupError(format!(
+                "failed to patch example ralph.yml cli block for e2e: {e}"
+            ))
+        })
+    }
+
     fn parallel_mode_visible(&self, result: &ExecutionResult) -> crate::models::Assertion {
         let stdout = &result.stdout;
         let visible = stdout.contains("[supervisor] instances");
@@ -62,12 +109,7 @@ impl ParallelExperimentalDevEngineExampleScenario {
     }
 
     fn required_topic_chain_observed(&self, result: &ExecutionResult) -> crate::models::Assertion {
-        // 这里的实验数量与我们在 E2E setup 里预填的 EXPERIMENT_PLAN 对齐。
-        // 目标：避免真实后端波动造成“偶尔只跑了一个实验”却误判通过。
-        const EXPECTED_EXPERIMENTS: usize = 2;
-
         let required = [
-            "experiment.start",
             "experiment.task",
             "experiment.result",
             "experiment.reviewed",
@@ -145,7 +187,7 @@ impl ParallelExperimentalDevEngineExampleScenario {
             .count();
 
         // 与 `fill_experiment_plan` 里的预填实验数量对齐：至少每个 experiment 都应该产出一个 commit。
-        let ok = result_with_commit >= 2;
+        let ok = result_with_commit >= EXPECTED_EXPERIMENTS;
         let builder = AssertionBuilder::new("Commit artifact present (example)")
             .expected("experiment.result payload includes commit (git hash) for each experiment")
             .actual(format!(
@@ -215,7 +257,14 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
             // 注意：必须在解析 job_id 之后再判断 completion，
             // 这样 `[ralph#1:out:job=...] LOOP_COMPLETE` 会被算作 completion 之前的 job。
-            if !completion_seen && line.trim_end().ends_with(completion_promise) {
+            //
+            // 同时我们只认可 **协调者** 输出的 completion promise：
+            // - 避免 prompt/instructions 中出现的 “不要输出 LOOP_COMPLETE” 误触发断言。
+            if !completion_seen
+                && line.trim_end().ends_with(completion_promise)
+                && line.trim_start().starts_with("[ralph#")
+                && line.contains(":out:job=")
+            {
                 completion_seen = true;
             }
         }
@@ -257,6 +306,12 @@ impl ParallelExperimentalDevEngineExampleScenario {
 ## 目标（Objective）
 
 - e2e: parallel experimental dev engine
+
+## 约束（Constraints）
+
+- 你必须派发并跑完本计划列出的所有实验条目(至少 exp-001 和 exp-002).
+- 在 exp-001 和 exp-002 都完成 `experiment.reviewed` 且 `evidence_ok=true` 之前,你不得进入 integration.
+- 你必须在第一批窗口里一次性发布两条 `experiment.task`(exp-001 与 exp-002),不要只发布一条.
 
 ## 选择标准（Selection Criteria）
 
@@ -369,13 +424,23 @@ impl TestScenario for ParallelExperimentalDevEngineExampleScenario {
             ))
         })?;
 
-        std::fs::write(dest_dir.join("ralph.yml"), config_content).map_err(|e| {
+        let patched_config = Self::patch_example_config_for_e2e(&config_content, backend)?;
+        std::fs::write(dest_dir.join("ralph.yml"), patched_config).map_err(|e| {
             ScenarioError::SetupError(format!("failed to write workspace example ralph.yml: {e}"))
         })?;
 
         let prompt_filled = Self::fill_experiment_plan(&prompt_content)?;
-        std::fs::write(dest_dir.join("PROMPT.md"), prompt_filled).map_err(|e| {
+        std::fs::write(dest_dir.join("PROMPT.md"), prompt_filled.as_str()).map_err(|e| {
             ScenarioError::SetupError(format!("failed to write workspace example PROMPT.md: {e}"))
+        })?;
+
+        // 说明：
+        // - 当前 `event_loop.prompt_file` 的路径解析是相对“进程当前工作目录”(workspace root)，
+        //   而不是相对 config 文件所在目录。
+        // - 该 example 的 `prompt_file: "PROMPT.md"` 因此会去找 `${workspace}/PROMPT.md`。
+        // - 为了保持 example 配置不变,这里在 E2E workspace root 再落一份同名 PROMPT.md 作为入口。
+        std::fs::write(workspace.join("PROMPT.md"), prompt_filled.as_str()).map_err(|e| {
+            ScenarioError::SetupError(format!("failed to write workspace root PROMPT.md: {e}"))
         })?;
 
         Ok(ScenarioConfig {

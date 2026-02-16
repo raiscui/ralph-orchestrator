@@ -3,6 +3,48 @@
 use crate::{AudienceOverride, HatId, HatInstanceId, Topic};
 use serde::{Deserialize, Serialize};
 
+// =====================================================================
+// Event id 生成规则
+// =====================================================================
+//
+// 说明:
+// - Event.id 用于"可引用主键",支持 reply(in-reply-to) 链路与诊断关联.
+// - 我们选择 nanoid 的 SAFE 字符集,避免出现引号/空格等会破坏 `<event ...>` 属性的字符.
+// - 长度不追求密码学意义的全局唯一,但需要在单次运行内极低碰撞概率,同时尽量短以降低 token 噪音.
+const DEFAULT_EVENT_ID_LEN: usize = 12;
+
+/// Generates a new URL-safe event id (nanoid).
+///
+/// 说明:
+/// - 默认长度: 12
+/// - 字符集: `nanoid::alphabet::SAFE`(URL-safe)
+#[must_use]
+pub fn new_event_id() -> String {
+    nanoid::nanoid!(DEFAULT_EVENT_ID_LEN, &nanoid::alphabet::SAFE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_EVENT_ID_LEN, new_event_id};
+
+    #[test]
+    fn new_event_id_is_short_and_url_safe() {
+        let id = new_event_id();
+
+        assert_eq!(
+            id.len(),
+            DEFAULT_EVENT_ID_LEN,
+            "nanoid length should stay stable to avoid token noise drift"
+        );
+
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "nanoid should be URL-safe, got: {id}"
+        );
+    }
+}
+
 /// Workspace strategy override for a single event/job.
 ///
 /// 说明：
@@ -21,6 +63,50 @@ pub enum WorkspaceStrategy {
     Worktree,
 }
 
+/// Session strategy override for a single event/job.
+///
+/// 说明：
+/// - 这是运行时"会话形态"的选择,用于决定 hat job 走一次性 `exec` ,还是可复用 thread 的 `mcp` .
+/// - 该字段必须是显式信号,不能只依赖隐式 thread 状态,否则 replay/诊断会失真.
+/// - 在方案1(只升级,不降级)里:
+///   - 默认 `exec`.
+///   - 任意事件请求 `mcp` 后,同一 instance 将 sticky 到 `mcp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStrategy {
+    /// 一次性会话(默认).
+    #[default]
+    Exec,
+    /// 持续会话(复用 thread,例如 Codex MCP).
+    Mcp,
+    /// App Server 会话(复用 thread + 支持 turn/steer/interrupt).
+    ///
+    /// 说明：
+    /// - 该策略用于表达“真 steer”能力：在同一 in-flight turn 内追加输入。
+    /// - 排序上它强于 `mcp`：`exec < mcp < app_server`。
+    AppServer,
+}
+
+/// Turn-level action semantic for App Server sessions.
+///
+/// 说明：
+/// - 这是“turn 级控制语义”，用于表达该事件希望如何作用于当前会话：
+///   - start: 新开 turn（默认）
+///   - steer: 对 in-flight turn 追加输入
+///   - interrupt: 中断当前 in-flight turn
+/// - 该字段是显式信号,用于保证 replay/诊断一致性。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnAction {
+    /// 新开 turn（默认）。
+    #[default]
+    Start,
+    /// 对 in-flight turn 追加输入（真 steer）。
+    Steer,
+    /// 中断当前 in-flight turn。
+    Interrupt,
+}
+
 /// An event in the pub/sub system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -31,6 +117,15 @@ pub struct Event {
     /// - 为兼容历史事件，该字段保持可选。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+
+    /// Optional in-reply-to event id (single value).
+    ///
+    /// 说明：
+    /// - 用于把本条事件与"被回复的事件"建立关联（in-reply-to）。
+    /// - 该字段为单值：一次只回复一条 event.id（避免形成多父关系导致歧义）。
+    /// - 若为空或缺失，表示该事件不是对某条特定事件的回复。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
 
     /// The routing topic for this event.
     pub topic: Topic,
@@ -74,6 +169,26 @@ pub struct Event {
     /// - 若缺失，则使用 hat 的默认 workspace.strategy。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_strategy: Option<WorkspaceStrategy>,
+
+    /// Optional per-event session strategy override.
+    ///
+    /// 说明：
+    /// - 该字段用于并行模式下的"动态会话选择":
+    ///   - ralph 可以在发布 `<event ...>` 时按需指定 `session_strategy="mcp"` .
+    ///   - hat instance 会在首次进入 mcp 后 sticky,避免 exec/mcp 来回切换造成上下文分裂.
+    /// - 若缺失: 等价于 `exec`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_strategy: Option<SessionStrategy>,
+
+    /// Optional per-event turn action (App Server only).
+    ///
+    /// 说明：
+    /// - 当 `session_strategy=app_server` 时，该字段用于表达 turn 级控制：
+    ///   - `steer`: 对 in-flight turn 追加输入
+    ///   - `interrupt`: 中断当前 turn
+    /// - 当缺失时,等价于 `start`（新开 turn）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_action: Option<TurnAction>,
 }
 
 impl Event {
@@ -81,6 +196,7 @@ impl Event {
     pub fn new(topic: impl Into<Topic>, payload: impl Into<String>) -> Self {
         Self {
             id: None,
+            reply: None,
             topic: topic.into(),
             payload: payload.into(),
             source: None,
@@ -89,6 +205,8 @@ impl Event {
             target_instance: None,
             audience_override: None,
             workspace_strategy: None,
+            session_strategy: None,
+            turn_action: None,
         }
     }
 
@@ -96,6 +214,22 @@ impl Event {
     #[must_use]
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    /// Sets the reply-to event id for this event.
+    ///
+    /// 说明：
+    /// - `reply` 语义是单值 in-reply-to。
+    /// - 传入空字符串会被规范化为 None（等价于“不回复任何事件”）。
+    #[must_use]
+    pub fn with_reply(mut self, reply: impl Into<String>) -> Self {
+        let reply = reply.into();
+        if reply.trim().is_empty() {
+            self.reply = None;
+        } else {
+            self.reply = Some(reply);
+        }
         self
     }
 
@@ -138,6 +272,20 @@ impl Event {
     #[must_use]
     pub fn with_workspace_strategy(mut self, strategy: WorkspaceStrategy) -> Self {
         self.workspace_strategy = Some(strategy);
+        self
+    }
+
+    /// Sets the per-event session strategy override.
+    #[must_use]
+    pub fn with_session_strategy(mut self, strategy: SessionStrategy) -> Self {
+        self.session_strategy = Some(strategy);
+        self
+    }
+
+    /// Sets the per-event turn action.
+    #[must_use]
+    pub fn with_turn_action(mut self, action: TurnAction) -> Self {
+        self.turn_action = Some(action);
         self
     }
 }

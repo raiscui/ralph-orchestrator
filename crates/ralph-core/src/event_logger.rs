@@ -71,6 +71,22 @@ pub struct EventRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_instance: Option<String>,
 
+    /// Optional stable identifier for this event.
+    ///
+    /// 说明：
+    /// - 该字段用于把"同一条事件"在不同层面(路由、日志、prompt)关联起来。
+    /// - 旧 events.jsonl 可能不存在该字段，因此保持可选并提供默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Optional in-reply-to event id (single value).
+    ///
+    /// 说明：
+    /// - 用于把本条事件与"被回复的事件"建立关联（in-reply-to）。
+    /// - 该字段为单值：一次只回复一条 event.id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+
     /// Event topic.
     pub topic: String,
 
@@ -132,6 +148,8 @@ impl EventRecord {
             iteration,
             hat: hat.into(),
             source_instance: event.source_instance.as_ref().map(|id| id.to_string()),
+            id: event.id.clone(),
+            reply: event.reply.clone(),
             topic: event.topic.to_string(),
             triggered: triggered.map(|h| h.to_string()),
             payload,

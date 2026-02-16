@@ -74,13 +74,24 @@ impl ReplayBackend {
     pub fn from_reader<R: BufRead>(reader: R) -> io::Result<Self> {
         let player = SessionPlayer::from_reader(reader)?;
 
-        // Pre-compute indices of terminal write records for efficient iteration
+        // Pre-compute indices of terminal write records for efficient iteration.
+        //
+        // 重要:
+        // - 我们只回放 stdout(true) 的 `ux.terminal.write`.
+        // - 目的: 保持 smoke tests 的事件解析语义稳定(解析 stdout-only),避免 stderr 的 `<event ...>` 假事件污染。
         let terminal_write_indices: Vec<usize> = player
             .records()
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.record.event == "ux.terminal.write")
-            .map(|(i, _)| i)
+            .filter_map(|(i, r)| {
+                if r.record.event != "ux.terminal.write" {
+                    return None;
+                }
+
+                let write: ralph_proto::TerminalWrite =
+                    serde_json::from_value(r.record.data.clone()).ok()?;
+                write.stdout.then_some(i)
+            })
             .collect();
 
         Ok(Self {
@@ -229,6 +240,22 @@ mod tests {
 
         assert_eq!(backend.output_count(), 2);
         assert!(!backend.is_exhausted());
+    }
+
+    #[test]
+    fn test_filters_stderr_terminal_writes() {
+        // 说明:
+        // - cassette 允许同时录制 stdout/stderr(用 `stdout` 字段区分).
+        // - 但 ReplayBackend(用于 smoke tests)必须只回放 stdout,避免 stderr 污染事件解析.
+        let line1 = make_write_record(b"STDOUT", true, 0, 1000);
+        let line2 = make_write_record(b"STDERR", false, 10, 1000);
+        let jsonl = format!("{}\n{}\n", line1, line2);
+
+        let mut backend = ReplayBackend::from_bytes(jsonl.as_bytes()).unwrap();
+
+        assert_eq!(backend.output_count(), 1);
+        assert_eq!(backend.next_output().unwrap(), b"STDOUT");
+        assert!(backend.next_output().is_none());
     }
 
     #[test]

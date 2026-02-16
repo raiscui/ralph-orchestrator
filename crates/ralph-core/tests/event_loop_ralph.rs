@@ -147,15 +147,19 @@ tasks:
 }
 
 #[test]
-fn test_ralph_prompt_includes_all_hat_overlay_from_workspace_config() {
-    let temp_dir = TempDir::new().unwrap();
-    let config_dir = temp_dir.path().join("config");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(config_dir.join("all_hat.md"), "ALL_HAT_SENTINEL_LINE").unwrap();
-
-    let mut config = RalphConfig::default();
-    config.core = config.core.with_workspace_root(temp_dir.path());
+fn test_ralph_prompt_includes_all_hat_overlay_from_compiled_config() {
+    let config = RalphConfig::default();
     let event_loop = EventLoop::new(config);
+
+    // 与生产实现保持同一编译期来源，避免回到运行时文件读取语义。
+    let compiled_overlay = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/all_hat.md"
+    ));
+    let overlay_anchor = compiled_overlay
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("compiled all-hat overlay should contain at least one non-empty line");
 
     let prompt = event_loop.build_ralph_prompt("Test context");
     assert!(
@@ -163,8 +167,8 @@ fn test_ralph_prompt_includes_all_hat_overlay_from_workspace_config() {
         "Prompt should contain all-hat overlay section"
     );
     assert!(
-        prompt.contains("ALL_HAT_SENTINEL_LINE"),
-        "Prompt should contain loaded all-hat overlay content"
+        prompt.contains(overlay_anchor),
+        "Prompt should contain compiled all-hat overlay content"
     );
 }
 

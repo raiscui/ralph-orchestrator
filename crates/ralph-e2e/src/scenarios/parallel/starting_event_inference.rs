@@ -63,6 +63,31 @@ impl ParallelStartingEventInferenceScenario {
         }
     }
 
+    fn cli_config_yaml(backend: Backend) -> String {
+        // ---------------------------------------------------------------------
+        // 说明：
+        // - 该 helper 只影响 E2E workspace 里的 `ralph.yml`，不影响仓库默认配置。
+        // - 并行场景在真实 Codex 下容易被“长篇思考/总结输出”拖慢收敛，并污染 stderr 诊断信息。
+        // - 这里用 `custom` 后端精确注入 codex 参数，做到降噪/提速而不改默认设置。
+        // ---------------------------------------------------------------------
+        match backend {
+            Backend::Codex => r#"  backend: custom
+  command: codex
+  args:
+    - exec
+    - --full-auto
+    - -c
+    - 'model_reasoning_effort="low"'
+    - -c
+    - 'model_reasoning_summary="none"'
+    - -c
+    - 'rmcp_client=false'
+"#
+            .to_string(),
+            _ => format!("  backend: {}\n", backend.as_config_str()),
+        }
+    }
+
     fn parallel_mode_visible(&self, result: &ExecutionResult) -> crate::models::Assertion {
         let visible = result.stdout.contains("[supervisor] instances");
         let builder = AssertionBuilder::new("Parallel mode visible")
@@ -210,11 +235,12 @@ impl TestScenario for ParallelStartingEventInferenceScenario {
 
         // 关键点：starting_event 不配置，让 ralph#1 自行推测入口事件。
         // 收敛：当 ralph#1 观察到 build.done（complete_publishes）后输出 LOOP_COMPLETE。
+        let cli_config = Self::cli_config_yaml(backend);
         let config_content = match self.variant {
             StartingEventInferenceVariant::SingleCandidate => format!(
                 r#"# Parallel starting_event inference E2E config for {backend}
 cli:
-  backend: {cli_backend}
+{cli_config}
 
 event_loop:
   completion_promise: "LOOP_COMPLETE"
@@ -274,12 +300,12 @@ hats:
       Then stop.
 "#,
                 backend = backend,
-                cli_backend = backend.as_config_str(),
+                cli_config = cli_config,
             ),
             StartingEventInferenceVariant::MultiCandidate => format!(
                 r#"# Parallel starting_event inference (multi-candidate) E2E config for {backend}
 cli:
-  backend: {cli_backend}
+{cli_config}
 
 event_loop:
   completion_promise: "LOOP_COMPLETE"
@@ -359,7 +385,7 @@ hats:
       Then stop.
 "#,
                 backend = backend,
-                cli_backend = backend.as_config_str(),
+                cli_config = cli_config,
             ),
         };
         std::fs::write(workspace.join("ralph.yml"), config_content)

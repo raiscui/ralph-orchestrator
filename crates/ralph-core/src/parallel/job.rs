@@ -1,7 +1,7 @@
 //! HatJob 与输出数据结构。
 
 use crate::config::HatBackend;
-use ralph_proto::{HatId, HatInstanceId};
+use ralph_proto::{HatId, HatInstanceId, SessionStrategy};
 use std::time::Duration;
 
 /// stdout/stderr 标识。
@@ -30,6 +30,17 @@ pub enum JobBackend {
     Hat(HatBackend),
 }
 
+/// HatJob 运行中控制消息（in-flight control）。
+///
+/// 说明：
+/// - 该通道用于实现 "Steer": 在同一 job/turn 进行期间追加输入。
+/// - 只有部分后端支持该能力（例如 Codex App Server 的 `turn/steer`）。
+#[derive(Debug, Clone)]
+pub enum HatJobControl {
+    /// 追加一条用户输入到当前 in-flight turn。
+    Steer { input: String },
+}
+
 /// 一次 headless CLI invocation 的描述。
 #[derive(Debug, Clone)]
 pub struct HatJob {
@@ -43,6 +54,12 @@ pub struct HatJob {
     pub prompt: String,
     /// 后端选择规则。
     pub backend: JobBackend,
+    /// 会话策略(一次性 exec vs 持续 mcp/app_server).
+    ///
+    /// 说明:
+    /// - 该字段来自事件的 `session_strategy` 合并结果.
+    /// - 方案1(只升级,不降级): instance 一旦升级,后续 job 将保持在同级或更强策略.
+    pub session_strategy: SessionStrategy,
     /// “检测超时”的窗口（None 表示不启用检测）。
     ///
     /// 说明：

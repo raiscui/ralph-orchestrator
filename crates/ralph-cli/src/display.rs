@@ -368,6 +368,8 @@ mod tests {
             triggered: None,
             payload,
             source_instance: None,
+            id: None,
+            reply: None,
             blocked_count: None,
         };
 
@@ -385,6 +387,8 @@ mod tests {
             triggered: None,
             payload: "ok".to_string(),
             source_instance: None,
+            id: None,
+            reply: None,
             blocked_count: None,
         };
 

@@ -305,7 +305,7 @@ Ralph also supports an **experimental** parallel runtime that can run multiple h
   - `event.target` / `event.target_instance` must be a subscriber (and instance must exist)
   - Otherwise the event is rejected and `routing.escalate` is emitted
 
-The UI currently runs in **log-only mode** (no parallel TUI yet). Output is attributed per instance (e.g. `[writer#1:out] ...`).
+Parallel runtime supports an **experimental supervisor TUI** when running in a real TTY (enabled by default). If TUI is disabled (or stdout is not a TTY), it falls back to **log-only mode**. Output is attributed per instance (e.g. `[writer#1:out] ...`).
 
 Runnable examples:
 - `examples/parallel-trigger-routing/` — trigger-driven routing semantics (fanout + instance queue)

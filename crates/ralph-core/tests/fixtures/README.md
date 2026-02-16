@@ -8,12 +8,13 @@ Each fixture is a JSONL file with terminal write events recorded from real or si
 The format matches the `SessionRecorder` output:
 
 ```json
-{"ts": 1000, "event": "ux.terminal.write", "data": {"bytes": "<base64>", "stdout": true, "offset_ms": 0}}
+{"ts": 1000, "event": "ux.terminal.write", "data": {"bytes": "<base64>", "text": "<utf8-lossy>", "stdout": true, "offset_ms": 0}}
 ```
 
 - `ts`: Timestamp in milliseconds
 - `event`: Event type (use `ux.terminal.write` for terminal output)
 - `data.bytes`: Base64-encoded raw terminal output bytes
+- `data.text`: UTF-8 lossy text for diagnostics (replay should still use `bytes`)
 - `data.stdout`: `true` for stdout, `false` for stderr
 - `data.offset_ms`: Offset from session start in milliseconds
 

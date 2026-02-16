@@ -78,20 +78,136 @@ flowchart LR
 在仓库根目录执行：
 
 ```bash
-# 只使用配置（目标 prompt 在 examples/parallel-experimental-dev-engine/PROMPT.md）
+# 推荐(TUI,可对话/可 steer):
+# - 目标 prompt 在 examples/parallel-experimental-dev-engine/PROMPT.md
 cargo run --bin ralph -- run \
-  -c examples/parallel-experimental-dev-engine/ralph.yml \
-  --no-tui
+  -c examples/parallel-experimental-dev-engine/ralph.yml
 ```
 
-可选：在 CLI 上覆盖 backend（如果你默认 backend 没配好，建议显式指定）：
+提示:
+- TUI 模式在 workflow 完成后不会立刻退出.
+  你可以继续查看输出,或继续在 chat 里追加输入.
+  需要退出时按 `q` 即可.
+
+日志模式(无人值守,无交互输入,适合 CI/脚本):
 
 ```bash
 cargo run --bin ralph -- run \
   -c examples/parallel-experimental-dev-engine/ralph.yml \
-  -b codex \
   --no-tui
 ```
+
+注意:
+- `--no-tui` 会在看到 completion promise(`LOOP_COMPLETE`)后退出进程.
+  因此它不适合做"持续对话".
+  如果你需要对话/steer,请用 TUI.
+
+可选：在 CLI 上覆盖 backend（如果你默认 backend 没配好,建议显式指定）：
+
+```bash
+cargo run --bin ralph -- run \
+  -c examples/parallel-experimental-dev-engine/ralph.yml \
+  -b codex
+```
+
+### 3) 交互与对话(可选)
+
+并行模式下,"在运行中追加输入"有两种方式:
+
+1) TUI 内置 chat(推荐):
+   - `hello`:
+     - 发送 `human.message` 到"当前选中实例".
+     - 如果提示 `send failed: no instance selected`,先在实例列表里选中一个实例(例如 `ralph#1`).
+   - `@ralph#1 hello`: 定向发送到 `ralph#1`.
+   - `!steer <text...>`: 以 app-server 的 `turn/steer` 方式追加输入(默认定向到选中实例).
+   - `!steer @ralph#1 <text...>`: 定向 steer 到 `ralph#1`.
+   - `!interrupt [@<instance>]`: 中断当前 turn(不中断 thread).
+
+2) 另开一个终端,通过"外部事件文件(JSONL)"注入消息(适合 `--no-tui` 或你不方便进 TUI):
+
+   先确认当前 run 正在读哪个事件文件:
+
+   ```bash
+   cat .ralph/current-events
+   ```
+
+   方式A(推荐): 用 `ralph emit` 注入 `human.message`:
+
+   ```bash
+   # 注意: 最好在启动 ralph 的同一工作区根目录执行,避免写错文件
+   cargo run --bin ralph -- emit human.message "继续" --target-instance ralph#1
+   ```
+
+   方式B(推荐,用于 steer/interrupt): 直接用 `ralph emit` 写入控制字段:
+
+   - steer(等价 TUI 的 `!steer @ralph#1 ...`):
+
+     ```bash
+     cargo run --bin ralph -- emit human.message "继续,把窗口扩大到2" \
+       --target-instance ralph#1 \
+       --session-strategy app_server \
+       --turn-action steer
+     ```
+
+   - interrupt(等价 TUI 的 `!interrupt @ralph#1`):
+
+     ```bash
+     cargo run --bin ralph -- emit human.message "" \
+       --target-instance ralph#1 \
+       --turn-action interrupt
+     ```
+
+   方式C(高级,可选): 手工追加一行 JSONL,支持 steer/interrupt(当你不想依赖 CLI 参数时):
+
+   - steer(等价 TUI 的 `!steer @ralph#1 ...`):
+
+     ```bash
+     python3 - <<'PY'
+import json
+from datetime import datetime, timezone
+
+events_path = open(".ralph/current-events", "r", encoding="utf-8").read().strip()
+event = {
+    "topic": "human.message",
+    "payload": "继续,把窗口扩大到2",
+    "ts": datetime.now(timezone.utc).isoformat(),
+    "target_instance": "ralph#1",
+    "session_strategy": "app_server",
+    "turn_action": "steer",
+}
+with open(events_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+print(f"appended: {events_path}")
+PY
+     ```
+
+   - interrupt(等价 TUI 的 `!interrupt @ralph#1`):
+
+     ```bash
+     python3 - <<'PY'
+import json
+from datetime import datetime, timezone
+
+events_path = open(".ralph/current-events", "r", encoding="utf-8").read().strip()
+event = {
+    "topic": "human.message",
+    "payload": "",
+    "ts": datetime.now(timezone.utc).isoformat(),
+    "target_instance": "ralph#1",
+    "turn_action": "interrupt",
+}
+with open(events_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+print(f"appended: {events_path}")
+PY
+     ```
+
+   常见"无回应"的原因与排查:
+   - 你用的是 `--no-tui`,并且 workflow 已经输出 `LOOP_COMPLETE` 并退出进程.
+   - 你在错误的目录执行注入,导致写入的不是当前 run 的 `.ralph/current-events` 指向文件.
+   - 你写错了 `target_instance`(例如实例不存在/拼写不一致).
+   - steer 的前提是目标实例当前存在 in-flight turn 且运行在 `session_strategy=app_server`.
+     否则会降级为普通 message,只会在下一轮被消费.
 
 ---
 
@@ -158,18 +274,19 @@ parallel:
 - 结果可能报错类似:
   - `fatal: Unable to create .../.git/worktrees/.../index.lock: Operation not permitted`
 
-因此,本 example 默认启用 `worktree_backend: clone`:
-
-```yaml
-parallel:
-  workspace:
-    worktree_backend: clone
-```
-
-如果你在本机/CI 环境里没有上述限制,并且更看重速度与磁盘占用,可以切回 `worktree`:
+因此,本 example 默认启用 `worktree_backend: worktree`:
 
 ```yaml
 parallel:
   workspace:
     worktree_backend: worktree
+```
+
+如果你的 runner 后端确实运行在"只能写当前目录"的沙箱里,并遇到上述权限报错,
+再切换为 `clone`(更稳,但更慢):
+
+```yaml
+parallel:
+  workspace:
+    worktree_backend: clone
 ```

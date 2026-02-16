@@ -871,3 +871,130 @@
   - 建议固定使用 `<<'EOF'` 写入/追加 Markdown,避免意外执行.
 - [二次写入偏差]: 阻塞信息追加时再次触发命令替换.
   - 同上,一律用带引号 heredoc,并尽量避免在 heredoc 内容里出现反引号.
+
+## 2026-02-11 22:48 +0800 | 错误修复: parallel-hat-instances 在真实 Codex 下超时与收敛失败
+
+### 问题
+
+- `parallel-hat-instances` / `parallel-hat-instances-zh` 在真实 Codex E2E 中出现:
+  - `routing.escalate` 缺失
+  - `LOOP_COMPLETE` 未出现
+  - 120s 超时
+  - 固定实例计数断言不稳定
+
+### 原因
+
+- 场景流程对模型时序依赖过高:
+  - 二次任务落点、collector 条件分支、手工 completion candidate 之间存在漂移.
+- 断言过于绑定固定实例编号,与动态并行调度天然有冲突.
+
+### 修复
+
+- 场景配置改为确定性链路:
+  - `writer.instances=2`
+  - `tester` 用 `target_instance=writer#2` 固定第二任务落点
+  - `collector` 只发 invalid target `build.task(target=ghost_hat)`,由 Supervisor 自动生成 `routing.escalate`
+  - `max_runtime_seconds` 调整为 180
+- 断言改为语义稳定:
+  - 按 hat 总运行次数校验 + `writer#2` 必须出现
+- 脚本基线修复:
+  - run 脚本改为 release 构建 + 清理整个 scenario workspace
+
+### 验证
+
+- `bash scripts/run-parallel-hat-instances-codex.sh` 通过(2/2)
+- `cargo test -p ralph-e2e` 全通过
+
+### 经验
+
+- 并行 E2E 优先使用“实例直达 + 运行时自动错误路径”构造 completion candidate。
+- 断言应优先验证语义,避免死绑固定实例号.
+
+## 2026-02-11 23:19 +0800 | 修复: all_hat 编译期改造后的旧语义测试失败
+
+### 问题
+
+- 在执行 `cargo test` 时,`crates/ralph-core/tests/event_loop_ralph.rs` 的
+  `test_ralph_prompt_includes_all_hat_overlay_from_workspace_config` 失败.
+
+### 根因
+
+- 该测试仍基于旧语义:
+  - 运行时在临时 workspace 创建 `config/all_hat.md` 并断言 prompt 读取到该文件.
+- 但本次需求已将 all_hat 改为编译期内嵌,运行时 workspace 文件不再参与.
+
+### 修复
+
+- 将测试改为编译期语义断言:
+  - 使用 `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/all_hat.md"))` 作为期望来源.
+  - 取首个非空行作为锚点,断言 prompt 包含该锚点.
+- 用例重命名为:
+  - `test_ralph_prompt_includes_all_hat_overlay_from_compiled_config`.
+
+### 验证
+
+- `cargo test -p ralph-core --test event_loop_ralph test_ralph_prompt_includes_all_hat_overlay_from_compiled_config` ✅
+- `cargo test` ✅
+
+## 2026-02-14 15:38 +0800 | 修复: HatJobExecutor execute 签名扩展后测试编译失败
+
+### 现象
+
+- 执行 `cargo test` 编译失败:
+  - E0050: `execute` 参数数量不匹配(测试里的 Fake Executor 仍是旧签名).
+  - E0063: 初始化 `HatInstanceActor` 时缺少新字段 `control_tx` 与 `running_session_strategy`.
+
+### 根因
+
+- 为支持 Codex App Server 的 in-flight `turn/steer`,我们把 `HatJobExecutor::execute(...)` 扩展为带 `control_rx`.
+- 同时 `HatInstanceActor` 增加了 in-flight 控制通道字段.
+- 但部分单元测试没有同步更新,导致编译期直接失败.
+
+### 修复
+
+- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+  - 所有 `HatJobExecutor` 测试实现补齐 `_control_rx: mpsc::Receiver<HatJobControl>`.
+- `crates/ralph-core/src/parallel/instance.rs`
+  - 单测初始化 `HatInstanceActor { ... }` 补齐:
+    - `running_session_strategy: None`
+    - `control_tx: None`
+- 运行 `cargo fmt` 统一格式.
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-02-14 18:01 +0800 | 修复: ralph-e2e `parallel-hat-instances` 英文场景在 180s max_runtime 下不收敛
+
+### 现象
+
+- 运行 `bash scripts/run-parallel-hat-instances-codex.sh`:
+  - `parallel-hat-instances` 180s 内未看到 `LOOP_COMPLETE`,最终以 max_runtime 退出.
+  - `parallel-hat-instances-zh` 可通过.
+
+### 根因
+
+- `routing.escalate` 的触发依赖 collector 输出 invalid target 事件.
+- 英文 collector 在真实 Codex 下会输出较长解释文本,导致 `routing.escalate` 出现偏晚.
+- `ralph#1` 第二轮收敛 job 启动后,剩余时间不足以稳定输出 `LOOP_COMPLETE`.
+
+### 修复
+
+- `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
+  - 收敛 Collector 的 instructions,消除“单行 stdout vs 多行 event block”的歧义.
+  - `event_loop.max_runtime_seconds: 180 -> 240`.
+- `crates/ralph-e2e/src/executor.rs`
+  - E2E best-effort 落盘 stdout/stderr 到 `${workspace}/.e2e/`,便于复盘失败现场.
+
+### 验证
+
+- `cargo test -p ralph-e2e` ✅
+- `bash scripts/run-parallel-hat-instances-codex.sh` ✅
+## 2026-02-15 12:00 +0800 | prompt: ralph_hat_instance_id 置顶(避免示例歧义)
+- 现象: overlay 示例后紧跟 ralph_hat_instance_id,模型误当示例续行.
+- 根因: overlay 注入无条件置顶,导致 runtime id 不在第一行.
+- 修复: prompt_overlay 在 runtime id 行之后插入 overlay.
+- 回归: 新增单测锁死 "runtime id 第一行".
+- 验证: cargo fmt && cargo test ✅

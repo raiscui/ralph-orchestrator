@@ -13,6 +13,10 @@ pub enum ChatSubmit {
     HumanMessage {
         target_instance: Option<String>,
         payload: String,
+        /// 可选会话策略覆盖(例如 app_server).
+        session_strategy: Option<String>,
+        /// 可选 turn 动作(start/steer/interrupt).
+        turn_action: Option<String>,
     },
     /// gate.resolve（由 `!approve/!deny/!resolve` 触发）。
     GateResolve { gate_id: String, decision: Value },
@@ -26,6 +30,8 @@ pub enum ChatSubmit {
 /// - `!approve <gate_id>` → gate.resolve(decision=true)
 /// - `!deny <gate_id>` → gate.resolve(decision=false)
 /// - `!resolve <gate_id> <text...>` → gate.resolve(decision="<text...>")
+/// - `!steer [@writer#2] <text...>` → human.message(session_strategy=app_server, turn_action=steer)
+/// - `!interrupt [@writer#2]` → human.message(turn_action=interrupt)
 pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
     let trimmed_all = input.trim();
     if trimmed_all.is_empty() {
@@ -88,6 +94,68 @@ pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
                     decision: Value::String(after),
                 });
             }
+            "steer" => {
+                // 语法：
+                // - !steer <text...>           (默认定向到 selected_instance)
+                // - !steer @writer#2 <text...> (显式定向)
+                let mut parts_vec = parts.collect::<Vec<_>>();
+                let mut target_instance: Option<String> = None;
+
+                if let Some(first) = parts_vec.first().copied()
+                    && first.starts_with('@')
+                {
+                    target_instance = Some(first.trim_start_matches('@').to_string());
+                    parts_vec.remove(0);
+                }
+
+                let mut after = parts_vec.join(" ");
+                if !rest.is_empty() {
+                    if !after.is_empty() {
+                        after.push('\n');
+                    }
+                    after.push_str(rest);
+                }
+
+                if after.trim().is_empty() {
+                    return Err("usage: !steer [@<instance_id>] <message>".to_string());
+                }
+
+                return Ok(ChatSubmit::HumanMessage {
+                    target_instance,
+                    payload: after,
+                    session_strategy: Some("app_server".to_string()),
+                    turn_action: Some("steer".to_string()),
+                });
+            }
+            "interrupt" => {
+                // 语法：
+                // - !interrupt           (默认定向到 selected_instance)
+                // - !interrupt @writer#2 (显式定向)
+                let mut parts_vec = parts.collect::<Vec<_>>();
+                let mut target_instance: Option<String> = None;
+
+                if let Some(first) = parts_vec.first().copied()
+                    && first.starts_with('@')
+                {
+                    target_instance = Some(first.trim_start_matches('@').to_string());
+                    parts_vec.remove(0);
+                }
+
+                let mut after = parts_vec.join(" ");
+                if !rest.is_empty() {
+                    if !after.is_empty() {
+                        after.push('\n');
+                    }
+                    after.push_str(rest);
+                }
+
+                return Ok(ChatSubmit::HumanMessage {
+                    target_instance,
+                    payload: after,
+                    session_strategy: None,
+                    turn_action: Some("interrupt".to_string()),
+                });
+            }
             _ => {
                 return Err(format!("unknown command: !{cmd}"));
             }
@@ -130,6 +198,8 @@ pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
         return Ok(ChatSubmit::HumanMessage {
             target_instance: Some(target.to_string()),
             payload,
+            session_strategy: None,
+            turn_action: None,
         });
     }
 
@@ -137,6 +207,8 @@ pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
     Ok(ChatSubmit::HumanMessage {
         target_instance: None,
         payload: trimmed_all.to_string(),
+        session_strategy: None,
+        turn_action: None,
     })
 }
 
@@ -151,7 +223,9 @@ mod tests {
             submit,
             ChatSubmit::HumanMessage {
                 target_instance: None,
-                payload: "hello".to_string()
+                payload: "hello".to_string(),
+                session_strategy: None,
+                turn_action: None,
             }
         );
     }
@@ -163,7 +237,9 @@ mod tests {
             submit,
             ChatSubmit::HumanMessage {
                 target_instance: Some("writer#2".to_string()),
-                payload: "hello world".to_string()
+                payload: "hello world".to_string(),
+                session_strategy: None,
+                turn_action: None,
             }
         );
     }
@@ -181,7 +257,9 @@ mod tests {
             submit,
             ChatSubmit::HumanMessage {
                 target_instance: None,
-                payload: "hello\nline2".to_string()
+                payload: "hello\nline2".to_string(),
+                session_strategy: None,
+                turn_action: None,
             }
         );
     }
@@ -193,7 +271,9 @@ mod tests {
             submit,
             ChatSubmit::HumanMessage {
                 target_instance: Some("writer#2".to_string()),
-                payload: "hello\nline2\nline3".to_string()
+                payload: "hello\nline2\nline3".to_string(),
+                session_strategy: None,
+                turn_action: None,
             }
         );
     }
@@ -205,7 +285,51 @@ mod tests {
             submit,
             ChatSubmit::HumanMessage {
                 target_instance: Some("writer#2".to_string()),
-                payload: "line2".to_string()
+                payload: "line2".to_string(),
+                session_strategy: None,
+                turn_action: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_steer_command_defaults_to_no_target() {
+        let submit = parse_chat_submit("!steer go").unwrap();
+        assert_eq!(
+            submit,
+            ChatSubmit::HumanMessage {
+                target_instance: None,
+                payload: "go".to_string(),
+                session_strategy: Some("app_server".to_string()),
+                turn_action: Some("steer".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_steer_command_with_target() {
+        let submit = parse_chat_submit("!steer @writer#2 go").unwrap();
+        assert_eq!(
+            submit,
+            ChatSubmit::HumanMessage {
+                target_instance: Some("writer#2".to_string()),
+                payload: "go".to_string(),
+                session_strategy: Some("app_server".to_string()),
+                turn_action: Some("steer".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_interrupt_command() {
+        let submit = parse_chat_submit("!interrupt").unwrap();
+        assert_eq!(
+            submit,
+            ChatSubmit::HumanMessage {
+                target_instance: None,
+                payload: String::new(),
+                session_strategy: None,
+                turn_action: Some("interrupt".to_string()),
             }
         );
     }

@@ -41,7 +41,7 @@
 - 不再 warning “ignores --record-session”
 - 写入 `_meta.loop_start`
 - 写入 `bus.publish`（每条业务事件一条）
-- 写入 `ux.terminal.write`（stdout-only，用于回放/解析）
+- 写入 `ux.terminal.write`（stdout+stderr,用 `data.stdout` 区分; 事件解析/回放默认只使用 stdout）
 
 ### G3: 并行回放可分流（避免多实例重复回放）
 
@@ -72,11 +72,17 @@
 
 ## 设计要点
 
-1) **stdout-only**：并行模式下仍遵循既有安全语义，录制与回放都以 stdout 为主，避免 stderr 的 `<event ...>` 假事件污染。
+1) **stdout-only(event parsing)**：
+   - cassette 允许录制 stdout+stderr(便于诊断),但事件解析/ReplayBackend 必须只看 stdout.
+   - 目的: 避免 stderr 的 `<event ...>` 假事件污染,导致路由漂移或 completion 假阳性。
 
 2) **低侵入**：尽量用现有 `SessionRecorder` / `Record` / `TerminalWrite`，避免引入新格式。
 
 3) **可回放**：录制文件需要能被 `SessionPlayer` 读取，并被 `ralph-e2e mock-cli` 输出。
+
+4) **可读性(诊断)**：`ux.terminal.write` 的 payload 除了 `bytes`(base64) 之外，还会写入 `text`(UTF-8 lossy)。
+   - `text` 仅用于人类直接阅读 JSONL 排障.
+   - 回放与事件解析仍以 `bytes` 为准.
 
 ---
 
@@ -90,4 +96,3 @@
   - `_meta.loop_start`
   - `ux.terminal.write`（至少一条）
 - `ralph-e2e --mock --filter parallel-hat-instances --backend codex` 能正常启动并执行（不因 mock-cli 参数解析失败而提前退出）。
-

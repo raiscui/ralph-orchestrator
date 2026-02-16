@@ -82,6 +82,10 @@
 - **workspace override（Event 字段）**
   - Event 可显式声明 `workspace_strategy=shared|patch|worktree`
   - 合并规则（同一 job 合并多个事件时）：`worktree > patch > shared`
+- **session override（Event 字段）**
+  - Event 可显式声明 `session_strategy=exec|mcp`
+  - 合并规则（同一 job 合并多个事件时）：只要任意事件请求 `mcp`,本 job 视为 `mcp`
+  - 方案1（只升级,不降级）：某 instance 首次进入 `mcp` 后将 sticky 到 `mcp`,避免 exec/mcp 来回切换造成上下文分裂
 - **严格 target 校验**
   - `event.target` / `event.target_instance` 必须是订阅者（并且 target_instance 必须存在）
   - 校验失败：拒绝投递并发出 `routing.escalate`（可观测信号）
@@ -487,6 +491,12 @@ parallel:
 >
 > ```text
 > <event topic="build.task" workspace_strategy="worktree">...</event>
+> ```
+>
+> 并行模式当前还支持 per-event session override（方案1: 只升级,不降级）:
+>
+> ```text
+> <event topic="build.task" session_strategy="mcp">...</event>
 > ```
 
 ---

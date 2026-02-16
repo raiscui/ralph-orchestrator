@@ -172,7 +172,7 @@ impl EventLoop {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| ".ralph/events.jsonl".to_string());
         let event_reader = EventReader::new(&events_path);
-        let all_hat_prompt = prompt_overlay::load_all_hat_prompt(&config.core.workspace_root);
+        let all_hat_prompt = prompt_overlay::load_all_hat_prompt();
 
         Self {
             config,
@@ -704,13 +704,26 @@ impl EventLoop {
         let topic = &event.topic;
         let payload = &event.payload;
 
+        // 事件引用信息: id + 可选 reply.
+        //
+        // 说明：
+        // - 并行模式下 hat 的 Incoming Events 会单独注入 id/reply。
+        // - 串行模式下这里同样展示,便于人类排查与未来扩展(例如外部事件 reply)。
+        let id = event.id.as_deref().unwrap_or("<none>");
+        let reply = event
+            .reply
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|r| format!(" reply={r}"))
+            .unwrap_or_default();
+
         if topic.as_str() == "task.start" || topic.as_str() == "task.resume" {
             format!(
-                "Event: {} - <top-level-prompt>\n{}\n</top-level-prompt>",
-                topic, payload
+                "Event: {} (id={}{}) - <top-level-prompt>\n{}\n</top-level-prompt>",
+                topic, id, reply, payload
             )
         } else {
-            format!("Event: {} - {}", topic, payload)
+            format!("Event: {} (id={}{}) - {}", topic, id, reply, payload)
         }
     }
 

@@ -4,7 +4,7 @@
 //! Multiple observers can be added to receive all published events for
 //! recording, TUI updates, and benchmarking purposes.
 
-use crate::{Event, Hat, HatId};
+use crate::{Event, Hat, HatId, new_event_id};
 use std::collections::HashMap;
 
 /// Type alias for the observer callback function.
@@ -73,7 +73,16 @@ impl EventBus {
     /// Returns the list of hat IDs that received the event.
     /// If an observer is set, it receives the event before routing.
     #[allow(clippy::needless_pass_by_value)] // Event is cloned to multiple recipients
-    pub fn publish(&mut self, event: Event) -> Vec<HatId> {
+    pub fn publish(&mut self, mut event: Event) -> Vec<HatId> {
+        // 事件主键：如果缺失 id,则由 EventBus 自动补齐.
+        //
+        // 说明：
+        // - 并行模式下 id 由 Supervisor/HatInstance 侧生成,这里仅覆盖串行/协议内发布的场景。
+        // - 该逻辑必须发生在 observer 之前,保证日志/诊断拿到的事件与路由一致。
+        if event.id.is_none() {
+            event = event.with_id(new_event_id());
+        }
+
         // Notify all observers before routing
         for observer in &self.observers {
             observer(&event);
@@ -226,6 +235,31 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         assert!(bus.take_pending(&hat_id).is_empty());
+    }
+
+    #[test]
+    fn test_publish_assigns_event_id_when_missing() {
+        let mut bus = EventBus::new();
+
+        let hat = Hat::new("impl", "Implementer").subscribe("task.*");
+        bus.register(hat);
+
+        bus.publish(Event::new("task.start", "Start"));
+
+        let hat_id = HatId::new("impl");
+        let events = bus.take_pending(&hat_id);
+
+        assert_eq!(events.len(), 1);
+        let id = events[0]
+            .id
+            .as_deref()
+            .expect("EventBus should assign event.id when missing");
+        assert_eq!(id.len(), 12, "EventBus should assign a short nanoid");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "EventBus should assign URL-safe nanoid id, got: {id}"
+        );
     }
 
     #[test]

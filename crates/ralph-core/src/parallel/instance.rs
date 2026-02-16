@@ -5,7 +5,7 @@
 //! - outbox：实例向 Supervisor 回传的状态变更 / 解析出的事件
 //! - 每个实例串行执行自己的 job，但多个实例之间可并行
 
-use super::{HatJob, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend};
+use super::{HatJob, HatJobControl, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend};
 use crate::config::{
     HatConfig, PermissionMode, PermissionsConfig, WorkspaceRuntimeConfig, WorkspaceStrategy,
     WorktreeBackend,
@@ -16,7 +16,7 @@ use crate::prompt_overlay;
 use anyhow::Context;
 use ralph_proto::{
     Event, GateKind, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
-    TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE,
+    SessionStrategy, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TurnAction, new_event_id,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -95,6 +95,17 @@ impl HatInstanceHandle {
 
         let actor_instance_id = instance_id.clone();
         tokio::spawn(async move {
+            // -----------------------------------------------------------------
+            // 会话策略默认值:
+            // - ralph(协调者)默认使用 app_server 常驻会话,以支持 turn/steer/interrupt.
+            // - 其他 hat 默认 exec,仅在事件显式请求时升级(mcp/app_server).
+            // -----------------------------------------------------------------
+            let default_session_locked_to = if hat.id.as_str() == "ralph" {
+                SessionStrategy::AppServer
+            } else {
+                SessionStrategy::Exec
+            };
+
             let mut actor = HatInstanceActor {
                 instance_id: actor_instance_id,
                 hat,
@@ -117,14 +128,16 @@ impl HatInstanceHandle {
                 state: HatInstanceState::Created,
                 pending: Vec::new(),
                 next_job_id: 1,
-                next_event_seq: 1,
                 dynamic_idle_since: None,
+                session_locked_to: default_session_locked_to,
                 pending_permission_gate: None,
                 worktree_override: None,
                 hooks_override: None,
                 running_workspace: None,
                 running: None,
+                running_session_strategy: None,
                 cancel_tx: None,
+                control_tx: None,
             };
 
             if let Err(e) = actor.run().await {
@@ -179,9 +192,16 @@ struct HatInstanceActor {
     state: HatInstanceState,
     pending: Vec<Event>,
     next_job_id: u64,
-    next_event_seq: u64,
     /// 动态实例进入“真正空闲”状态的起始时间（使用 tokio 时间，便于测试 time control）。
     dynamic_idle_since: Option<Instant>,
+    /// 会话策略 sticky(只升级,不降级).
+    ///
+    /// 说明：
+    /// - 该字段表示“该实例已进入过的最强会话形态”。
+    /// - 合并规则：`job.session_strategy = max(merged_pending, session_locked_to)`.
+    /// - 更新规则：每次 job 启动后,`session_locked_to = max(session_locked_to, job.session_strategy)`.
+    /// - 排序强弱：`exec < mcp < app_server`.
+    session_locked_to: SessionStrategy,
 
     // =====================================================================
     // Permissions / gate（用于 worktree & hooks）
@@ -196,7 +216,11 @@ struct HatInstanceActor {
     running_workspace: Option<RunningWorkspace>,
 
     running: Option<tokio::task::JoinHandle<anyhow::Result<HatJobResult>>>,
+    /// 当前 in-flight job 的会话策略(用于判断是否允许 steer).
+    running_session_strategy: Option<SessionStrategy>,
     cancel_tx: Option<watch::Sender<bool>>,
+    /// in-flight 控制通道（用于 `turn/steer`）。
+    control_tx: Option<mpsc::Sender<HatJobControl>>,
 }
 
 // ============================================================================
@@ -258,11 +282,52 @@ impl HatInstanceActor {
                 cmd = self.cmd_rx.recv() => {
                     let Some(cmd) = cmd else { break };
                     match cmd {
-                        HatInstanceCommand::Deliver(event) => {
+                        HatInstanceCommand::Deliver(mut event) => {
                             // 权限 gate 的 resolve 是“运行时控制信号”，不应该进入 LLM 的业务事件列表。
                             if self.try_handle_permission_gate_resolve(event.as_ref()).await? {
                                 // gate 已处理完毕（可能解锁了 job），继续 loop
                                 continue;
+                            }
+
+                            // turn_action 属于“运行时控制信号”：
+                            // - interrupt: 取消当前 job（best-effort）
+                            // - steer: 尝试对 in-flight turn 追加输入；不满足条件则降级为普通消息入队
+                            match event.turn_action {
+                                Some(TurnAction::Interrupt) => {
+                                    if let Some(cancel_tx) = &self.cancel_tx {
+                                        let _ = cancel_tx.send(true);
+                                    }
+                                    continue;
+                                }
+                                Some(TurnAction::Steer) => {
+                                    // steer 只在 app_server 下有意义：缺失时也强制升级为 app_server（避免丢语义）。
+                                    if event.session_strategy.is_none() {
+                                        event.session_strategy = Some(SessionStrategy::AppServer);
+                                    }
+
+                                    let can_steer_in_flight = self.running.is_some()
+                                        && self.running_session_strategy == Some(SessionStrategy::AppServer);
+
+                                    if can_steer_in_flight
+                                        && let Some(control_tx) = &self.control_tx
+                                        && !event.payload.trim().is_empty()
+                                    {
+                                        let _ = control_tx
+                                            .send(HatJobControl::Steer {
+                                                input: event.payload.clone(),
+                                            })
+                                            .await;
+                                        continue;
+                                    }
+
+                                    // 降级：把 steer 当作普通消息入队（避免丢消息）。
+                                    event.turn_action = None;
+                                }
+                                Some(TurnAction::Start) => {
+                                    // start 是默认语义,进入 pending 列表前可清空,避免污染 prompt.
+                                    event.turn_action = None;
+                                }
+                                None => {}
                             }
 
                             self.pending.push(*event);
@@ -289,6 +354,8 @@ impl HatInstanceActor {
                 }, if self.running.is_some() => {
                     self.running = None;
                     self.cancel_tx = None;
+                    self.control_tx = None;
+                    self.running_session_strategy = None;
 
                     let Some(res) = res else { continue };
                     let job_result = res.context("JoinHandle await failed")??;
@@ -414,6 +481,8 @@ impl HatInstanceActor {
 
         // 4.2：workspace_strategy 合并规则（最强隔离优先：worktree > patch > shared）
         let strategy = self.merged_workspace_strategy_for_pending();
+        // 会话策略合并规则(方案1: 只升级,不降级).
+        let session_strategy = self.merged_session_strategy_for_pending();
         let (hooks_on_acquire, hooks_on_release) = self.requested_workspace_hooks();
 
         // 1) worktree 权限判定（必要时发 gate.request 并阻塞）
@@ -541,12 +610,17 @@ impl HatInstanceActor {
         let timeout = self.job_timeout;
         let output_stale_timeout = self.job_output_stale_timeout;
 
+        // 方案1: 只升级,不降级.
+        // 记录该 instance 进入过的“最强会话形态”,避免 exec/mcp/app_server 来回切换造成上下文分裂.
+        self.session_locked_to = self.session_locked_to.max(session_strategy);
+
         let job = HatJob {
             job_id,
             instance_id: self.instance_id.clone(),
             hat_id: self.hat.id.clone(),
             prompt,
             backend,
+            session_strategy,
             timeout,
             output_stale_timeout,
             workdir: self
@@ -559,13 +633,19 @@ impl HatInstanceActor {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         self.cancel_tx = Some(cancel_tx);
 
+        let (control_tx, control_rx) = mpsc::channel::<HatJobControl>(32);
+        self.control_tx = Some(control_tx);
+        self.running_session_strategy = Some(session_strategy);
+
         let executor = Arc::clone(&self.executor);
         let output_tx = self.output_tx.clone();
 
         self.set_state(HatInstanceState::Running).await?;
         self.running = Some(tokio::spawn(async move {
             let _permit = permit;
-            executor.execute(job, output_tx, cancel_rx).await
+            executor
+                .execute(job, output_tx, cancel_rx, control_rx)
+                .await
         }));
         Ok(())
     }
@@ -587,6 +667,18 @@ impl HatInstanceActor {
         }
 
         merged
+    }
+
+    fn merged_session_strategy_for_pending(&self) -> SessionStrategy {
+        // 方案1: 只升级,不降级.
+        // 合并规则：pending 取最大值,再与 sticky 值取最大值。
+        let mut merged = SessionStrategy::Exec;
+        for event in &self.pending {
+            if let Some(strategy) = event.session_strategy {
+                merged = merged.max(strategy);
+            }
+        }
+        merged.max(self.session_locked_to)
     }
 
     fn requested_workspace_hooks(&self) -> (Option<String>, Option<String>) {
@@ -1129,9 +1221,29 @@ impl HatInstanceActor {
     fn build_prompt(&self, events: &[Event]) -> String {
         let mut events_context = String::new();
         for event in events {
-            // 说明：这里尽量保持“可读 + 可解析”，不强制 agent 必须使用特定格式。
-            // 后续如果需要更强约束，可以改成统一的 `<event ...>` 输入格式。
-            events_context.push_str(&format!("- {}: {}\n", event.topic, event.payload));
+            // 说明：这里尽量保持“可读 + 可解析”，同时避免把输入渲染成 `<event ...>` 原样文本。
+            //
+            // 背景：
+            // - 输入事件如果长得像 `<event ...>`，LLM 有时会在回复里复述，从而被 EventParser 误判成新事件。
+            // - 我们需要让 hat 能"引用并回复"某条事件，因此必须把 event.id 暴露出来。
+            //
+            // 格式约定（纯文本，不是 XML）：
+            // - 必含: id, topic, payload
+            // - 可选: reply（单值 in-reply-to）
+            let id = event.id.as_deref().unwrap_or("<none>");
+            if let Some(reply) = event.reply.as_deref().filter(|s| !s.trim().is_empty()) {
+                events_context.push_str(&format!(
+                    "- id={id} reply={reply} topic={topic} payload={payload}\n",
+                    topic = event.topic,
+                    payload = event.payload
+                ));
+            } else {
+                events_context.push_str(&format!(
+                    "- id={id} topic={topic} payload={payload}\n",
+                    topic = event.topic,
+                    payload = event.payload
+                ));
+            }
         }
 
         let is_ralph = self.hat.id.as_str() == "ralph";
@@ -1178,7 +1290,7 @@ impl HatInstanceActor {
         };
 
         let prompt_body = format!(
-            "{prelude}\n\n{instructions}\n\n### Incoming Events\n{events}\n",
+            "{prelude}\n\n{instructions}\n\n### Incoming Events\nWhen replying to a specific incoming event, include `reply=\"<event id>\"` on your emitted `<event>` tag.\n{events}\n",
             prelude = prelude,
             instructions = hat_instructions,
             events = events_context
@@ -1264,12 +1376,10 @@ impl HatInstanceActor {
 
         // 事件主键：如果 agent 没有显式提供 id，则由实例按序生成。
         // 说明：
-        // - 选择 `{instance_id}:{seq}` 的形式，保证“同一实例内的事件序”稳定且可引用
-        // - 这样 dispatch.decision 可以用 event_id 做关联，而不依赖全局调度顺序
+        // - 使用 nanoid 生成一个短且 URL-safe 的 id,便于 reply 协作链路复制粘贴.
+        // - 不强制覆盖 agent 手动设置的 id(如果它确实提供了).
         if event.id.is_none() {
-            let id = format!("{}:{}", self.instance_id, self.next_event_seq);
-            self.next_event_seq = self.next_event_seq.saturating_add(1);
-            event = event.with_id(id);
+            event = event.with_id(new_event_id());
         }
 
         event
@@ -1281,6 +1391,7 @@ mod tests {
     use super::*;
     use crate::config::{CoreConfig, EventMetadata, HatWorkspaceConfig};
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     #[derive(Debug)]
     struct NoopExecutor;
@@ -1292,6 +1403,7 @@ mod tests {
             _job: HatJob,
             _output_tx: mpsc::Sender<HatJobOutputChunk>,
             mut _cancel_rx: watch::Receiver<bool>,
+            mut _control_rx: mpsc::Receiver<HatJobControl>,
         ) -> anyhow::Result<HatJobResult> {
             Ok(HatJobResult {
                 output: String::new(),
@@ -1423,14 +1535,16 @@ mod tests {
                 Event::new("y", "b").with_workspace_strategy(WorkspaceStrategy::Patch),
             ],
             next_job_id: 1,
-            next_event_seq: 1,
             dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
             pending_permission_gate: None,
             worktree_override: None,
             hooks_override: None,
             running_workspace: None,
             running: None,
+            running_session_strategy: None,
             cancel_tx: None,
+            control_tx: None,
         };
 
         assert_eq!(
@@ -1444,6 +1558,225 @@ mod tests {
         assert_eq!(
             actor.merged_workspace_strategy_for_pending(),
             WorkspaceStrategy::Worktree
+        );
+    }
+
+    #[test]
+    fn session_strategy_merge_defaults_to_exec() {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, _supervisor_rx) = mpsc::channel(1);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("writer#1"),
+            hat: Hat::new("writer", "Writer").subscribe("build.task"),
+            hat_config: None,
+            workspace_runtime: WorkspaceRuntimeConfig::default(),
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: String::new(),
+            all_hat_prompt: None,
+            instruction_builder,
+            executor: Arc::new(NoopExecutor),
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Idle,
+            pending: vec![Event::new("build.task", "hello")],
+            next_job_id: 1,
+            dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: None,
+            running: None,
+            running_session_strategy: None,
+            cancel_tx: None,
+            control_tx: None,
+        };
+
+        assert_eq!(
+            actor.merged_session_strategy_for_pending(),
+            SessionStrategy::Exec
+        );
+    }
+
+    #[test]
+    fn session_strategy_merge_upgrades_to_mcp() {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, _supervisor_rx) = mpsc::channel(1);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("writer#1"),
+            hat: Hat::new("writer", "Writer").subscribe("build.task"),
+            hat_config: None,
+            workspace_runtime: WorkspaceRuntimeConfig::default(),
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: String::new(),
+            all_hat_prompt: None,
+            instruction_builder,
+            executor: Arc::new(NoopExecutor),
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Idle,
+            pending: vec![
+                Event::new("build.task", "hello").with_session_strategy(SessionStrategy::Mcp),
+            ],
+            next_job_id: 1,
+            dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: None,
+            running: None,
+            running_session_strategy: None,
+            cancel_tx: None,
+            control_tx: None,
+        };
+
+        assert_eq!(
+            actor.merged_session_strategy_for_pending(),
+            SessionStrategy::Mcp
+        );
+    }
+
+    #[tokio::test]
+    async fn session_strategy_sticks_after_first_mcp_job() {
+        #[derive(Debug)]
+        struct CaptureExecutor {
+            last_job: Arc<Mutex<Option<HatJob>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl HatJobExecutor for CaptureExecutor {
+            async fn execute(
+                &self,
+                job: HatJob,
+                _output_tx: mpsc::Sender<HatJobOutputChunk>,
+                mut _cancel_rx: watch::Receiver<bool>,
+                mut _control_rx: mpsc::Receiver<HatJobControl>,
+            ) -> anyhow::Result<HatJobResult> {
+                *self.last_job.lock().expect("lock last_job") = Some(job);
+                Ok(HatJobResult {
+                    output: String::new(),
+                    success: true,
+                    exit_code: Some(0),
+                    timed_out: false,
+                    canceled: false,
+                })
+            }
+        }
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, _supervisor_rx) = mpsc::channel(8);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let last_job = Arc::new(Mutex::new(None));
+        let executor = Arc::new(CaptureExecutor {
+            last_job: Arc::clone(&last_job),
+        });
+
+        let mut actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("writer#1"),
+            hat: Hat::new("writer", "Writer").subscribe("build.task"),
+            hat_config: None,
+            workspace_runtime: WorkspaceRuntimeConfig::default(),
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: String::new(),
+            all_hat_prompt: None,
+            instruction_builder,
+            executor,
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Idle,
+            pending: vec![
+                Event::new("build.task", "hello").with_session_strategy(SessionStrategy::Mcp),
+            ],
+            next_job_id: 1,
+            dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: None,
+            running: None,
+            running_session_strategy: None,
+            cancel_tx: None,
+            control_tx: None,
+        };
+
+        actor.maybe_start_job().await.unwrap();
+
+        // 说明:
+        // - maybe_start_job 会 spawn 一个 tokio task 执行 executor.
+        // - 为了让测试确定性更强,这里直接 await 掉该 handle,确保 executor 已运行并写入 last_job.
+        let handle = actor.running.take().expect("expected running handle");
+        handle
+            .await
+            .expect("join executor task")
+            .expect("executor result");
+
+        assert_eq!(
+            actor.session_locked_to,
+            SessionStrategy::Mcp,
+            "Expected actor to sticky-lock to mcp after first mcp job"
+        );
+
+        let job = last_job
+            .lock()
+            .expect("lock last_job")
+            .clone()
+            .expect("expected capture job");
+        assert_eq!(job.session_strategy, SessionStrategy::Mcp);
+
+        // 第二轮不再显式请求 session_strategy,但仍应保持 mcp(方案1: 只升级,不降级).
+        actor.pending.push(Event::new("build.task", "again"));
+        assert_eq!(
+            actor.merged_session_strategy_for_pending(),
+            SessionStrategy::Mcp
         );
     }
 
@@ -1482,14 +1815,16 @@ mod tests {
             state: HatInstanceState::Idle,
             pending: Vec::new(),
             next_job_id: 1,
-            next_event_seq: 1,
             dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
             pending_permission_gate: None,
             worktree_override: None,
             hooks_override: None,
             running_workspace: None,
             running: None,
+            running_session_strategy: None,
             cancel_tx: None,
+            control_tx: None,
         };
 
         let event = Event::new("build.task", "hello");
@@ -1515,6 +1850,74 @@ mod tests {
         assert!(
             decorated.id.is_some(),
             "event id should be generated when missing"
+        );
+    }
+
+    #[test]
+    fn build_prompt_includes_event_id_and_reply() {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, _supervisor_rx) = mpsc::channel(1);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("writer#1"),
+            hat: Hat::new("writer", "Writer").subscribe("build.task"),
+            hat_config: None,
+            workspace_runtime: WorkspaceRuntimeConfig::default(),
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: String::new(),
+            all_hat_prompt: None,
+            instruction_builder,
+            executor: Arc::new(NoopExecutor),
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Idle,
+            pending: Vec::new(),
+            next_job_id: 1,
+            dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: None,
+            running: None,
+            running_session_strategy: None,
+            cancel_tx: None,
+            control_tx: None,
+        };
+
+        let task = Event::new("build.task", "hello").with_id("writer#1:7");
+        let done = Event::new("build.done", "ok")
+            .with_id("writer#1:8")
+            .with_reply("writer#1:7");
+
+        let prompt = actor.build_prompt(&[task, done]);
+
+        assert!(
+            prompt.contains("id=writer#1:7"),
+            "Prompt should expose incoming event id so hats can reply"
+        );
+        assert!(
+            prompt.contains("reply=writer#1:7"),
+            "Prompt should expose reply correlation for debugging and routing clarity"
+        );
+        assert!(
+            prompt.contains("topic=build.task"),
+            "Prompt should include topic for incoming events"
         );
     }
 }

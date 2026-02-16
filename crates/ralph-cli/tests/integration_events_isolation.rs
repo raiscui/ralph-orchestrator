@@ -10,6 +10,7 @@
 //! 4. Fallback to `.ralph/events.jsonl` when no marker exists
 
 use anyhow::Result;
+use ralph_core::Event as JsonlEvent;
 use std::fs;
 use std::process::Command;
 use std::thread;
@@ -315,6 +316,66 @@ fn test_ralph_emit_writes_to_marker_specified_file() -> Result<()> {
             "Event should NOT be written to fallback .ralph/events.jsonl"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_ralph_emit_writes_optional_strategy_fields() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+
+    create_test_config(temp_path)?;
+
+    // Run ralph to create marker file
+    let _output = Command::new(ralph_bin())
+        .arg("run")
+        .arg("--config")
+        .arg(temp_path.join("ralph.yml"))
+        .current_dir(temp_path)
+        .output()?;
+
+    // Read the marker to find the events file path
+    let marker_content = fs::read_to_string(temp_path.join(".ralph/current-events"))?;
+    let events_path = marker_content.trim();
+    let events_file = temp_path.join(events_path);
+
+    // Use ralph emit to write an event with optional strategy fields
+    let output = Command::new(ralph_bin())
+        .arg("emit")
+        .arg("human.message")
+        .arg("hello")
+        .arg("--target-instance")
+        .arg("ralph#1")
+        .arg("--workspace-strategy")
+        .arg("worktree")
+        .arg("--session-strategy")
+        .arg("app_server")
+        .arg("--turn-action")
+        .arg("steer")
+        .current_dir(temp_path)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "ralph emit should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify we can parse the emitted JSONL line via EventReader schema
+    let content = fs::read_to_string(&events_file)?;
+    let last_line = content
+        .lines()
+        .last()
+        .expect("events file should contain at least one line");
+    let parsed: JsonlEvent = serde_json::from_str(last_line)?;
+
+    assert_eq!(parsed.topic, "human.message");
+    assert_eq!(parsed.payload, Some("hello".to_string()));
+    assert_eq!(parsed.target_instance, Some("ralph#1".to_string()));
+    assert_eq!(parsed.workspace_strategy.as_deref(), Some("worktree"));
+    assert_eq!(parsed.session_strategy.as_deref(), Some("app_server"));
+    assert_eq!(parsed.turn_action.as_deref(), Some("steer"));
 
     Ok(())
 }

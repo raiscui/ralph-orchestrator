@@ -104,6 +104,22 @@ pub struct Event {
     /// - 该字段是“提示执行环境”，最终仍需 capability/permission gate 判定
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_strategy: Option<String>,
+
+    /// Optional per-event session strategy override (parallel mode).
+    ///
+    /// 说明：
+    /// - 值为 snake_case：exec / mcp / app_server
+    /// - 该字段是显式信号,用于保证 replay/诊断一致性
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_strategy: Option<String>,
+
+    /// Optional per-event turn action (App Server only).
+    ///
+    /// 说明：
+    /// - 值为 snake_case：start / steer / interrupt
+    /// - 当缺失时,等价于 start
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_action: Option<String>,
 }
 
 /// Reads new events from `.ralph/events.jsonl` since last read.

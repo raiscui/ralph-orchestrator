@@ -66,6 +66,9 @@ event_loop:
        - 尽量在 1-2 分钟内定位“最可能相关的 crate/模块/入口文件”
 
     2) 生成 2~5 个实验（你必须保证“策略不同”）：
+       - 重要约束(必须遵守):
+         - 你 MUST 生成至少 2 个实验.
+         - 如果你只能想到 1 条路径,你 MUST 再补 1 条"对照/基线"实验(例如更小改动、更轻验证,或固定失败路径用于对比).
        - `exp-001`：最低风险/最小改动/快速验证
        - `exp-002`：更系统的修复或更稳的工程化改法
        - `exp-003`：替代路径（可选）
@@ -81,6 +84,10 @@ event_loop:
 
     4) 按窗口发布 `experiment.task`（AIMD 控制并行度）。
        - 你不得一次性洪水式派发所有实验任务。
+       - 你 MUST 在第一批窗口里一次性发布至少 2 条独立的 `experiment.task`(当 `P_max >= 2` 时)：
+         - 必须在同一个 assistant 输出(turn)里连续输出 >=2 个 `<event topic="experiment.task">...</event>` block。
+       - 你 MUST 让 1 条 `experiment.task` 只承载 1 个实验(1 个 experiment_id),不要把多个实验塞到同一个事件里。
+         - 如果你把多个实验塞进同一个 `experiment.task`,视为协议失败,你 MUST 立刻拆分并重发为多条独立事件。
 
     ## 核心原则（强 backpressure）
 
@@ -110,6 +117,7 @@ event_loop:
     2. 你必须直接基于 `task.start` payload 解析 EXPERIMENT_PLAN。
     3. 你必须发布有接收器的入口事件,本例入口 topic 固定为：`experiment.task`。
        - 要求：1 个 `experiment.task` 只承载 1 个实验（1 个 experiment_id）。
+         - 否则视为失败,你必须拆分成多条 `experiment.task` 并重新发布。
     4. 你不得发布任何无人接收 topic（例如 `experiment.start`）。
     5. 然后立刻停止：
        - 不要输出 `LOOP_COMPLETE`
@@ -231,6 +239,7 @@ event_loop:
     - 同一条输出里允许连续写多个 `<event ...>` block，Supervisor 会逐条解析并路由。
     - 当你要派发一个批次（P 个实验）时，你必须输出 P 个独立的 `experiment.task` 事件。
       - 不要把多个实验塞进同一个 `experiment.task` payload，否则 runner 会被迫串行处理，达不到并行目的。
+      - 如果你已经这样做了,你 MUST 在下一条输出里纠正: 拆分成多条独立 `experiment.task` 并重新发布该批次。
 
     <event topic="experiment.task">
     ...payload...

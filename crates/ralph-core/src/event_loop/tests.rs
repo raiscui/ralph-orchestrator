@@ -38,6 +38,53 @@ hats:
 }
 
 #[test]
+fn test_build_prompt_injects_compiled_all_hat_overlay_for_ralph_and_custom_hat() {
+    let yaml = r#"
+hats:
+  writer:
+    name: "Writer"
+    triggers: ["build.task"]
+    publishes: ["build.done"]
+"#;
+    let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+
+    // 从编译期内嵌 overlay 里提取稳定锚点，避免硬编码完整文本。
+    let all_hat_overlay = crate::prompt_overlay::load_all_hat_prompt()
+        .expect("compiled all-hat overlay should not be empty");
+    let overlay_anchor = all_hat_overlay
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("compiled all-hat overlay should contain at least one non-empty line");
+
+    let ralph_prompt = event_loop
+        .build_prompt(&HatId::new("ralph"))
+        .expect("ralph prompt should be buildable");
+    let writer_prompt = event_loop
+        .build_prompt(&HatId::new("writer"))
+        .expect("custom hat prompt should be buildable");
+
+    assert!(
+        ralph_prompt.contains("## ALL HAT PROMPT (config/all_hat.md)"),
+        "ralph prompt should include all-hat overlay header"
+    );
+    assert!(
+        ralph_prompt.contains(overlay_anchor),
+        "ralph prompt should include compiled all-hat overlay content"
+    );
+
+    assert!(
+        writer_prompt.contains("## ALL HAT PROMPT (config/all_hat.md)"),
+        "custom hat prompt should include all-hat overlay header"
+    );
+    assert!(
+        writer_prompt.contains(overlay_anchor),
+        "custom hat prompt should include compiled all-hat overlay content"
+    );
+}
+
+#[test]
 fn test_hat_max_activations_emits_exhausted_event() {
     // Repro for issue #66: per-hat max_activations should prevent infinite reviewer loops.
     let yaml = r#"

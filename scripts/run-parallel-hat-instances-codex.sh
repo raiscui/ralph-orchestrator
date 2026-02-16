@@ -31,22 +31,18 @@ echo "[parallel-e2e] codex 版本：$(codex --version || true)"
 
 # 关键：确保 ralph-e2e 能解析到“本仓库构建”的 ralph 二进制，
 # 避免误用 PATH 上的旧版本。
-echo "[parallel-e2e] 预构建 ralph 二进制（确保使用本地实现）..."
-(cd "${ROOT_DIR}" && cargo build -p ralph-cli --bin ralph)
+echo "[parallel-e2e] 预构建 ralph 二进制（release，确保与 harness 选择的 target/release/ralph 一致）..."
+(cd "${ROOT_DIR}" && cargo build --release -p ralph-cli --bin ralph)
 
 mkdir -p "${ROOT_DIR}/.e2e-tests"
 LOG_PATH="${ROOT_DIR}/.e2e-tests/parallel-hat-instances-codex.log"
 
-# 关键：E2E harness 在断言时会读取 `events.jsonl` 全文件。
-# 如果复用 workspace（--keep-workspace），旧数据可能污染断言（误判通过/误判失败）。
+# 关键：E2E harness 在断言时会读取 workspace 内产物。
+# 若复用 workspace（--keep-workspace），旧数据/旧 .ralph 状态可能污染断言（误判通过/误判失败）。
 WORKSPACE_DIR="${ROOT_DIR}/.e2e-tests/parallel-hat-instances"
-if [[ -f "${WORKSPACE_DIR}/.ralph/events.jsonl" ]]; then
-  echo "[parallel-e2e] 清理上次残留的 .ralph/events.jsonl（避免断言被旧数据污染）..."
-  rm -f "${WORKSPACE_DIR}/.ralph/events.jsonl"
-fi
-if [[ -f "${WORKSPACE_DIR}/.ralph/current-events" ]]; then
-  # current-events 只是 marker，清掉可避免误导排障（本次运行会重新写入）
-  rm -f "${WORKSPACE_DIR}/.ralph/current-events"
+if [[ -d "${WORKSPACE_DIR}" ]]; then
+  echo "[parallel-e2e] 清理上次残留 workspace（${WORKSPACE_DIR}）..."
+  rm -rf "${WORKSPACE_DIR}"
 fi
 
 echo "[parallel-e2e] 开始运行 E2E（只跑 parallel-hat-instances / backend=codex）..."

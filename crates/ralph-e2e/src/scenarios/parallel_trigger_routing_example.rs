@@ -4,7 +4,7 @@
 //! - 直接跑仓库自带的 example：`examples/parallel-trigger-routing`
 //! - 用“并行 stdout 的 job_id 去重统计”来断言 hat 的运行次数
 
-use super::parallel::{JobRunCounts, parse_parallel_job_line};
+use super::parallel::{JobRunCounts, parse_parallel_job_line, replace_top_level_yaml_block};
 use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
 use crate::Backend;
 use crate::executor::{ExecutionResult, PromptSource, RalphExecutor, ScenarioConfig};
@@ -34,6 +34,43 @@ impl ParallelTriggerRoutingExampleScenario {
                     .to_string(),
             tier: "Tier 8: Parallel Runtime".to_string(),
         }
+    }
+
+    fn patch_example_config_for_e2e(
+        config_content: &str,
+        backend: Backend,
+    ) -> Result<String, ScenarioError> {
+        // ---------------------------------------------------------------------
+        // 说明：
+        // - 该场景的原则是“example 行为不改”，因此我们不改仓库里的示例文件。
+        // - 但在真实 Codex 下，默认配置可能会输出长篇思考/总结，导致 E2E 噪音变大、耗时抖动。
+        // - 这里仅在 E2E workspace 里覆写 `cli` 段，注入 `codex exec -c ...` 降噪/提速参数。
+        // ---------------------------------------------------------------------
+        if backend != Backend::Codex {
+            return Ok(config_content.to_string());
+        }
+
+        let cli_block = r#"cli:
+  # E2E: 覆写 Codex 参数,降噪/提速(不影响仓库 example 原文件).
+  backend: custom
+  command: codex
+  args:
+    - exec
+    - --full-auto
+    - -c
+    - 'model_reasoning_effort="low"'
+    - -c
+    - 'model_reasoning_summary="none"'
+    - -c
+    - 'rmcp_client=false'
+
+"#;
+
+        replace_top_level_yaml_block(config_content, "cli:", cli_block).map_err(|e| {
+            ScenarioError::SetupError(format!(
+                "failed to patch example ralph.yml cli block for e2e: {e}"
+            ))
+        })
     }
 
     fn parallel_mode_visible(&self, result: &ExecutionResult) -> crate::models::Assertion {
@@ -125,7 +162,14 @@ impl ParallelTriggerRoutingExampleScenario {
 
             // 注意：必须在解析 job_id 之后再判断 completion，
             // 这样 `[ralph#1:out:job=...] LOOP_COMPLETE` 会被算作 completion 之前的 job。
-            if !completion_seen && line.trim_end().ends_with(completion_promise) {
+            //
+            // 同时我们只认可 **协调者** 输出的 completion promise：
+            // - 避免 prompt/instructions 中出现的 “不要输出 LOOP_COMPLETE” 误触发断言。
+            if !completion_seen
+                && line.trim_end().ends_with(completion_promise)
+                && line.trim_start().starts_with("[ralph#")
+                && line.contains(":out:job=")
+            {
                 completion_seen = true;
             }
         }
@@ -192,8 +236,9 @@ impl TestScenario for ParallelTriggerRoutingExampleScenario {
             ))
         })?;
 
-        // 原样拷贝示例 config：这就是“直接覆盖 example”。
-        std::fs::write(workspace.join("ralph.yml"), config_content).map_err(|e| {
+        // 原样拷贝示例 config,但会在 E2E workspace 覆写 cli 段的 Codex 参数（只影响 E2E）。
+        let patched = Self::patch_example_config_for_e2e(&config_content, backend)?;
+        std::fs::write(workspace.join("ralph.yml"), patched).map_err(|e| {
             ScenarioError::SetupError(format!("failed to write workspace ralph.yml: {e}"))
         })?;
 

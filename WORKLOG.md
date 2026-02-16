@@ -145,3 +145,533 @@
 
 - 验证:
   - `cargo test` 全量通过.
+
+## 2026-02-11 20:52 +0800 | 实现: ralph#1 Codex MCP 常驻 + 忙时切换 ralph#2
+
+- 背景:
+  - 目标是把并行模式里 ralph 的 Codex 调用从一次性 `codex exec` 改为常驻 `codex mcp-server`.
+  - 并要求当 `ralph#1` 忙时,新事件自动交给 `ralph#2`.
+
+- 主要实现:
+  - `crates/ralph-core/src/parallel/supervisor/routing.rs`
+    - 新增 ralph 双实例分配函数与显式目标重写逻辑.
+    - `ralph#1` 空闲优先;主忙时自动切 `ralph#2`;双忙回退主实例.
+  - `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+    - 增加“主忙重定向次实例”与“主空闲优先主实例”回归测试.
+  - `crates/ralph-cli/src/codex_mcp_session.rs`(新增)
+    - 实现 per-instance 常驻 MCP 会话,首轮 `codex` + 后续 `codex-reply`.
+    - 解析 `codex/event` 流式输出,支撑 TUI 实时文本显示.
+    - 新增 `ralph#2` 首次接管摘要继承(仅摘要,不共享 thread).
+  - `crates/ralph-cli/src/parallel_runner.rs`
+    - 接入 `CodexMcpRuntime`.
+    - 仅对 `ralph#1`/`ralph#2` 使用 MCP 常驻路径.
+    - 在中断/异常/正常退出路径统一 `shutdown_all`.
+  - `crates/ralph-cli/src/main.rs`
+    - 注册 `mod codex_mcp_session;`.
+
+- 验证:
+  - `cargo fmt --check` ✅
+  - `cargo clippy --all-targets --all-features -- -D warnings` ✅
+  - `cargo test -p ralph-core smoke_runner` ✅
+  - `cargo test` ✅
+
+## 2026-02-11 21:12 +0800 | 继续验证: parallel-hat-instances E2E 复跑与脚本基线修复
+
+- 执行:
+  - 按“继续”要求复跑 `bash scripts/run-parallel-hat-instances-codex.sh`.
+  - 两次复跑结果一致: `parallel-hat-instances` / `parallel-hat-instances-zh` 均在约 120s 失败.
+
+- 诊断:
+  - 失败主因并非编译错误,而是场景运行语义在真实模型下不稳定:
+    - `routing.escalate` 未稳定出现;
+    - `LOOP_COMPLETE` 未出现;
+    - 实例计数断言存在漂移.
+  - 发现脚本级确定性问题:
+    - 脚本只 build dev,但 harness 实际使用 `target/release/ralph`.
+    - workspace 清理不彻底,存在复用污染风险.
+
+- 修复:
+  - 更新 `scripts/run-parallel-hat-instances-codex.sh`:
+    - 改为 `cargo build --release -p ralph-cli --bin ralph`.
+    - 运行前删除 `.e2e-tests/parallel-hat-instances` 整目录,确保干净现场.
+  - 快速校验:
+    - `bash -n scripts/run-parallel-hat-instances-codex.sh` ✅
+
+- 说明:
+  - 该脚本修复提升了“验证基线一致性与可重复性”。
+  - 场景本身的模型行为漂移问题,建议下一步单独收敛 scenario 提示词/断言策略。
+
+## 2026-02-11 22:48 +0800 | 收敛: parallel-hat-instances / zh 场景稳定通过
+
+- 背景:
+  - 用户要求继续执行“真实并行 E2E 验证”并闭环.
+  - 原场景在真实 Codex 下出现 timeout + 缺失 `routing.escalate` + 缺失 `LOOP_COMPLETE`.
+
+- 代码调整:
+  - `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
+    - 重构并行场景配置:
+      - `writer.instances=2`.
+      - `tester` 第二任务改为 `target_instance=writer#2`.
+      - `collector` 在 `task_id:2` 分支只发 invalid target,不手工发 `routing.escalate`.
+      - `max_runtime_seconds` 从 120 调整到 180.
+    - 重构计数断言:
+      - 从固定实例精确计数改为语义计数(按 hat 汇总 + `writer#2` 必须出现).
+    - 更新场景说明文案(强调 strict target + completion 收敛).
+  - `scripts/run-parallel-hat-instances-codex.sh`
+    - 构建改为 `cargo build --release -p ralph-cli --bin ralph`.
+    - 运行前清理整目录 `.e2e-tests/parallel-hat-instances`.
+
+- 验证:
+  - `cargo fmt --check` ✅
+  - `cargo test -p ralph-e2e --no-run` ✅
+  - `bash scripts/run-parallel-hat-instances-codex.sh` ✅
+    - `parallel-hat-instances` ✅
+    - `parallel-hat-instances-zh` ✅
+  - `cargo test -p ralph-e2e` ✅
+
+- 结果:
+  - 本轮“继续”目标已完成.
+  - 并行 Tier 8 场景在真实 Codex 下恢复稳定可复现通过.
+
+## 2026-02-11 23:19 +0800 | 调整: `config/all_hat.md` 改为编译期注入所有 hat(含 ralph)
+
+- 背景:
+  - 用户要求 `config/all_hat.md` 作为编译时配置项.
+  - 目标是让 all-hat prompt 注入在编译期确定,运行时不依赖 workspace 文件.
+
+- 实施:
+  - `crates/ralph-core/src/prompt_overlay.rs`
+    - 将 `config/all_hat.md` 改为 `include_str!` 编译期内嵌.
+    - `load_all_hat_prompt` 改为无参数的编译期加载.
+  - `crates/ralph-core/src/event_loop/mod.rs`
+    - `EventLoop::new` 切换到编译期 overlay 加载.
+  - `crates/ralph-core/src/parallel/supervisor.rs`
+    - `ParallelSupervisor::new` 切换到编译期 overlay 加载.
+  - 测试调整:
+    - `crates/ralph-core/src/event_loop/tests.rs` 新增 ralph + custom hat 注入回归测试.
+    - `crates/ralph-core/src/parallel/supervisor/routing_tests.rs` 改为断言编译期 overlay 锚点.
+    - `crates/ralph-core/tests/event_loop_ralph.rs` 改为编译期语义断言并重命名测试用例.
+
+- 验证:
+  - `cargo fmt && cargo fmt --check` ✅
+  - `cargo test -p ralph-core --test event_loop_ralph test_ralph_prompt_includes_all_hat_overlay_from_compiled_config` ✅
+  - `cargo test` ✅
+
+- 结果:
+  - `config/all_hat.md` 已在编译时注入到所有 hat prompt,包括 `ralph`.
+
+## 2026-02-13 01:10 +0800 | 功能: parallel 动态会话策略(session_strategy) + sticky(只升级)
+
+### 背景与目标
+
+- 现状: parallel 下 `ralph#1/#2` 已是 Codex MCP 常驻,但其他 hat 仍是 `codex exec` 单次.
+- 目标: 不用静态配置写死"哪个 hat 常驻".
+  由 ralph 在发布事件时动态决定.
+  同时保证 replay 可复现.
+
+### 落地内容
+
+- 协议层:
+  - `Event` 新增 `session_strategy: exec|mcp`(可选字段).
+  - `<event ... session_strategy="mcp">` 可被解析并落盘.
+- 并行 core 侧:
+  - 合并规则: pending events 任意请求 mcp -> job 视为 mcp.
+  - 方案1(只升级,不降级): instance 首次进入 mcp 后 sticky 到 mcp,避免上下文分裂.
+- CLI executor 侧:
+  - `ralph#1/#2` 固定走 Codex MCP.
+  - 其他 hat 默认走 exec,仅在 job.session_strategy=mcp 时升级到 MCP.
+
+### 相关文件
+
+- `crates/ralph-proto/src/event.rs`
+- `crates/ralph-core/src/event_parser.rs`
+- `crates/ralph-core/src/parallel/job.rs`
+- `crates/ralph-core/src/parallel/instance.rs`
+- `crates/ralph-cli/src/parallel_runner.rs`
+- `specs/parallel-hat-instances.spec.md`
+- `config/all_hat.md`
+- `docs/plans/2026-02-13-parallel-session-strategy-design.md`
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-02-14 15:38 +0800 | 功能: Codex App Server 真 steer 接入 parallel(session_strategy=app_server)
+
+### 落地内容
+
+- 协议层:
+  - `crates/ralph-proto/src/event.rs`: `SessionStrategy` 增加 `AppServer`,新增 `TurnAction`.
+  - `crates/ralph-core/src/event_parser.rs`: 支持解析 `<event ... session_strategy="app_server" turn_action="steer|interrupt">`.
+- core 并行:
+  - `crates/ralph-core/src/parallel/instance.rs`: session sticky 扩展为 `exec < mcp < app_server`.
+  - in-flight 控制:
+    - job 启动时创建 control channel.
+    - 收到 `turn_action=steer` 且当前 running session_strategy=app_server 时,通过 control channel 立刻追加输入.
+    - 收到 `turn_action=interrupt` 时,直接 cancel in-flight job.
+  - 降级策略:
+    - 若 steer 没有 in-flight turn,事件会被清空 turn_action 并作为普通消息入队,同时保留 session_strategy=app_server 让下一轮升级.
+- ralph-cli:
+  - `crates/ralph-cli/src/codex_app_server_session.rs`: 新增 app-server runtime,支持 `turn/start` 后 `turn/steer`(expectedTurnId) 与 `turn/interrupt`.
+  - `crates/ralph-cli/src/parallel_runner.rs`: job.session_strategy=app_server 时选择 app-server runtime.
+- TUI:
+  - `crates/ralph-tui/src/chat.rs`: 新增 `!steer` 与 `!interrupt` 命令,并落盘携带 `session_strategy/turn_action`.
+  - `crates/ralph-tui/src/external_event_writer.rs`: external events JSONL 支持写入这两个字段.
+
+### 用法示例
+
+- 在 TUI 输入:
+  - `!steer 继续沿着方案 B 往下做`
+  - `!interrupt`
+  - (可选实例) `!steer @writer#2 立刻停下,改走方案 A`
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-02-14 08:47 +0800 | Explore: Codex App Server 支持 steer,并与 parallel session_strategy 对齐
+
+- 背景:
+  - 你希望在并行模式下提升 ralph <-> hat 的沟通质量.
+  - 关键诉求是 "Steer": 在 hat 正在运行时,立即追加新指令并改变后续轨迹.
+
+- 调研与核对:
+  - 查官方 Codex App Server 协议,确认存在 `turn/steer` 与 `turn/interrupt` 语义.
+  - 核对本机 codex CLI 版本,确认存在 `codex app-server`(默认 stdio transport).
+
+- 设计对齐结论:
+  - 现有 `Event.session_strategy=exec|mcp` 的思路正确,但要实现真 steer 需要引入 `app_server` 策略.
+  - 建议在事件协议里引入 turn 级动作(steer/interrupt),让 Supervisor/Instance 可以在 in-flight job 上做控制,而不是只能排队到下一轮.
+
+- 下一步(待你确认后进入实现):
+  - 明确 steer 的发起者(ralph 自动 vs 人类交互).
+  - 明确降级策略(非 app_server 时 steer 是 queue 还是 interrupt+重启).
+
+## 2026-02-14 08:55 +0800 | Explore: 追加需求 - Event 需要可引用 id(nanoid) + reply 字段
+
+- 你提出: event 需要增加 nanoid,并新增 `reply=""`,让其他 hat 回复事件时可以带入该 id.
+- 我核对了现状:
+  - `Event.id` 已存在且并行模式下会被补齐,但 prompt 里并未把 id 展示给 hat,导致无法形成回复链.
+- 初步设计方向:
+  - 复用 `Event.id` 作为 "nanoid/事件主键"(改良胜过新增).
+  - 新增 `Event.reply` 字段,并让 EventParser 解析 `<event ... reply=\"...\">`.
+  - 调整 incoming events 的 prompt 展示,显式展示 id,避免 hat 无法引用.
+
+- 用户确认口径:
+  - 每条 event 都必须有可引用 id.
+  - `reply` 是单值.
+
+## 2026-02-14 12:55 +0800 | 功能: Event reply 协作闭环落地(A1,确定性 id 直接展示)
+
+### 落地内容
+
+- 协议层:
+  - `crates/ralph-proto/src/event.rs`: `Event` 新增 `reply: Option<String>`(单值 in-reply-to),并提供 `with_reply()`(空字符串会被规范化为 None).
+- 解析层:
+  - `crates/ralph-core/src/event_parser.rs`: 支持解析 `<event ... reply="...">`.
+- Prompt 注入:
+  - `crates/ralph-core/src/parallel/instance.rs`: Incoming Events 现在会显示 `id=...` 与可选 `reply=...`,并明确提示"回复时用 reply 引用 id".
+  - `crates/ralph-core/src/event_loop/mod.rs`: 串行模式 `format_event()` 也会展示 `(id=... reply=...)`,方便排查与未来扩展.
+- id 生成(确定性,不引入随机 nanoid):
+  - 并行模式保持既有规则(实例侧 `{instance_id}:{seq}` + supervisor 侧 `supervisor:{seq}`).
+  - `crates/ralph-proto/src/event_bus.rs`: 串行模式 EventBus 会为缺失 id 的事件补齐 `eventbus:{seq}`.
+- 观测落盘:
+  - `crates/ralph-core/src/event_logger.rs`: `.ralph/events.jsonl` 现在会记录 `id/reply`,便于把路由、日志、prompt 关联起来.
+
+### 测试补齐
+
+- `crates/ralph-core/src/event_parser.rs`: 新增 reply 解析与空 reply 归一化用例.
+- `crates/ralph-core/src/parallel/instance.rs`: 新增 prompt 必含 `id=` 与 `reply=` 的回归用例.
+- `crates/ralph-proto/src/event_bus.rs`: 新增缺失 id 时自动补齐的回归用例.
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo test` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-02-14 18:01 +0800 | 修复: ralph-e2e 并行场景 `parallel-hat-instances` 超时漂移,并补齐可排障证据
+
+### 现象
+
+- `bash scripts/run-parallel-hat-instances-codex.sh` 出现混合结果:
+  - `parallel-hat-instances` 在 180s max_runtime 下无法收敛(缺少 `LOOP_COMPLETE`).
+  - `parallel-hat-instances-zh` 可通过.
+- 失败时的直接表现:
+  - `routing.escalate` 已能生成,但出现时间太晚.
+  - `ralph#1` 第二轮 job 来不及完成并输出 `LOOP_COMPLETE`,最终被 max_runtime 截断.
+
+### 根因
+
+- completion candidate(`routing.escalate`)依赖 collector 产出 invalid target 事件.
+- 英文 collector 在真实 Codex 下会输出较长的思考文本(尤其在解释“stdout 单行 vs 多行 event block”的歧义时),导致 `routing.escalate` 触发偏晚.
+
+### 修复
+
+- 收敛场景提示词,降低模型解释/犹豫:
+  - `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
+    - Collector 指令去歧义,明确以 Incoming Events 的子串匹配触发 invalid target.
+    - `event_loop.max_runtime_seconds` 从 180 提升到 240,给 ralph 第二轮收敛留出窗口.
+- 增强 E2E 排障证据:
+  - `crates/ralph-e2e/src/executor.rs`
+    - best-effort 把 ralph 进程的 stdout/stderr 落盘到 `${workspace}/.e2e/stdout.txt` 与 `${workspace}/.e2e/stderr.txt`.
+
+### 验证
+
+- `cargo test -p ralph-e2e` ✅
+- `bash scripts/run-parallel-hat-instances-codex.sh` ✅
+  - `parallel-hat-instances`: 167.1s
+  - `parallel-hat-instances-zh`: 209.8s
+
+## 2026-02-14 20:41 +0800 | 改良: E2E Codex 后端降噪/提速(只影响 E2E 生成的 ralph.yml)
+
+### 背景
+
+- 本机 `~/.codex/config.toml` 里 `model_reasoning_effort="xhigh"` + `model_reasoning_summary="detailed"` 会让 `codex exec` 输出更吵,并在并行场景里拖慢收敛.
+- 我们希望:
+  - 不改你平时的 Codex 全局配置.
+  - 只在 E2E workspace 里让 Codex 更快更安静.
+
+### 实施
+
+- `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
+  - 生成的 `ralph.yml` 中,将 `cli.backend` 从命名 `codex` 改为 `custom`:
+    - `command: codex`
+    - `args: ["exec","--full-auto","-c","model_reasoning_effort=\"low\"","-c","model_reasoning_summary=\"none\"","-c","rmcp_client=false"]`
+- `crates/ralph-e2e/src/scenarios/parallel/starting_event_inference.rs`
+  - 同样注入上述 Codex 参数,保持并行 Codex-only 场景口径一致.
+
+### 验证
+
+- `cargo test -p ralph-e2e` ✅
+- `bash scripts/run-parallel-hat-instances-codex.sh` ✅
+  - `parallel-hat-instances`: 77.9s
+  - `parallel-hat-instances-zh`: 77.6s
+
+## 2026-02-14 23:04 +0800 | 改良: Event.id 默认改为 nanoid,用于 reply 协作链路引用
+
+### 背景
+
+- 你确认的协作口径是:
+  - 1) 每条 event 都有可引用 id.
+  - 2) `reply` 是单值(in-reply-to).
+- 之前实现为了保持确定性,默认 id 采用了 `eventbus:{seq}` / `{instance}:{seq}` / `supervisor:{seq}` 这类序号.
+- 这次按你的新决定,把"默认生成"切换为 nanoid,让 id 更短、更易复制,也避免把 instance 信息编码进 id.
+
+### 实施
+
+- 统一 id 生成入口:
+  - `crates/ralph-proto/src/event.rs`
+    - 新增 `new_event_id()`(nanoid,长度 12,`alphabet::SAFE`).
+- 串行(EventBus):
+  - `crates/ralph-proto/src/event_bus.rs`
+    - 当 `event.id` 缺失时,自动补齐 `new_event_id()`.
+- 并行(HatInstance/Supervisor):
+  - `crates/ralph-core/src/parallel/instance.rs`
+    - agent 输出未带 `id` 时,实例侧自动补齐 `new_event_id()`.
+  - `crates/ralph-core/src/parallel/supervisor/routing.rs`
+    - Supervisor 自己生成的事件缺失 `id` 时,自动补齐 `new_event_id()`.
+- 文案同步:
+  - `crates/ralph-core/src/parallel/supervisor.rs`
+    - reply 示例从 `supervisor:1` 改为占位 `EVENT_ID`(避免误导为固定格式).
+
+### 额外修补(为了 clippy -D warnings 通过)
+
+- `crates/ralph-e2e/src/scenarios/parallel/mod.rs`: 修复 `needless_range_loop`.
+- `crates/ralph-tui/src/chat.rs`: 修复 `manual_string_new`.
+- `crates/ralph-cli/src/codex_app_server_session.rs`: 修复 `unused_async`(spawn 改为同步函数).
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo test -p ralph-proto` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-e2e` ✅
+- `cargo test` ✅
+- `cargo clippy --all-targets --all-features -- -D warnings` ✅
+
+### 备注
+
+- 为避免 `task_plan.md` 接近 1000 行后继续膨胀,本次已归档旧文件:
+  - `archive/task_plan_2026-02-14_224712.md`
+  - 并新建了当前的 `task_plan.md`.
+
+---
+
+## 2026-02-15 10:55 +0800 | 答复: parallel TUI 模式是否可录制
+
+### 我做了什么
+
+- 代码核对:
+  - `crates/ralph-cli/src/parallel_runner.rs` 与 `crates/ralph-cli/src/loop_runner.rs` 的 `--record-session` wiring.
+- 规格对照:
+  - `specs/parallel-record-session.spec.md`(明确写了录制目标与 non-goal: 不录 TUI frame).
+- 文档同步:
+  - `README.md` 原文写 "no parallel TUI yet",已更新为当前真实行为(有 supervisor TUI,非 TTY 则回退 log-only).
+
+### 结论(给用户的口径)
+
+- 并行 + TUI 可以用 `--record-session <FILE>` 录制到 JSONL cassette.
+- cassette 的目标是回放与测试:
+  - 录制 `bus.publish` 事件.
+  - 录制 stdout-only 的 `ux.terminal.write`.
+  - 并行模式会在 `ux.terminal.write` 上附带 `instance_id`(便于分流回放).
+- 如果你想录的是 "TUI 屏幕过程"(视觉录屏),项目当前不把每帧写进 cassette,需要外部录屏/截图工具辅助.
+
+---
+
+## 2026-02-15 12:00 +0800 | 修复: `ralph_hat_instance_id` 必须置顶,避免被 all-hat 示例误解
+
+### 现象
+
+- all-hat overlay(`config/all_hat.md`)里包含:
+  - `session_strategy` 的 `<event ...>` 示例块.
+- 运行时 `ralph_hat_instance_id:"experiment_runner#1"` 会出现在示例块之后.
+- 这会让部分模型把该行误认为“示例的一部分”,从而产生歧义与行为漂移.
+
+### 根因
+
+- `crates/ralph-core/src/event_loop/mod.rs` 和 `crates/ralph-core/src/parallel/instance.rs` 都是:
+  - 先注入 `ralph_hat_instance_id:"..."`.
+  - 再调用 `inject_all_hat_prompt()` 把 overlay 整体前置到 prompt 顶部.
+- 由于 overlay 的注入是“无条件置顶”,导致最终 prompt 的第一行变成 overlay header,
+  而 `ralph_hat_instance_id` 被推到了 overlay 末尾.
+
+### 修复
+
+- `crates/ralph-core/src/prompt_overlay.rs`
+  - 调整 `inject_all_hat_prompt()`:
+    - 如果 prompt 第一行就是 `ralph_hat_instance_id:"..."`,
+      则把 overlay 插入到该行之后.
+    - 这样 `ralph_hat_instance_id` 永远保持第一行,overlay 也仍然能覆盖所有 hat.
+
+### 回归测试
+
+- `crates/ralph-core/src/prompt_overlay.rs`
+  - 新增单测 `inject_all_hat_prompt_keeps_runtime_id_as_first_line`,
+    锁死 "runtime id 必须位于 overlay header 之前且为第一行" 的约束.
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo test -p ralph-core` ✅
+- `cargo test` ✅
+
+---
+
+## 2026-02-15 12:26 +0800 | 改良: `ux.terminal.write` 录制可读 `text`,便于诊断
+
+### 背景
+
+- cassette 的 `ux.terminal.write.data.bytes` 是 base64.
+- 人肉排障时需要先解码,阅读体验很差.
+
+### 实施
+
+- `crates/ralph-proto/src/ux_event.rs`
+  - `TerminalWrite` 新增 `text: Option<String>` 字段.
+  - `TerminalWrite::new()` 自动填充 `text`(UTF-8 lossy),让新录制的 JSONL 可直接阅读.
+  - 增加单测锁死旧 cassette(无 `text`)仍可解析,避免破坏历史 fixtures.
+- `crates/ralph-core/src/session_recorder.rs`
+  - 补单测断言确保 `"text":"Hello"` 会被写入录制输出.
+- 文档与规格同步:
+  - `crates/ralph-core/tests/fixtures/README.md`
+  - `crates/ralph-core/tests/fixtures/kiro/README.md`
+  - `specs/parallel-record-session.spec.md`
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo test -p ralph-proto` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test -p ralph-e2e` ✅
+- `cargo test` ✅
+
+### 备注
+
+- `text` 仅用于诊断阅读 JSONL.
+- 回放与事件解析仍应以 `bytes` 为准,保持字节级保真.
+
+---
+
+## 2026-02-16 17:32 +0800 | follow-up: 并行示例补齐 stderr 自检 + 交互注入路径文档化 + 外部目录同步
+
+### 变更点
+
+- 并行自检更“可验收”:
+  - `examples/parallel-experimental-dev-engine/PROMPT.md`
+    - exp-par-001/002 自检实验改为同时输出 stdout+stderr.
+    - 修正 here-doc 缩进,确保复制即可运行(终止符 `PY` 必须行首对齐)。
+- Auto-Plan 协议加固:
+  - `examples/parallel-experimental-dev-engine/ralph.yml`
+    - 明确首批窗口当 `P_max >= 2` 时,必须在同一输出(turn)内连续发布 >=2 条 `experiment.task`.
+    - 明确“把多个实验塞进同一 experiment.task”属于协议失败,必须拆分重发。
+- 交互说明补齐:
+  - `examples/parallel-experimental-dev-engine/README.md`
+    - 明确 `--no-tui` 在 completion 后退出,不适合持续对话.
+    - 补齐 `.ralph/current-events` marker 与手工 JSONL 注入 steer/interrupt 的示例,并列出“无回应”排查清单.
+- App-Server stderr 降噪:
+  - `crates/ralph-cli/src/codex_app_server_session.rs`
+    - codex app-server stderr 的兜底日志从 warn 调整为 debug,避免默认刷屏(主要观测面在并行输出流)。
+
+### 外部目录同步
+
+- 同步目录: `/Users/cuiluming/local_doc/l_dev/my/rust/parallel-experimental-dev-engine/`
+  - `ralph.yml` 同步协议加固内容.
+  - `PROMPT.md` 先备份为 `PROMPT_backup_2026-02-16_1731.md`,再用仓库示例 PROMPT 模板覆盖,避免两边语义漂移。
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo test -p ralph-cli parallel_runner` ✅
+- `cargo test -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+---
+
+## 2026-02-16 18:24 +0800 | 改良: `ralph emit` 支持 session_strategy/turn_action/workspace_strategy
+
+### 目标
+
+- 让 headless 场景(例如 `--no-tui`)不需要手工写 JSONL,也能通过 `ralph emit` 注入:
+  - `session_strategy=app_server`
+  - `turn_action=steer|interrupt`
+- 同时保证字段名/取值与 `EventReader` schema 对齐,避免“写了但读不到”。
+
+### 实施
+
+- `crates/ralph-cli/src/main.rs`
+  - `ralph emit` 新增可选参数:
+    - `--workspace-strategy shared|patch|worktree`
+    - `--session-strategy exec|mcp|app_server`
+    - `--turn-action start|steer|interrupt`
+  - 写入 JSONL 时新增字段:
+    - `workspace_strategy` / `session_strategy` / `turn_action`
+- `crates/ralph-cli/tests/integration_events_isolation.rs`
+  - 新增集成测试 `test_ralph_emit_writes_optional_strategy_fields`:
+    - 运行 `ralph emit ... --session-strategy app_server --turn-action steer`
+    - 读取写入文件最后一行
+    - 解析为 `ralph_core::Event` 并断言字段值一致
+- `examples/parallel-experimental-dev-engine/README.md`
+  - steer/interrupt 优先推荐使用 `ralph emit` 的新参数,不再要求手工追加 JSONL。
+
+### 验证
+
+- `cargo fmt` ✅
+- `cargo test -p ralph-cli --test integration_events_isolation` ✅
+- `cargo test -p ralph-cli` ✅
+
+---
+
+## 2026-02-16 18:24 +0800 | 文档: `config/all_hat.md` 补齐 app_server 与 sticky 语义
+
+- `config/all_hat.md`
+  - 之前只写了 `session_strategy="mcp"` 的说明,容易让人误读为"系统仍然只支持 mcp"。
+  - 现在补齐:
+    - `session_strategy="app_server"` 的用途(支持 steer/interrupt).
+    - sticky 的强弱排序: `exec < mcp < app_server`.
+    - 提醒: `mcp` 与 `app_server` 是两套常驻实现,升级也可能丢上下文,建议一开始就选定策略.
