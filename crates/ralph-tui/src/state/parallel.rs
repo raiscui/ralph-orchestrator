@@ -646,6 +646,7 @@ impl ParallelOutputRenderer {
         }
 
         let text = lines.join("\n");
+        let contains_ansi = text.contains("\x1b[");
 
         // 单独处理“只有一个空行”的情况：否则会被 `render_text_to_lines` 的 empty fast-path 吃掉。
         let mut rendered = if text.is_empty() {
@@ -654,7 +655,12 @@ impl ParallelOutputRenderer {
             render_text_to_lines(&text, self.mode, self.width)
         };
 
-        if muted {
+        // 说明:
+        // - stderr 默认用 muted 灰色弱化,提高可读性。
+        // - 但当文本本身包含 ANSI 转义序列时,这些 ANSI 往往承载“语义色彩”(例如 codex prompt transcript),
+        //   如果强制覆盖 fg 会把色彩吞掉,导致用户看不到关键提示。
+        // - 因此: 含 ANSI 时不再强制 muted,保留原始色彩。
+        if muted && !contains_ansi {
             rendered = rendered
                 .into_iter()
                 .map(|line| {
@@ -1071,6 +1077,7 @@ impl ParallelTuiState {
 mod tests {
     use super::*;
     use ralph_proto::{GateKind, GateResolvedBy};
+    use ratatui::style::Color;
     use std::time::Duration;
 
     fn make_request(id: &str, timeout_seconds: Option<u64>) -> GateRequest {
@@ -1432,6 +1439,23 @@ mod tests {
         assert!(
             text.contains("```"),
             "Plain should keep fence markers: {text}"
+        );
+    }
+
+    #[test]
+    fn parallel_output_stderr_with_ansi_is_not_force_muted() {
+        let renderer = ParallelOutputRenderer::new(MarkdownRenderMode::Plain, 120);
+
+        // stderr 上的 ANSI 色彩是“语义信息”(例如 prompt transcript),不能被 stderr-muted 强行覆盖掉。
+        let rendered = renderer.render_stream_chunk(&["\x1b[31mRED\x1b[0m ok".to_string()], true);
+        let has_red = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.style.fg == Some(Color::Red));
+
+        assert!(
+            has_red,
+            "Expected ANSI red span to be preserved under stderr-muted: {rendered:?}"
         );
     }
 

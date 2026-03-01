@@ -1007,6 +1007,7 @@ tests: pass, lint: pass, typecheck: pass
 | Command | Description |
 |---------|-------------|
 | `ralph run` | Run the orchestration loop (default) |
+| `ralph autopilot` | Headless automation: run in a Git repo, record session, then judge JSONL |
 | `ralph resume` | Resume from existing scratchpad |
 | `ralph plan` | Start an interactive PDD planning session |
 | `ralph task` | Start an interactive code-task-generator session |
@@ -1042,6 +1043,64 @@ tests: pass, lint: pass, typecheck: pass
 | `-q, --quiet` | Suppress output (for CI) |
 | `--continue` | Resume from existing scratchpad |
 | `-- <BACKEND_ARGS...>` | Pass extra trailing args to the backend command |
+
+### `ralph autopilot`
+
+Autopilot is a headless wrapper for unattended validation.
+It is designed for "in-place" runs inside an already-initialized Git repository (worktree-friendly).
+
+Key points:
+- It forces `--record-session` and treats the JSONL as the primary evidence source for deterministic hard verdicts.
+- It captures stdout/stderr as auxiliary evidence for debugging.
+- It optionally runs a second lightweight agent analysis over a bounded evidence pack (`analysis_input.json`).
+- It writes `report.json` (machine-readable) and `report.md` (human-readable), then exits with stable codes.
+- Agent analysis is enabled by default (it only runs after a hard PASS). Disable it with `--skip-agent-analysis`.
+  Use `--analysis-backend` only if you want to override which backend the agent analysis step uses.
+
+Examples:
+
+```bash
+# Run the real workflow in-place, record session, then judge JSONL (hard verdict only)
+ralph autopilot run \
+  --repo-dir /path/to/git-repo \
+  --config ralph.yml \
+  --record-session /tmp/ralph-autopilot-out/session.jsonl \
+  --out-dir /tmp/ralph-autopilot-out \
+  --skip-agent-analysis
+
+# Run + hard verdict + agent analysis (default; requires a working backend)
+ralph autopilot run \
+  --repo-dir /path/to/git-repo \
+  --config ralph.yml \
+  --record-session /tmp/ralph-autopilot-out/session.jsonl \
+  --out-dir /tmp/ralph-autopilot-out
+
+# Optional: force a specific backend for the agent analysis step only
+ralph autopilot run \
+  --repo-dir /path/to/git-repo \
+  --config ralph.yml \
+  --record-session /tmp/ralph-autopilot-out/session.jsonl \
+  --out-dir /tmp/ralph-autopilot-out \
+  --analysis-backend codex
+
+# Offline: analyze an existing record-session JSONL (hard verdict only)
+ralph autopilot analyze \
+  --repo-dir /path/to/git-repo \
+  --record-session /tmp/ralph-autopilot-out/session.jsonl \
+  --out-dir /tmp/ralph-autopilot-out \
+  --skip-agent-analysis
+```
+
+Outputs (in `--out-dir`):
+- `stdout.txt`, `stderr.txt`
+- `analysis_input.json`, `analysis_output.json`
+- `report.json`, `report.md`
+
+Exit codes:
+- `0`: hard PASS and agent PASS (or agent skipped)
+- `1`: hard FAIL
+- `2`: hard PASS but agent FAIL or `quality_score=suboptimal`
+- `3`: hard PASS but agent analysis error (run/parse/backend)
 
 ### `ralph init` Options
 

@@ -1,0 +1,9 @@
+{"ts":1737740500000,"event":"_meta.loop_start","data":{"max_iterations":20,"prompt_file":"","ux_mode":"parallel-cli"}}
+{"ts":1737740500010,"event":"bus.publish","data":{"id":"supervisor:1","payload":"@prompt.md","source":null,"target":null,"target_instance":"ralph#1","topic":"task.start"}}
+{"ts":1737740500100,"event":"ux.terminal.write","data":{"bytes":"W0UyRV9DTURdIHJhbHBoIGVtaXQgc3Bhd24udGFzayAibWFya2VyOiBFMkVfU1BBV05fTUFSS0VSXzQyOyBxdWVzdGlvbjogMTIxKzQzPT8iIC0tdGFyZ2V0IHdvcmtlciAtLXNwYXduLWluc3RhbmNlCg==","instance_id":"ralph#1","offset_ms":100,"stdout":true}}
+{"ts":1737740500150,"event":"bus.publish","data":{"id":"ralph#1:1","payload":"e2e boundary","source":null,"source_instance":"ralph#1","target":null,"target_instance":null,"topic":"e2e.boundary"}}
+{"ts":1737740500200,"event":"ux.terminal.write","data":{"bytes":"PGV2ZW50IHRvcGljPSJzcGF3bi5kb25lIiB0YXJnZXRfaW5zdGFuY2U9InJhbHBoIzEiPgptYXJrZXI6IEUyRV9TUEFXTl9NQVJLRVJfNDIKcXVlc3Rpb246IDEyMSs0Mz0/CmFuc3dlcjogMTY0CjwvZXZlbnQ+Cg==","instance_id":"worker#2","offset_ms":200,"stdout":true}}
+{"ts":1737740500250,"event":"bus.publish","data":{"id":"worker#2:1","payload":"marker: E2E_SPAWN_MARKER_42\nquestion: 121+43=?\nanswer: 164","source":null,"source_instance":"worker#2","target":null,"target_instance":"ralph#1","topic":"spawn.done"}}
+{"ts":1737740500300,"event":"ux.terminal.write","data":{"bytes":"QUNLIG1hcmtlcjogRTJFX1NQQVdOX01BUktFUl80MiBhbnN3ZXI6IDE2NAo=","instance_id":"ralph#1","offset_ms":300,"stdout":true}}
+{"ts":1737740500310,"event":"ux.terminal.write","data":{"bytes":"TE9PUF9DT01QTEVURQo=","instance_id":"ralph#1","offset_ms":310,"stdout":true}}
+{"ts":1737740500400,"event":"_meta.termination","data":{"elapsed_secs":0.4,"iterations":0,"reason":"CompletionPromise","ux_writes":4}}

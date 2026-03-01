@@ -119,6 +119,34 @@ cargo test
 # Try happy paths, error cases, edge cases
 ```
 
+#### macOS note: "Xcode license" failures during `cargo test`
+
+On macOS, `cargo test` compiles and links test binaries and may invoke Apple's toolchain via `xcrun`.
+
+If you see an error like:
+
+```
+You have not agreed to the Xcode license agreements...
+```
+
+it usually means your `xcode-select -p` points at an Xcode.app install whose license hasn't been accepted yet.
+
+Options:
+
+- Use Command Line Tools for this command (no sudo):
+
+```bash
+DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test
+```
+
+- Or accept the Xcode license (requires admin):
+
+```bash
+sudo xcodebuild -license accept
+```
+
+If you use `direnv`, this repo's `.envrc` will default `DEVELOPER_DIR` to Command Line Tools when available.
+
 ### Step 5: Update Spec Status
 
 ```yaml

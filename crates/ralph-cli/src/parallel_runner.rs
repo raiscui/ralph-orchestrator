@@ -35,11 +35,12 @@ use crate::{ColorMode, Verbosity};
 
 fn should_forward_event_to_tui(event: &ralph_proto::Event) -> bool {
     // 事件转发策略（并行模式）：
-    // - gate.* / human.message：用于控制面 UI（Gate 面板/提示等）；
+    // - gate.* / human.message / reply.human.message：用于控制面 UI（Gate 面板/提示等）；
     // - source_instance 存在：用于运行态可视化（Hat Graph Radar 边动画可据此推导发布者 hat）。
     let topic = event.topic.as_str();
     topic.starts_with("gate.")
         || topic == "human.message"
+        || topic == "reply.human.message"
         || event.source_instance.is_some()
         || event.source.is_some()
 }
@@ -272,7 +273,8 @@ impl HatJobExecutor for CliHatJobExecutor {
         let _ = stderr_task.await;
 
         Ok(HatJobResult {
-            output,
+            output_for_parsing: output,
+            observed_stderr: String::new(),
             success: status.success() && !timed_out && !canceled,
             exit_code: status.code(),
             timed_out,
@@ -386,6 +388,66 @@ impl CliHatJobExecutor {
     }
 }
 
+#[cfg(test)]
+mod guardrail_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn parallel_output_for_event_parsing_is_stdout_only() {
+        // ------------------------------------------------------------------
+        // 目标:
+        // - 锁死 parallel 模式的关键不变量: EventParser 的输入必须是 stdout-only.
+        // - stderr 可能包含 prompt transcript / MCP 日志 / warnings 等,它们经常含 `<event ...>` 字样。
+        //   一旦把 stderr 拼进 `HatJobResult.output`,就会产生“假事件/假 completion/重复路由”的回归。
+        // ------------------------------------------------------------------
+
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<HatJobOutputChunk>(8);
+        let instance_id = HatInstanceId::from("writer#1");
+        let job_id = 42_u64;
+        let mut output = String::new();
+
+        // 1) stdout: 必须进入 output(用于事件解析).
+        CliHatJobExecutor::handle_output_line(
+            job_id,
+            &instance_id,
+            &output_tx,
+            &mut output,
+            OutputStream::Stdout,
+            "hello".to_string(),
+        )
+        .await;
+
+        assert_eq!(output, "hello\n");
+        let chunk = output_rx.recv().await.expect("should receive stdout chunk");
+        assert_eq!(chunk.job_id, job_id);
+        assert_eq!(chunk.instance_id, instance_id);
+        assert_eq!(chunk.stream, OutputStream::Stdout);
+        assert_eq!(chunk.line, "hello");
+
+        // 2) stderr: 仍要流式转发给 supervisor 做可观测输出,但绝不能污染 output.
+        let stderr_line = "<event topic=\"build.task\">should_not_parse</event>".to_string();
+        CliHatJobExecutor::handle_output_line(
+            job_id,
+            &instance_id,
+            &output_tx,
+            &mut output,
+            OutputStream::Stderr,
+            stderr_line.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            output, "hello\n",
+            "REGRESSION: stderr must NOT be appended to output used for event parsing"
+        );
+        let chunk = output_rx.recv().await.expect("should receive stderr chunk");
+        assert_eq!(chunk.job_id, job_id);
+        assert_eq!(chunk.instance_id, instance_id);
+        assert_eq!(chunk.stream, OutputStream::Stderr);
+        assert_eq!(chunk.line, stderr_line);
+    }
+}
+
 /// 运行并行 HatInstance 调度器。
 ///
 /// 说明：
@@ -396,6 +458,10 @@ pub struct ParallelLoopFlags {
     pub enable_tui: bool,
     pub plain: bool,
     pub show_stderr: bool,
+    /// Headless/CI/E2E: 允许在 prompt 缺失/为空时启动并待机。
+    pub idle_start: bool,
+    /// 并行 TUI: 仅当没有 CLI prompt 覆盖时,才允许自动待机。
+    pub allow_tui_auto_idle: bool,
 }
 
 pub async fn run_parallel_loop_impl(
@@ -444,8 +510,73 @@ pub async fn run_parallel_loop_impl(
 
     let use_colors = color_mode.should_use_colors();
 
-    // 复用现有的 prompt 解析规则（与串行保持一致）
-    let prompt_content = crate::loop_runner::resolve_prompt_content(&config.event_loop)?;
+    // prompt 解析(并行模式):
+    //
+    // 说明：
+    // - 默认与串行保持一致：必须有 prompt。
+    // - 但为了支持“并行 TUI 启动后待机(0 token)”体验,我们允许在特定条件下进入 idle_start:
+    //   - headless/CI/E2E: 显式 `--idle-start`
+    //   - 交互式 TUI: 默认 `PROMPT.md` 缺失/为空 + 无 CLI prompt 覆盖时自动待机
+    //
+    // 重要：
+    // - idle_start 只在 fresh run 生效；resume/continue 不支持该语义。
+    // - 即使进入 idle_start,我们仍会创建 `.ralph/current-events` marker 以支持 `ralph emit` 注入。
+    let mut idle_start = false;
+    let prompt_content = if resume {
+        crate::loop_runner::resolve_prompt_content(&config.event_loop)?
+    } else {
+        // 1) 优先 inline prompt
+        let inline = config
+            .event_loop
+            .prompt
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        if !inline.trim().is_empty() {
+            inline
+        } else {
+            // 2) prompt_file
+            let prompt_file = config.event_loop.prompt_file.as_str();
+            let default_prompt_file = prompt_file == "PROMPT.md";
+
+            // 并行 TUI 的“自动待机”只在默认 PROMPT.md 丢失/为空时触发,避免吞掉显式配置错误。
+            let can_auto_idle = enable_tui && flags.allow_tui_auto_idle && default_prompt_file;
+
+            if prompt_file.is_empty() {
+                if flags.idle_start {
+                    idle_start = true;
+                    String::new()
+                } else {
+                    crate::loop_runner::resolve_prompt_content(&config.event_loop)?
+                }
+            } else {
+                let path = std::path::Path::new(prompt_file);
+                if path.exists() {
+                    let content = std::fs::read_to_string(path).with_context(|| {
+                        format!("Failed to read prompt file (parallel): {}", prompt_file)
+                    })?;
+
+                    if content.trim().is_empty() && (flags.idle_start || can_auto_idle) {
+                        idle_start = true;
+                        String::new()
+                    } else if content.trim().is_empty() {
+                        anyhow::bail!(
+                            "Prompt file '{}' is empty. Add content, or use `ralph run --idle-start` (parallel) to start idle.",
+                            prompt_file
+                        );
+                    } else {
+                        content
+                    }
+                } else if flags.idle_start || can_auto_idle {
+                    idle_start = true;
+                    String::new()
+                } else {
+                    crate::loop_runner::resolve_prompt_content(&config.event_loop)?
+                }
+            }
+        }
+    };
 
     // Create termination + interrupt signals for TUI lifecycle
     let (terminated_tx, terminated_rx) = watch::channel(false);
@@ -463,32 +594,23 @@ pub async fn run_parallel_loop_impl(
         // Fresh run：清理旧 scratchpad，避免历史残留误导本次 objective。
         // 注意：resume/continue 模式下必须保留 scratchpad（作为恢复上下文的一部分）。
         let scratchpad_path = config.core.resolve_path(&config.core.scratchpad);
-        if scratchpad_path.exists() {
-            if let Some(parent) = scratchpad_path.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "Failed to create scratchpad parent directory (parallel): {:?}",
-                        parent
-                    )
-                })?;
-            }
-            std::fs::write(&scratchpad_path, "").with_context(|| {
-                format!(
-                    "Failed to clear scratchpad for fresh run (parallel): {:?}",
-                    scratchpad_path
-                )
-            })?;
-            debug!(
-                "Cleared scratchpad for fresh run (parallel): {:?}",
-                scratchpad_path
-            );
-        }
+        crate::loop_runner::clear_scratchpad_for_fresh_run(&scratchpad_path, "parallel")?;
+    }
+
+    // headless(无 TUI)下的 idle_start 需要一个“明显信号”,否则看起来像卡住。
+    // 注意：这是本地输出,不触发任何后端调用,不消耗 token。
+    if idle_start && !enable_tui && !matches!(verbosity, Verbosity::Quiet) {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(
+            out,
+            "[supervisor] idle_start 已启用: 正在等待外部事件. 例如: ralph emit human.message \"你的任务\" --target-instance ralph#1"
+        );
     }
 
     let default_backend = CliBackend::from_config(&config.cli)
         .map_err(|e| anyhow::anyhow!("Failed to create backend from config: {e}"))?;
     let codex_mcp_runtime = Arc::new(CodexMcpRuntime::default());
-    let codex_app_server_runtime = Arc::new(CodexAppServerRuntime::default());
+    let codex_app_server_runtime = Arc::new(CodexAppServerRuntime::new(use_colors));
 
     let executor = Arc::new(CliHatJobExecutor {
         default_backend,
@@ -684,7 +806,13 @@ pub async fn run_parallel_loop_impl(
             );
 
             // stderr 用灰色显示，提高可读性。
-            if use_colors && matches!(chunk.stream, OutputStream::Stderr) {
+            //
+            // 注意:
+            // - 如果 stderr 行本身带 ANSI(例如我们回显的 prompt transcript,或后端自身彩色日志),
+            //   外层再包一层 GRAY 会破坏原始色彩语义。
+            let is_stderr = matches!(chunk.stream, OutputStream::Stderr);
+            let line_has_ansi = chunk.line.contains("\x1b[");
+            if use_colors && is_stderr && !line_has_ansi {
                 let _ = writeln!(out, "{}{}{}", colors::GRAY, line, colors::RESET);
             } else {
                 let _ = writeln!(out, "{line}");
@@ -744,12 +872,14 @@ pub async fn run_parallel_loop_impl(
 
     // Supervisor
     let mut supervisor = ParallelSupervisor::new(config, prompt_content, executor)?
+        .with_agents_snapshot_to_default_path()
         .with_output_observer(observer)
         .with_instance_state_observer(state_observer)
         // 并行 TUI：completion promise（LOOP_COMPLETE）进入“暂停”而不是“退出”，并禁用动态实例回收，
         // 这样 human message 可以在会话中持续驱动下一轮对话/工作，而不会被 done/回收打断。
         .with_pause_on_completion_promise(enable_tui)
-        .with_disable_dynamic_instance_reap(enable_tui);
+        .with_disable_dynamic_instance_reap(enable_tui)
+        .with_idle_start(idle_start);
     if let Some(event_observer) = event_observer {
         supervisor = supervisor.with_event_observer(event_observer);
     }
@@ -775,6 +905,21 @@ pub async fn run_parallel_loop_impl(
 
                     // 让 TUI 立即退出（如果还在跑）
                     let _ = terminated_tx.send(true);
+
+                    // best-effort：即使被 Ctrl+C/SIGTERM/SIGHUP 打断,也要把 cassette 尾部刷盘,
+                    // 否则用户会看到 record-session JSONL “没有回答就结束”。
+                    if let Some(recorder) = &session_recorder {
+                        let reason = TerminationReason::Interrupted;
+                        let reason_str = format!("{reason:?}");
+                        recorder.record_meta(Record::meta_termination(
+                            &reason_str,
+                            0, // 并行模式的 iteration 语义与串行不同，这里先写 0 做占位
+                            recorder.elapsed().as_secs_f64(),
+                            recorder.ux_write_count(),
+                        ));
+                        let _ = recorder.flush();
+                    }
+
                     codex_mcp_runtime.shutdown_all().await;
                     codex_app_server_runtime.shutdown_all().await;
                     return Ok(TerminationReason::Interrupted);
@@ -785,6 +930,17 @@ pub async fn run_parallel_loop_impl(
     let result = match result {
         Ok(result) => result,
         Err(e) => {
+            // best-effort：错误退出时也尽量刷盘,保留可审计证据.
+            if let Some(recorder) = &session_recorder {
+                let reason_str = format!("Error: {e:#}");
+                recorder.record_meta(Record::meta_termination(
+                    &reason_str,
+                    0,
+                    recorder.elapsed().as_secs_f64(),
+                    recorder.ux_write_count(),
+                ));
+                let _ = recorder.flush();
+            }
             codex_mcp_runtime.shutdown_all().await;
             codex_app_server_runtime.shutdown_all().await;
             return Err(e);

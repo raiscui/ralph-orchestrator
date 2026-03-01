@@ -4,7 +4,7 @@
 //! iteration separators, termination messages, event tables,
 //! and other terminal UI elements.
 
-use ralph_core::{EventRecord, TerminationReason};
+use ralph_core::{AgentsSnapshot, EventRecord, TerminationReason};
 use ralph_proto::HatId;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -285,6 +285,67 @@ pub fn print_events_table(records: &[EventRecord], use_colors: bool) {
         println!("\n{DIM}Total: {} events{RESET}", records.len());
     } else {
         println!("\nTotal: {} events", records.len());
+    }
+}
+
+/// Prints a table of active hat instances from `.ralph/agents.json`.
+pub fn print_agents_table(snapshot: &AgentsSnapshot, use_colors: bool) {
+    use colors::*;
+
+    // Header
+    if use_colors {
+        println!("{BOLD}{DIM}Instance        | Hat     | State    | Dynamic | Last Input{RESET}");
+        println!(
+            "{DIM}---------------+---------+----------+---------+----------------------------------------{RESET}"
+        );
+    } else {
+        println!("Instance        | Hat     | State    | Dynamic | Last Input");
+        println!(
+            "---------------|---------|----------|---------|----------------------------------------"
+        );
+    }
+
+    for inst in &snapshot.instances {
+        let dynamic = if inst.is_dynamic { "yes" } else { "no" };
+        let last = inst
+            .last_input
+            .as_ref()
+            .map(|v| format!("{}: {}", v.topic, v.preview))
+            .unwrap_or_else(|| "-".to_string());
+        let last = if last.len() > 60 {
+            truncate(&last, 60)
+        } else {
+            last
+        };
+
+        if use_colors {
+            let state_color = match inst.state.as_str() {
+                "running" => GREEN,
+                "idle" => CYAN,
+                "created" => DIM,
+                "done" => GRAY,
+                "failed" => RED,
+                _ => RESET,
+            };
+
+            println!(
+                "{CYAN}{:<14}{RESET} | {MAGENTA}{:<7}{RESET} | {state_color}{:<8}{RESET} | {:<7} | {}",
+                inst.instance_id,
+                inst.hat_id,
+                inst.state.as_str(),
+                dynamic,
+                last
+            );
+        } else {
+            println!(
+                "{:<14} | {:<7} | {:<8} | {:<7} | {}",
+                inst.instance_id,
+                inst.hat_id,
+                inst.state.as_str(),
+                dynamic,
+                last
+            );
+        }
     }
 }
 

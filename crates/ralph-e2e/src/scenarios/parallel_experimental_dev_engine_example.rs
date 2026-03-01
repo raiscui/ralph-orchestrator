@@ -6,7 +6,9 @@
 //!   experiment.* -> review -> integration.* -> experiment.complete -> LOOP_COMPLETE
 //! - 断言尽量“硬”，优先用 `.ralph/events.jsonl`（比 stdout 更稳）
 
-use super::parallel::{parse_parallel_job_line, replace_top_level_yaml_block};
+use super::parallel::{
+    parse_parallel_job_line, read_agents_snapshot, replace_top_level_yaml_block,
+};
 use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
 use crate::Backend;
 use crate::executor::{ExecutionResult, PromptSource, RalphExecutor, ScenarioConfig};
@@ -102,6 +104,53 @@ impl ParallelExperimentalDevEngineExampleScenario {
             });
 
         if visible {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
+    fn agents_snapshot_written(&self, executor: &RalphExecutor) -> crate::models::Assertion {
+        // -----------------------------------------------------------------
+        // 说明:
+        // - `.ralph/agents.json` 是并行 Supervisor 的运行态快照,用于 `ralph agents` 命令。
+        // - 该 example 的“最近新增能力”之一就是把并行实例的状态持续落盘,便于另一个终端观测。
+        // - 这里不强约束实例数量(避免 autoscale/动态实例引入 flaky),
+        //   只要求包含关键 hat: experiment_runner/auditor/integrator。
+        // -----------------------------------------------------------------
+        let snapshot = match read_agents_snapshot(executor.workspace()) {
+            Ok(s) => s,
+            Err(e) => {
+                return AssertionBuilder::new("Agents snapshot written (example)")
+                    .expected(".ralph/agents.json exists and is valid JSON")
+                    .actual(e)
+                    .failed()
+                    .build();
+            }
+        };
+
+        let instance_count = snapshot.instances.len();
+        let has_runner = snapshot
+            .instances
+            .iter()
+            .any(|i| i.hat_id == "experiment_runner");
+        let has_auditor = snapshot
+            .instances
+            .iter()
+            .any(|i| i.hat_id == "experiment_auditor");
+        let has_integrator = snapshot
+            .instances
+            .iter()
+            .any(|i| i.hat_id == "experiment_integrator");
+
+        let ok = instance_count >= 3 && has_runner && has_auditor && has_integrator;
+        let builder = AssertionBuilder::new("Agents snapshot written (example)")
+            .expected("agents.json contains runner + auditor + integrator (and instance_count>=3)")
+            .actual(format!(
+                "instance_count={instance_count}, runner={has_runner}, auditor={has_auditor}, integrator={has_integrator}"
+            ));
+
+        if ok {
             builder.passed().build()
         } else {
             builder.failed().build()
@@ -474,6 +523,7 @@ impl TestScenario for ParallelExperimentalDevEngineExampleScenario {
             Assertions::exit_code(&execution, 0),
             Assertions::no_timeout(&execution),
             self.parallel_mode_visible(&execution),
+            self.agents_snapshot_written(executor),
             self.required_topic_chain_observed(&execution),
             self.commit_artifact_present(&execution),
             self.no_unexpected_gates_or_routing_escalations(&execution),

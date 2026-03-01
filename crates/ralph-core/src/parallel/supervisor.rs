@@ -12,15 +12,19 @@ mod routing;
 mod routing_tests;
 
 use super::{
-    HatInstanceCommand, HatInstanceEvent, HatInstanceHandle, HatJobExecutor, HatJobOutputChunk,
-    TopicContractStore,
+    CommandQueue, HatInstanceCommand, HatInstanceEvent, HatInstanceHandle, HatJobExecutor,
+    HatJobOutputChunk, TopicContractStore,
 };
 use crate::config::{HatBackend, HatConfig, RalphConfig};
 use crate::event_logger::EventLogger;
 use crate::hat_registry::HatRegistry;
 use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
-use crate::{EventParser, EventReader as FileEventReader, TerminationReason};
+use crate::{
+    AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot, EventParser,
+    EventReader as FileEventReader, TerminationReason,
+};
+use anyhow::Context;
 use ralph_proto::{
     Event, Hat, HatId, HatInstanceId, HatInstanceState, SessionStrategy, TurnAction,
     WorkspaceStrategy,
@@ -55,6 +59,13 @@ pub struct ParallelSupervisor {
     instance_states: HashMap<HatInstanceId, HatInstanceState>,
     rr_cursor_by_topic: HashMap<String, usize>,
 
+    // agents 快照(供 `ralph agents` 查询)
+    //
+    // 说明：
+    // - 只有在 ralph-cli 显式启用时才会落盘,避免测试/库用法污染工作区。
+    agents_snapshot_path: Option<std::path::PathBuf>,
+    agents_last_inputs: HashMap<HatInstanceId, AgentLastInput>,
+
     // 路由批次内的“乐观运行态”：
     // - 在同一个 job 输出里可能一次解析出多条事件。
     // - Supervisor 顺序路由这些事件时，无法同时消费 `StateChanged`，因此后续事件可能看不到
@@ -67,6 +78,7 @@ pub struct ParallelSupervisor {
     dynamic_instances: HashSet<HatInstanceId>,
     next_instance_seq_by_hat: HashMap<HatId, u64>,
     job_semaphore: Arc<Semaphore>,
+    command_queue: Arc<CommandQueue>,
 
     // 并行运行时通道（用于按需 spawn 新实例）
     output_tx: Option<mpsc::Sender<HatJobOutputChunk>>,
@@ -88,6 +100,13 @@ pub struct ParallelSupervisor {
     // - 我们刻意不把它们做成 config 字段，避免用户 YAML 复杂度上升，也避免 CI/E2E 行为漂移。
     pause_on_completion_promise: bool,
     disable_dynamic_instance_reap: bool,
+    /// Idle start: Supervisor 启动后先待机,不自动投递 `task.start`。
+    ///
+    /// 说明：
+    /// - 该模式用于“启动后等待 human 第一条指令”的交互式体验(0 token 待机)。
+    /// - 仅对 fresh run 生效；resume/continue 语义保持不变。
+    /// - 这是运行时 UX 开关,由 ralph-cli 注入,不落盘到配置文件。
+    idle_start: bool,
 
     output_observer: Option<Arc<dyn Fn(&HatJobOutputChunk) + Send + Sync>>,
     instance_state_observer: Option<Arc<dyn Fn(&HatInstanceId, HatInstanceState) + Send + Sync>>,
@@ -118,6 +137,7 @@ impl ParallelSupervisor {
         let contracts = TopicContractStore::new(&config.parallel.topic_contracts);
         let max_running_jobs = config.parallel.autoscale.max_running_jobs.max(1);
         let job_semaphore = Arc::new(Semaphore::new(max_running_jobs));
+        let command_queue = Arc::new(CommandQueue::new());
         let all_hat_prompt = prompt_overlay::load_all_hat_prompt();
 
         Ok(Self {
@@ -133,11 +153,14 @@ impl ParallelSupervisor {
             instances_by_hat: HashMap::new(),
             instance_states: HashMap::new(),
             rr_cursor_by_topic: HashMap::new(),
+            agents_snapshot_path: None,
+            agents_last_inputs: HashMap::new(),
             routing_batch_depth: 0,
             routing_inflight_instances: HashSet::new(),
             dynamic_instances: HashSet::new(),
             next_instance_seq_by_hat: HashMap::new(),
             job_semaphore,
+            command_queue,
             output_tx: None,
             instance_tx: None,
             queue_decisions: HashMap::new(),
@@ -145,6 +168,7 @@ impl ParallelSupervisor {
             next_decision_job_id: 1,
             pause_on_completion_promise: false,
             disable_dynamic_instance_reap: false,
+            idle_start: false,
             output_observer: None,
             instance_state_observer: None,
             event_observer: None,
@@ -175,6 +199,24 @@ impl ParallelSupervisor {
         self
     }
 
+    /// 启用 `.ralph/agents.json` 落盘(供 `ralph agents` 命令查询)。
+    ///
+    /// 说明：
+    /// - 该快照是运行时可观测性产物,默认不落盘(避免库用法/测试污染工作区)。
+    /// - ralph-cli 在 parallel 模式启动时会显式启用。
+    #[must_use]
+    pub fn with_agents_snapshot_to_default_path(mut self) -> Self {
+        self.agents_snapshot_path = Some(self.config.core.resolve_path(".ralph/agents.json"));
+        self
+    }
+
+    /// 启用 agents 快照落盘到自定义路径(用于测试或外部集成)。
+    #[must_use]
+    pub fn with_agents_snapshot_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.agents_snapshot_path = Some(path.into());
+        self
+    }
+
     /// 并行 TUI：将 completion promise（默认 `LOOP_COMPLETE`）视为“暂停信号”，而不是“退出信号”。
     ///
     /// 说明：
@@ -183,6 +225,13 @@ impl ParallelSupervisor {
     #[must_use]
     pub fn with_pause_on_completion_promise(mut self, enabled: bool) -> Self {
         self.pause_on_completion_promise = enabled;
+        self
+    }
+
+    /// Idle start: 启动后待机,等待 external events 触发第一次 job。
+    #[must_use]
+    pub fn with_idle_start(mut self, enabled: bool) -> Self {
+        self.idle_start = enabled;
         self
     }
 
@@ -234,11 +283,12 @@ impl ParallelSupervisor {
         //
         // 说明：
         // - parallel-cli/CI：从 run 启动开始计时（与串行一致）。
+        // - idle_start：fresh run 时先待机(不自动投递 task.start),因此在看到第一次 Running 前不计时。
         // - parallel-tui：当进入 `LOOP_COMPLETE` 暂停态后，计时会重置并暂停；
         //   直到任意实例再次进入 Running（新的 job 启动）才重新开始计时（见 specs）。
         let mut max_runtime_started_at = std::time::Instant::now();
-        let mut max_runtime_counting = true;
-        let mut max_runtime_waiting_for_running = false;
+        let mut max_runtime_waiting_for_running = !resume && self.idle_start;
+        let mut max_runtime_counting = !max_runtime_waiting_for_running;
         let mut ralph_iterations: u32 = 0;
         // completion_promise 属于“软退出信号”：
         // - 不应当立刻 break，否则同一轮输出里解析出的事件可能还没来得及路由/触发下游 job。
@@ -270,17 +320,21 @@ impl ParallelSupervisor {
         }
 
         self.spawn_instances()?;
+        self.write_agents_snapshot_best_effort();
 
         // 初始事件：task.start / task.resume
         //
         // 说明：
-        // - 这两条属于控制面 handshake 事件，payload 是 top-level prompt。
+        // - `task.start`/`task.resume` 属于控制面 handshake 事件，payload 是 top-level prompt。
         // - 为了避免 wildcard hat 收到该 payload 造成“角色污染”，并行模式下强制投递给 ralph#1。
-        let start_topic = if resume { "task.resume" } else { "task.start" };
-        let mut start_event = Event::new(start_topic, &self.prompt_prelude)
-            .with_target_instance(HatInstanceId::from_parts("ralph", "1"));
-        self.ensure_event_id(&mut start_event);
-        self.route_event(start_event).await?;
+        // - idle_start(fresh): 不自动投递 `task.start`，从而实现 0 token 待机(等待 human 第一条指令)。
+        if resume || !self.idle_start {
+            let start_topic = if resume { "task.resume" } else { "task.start" };
+            let mut start_event = Event::new(start_topic, &self.prompt_prelude)
+                .with_target_instance(HatInstanceId::from_parts("ralph", "1"));
+            self.ensure_event_id(&mut start_event);
+            self.route_event(start_event).await?;
+        }
 
         let mut termination: Option<TerminationReason> = None;
         let mut output_chunks = 0usize;
@@ -316,11 +370,9 @@ impl ParallelSupervisor {
                                 observer(&instance_id, state);
                             }
 
-                            // parallel-tui：`LOOP_COMPLETE` 暂停态下，max_runtime 直到看到任意实例 Running 才重新开始计时。
-                            if self.pause_on_completion_promise
-                                && max_runtime_waiting_for_running
-                                && state == HatInstanceState::Running
-                            {
+                            // max_runtime：暂停态(例如 idle_start / parallel-tui completion pause)下，
+                            // 直到看到任意实例进入 Running 才重新开始计时。
+                            if max_runtime_waiting_for_running && state == HatInstanceState::Running {
                                 max_runtime_started_at = std::time::Instant::now();
                                 max_runtime_counting = true;
                                 max_runtime_waiting_for_running = false;
@@ -333,6 +385,9 @@ impl ParallelSupervisor {
                             {
                                 self.unregister_dynamic_instance(&instance_id);
                             }
+
+                            // 状态变化属于最关键的可观测信号：及时刷新 agents 快照。
+                            self.write_agents_snapshot_best_effort();
                         }
                         HatInstanceEvent::JobCompleted { instance_id, hat_id, result, events } => {
                             // 记录：把解析到的事件写入 debug events.jsonl（方便排查）
@@ -346,7 +401,7 @@ impl ParallelSupervisor {
                             // 注意：不要在这里立刻 break（见上方 drain 说明）。
                             let completion_promise = hat_id.as_str() == "ralph"
                                 && EventParser::contains_promise(
-                                    &result.output,
+                                    &result.output_for_parsing,
                                     &self.config.event_loop.completion_promise,
                                 );
 
@@ -482,8 +537,14 @@ impl ParallelSupervisor {
                             for raw in parse.events {
                                 let payload = raw.payload.unwrap_or_default();
                                 let mut event = Event::new(raw.topic, payload);
+                                if let Some(target) = raw.target {
+                                    event = event.with_target(target);
+                                }
                                 if let Some(target_instance) = raw.target_instance {
                                     event = event.with_target_instance(target_instance);
+                                }
+                                if matches!(raw.spawn_instance, Some(true)) {
+                                    event = event.with_spawn_instance(true);
                                 }
                                 if let Some(strategy) = raw
                                     .workspace_strategy
@@ -678,6 +739,7 @@ impl ParallelSupervisor {
                     output_tx.clone(),
                     instance_tx.clone(),
                     Arc::clone(&self.job_semaphore),
+                    Arc::clone(&self.command_queue),
                     false,
                     dynamic_idle_ttl,
                 );
@@ -694,14 +756,14 @@ impl ParallelSupervisor {
         }
 
         // 始终注册 Ralph fallback（即使 config 没写）
+        let ralph_id = HatId::new("ralph");
+        let ralph_instance = HatInstanceId::from_parts("ralph", "1");
         let ralph_hat = Hat::new("ralph", "Ralph")
             .with_description(
                 "Parallel coordinator: handles true-orphan events and makes completion decisions",
             )
             .subscribe("*")
-            .with_instructions(self.build_ralph_coordinator_instructions());
-        let ralph_id = HatId::new("ralph");
-        let ralph_instance = HatInstanceId::from_parts("ralph", "1");
+            .with_instructions(self.build_ralph_coordinator_instructions(&ralph_instance));
         let ralph_job_timeout = self.resolve_job_timeout(None);
         let ralph_job_output_stale_timeout = self.resolve_output_stale_timeout(None);
         let handle = HatInstanceHandle::spawn(
@@ -720,6 +782,7 @@ impl ParallelSupervisor {
             output_tx,
             instance_tx,
             Arc::clone(&self.job_semaphore),
+            Arc::clone(&self.command_queue),
             false,
             dynamic_idle_ttl,
         );
@@ -732,7 +795,7 @@ impl ParallelSupervisor {
         Ok(())
     }
 
-    fn build_ralph_coordinator_instructions(&self) -> String {
+    fn build_ralph_coordinator_instructions(&self, instance_id: &HatInstanceId) -> String {
         // =====================================================================
         // Ralph#1（并行协调者）prompt：把“官方语义锚点”写死，减少 demo prompt 依赖
         // =====================================================================
@@ -787,13 +850,16 @@ impl ParallelSupervisor {
 
         let mut out = String::new();
 
-        out.push_str(
-            "You are Ralph (coordinator) running in PARALLEL mode as instance ralph#1.\n\n",
-        );
+        out.push_str(&format!(
+            "You are Ralph (coordinator) running in PARALLEL mode as instance {instance_id}.\n\n"
+        ));
 
         out.push_str("## ROLE\n");
         out.push_str("- You MUST NOT implement code.\n");
-        out.push_str("- You MUST coordinate by emitting events.\n");
+        out.push_str("- You MUST coordinate by publishing events.\n");
+        out.push_str(
+	            "- You MAY publish events in-band (`<event ...>...</event>`) or out-of-band via `ralph emit` when command execution is available.\n",
+	        );
         out.push_str("- You MUST keep output short and action-oriented.\n\n");
 
         // =====================================================================
@@ -820,7 +886,10 @@ impl ParallelSupervisor {
         ));
 
         out.push_str("## EMIT EVENTS (NO CODE FENCES)\n");
-        out.push_str("Emit routing events using XML-style tags:\n\n");
+        out.push_str("You have two valid ways to publish routing events:\n\n");
+        out.push_str(
+            "1) In-band: emit XML-style tags to stdout (parsed after the job completes):\n\n",
+        );
         out.push_str("<event topic=\"work.start\">payload</event>\n\n");
         out.push_str("Optional (parallel): target a specific instance:\n\n");
         out.push_str(
@@ -828,12 +897,35 @@ impl ParallelSupervisor {
         );
         out.push_str("Optional: reply to a specific incoming event id (single value):\n\n");
         out.push_str("<event topic=\"build.done\" reply=\"EVENT_ID\">done</event>\n\n");
+        out.push_str("2) Out-of-band (ONLY if you can execute shell/tool commands): run `ralph emit` (Supervisor polls external events continuously):\n\n");
+        out.push_str("ralph emit human.message \"your message\" --target-instance writer#1\n\n");
+        out.push_str("IMPORTANT:\n");
+        out.push_str("- If you choose out-of-band `ralph emit`, you MUST actually execute the command. Do NOT print the command as plain text.\n");
+        out.push_str("- Out-of-band `ralph emit` does NOT require the current job/turn to finish; it can be used at any time (including in-flight steer/interrupt).\n");
+        out.push_str("- If you cannot execute commands, use in-band `<event ...>...</event>`.\n\n");
         out.push_str("Notes:\n");
         out.push_str(
             "- You do NOT need to set `id` manually; runtime will assign one if missing.\n",
         );
         out.push_str("- When replying, use exactly ONE reply id (no multi-reply).\n\n");
-        out.push_str("After emitting an event, you MUST stop. The supervisor will route it and run the next job with fresh context.\n\n");
+        out.push_str("- Every `<event ...>` MUST be a complete tag with a closing `</event>`.\n");
+        out.push_str("  - NEVER output an opening `<event ...>` without `</event>`.\n");
+        out.push_str(
+            "  - Prefer single-line events (no newlines inside a tag) to avoid parse failures.\n\n",
+        );
+        out.push_str(
+            "- You MAY publish multiple `<event ...>...</event>` tags in a single response.\n",
+        );
+        out.push_str("After publishing the required event(s), you MUST stop. The supervisor will route them and run the next job with fresh context.\n\n");
+
+        out.push_str("## HUMAN CHAT (INPUT VS REPLY)\n");
+        out.push_str("- `human.message` is an input message (human -> hats) OR a message addressed to a hat instance.\n");
+        out.push_str("- If you want to reply back to the human user, you MUST publish `reply.human.message`.\n");
+        out.push_str("  - Example: <event topic=\"reply.human.message\" reply=\"EVENT_ID\">your reply</event>\n");
+        out.push_str("- When you observe an external `human.message` event (no `source`/`source_instance`), you MUST reply to the human.\n");
+        out.push_str("  - Emit exactly one `reply.human.message` event with `reply=\"<incoming_event.id>\"`.\n");
+        out.push_str("- You MUST NOT use `human.message` as a human-facing reply topic.\n");
+        out.push_str("  - Reason: `human.message` is treated as an input topic and can cause self-chat loops in parallel mode.\n\n");
 
         out.push_str("## CONFIG (THIS RUN)\n");
         match starting_event {
@@ -948,12 +1040,138 @@ impl ParallelSupervisor {
     fn unregister_dynamic_instance(&mut self, instance_id: &HatInstanceId) {
         self.instances.remove(instance_id);
         self.dynamic_instances.remove(instance_id);
+        self.agents_last_inputs.remove(instance_id);
 
         // 从 hat -> instances 索引里移除，避免后续路由继续选中该实例。
         if let Some(hat_id_str) = instance_id.split_hat_id() {
             let hat_id = HatId::new(hat_id_str);
             if let Some(list) = self.instances_by_hat.get_mut(&hat_id) {
                 list.retain(|id| id != instance_id);
+            }
+        }
+    }
+
+    // =====================================================================
+    // `.ralph/agents.json` 快照写入(供 `ralph agents`)
+    // =====================================================================
+    //
+    // 说明：
+    // - 该快照是“观察面”功能,不应该影响核心调度语义。
+    // - 因此所有写盘都采用 best-effort：失败只 warn,不让 Supervisor 退出。
+
+    fn record_agents_last_input(&mut self, instance_id: &HatInstanceId, event: &Event) {
+        // 未启用快照时,不做任何额外工作.
+        if self.agents_snapshot_path.is_none() {
+            return;
+        }
+
+        let topic = event.topic.to_string();
+
+        // 预览策略：
+        // - 把 payload 压成单行(便于表格展示)
+        // - 只截断到固定长度,避免把大块 prompt 落盘
+        let collapsed = event
+            .payload
+            .replace('\r', " ")
+            .replace('\n', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let preview = crate::truncate_with_ellipsis(&collapsed, 160);
+
+        self.agents_last_inputs.insert(
+            instance_id.clone(),
+            AgentLastInput {
+                ts: chrono::Utc::now().to_rfc3339(),
+                topic,
+                preview,
+            },
+        );
+    }
+
+    fn build_agents_snapshot(&self) -> AgentsSnapshot {
+        let mut instance_ids: Vec<HatInstanceId> = self.instances.keys().cloned().collect();
+        instance_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        let instances = instance_ids
+            .into_iter()
+            .map(|instance_id| {
+                let hat_id = instance_id
+                    .split_hat_id()
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                let state = self
+                    .instance_states
+                    .get(&instance_id)
+                    .copied()
+                    .unwrap_or(HatInstanceState::Created);
+                let is_dynamic = self.dynamic_instances.contains(&instance_id);
+                let last_input = self.agents_last_inputs.get(&instance_id).cloned();
+
+                AgentInstanceSnapshot {
+                    instance_id: instance_id.to_string(),
+                    hat_id,
+                    state,
+                    is_dynamic,
+                    last_input,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        AgentsSnapshot {
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            instances,
+        }
+    }
+
+    fn write_agents_snapshot_best_effort(&self) {
+        let Some(path) = &self.agents_snapshot_path else {
+            return;
+        };
+
+        if let Err(e) = self.write_agents_snapshot_to_path(path) {
+            tracing::warn!(error = %e, path = ?path, "Failed to write agents snapshot");
+        }
+    }
+
+    fn write_agents_snapshot_to_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let snapshot = self.build_agents_snapshot();
+        let json = serde_json::to_string_pretty(&snapshot)
+            .context("Failed to serialize AgentsSnapshot as JSON")?;
+
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create agents snapshot directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        // 原子写入(尽量)：先写 tmp,再 rename 覆盖.
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, json).with_context(|| {
+            format!(
+                "Failed to write tmp agents snapshot: {}",
+                tmp_path.display()
+            )
+        })?;
+
+        // Windows 上 rename 到已存在文件可能失败,这里做一次 remove+retry 的兼容兜底.
+        match std::fs::rename(&tmp_path, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(path);
+                std::fs::rename(&tmp_path, path).with_context(|| {
+                    format!(
+                        "Failed to rename tmp agents snapshot to final: {} -> {} ({e})",
+                        tmp_path.display(),
+                        path.display()
+                    )
+                })?;
+                Ok(())
             }
         }
     }

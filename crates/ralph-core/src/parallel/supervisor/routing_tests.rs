@@ -15,7 +15,7 @@ use crate::parallel::{
 use anyhow::Context;
 use ralph_proto::{
     AudienceOverride, AudienceSelector, Delivery, Event, HatId, HatInstanceId, HatInstanceState,
-    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TopicContract,
+    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TopicContract, TurnAction,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -66,7 +66,8 @@ impl HatJobExecutor for PauseOnCompletionExecutor {
             }
 
             return Ok(HatJobResult {
-                output: "LOOP_COMPLETE\n".to_string(),
+                output_for_parsing: "LOOP_COMPLETE\n".to_string(),
+                observed_stderr: String::new(),
                 success: true,
                 exit_code: Some(0),
                 timed_out: false,
@@ -75,7 +76,8 @@ impl HatJobExecutor for PauseOnCompletionExecutor {
         }
 
         Ok(HatJobResult {
-            output: String::new(),
+            output_for_parsing: String::new(),
+            observed_stderr: String::new(),
             success: true,
             exit_code: Some(0),
             timed_out: false,
@@ -102,7 +104,8 @@ impl HatJobExecutor for PauseMaxRuntimeExecutor {
     ) -> anyhow::Result<HatJobResult> {
         if job.instance_id.as_str() != "ralph#1" {
             return Ok(HatJobResult {
-                output: String::new(),
+                output_for_parsing: String::new(),
+                observed_stderr: String::new(),
                 success: true,
                 exit_code: Some(0),
                 timed_out: false,
@@ -116,7 +119,8 @@ impl HatJobExecutor for PauseMaxRuntimeExecutor {
                 // 第一次：立刻输出 completion promise，让 Supervisor 进入暂停态。
                 self.first_done.notify_waiters();
                 Ok(HatJobResult {
-                    output: "LOOP_COMPLETE\n".to_string(),
+                    output_for_parsing: "LOOP_COMPLETE\n".to_string(),
+                    observed_stderr: String::new(),
                     success: true,
                     exit_code: Some(0),
                     timed_out: false,
@@ -139,7 +143,8 @@ impl HatJobExecutor for PauseMaxRuntimeExecutor {
                 }
 
                 Ok(HatJobResult {
-                    output: String::new(),
+                    output_for_parsing: String::new(),
+                    observed_stderr: String::new(),
                     success: true,
                     exit_code: Some(0),
                     timed_out: false,
@@ -189,7 +194,8 @@ impl HatJobExecutor for NotifyExecutor {
         };
 
         Ok(HatJobResult {
-            output,
+            output_for_parsing: output,
+            observed_stderr: String::new(),
             success: true,
             exit_code: Some(0),
             timed_out: false,
@@ -202,6 +208,12 @@ impl HatJobExecutor for NotifyExecutor {
 struct BlockingExecutor {
     started: Arc<AtomicUsize>,
     notify: Arc<Notify>,
+}
+
+#[derive(Debug, Clone)]
+struct IdleStartCompletionExecutor {
+    started: Arc<AtomicUsize>,
+    started_notify: Arc<Notify>,
 }
 
 #[derive(Debug, Clone)]
@@ -236,11 +248,46 @@ impl HatJobExecutor for BlockingExecutor {
         }
 
         Ok(HatJobResult {
-            output: String::new(),
+            output_for_parsing: String::new(),
+            observed_stderr: String::new(),
             success: true,
             exit_code: Some(0),
             timed_out: false,
             canceled: true,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for IdleStartCompletionExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
+    ) -> anyhow::Result<HatJobResult> {
+        if job.instance_id.as_str() != "ralph#1" {
+            return Ok(HatJobResult {
+                output_for_parsing: String::new(),
+                observed_stderr: String::new(),
+                success: true,
+                exit_code: Some(0),
+                timed_out: false,
+                canceled: false,
+            });
+        }
+
+        self.started.fetch_add(1, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+
+        Ok(HatJobResult {
+            output_for_parsing: "LOOP_COMPLETE\n".to_string(),
+            observed_stderr: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
         })
     }
 }
@@ -433,6 +480,89 @@ async fn supervisor_pause_on_completion_promise_resets_and_pauses_max_runtime_un
 }
 
 #[tokio::test]
+async fn supervisor_idle_start_waits_for_external_event_and_pauses_max_runtime() {
+    // =====================================================================
+    // 目的：
+    // - idle_start(fresh) 下,Supervisor 启动后应当“真待机”(不自动投递 task.start)。
+    // - 待机期间 max_runtime 不计时(否则会在无人输入时被硬退出)。
+    // - 直到 external events 注入一条 human.message,才触发第一次 ralph#1 job。
+    // =====================================================================
+
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // external events：走 fallback `.ralph/events.jsonl`
+    let external_dir = temp_dir.path().join(".ralph");
+    fs::create_dir_all(&external_dir).unwrap();
+    let external_events_path = external_dir.join("events.jsonl");
+    fs::write(&external_events_path, "").unwrap();
+
+    // 内部事件日志写到另一个文件,避免与 external events 混在一起被误读。
+    let internal_events_path = temp_dir.path().join("internal-events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.max_runtime_seconds = 1;
+    config.core = config.core.with_workspace_root(temp_dir.path());
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let started_notify = Arc::new(Notify::new());
+
+    let executor = IdleStartCompletionExecutor {
+        started: Arc::clone(&started),
+        started_notify: Arc::clone(&started_notify),
+    };
+
+    let mut supervisor = ParallelSupervisor::new(config, String::new(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed")
+        .with_idle_start(true)
+        .with_disable_dynamic_instance_reap(true);
+
+    supervisor.event_logger = EventLogger::new(internal_events_path);
+
+    let handle = tokio::spawn(async move { supervisor.run(false).await });
+
+    // 等待超过 max_runtime：不应退出,且不应启动任何 job。
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !handle.is_finished(),
+        "Supervisor should remain alive while idle_start is waiting for external events"
+    );
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        0,
+        "idle_start must NOT start any job before external events"
+    );
+
+    // 注入 human.message：触发第一次 ralph#1 job
+    let line = serde_json::json!({
+        "topic": "human.message",
+        "payload": "marker: E2E_IDLE_START; question: 121+43=?; question: 10+5=?",
+        "ts": "2026-02-01T00:00:00Z",
+    });
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(&external_events_path)
+        .unwrap();
+    writeln!(f, "{}", serde_json::to_string(&line).unwrap()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), started_notify.notified())
+        .await
+        .expect("Timed out waiting for first job after external event");
+
+    let result = tokio::time::timeout(Duration::from_secs(6), handle)
+        .await
+        .expect("Timed out waiting for supervisor.run() to return")
+        .expect("JoinHandle should succeed")
+        .expect("supervisor run should succeed");
+
+    assert_eq!(
+        result.termination,
+        Some(TerminationReason::CompletionPromise)
+    );
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn supervisor_does_not_route_new_events_after_completion_promise() {
     // =====================================================================
     // 目的：
@@ -545,7 +675,8 @@ status: ok
                         // 如果被 supervisor cancel/shutdown，也要及时退出，避免测试卡住
                         if changed.is_ok() && *cancel_rx.borrow() {
                             return Ok(HatJobResult {
-                                output: String::new(),
+                                output_for_parsing: String::new(),
+                                observed_stderr: String::new(),
                                 success: true,
                                 exit_code: Some(0),
                                 timed_out: false,
@@ -569,7 +700,8 @@ status: ok
         };
 
         Ok(HatJobResult {
-            output,
+            output_for_parsing: output,
+            observed_stderr: String::new(),
             success: true,
             exit_code: Some(0),
             timed_out: false,
@@ -652,7 +784,8 @@ impl HatJobExecutor for TimeoutCaptureExecutor {
         }
 
         Ok(HatJobResult {
-            output: String::new(),
+            output_for_parsing: String::new(),
+            observed_stderr: String::new(),
             success: true,
             exit_code: Some(0),
             timed_out: false,
@@ -683,7 +816,8 @@ impl HatJobExecutor for StartEventCaptureExecutor {
         self.notify.notify_waiters();
 
         Ok(HatJobResult {
-            output: String::new(),
+            output_for_parsing: String::new(),
+            observed_stderr: String::new(),
             success: true,
             exit_code: Some(0),
             timed_out: false,
@@ -716,7 +850,44 @@ impl HatJobExecutor for PromptCaptureExecutor {
         }
 
         Ok(HatJobResult {
-            output: String::new(),
+            output_for_parsing: String::new(),
+            observed_stderr: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PromptCaptureNotifyExecutor {
+    prompts: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    notify: Arc<Notify>,
+    notify_on_instance: String,
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for PromptCaptureNotifyExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        _control_rx: mpsc::Receiver<HatJobControl>,
+    ) -> anyhow::Result<HatJobResult> {
+        {
+            let mut prompts = self.prompts.lock().await;
+            let instance_id = job.instance_id.to_string();
+            prompts.insert(instance_id.clone(), job.prompt);
+            if instance_id == self.notify_on_instance {
+                self.notify.notify_waiters();
+            }
+        }
+
+        Ok(HatJobResult {
+            output_for_parsing: String::new(),
+            observed_stderr: String::new(),
             success: true,
             exit_code: Some(0),
             timed_out: false,
@@ -917,6 +1088,57 @@ async fn trigger_routing_delivers_to_single_instance_per_hat() {
 }
 
 #[tokio::test]
+async fn spawn_instance_forces_new_dynamic_instance_and_delivers_direct() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    // 单个静态实例：writer#1
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+
+    // 显式请求 spawn 一个新实例(上下文隔离),并直达投递.
+    let event = Event::new("build.task", "hello")
+        .with_id("e-spawn-1")
+        .with_target(HatId::new("writer"))
+        .with_spawn_instance(true);
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let seen = executor.seen.lock().await.clone();
+    assert_eq!(seen, vec!["writer#2".to_string()]);
+
+    // 断言：新实例已被创建并注册,但旧实例仍存在.
+    assert!(
+        supervisor
+            .instances
+            .contains_key(&HatInstanceId::new("writer#2"))
+    );
+    assert!(
+        supervisor
+            .instances
+            .contains_key(&HatInstanceId::new("writer#1"))
+    );
+}
+
+#[tokio::test]
 async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
@@ -997,6 +1219,161 @@ async fn busy_ralph_primary_explicit_target_is_redirected_to_secondary() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let seen = executor.seen.lock().await.clone();
     assert_eq!(seen, vec!["ralph#2".to_string()]);
+}
+
+#[tokio::test]
+async fn busy_ralph_primary_explicit_target_is_not_redirected_for_turn_steer() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+
+    // 说明:
+    // - 标记 ralph#1 为 Running,模拟“主协调实例正在执行中”。
+    // - 但 turn/steer 属于 in-flight 控制信号,必须保持直达 ralph#1,不应被改投到 ralph#2。
+    supervisor
+        .instance_states
+        .insert(HatInstanceId::new("ralph#1"), HatInstanceState::Running);
+
+    let event = Event::new("e2e.steer", "marker")
+        .with_id("e-ralph-busy-steer-no-redirect")
+        .with_target_instance(HatInstanceId::new("ralph#1"))
+        .with_turn_action(TurnAction::Steer);
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seen = executor.seen.lock().await.clone();
+    assert_eq!(seen, vec!["ralph#1".to_string()]);
+}
+
+#[tokio::test]
+async fn busy_ralph_primary_explicit_target_is_not_redirected_for_turn_interrupt() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+
+    // 说明:
+    // - turn/interrupt 也属于 in-flight 控制信号,必须直达目标实例,否则无法取消正在运行的 job。
+    supervisor
+        .instance_states
+        .insert(HatInstanceId::new("ralph#1"), HatInstanceState::Running);
+
+    let event = Event::new("e2e.interrupt", "please stop")
+        .with_id("e-ralph-busy-interrupt-no-redirect")
+        .with_target_instance(HatInstanceId::new("ralph#1"))
+        .with_turn_action(TurnAction::Interrupt);
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    // 说明:
+    // - turn/interrupt 在 HatInstance 内属于“取消当前 job”的控制信号,不一定会触发新的 job 启动。
+    // - 因此这里不以 executor.seen 作为断言,而是锁定“没有发生改投/没有按需创建 ralph#2”:
+    //   - 若 rewrite_target_for_busy_ralph 没有豁免 Interrupt,此处会创建 ralph#2 并把事件改投过去。
+    assert!(
+        !supervisor
+            .instances
+            .contains_key(&HatInstanceId::new("ralph#2")),
+        "turn/interrupt should NOT spawn or redirect to ralph#2 when explicit target_instance=ralph#1"
+    );
+}
+
+#[tokio::test]
+async fn busy_ralph_secondary_includes_coordinator_instructions_and_config_prompt() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = PromptCaptureNotifyExecutor {
+        prompts: Arc::clone(&prompts),
+        notify: Arc::clone(&notify),
+        notify_on_instance: "ralph#2".to_string(),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.ralph_prompt = Some("RALPH_PROMPT_ANCHOR_FOR_TEST".to_string());
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
+
+    // 说明:
+    // - 主协调实例处于 Running 时,route_event 会按需创建 ralph#2 并改投.
+    // - 该测试的目的不是验证"改投"本身(已有单测覆盖),
+    //   而是锁定 ralph#2 的 prompt 必须包含与 ralph#1 等价的 coordinator 指令,
+    //   避免它使用极小兜底 prompt 漂移导致协议破坏.
+    supervisor
+        .instance_states
+        .insert(HatInstanceId::new("ralph#1"), HatInstanceState::Running);
+
+    let event = Event::new("routing.escalate", "needs coordinator")
+        .with_id("e-ralph-2-prompt")
+        .with_target_instance(HatInstanceId::new("ralph#1"));
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for ralph#2 prompt capture");
+
+    let prompt = {
+        let prompts = prompts.lock().await;
+        prompts
+            .get("ralph#2")
+            .cloned()
+            .expect("ralph#2 prompt should be captured")
+    };
+
+    assert!(
+        prompt
+            .contains("You are Ralph (coordinator) running in PARALLEL mode as instance ralph#2."),
+        "ralph#2 should receive coordinator identity line"
+    );
+    assert!(
+        prompt.contains("## KEY SEMANTICS (OFFICIAL)"),
+        "ralph#2 should include official coordinator semantics section"
+    );
+    assert!(
+        prompt.contains("Out-of-band (ONLY if you can execute shell/tool commands)"),
+        "ralph#2 prompt should describe out-of-band `ralph emit` publishing"
+    );
+    assert!(
+        prompt.contains("You MAY publish multiple"),
+        "ralph#2 prompt should allow multiple events in a single response"
+    );
+    assert!(
+        prompt.contains("## RALPH PROMPT (CONFIG)"),
+        "ralph#2 should include config ralph_prompt section"
+    );
+    assert!(
+        prompt.contains("RALPH_PROMPT_ANCHOR_FOR_TEST"),
+        "ralph#2 should include config.event_loop.ralph_prompt content"
+    );
 }
 
 #[tokio::test]
@@ -1176,6 +1553,104 @@ async fn parallel_injects_human_message_subscription_for_strict_target_validatio
         }
         other => panic!("Expected Deliver, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn parallel_does_not_route_hat_sourced_human_message_to_prevent_self_chat_loop() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    // 这里不走 spawn_instances：直接插一个“测试 instance handle”，
+    // 用 channel 捕获 route_event 是否真的投递 Deliver 命令。
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let executor = TimeoutCaptureExecutor { seen };
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed");
+    supervisor.event_logger = EventLogger::new(events_path);
+
+    // 关键点:
+    // - 我们需要让 choose_ralph_instance_for_delivery() 稳定选中 ralph#1,
+    //   避免因为默认 state=Running 而触发 ralph#2 的 spawn(测试里没有 instance_tx)。
+    let instance_id = HatInstanceId::new("ralph#1");
+    supervisor
+        .instance_states
+        .insert(instance_id.clone(), HatInstanceState::Idle);
+
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<HatInstanceCommand>(8);
+    supervisor
+        .instances
+        .insert(instance_id.clone(), HatInstanceHandle { cmd_tx });
+
+    // 模拟 "hat -> human" 的回复事件:
+    // - topic 仍然是 human.message
+    // - 但带 source/source_instance（表示这是 hat 产出的消息,不是外部注入）
+    //
+    // 预期:
+    // - 该事件只用于 UI 展示,不应再次被路由回 hats。
+    // - 否则会形成 ralph#1 自我对话回路(回复自己的 human.message)。
+    let event = Event::new("human.message", "hello from ralph")
+        .with_id("e-human-from-ralph")
+        .with_source(HatId::new("ralph"))
+        .with_source_instance(instance_id.clone());
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let recv = tokio::time::timeout(Duration::from_millis(200), cmd_rx.recv()).await;
+    assert!(
+        recv.is_err(),
+        "Expected no delivery for hat-sourced human.message, but got: {recv:?}"
+    );
+}
+
+#[tokio::test]
+async fn parallel_does_not_route_reply_human_message_topic() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    // 这里不走 spawn_instances：直接插一个“测试 instance handle”，
+    // 用 channel 捕获 route_event 是否真的投递 Deliver 命令。
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let executor = TimeoutCaptureExecutor { seen };
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed");
+    supervisor.event_logger = EventLogger::new(events_path);
+
+    // 确保 choose_ralph_instance_for_delivery() 稳定选中 ralph#1（避免测试里意外 spawn ralph#2）。
+    let instance_id = HatInstanceId::new("ralph#1");
+    supervisor
+        .instance_states
+        .insert(instance_id.clone(), HatInstanceState::Idle);
+
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<HatInstanceCommand>(8);
+    supervisor
+        .instances
+        .insert(instance_id.clone(), HatInstanceHandle { cmd_tx });
+
+    // reply.human.message 是“输出专用 topic”，只用于 UI 展示，不应再被路由回 hats。
+    let event = Event::new("reply.human.message", "hello to human")
+        .with_id("e-reply-human")
+        .with_source(HatId::new("ralph"))
+        .with_source_instance(instance_id.clone());
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let recv = tokio::time::timeout(Duration::from_millis(200), cmd_rx.recv()).await;
+    assert!(
+        recv.is_err(),
+        "Expected no delivery for reply.human.message, but got: {recv:?}"
+    );
 }
 
 #[tokio::test]
@@ -1775,7 +2250,8 @@ mod test_executors {
         ) -> anyhow::Result<HatJobResult> {
             let _ = self.tx.send(job.instance_id.to_string()).await;
             Ok(HatJobResult {
-                output: String::new(),
+                output_for_parsing: String::new(),
+                observed_stderr: String::new(),
                 success: true,
                 exit_code: Some(0),
                 timed_out: false,
@@ -1812,7 +2288,8 @@ mod test_executors {
 
             let _ = self.tx.send(job.instance_id.to_string()).await;
             Ok(HatJobResult {
-                output: String::new(),
+                output_for_parsing: String::new(),
+                observed_stderr: String::new(),
                 success: true,
                 exit_code: Some(0),
                 timed_out: false,

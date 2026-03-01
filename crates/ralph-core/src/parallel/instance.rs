@@ -5,7 +5,10 @@
 //! - outbox：实例向 Supervisor 回传的状态变更 / 解析出的事件
 //! - 每个实例串行执行自己的 job，但多个实例之间可并行
 
-use super::{HatJob, HatJobControl, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend};
+use super::{
+    COMMAND_LANE_WORKSPACE_GIT, CommandQueue, HatJob, HatJobControl, HatJobExecutor,
+    HatJobOutputChunk, HatJobResult, JobBackend,
+};
 use crate::config::{
     HatConfig, PermissionMode, PermissionsConfig, WorkspaceRuntimeConfig, WorkspaceStrategy,
     WorktreeBackend,
@@ -88,6 +91,7 @@ impl HatInstanceHandle {
         output_tx: mpsc::Sender<HatJobOutputChunk>,
         supervisor_tx: mpsc::Sender<HatInstanceEvent>,
         job_semaphore: Arc<Semaphore>,
+        command_queue: Arc<CommandQueue>,
         is_dynamic: bool,
         dynamic_idle_ttl: Duration,
     ) -> Self {
@@ -122,6 +126,7 @@ impl HatInstanceHandle {
                 output_tx,
                 supervisor_tx,
                 job_semaphore,
+                command_queue,
                 is_dynamic,
                 dynamic_idle_ttl,
                 cmd_rx,
@@ -138,6 +143,8 @@ impl HatInstanceHandle {
                 running_session_strategy: None,
                 cancel_tx: None,
                 control_tx: None,
+                shutdown_requested: false,
+                shutdown_deadline: None,
             };
 
             if let Err(e) = actor.run().await {
@@ -184,6 +191,8 @@ struct HatInstanceActor {
     supervisor_tx: mpsc::Sender<HatInstanceEvent>,
     /// 全局并发上限的 semaphore（permit 持有期间代表一个 Running job）。
     job_semaphore: Arc<Semaphore>,
+    /// in-process command queue(用于串行化 workspace/git 等副作用动作)。
+    command_queue: Arc<CommandQueue>,
     /// 是否为动态实例（由 autoscale 创建，空闲可回收）。
     is_dynamic: bool,
     /// 动态实例的 idle 回收阈值。
@@ -221,6 +230,12 @@ struct HatInstanceActor {
     cancel_tx: Option<watch::Sender<bool>>,
     /// in-flight 控制通道（用于 `turn/steer`）。
     control_tx: Option<mpsc::Sender<HatJobControl>>,
+
+    // =====================================================================
+    // Shutdown draining(避免直接 drop in-flight job 导致 workspace 泄漏)
+    // =====================================================================
+    shutdown_requested: bool,
+    shutdown_deadline: Option<Instant>,
 }
 
 // ============================================================================
@@ -236,6 +251,11 @@ enum PermissionAction {
 
 const CAP_WORKTREE: &str = "workspace.worktree";
 const CAP_HOOKS: &str = "workspace.hooks";
+
+// shutdown draining 的兜底窗口:
+// - Supervisor 的 shutdown-drain 默认只有 5s,因此这里要更短一点,避免 instance 来不及发 Done.
+// - 该窗口只用于“确保退出可控”,真正的 stop/kill 行为仍应依赖 job-level cancel/timeout/watchdog。
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// 单次 job 的权限决策缓存（用于 ask gate 回来后继续推进）。
 #[derive(Debug, Clone, Copy)]
@@ -274,6 +294,32 @@ impl HatInstanceActor {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    // shutdown draining:
+                    // - 不再启动新 job
+                    // - 等待 in-flight job 尽快结束(已 cancel),并在退出前做 best-effort workspace cleanup
+                    if self.shutdown_requested {
+                        // 没有 in-flight job 了,可以确定性退出。
+                        if self.running.is_none() {
+                            self.release_workspace_on_shutdown_best_effort().await;
+                            break;
+                        }
+
+                        // 兜底: 别无限等(避免 shutdown 收尾阶段卡死)。
+                        if let Some(deadline) = self.shutdown_deadline
+                            && Instant::now() >= deadline
+                        {
+                            tracing::warn!(
+                                instance = %self.instance_id,
+                                hat = %self.hat.id,
+                                "Shutdown draining deadline exceeded; forcing instance exit"
+                            );
+                            self.release_workspace_on_shutdown_best_effort().await;
+                            break;
+                        }
+
+                        continue;
+                    }
+
                     if self.should_reap_dynamic_instance() {
                         break;
                     }
@@ -283,6 +329,11 @@ impl HatInstanceActor {
                     let Some(cmd) = cmd else { break };
                     match cmd {
                         HatInstanceCommand::Deliver(mut event) => {
+                            // shutdown draining: 退出路径上不再接收新事件,避免在收尾阶段又被新事件拉起。
+                            if self.shutdown_requested {
+                                continue;
+                            }
+
                             // 权限 gate 的 resolve 是“运行时控制信号”，不应该进入 LLM 的业务事件列表。
                             if self.try_handle_permission_gate_resolve(event.as_ref()).await? {
                                 // gate 已处理完毕（可能解锁了 job），继续 loop
@@ -339,10 +390,13 @@ impl HatInstanceActor {
                             }
                         }
                         HatInstanceCommand::Shutdown => {
-                            if let Some(cancel_tx) = &self.cancel_tx {
-                                let _ = cancel_tx.send(true);
+                            self.begin_shutdown().await?;
+
+                            // 若当前没有 in-flight job,立刻收尾并退出(减少 drain 延迟)。
+                            if self.running.is_none() {
+                                self.release_workspace_on_shutdown_best_effort().await;
+                                break;
                             }
-                            break;
                         }
                     }
                 }
@@ -360,6 +414,11 @@ impl HatInstanceActor {
                     let Some(res) = res else { continue };
                     let job_result = res.context("JoinHandle await failed")??;
                     self.on_job_completed(job_result).await?;
+
+                    // draining: job 已结束,可以退出(避免 pending 再起).
+                    if self.shutdown_requested {
+                        break;
+                    }
                 }
             }
         }
@@ -386,6 +445,81 @@ impl HatInstanceActor {
 
         let since = self.dynamic_idle_since.get_or_insert_with(Instant::now);
         since.elapsed() >= self.dynamic_idle_ttl
+    }
+
+    async fn begin_shutdown(&mut self) -> anyhow::Result<()> {
+        if self.shutdown_requested {
+            return Ok(());
+        }
+
+        self.shutdown_requested = true;
+        self.shutdown_deadline = Some(Instant::now() + SHUTDOWN_DRAIN_TIMEOUT);
+
+        // draining:
+        // - 明确停止接受新工作
+        // - 尽快取消 in-flight job
+        self.pending.clear();
+        self.pending_permission_gate = None;
+        self.worktree_override = None;
+        self.hooks_override = None;
+
+        if let Some(cancel_tx) = &self.cancel_tx {
+            let _ = cancel_tx.send(true);
+        }
+
+        Ok(())
+    }
+
+    async fn release_workspace_on_shutdown_best_effort(&mut self) {
+        // shutdown 收尾:
+        // - 尽量回收已 acquire 的 worktree,避免污染后续 run.
+        // - 退出路径上必须可控,因此一律跳过 hooks(不跑 on_release).
+        let Some(ws) = self.running_workspace.take() else {
+            return;
+        };
+
+        if ws.strategy != WorkspaceStrategy::Worktree {
+            self.running_workspace = None;
+            return;
+        }
+
+        let Some(workdir) = ws.workdir else {
+            self.running_workspace = None;
+            return;
+        };
+
+        match self.workspace_runtime.worktree_backend {
+            WorktreeBackend::Worktree => {
+                if let Err(e) = self
+                    .release_worktree(ws.job_id, &workdir, false, None)
+                    .await
+                {
+                    tracing::warn!(
+                        instance = %self.instance_id,
+                        job_id = ws.job_id,
+                        workdir = ?workdir,
+                        error = %e,
+                        "Failed to release worktree during shutdown draining (best-effort)"
+                    );
+                }
+            }
+            WorktreeBackend::Clone => {
+                // clone 模式下的 shutdown 收尾:
+                // - 退出路径上避免触碰主仓库 refs(不要 import clone HEAD),只做目录清理.
+                // - 若你需要保留中间产物,可以在上层改为“不做 shutdown 清理”(后续再加开关)。
+                if let Err(e) = tokio::fs::remove_dir_all(&workdir).await {
+                    tracing::warn!(
+                        instance = %self.instance_id,
+                        job_id = ws.job_id,
+                        workdir = ?workdir,
+                        error = %e,
+                        "Failed to remove clone workdir during shutdown draining (best-effort)"
+                    );
+                }
+            }
+        }
+
+        self.running_workspace = None;
     }
 
     /// 尝试处理“权限 gate”的 resolve。
@@ -465,6 +599,11 @@ impl HatInstanceActor {
     }
 
     async fn maybe_start_job(&mut self) -> anyhow::Result<()> {
+        // shutdown draining: 不再启动新 job.
+        if self.shutdown_requested {
+            return Ok(());
+        }
+
         if self.running.is_some() {
             return Ok(());
         }
@@ -1012,6 +1151,14 @@ impl HatInstanceActor {
         let instance_dir = self.instance_id.to_string().replace('#', "_");
         let refname = format!("refs/ralph/workspaces/{instance_dir}/job-{job_id}");
 
+        // workspace.git lane:
+        // - 该 fetch 会修改主仓库 refs,并可能与其他 worktree 操作竞争 git 锁.
+        // - 因此需要串行化(避免并发 flaky)。
+        let _permit = self
+            .command_queue
+            .acquire(COMMAND_LANE_WORKSPACE_GIT)
+            .await?;
+
         let output = Command::new("git")
             .current_dir(repo_root)
             .args(["fetch", "--no-tags"])
@@ -1065,6 +1212,12 @@ impl HatInstanceActor {
     }
 
     async fn git_worktree_add(&self, repo_root: &PathBuf, workdir: &PathBuf) -> anyhow::Result<()> {
+        // workspace.git lane: worktree add/remove 属于高风险副作用动作,必须全局串行化。
+        let _permit = self
+            .command_queue
+            .acquire(COMMAND_LANE_WORKSPACE_GIT)
+            .await?;
+
         let output = Command::new("git")
             .current_dir(repo_root)
             .args(["worktree", "add", "--detach"])
@@ -1091,6 +1244,12 @@ impl HatInstanceActor {
         repo_root: &PathBuf,
         workdir: &PathBuf,
     ) -> anyhow::Result<()> {
+        // workspace.git lane: worktree add/remove 属于高风险副作用动作,必须全局串行化。
+        let _permit = self
+            .command_queue
+            .acquire(COMMAND_LANE_WORKSPACE_GIT)
+            .await?;
+
         let output = Command::new("git")
             .current_dir(repo_root)
             .args(["worktree", "remove", "-f"])
@@ -1305,9 +1464,9 @@ impl HatInstanceActor {
     }
 
     async fn on_job_completed(&mut self, result: HatJobResult) -> anyhow::Result<()> {
-        // 将 stderr 也带上 prefix，便于 event parser / 人类阅读一致。
-        // 注意：executor 里已经把 stderr 标成 chunk；这里的 output 是“拼接后的完整输出”。
-        let parsed_events = EventParser::new().parse(&result.output);
+        // 事件解析必须基于 stdout-only 的输出,避免 stderr(例如 prompt transcript/后端日志)
+        // 混入后触发假事件/假 completion/重复路由等 flaky 回归。
+        let parsed_events = EventParser::new().parse(&result.output_for_parsing);
 
         let events = parsed_events
             .into_iter()
@@ -1319,13 +1478,17 @@ impl HatInstanceActor {
             && ws.strategy == WorkspaceStrategy::Worktree
             && let Some(workdir) = ws.workdir
         {
+            // shutdown draining:
+            // - 退出路径上必须可控,因此跳过 hooks(避免 on_release 跑很久,导致 drain 超窗)。
+            let hooks_allowed = ws.hooks_allowed && !self.shutdown_requested;
+            let on_release_hook = if self.shutdown_requested {
+                None
+            } else {
+                ws.on_release_hook.as_ref()
+            };
+
             if let Err(e) = self
-                .release_worktree(
-                    ws.job_id,
-                    &workdir,
-                    ws.hooks_allowed,
-                    ws.on_release_hook.as_ref(),
-                )
+                .release_worktree(ws.job_id, &workdir, hooks_allowed, on_release_hook)
                 .await
             {
                 tracing::warn!(
@@ -1392,6 +1555,7 @@ mod tests {
     use crate::config::{CoreConfig, EventMetadata, HatWorkspaceConfig};
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use tempfile::TempDir;
 
     #[derive(Debug)]
     struct NoopExecutor;
@@ -1406,7 +1570,8 @@ mod tests {
             mut _control_rx: mpsc::Receiver<HatJobControl>,
         ) -> anyhow::Result<HatJobResult> {
             Ok(HatJobResult {
-                output: String::new(),
+                output_for_parsing: String::new(),
+                observed_stderr: String::new(),
                 success: true,
                 exit_code: Some(0),
                 timed_out: false,
@@ -1442,6 +1607,7 @@ mod tests {
             output_tx,
             supervisor_tx,
             Arc::new(Semaphore::new(1)),
+            Arc::new(CommandQueue::new()),
             true,
             Duration::from_secs(30),
         );
@@ -1476,6 +1642,89 @@ mod tests {
         assert!(
             seen_done,
             "Expected dynamic instance to self-shutdown after idle TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_cleanup_clone_backend_removes_workdir_and_skips_hooks() {
+        let temp = TempDir::new().expect("temp dir");
+        let hook_marker = temp.path().join("hook_ran.txt");
+        let workdir = temp.path().join("clone-workdir");
+        tokio::fs::create_dir_all(&workdir)
+            .await
+            .expect("create workdir");
+
+        // 让 workdir 看起来更“真实”一点(至少不是空目录),便于发现 remove_dir_all 未执行的回归。
+        tokio::fs::write(workdir.join("dummy.txt"), "x")
+            .await
+            .expect("write dummy file");
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, _supervisor_rx) = mpsc::channel(1);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let mut workspace_runtime = WorkspaceRuntimeConfig::default();
+        workspace_runtime.worktree_backend = WorktreeBackend::Clone;
+
+        let mut actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("writer#1"),
+            hat: Hat::new("writer", "Writer").subscribe("build.task"),
+            hat_config: None,
+            workspace_runtime,
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: String::new(),
+            all_hat_prompt: None,
+            instruction_builder,
+            executor: Arc::new(NoopExecutor),
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Idle,
+            pending: Vec::new(),
+            next_job_id: 1,
+            dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: Some(RunningWorkspace {
+                job_id: 7,
+                strategy: WorkspaceStrategy::Worktree,
+                workdir: Some(workdir.clone()),
+                hooks_allowed: true,
+                on_release_hook: Some(format!("touch {}", hook_marker.display())),
+            }),
+            running: None,
+            running_session_strategy: None,
+            cancel_tx: None,
+            control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
+        };
+
+        actor.release_workspace_on_shutdown_best_effort().await;
+
+        assert!(
+            !workdir.exists(),
+            "Expected clone workdir to be removed during shutdown cleanup"
+        );
+        assert!(
+            !hook_marker.exists(),
+            "Expected shutdown cleanup to skip hooks (marker file should not be created)"
         );
     }
 
@@ -1526,6 +1775,7 @@ mod tests {
             output_tx,
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -1545,6 +1795,8 @@ mod tests {
             running_session_strategy: None,
             cancel_tx: None,
             control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
         };
 
         assert_eq!(
@@ -1590,6 +1842,7 @@ mod tests {
             output_tx,
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -1606,6 +1859,8 @@ mod tests {
             running_session_strategy: None,
             cancel_tx: None,
             control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
         };
 
         assert_eq!(
@@ -1643,6 +1898,7 @@ mod tests {
             output_tx,
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -1661,6 +1917,8 @@ mod tests {
             running_session_strategy: None,
             cancel_tx: None,
             control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
         };
 
         assert_eq!(
@@ -1687,7 +1945,8 @@ mod tests {
             ) -> anyhow::Result<HatJobResult> {
                 *self.last_job.lock().expect("lock last_job") = Some(job);
                 Ok(HatJobResult {
-                    output: String::new(),
+                    output_for_parsing: String::new(),
+                    observed_stderr: String::new(),
                     success: true,
                     exit_code: Some(0),
                     timed_out: false,
@@ -1728,6 +1987,7 @@ mod tests {
             output_tx,
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -1746,6 +2006,8 @@ mod tests {
             running_session_strategy: None,
             cancel_tx: None,
             control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
         };
 
         actor.maybe_start_job().await.unwrap();
@@ -1809,6 +2071,7 @@ mod tests {
             output_tx,
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -1825,6 +2088,8 @@ mod tests {
             running_session_strategy: None,
             cancel_tx: None,
             control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
         };
 
         let event = Event::new("build.task", "hello");
@@ -1882,6 +2147,7 @@ mod tests {
             output_tx,
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -1898,6 +2164,8 @@ mod tests {
             running_session_strategy: None,
             cancel_tx: None,
             control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
         };
 
         let task = Event::new("build.task", "hello").with_id("writer#1:7");

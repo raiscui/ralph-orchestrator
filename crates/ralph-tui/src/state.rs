@@ -817,7 +817,8 @@ impl TuiState {
         // - 你明确指出 event 线路动画应是“因果可视化”，不是 gate/human 这类控制面噪音；
         // - 因此这里只记录“业务事件”，并且必须能推导出发布者 hat（source/source_instance）。
         let topic = event.topic.as_str();
-        if topic.starts_with("gate.") || topic == "human.message" {
+        if topic.starts_with("gate.") || topic == "human.message" || topic == "reply.human.message"
+        {
             return;
         }
 

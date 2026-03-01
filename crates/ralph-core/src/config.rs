@@ -373,6 +373,16 @@ pub struct AdapterSettings {
     #[serde(default = "default_output_stale_timeout_secs")]
     pub output_stale_timeout_secs: u64,
 
+    /// 该 backend 的上下文窗口大小（tokens）。
+    ///
+    /// 说明：
+    /// - 这是一个“预算/护栏”配置,主要用于 `ralph doctor` 在运行前做上下文窗检查,
+    ///   避免在小窗模型上无谓地启动长工作流(浪费时间与 token)。
+    /// - Ralph 不会把这个值直接传递给后端 CLI,它只是用于预检与提示。
+    /// - 若未配置(None),doctor 会跳过窗口检查(保持默认兼容)。
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
+
     /// Include in auto-detection.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -395,6 +405,7 @@ impl Default for AdapterSettings {
         Self {
             timeout: default_timeout(),
             output_stale_timeout_secs: default_output_stale_timeout_secs(),
+            context_window_tokens: None,
             enabled: true,
             tool_permissions: None,
         }
@@ -1617,6 +1628,7 @@ max_tokens: 4096
 adapters:
   claude:
     timeout: 600
+    context_window_tokens: 200000
     enabled: true
   gemini:
     timeout: 300
@@ -1626,6 +1638,7 @@ adapters:
 
         let claude = config.adapter_settings("claude");
         assert_eq!(claude.timeout, 600);
+        assert_eq!(claude.context_window_tokens, Some(200000));
         assert!(claude.enabled);
 
         let gemini = config.adapter_settings("gemini");

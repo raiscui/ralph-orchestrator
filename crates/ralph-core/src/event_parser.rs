@@ -130,6 +130,7 @@ impl EventParser {
             let workspace_strategy = Self::extract_attr(opening_tag, "workspace_strategy");
             let session_strategy = Self::extract_attr(opening_tag, "session_strategy");
             let turn_action = Self::extract_attr(opening_tag, "turn_action");
+            let spawn_instance = Self::extract_attr(opening_tag, "spawn_instance");
 
             let Some(topic) = topic else {
                 remaining = &remaining[start_idx + tag_end + 1..];
@@ -138,12 +139,34 @@ impl EventParser {
 
             // Find the closing tag
             let content_start = &after_start[tag_end + 1..];
-            let Some(close_idx) = content_start.find("</event>") else {
-                remaining = &remaining[start_idx + tag_end + 1..];
-                continue;
-            };
+            let nested_event_idx = content_start.find("<event ");
+            let close_idx = content_start.find("</event>");
 
-            let payload = content_start[..close_idx].trim().to_string();
+            let (payload, total_consumed) = if let Some(close_idx) = close_idx
+                && nested_event_idx.is_none_or(|nested| nested > close_idx)
+            {
+                let payload = content_start[..close_idx].trim().to_string();
+                let total_consumed = start_idx + tag_end + 1 + close_idx + 8; // 8 = "</event>".len()
+                (payload, Some(total_consumed))
+            } else {
+                // ------------------------------------------------------------------
+                // 容错:
+                // - 在并行 TUI chat 场景里,`reply.human.message` 是 UI-only 的“回复输出 topic”.
+                // - 但真实模型偶尔会输出 `<event ...>` 开头,随后因为截断/中止等原因缺失 `</event>`,
+                //   导致 EventParser 丢事件,用户体验变成“问了但没回复”.
+                // - 这里做一个极小、可控的容错: 仅对 `reply.human.message` 且该 tag 位于输出开头(忽略前导空白),
+                //   并且后续不再出现任何新的 `<event ` 时,把 EOF 视为隐式 `</event>`.
+                // - 这样可以最大化避免误把普通日志/示例文本解析成事件.
+                // ------------------------------------------------------------------
+                let prefix_is_blank = remaining[..start_idx].trim().is_empty();
+                let is_last_event = !content_start.contains("<event ");
+                if topic == "reply.human.message" && prefix_is_blank && is_last_event {
+                    (content_start.trim().to_string(), None)
+                } else {
+                    remaining = &remaining[start_idx + tag_end + 1..];
+                    continue;
+                }
+            };
 
             let mut event = Event::new(topic, payload);
 
@@ -202,11 +225,25 @@ impl EventParser {
                 event = event.with_turn_action(action);
             }
 
+            if let Some(flag) = spawn_instance {
+                // 说明：
+                // - 这是路由提示信号：只在 Supervisor 路由层生效。
+                // - 与其他 bool flag 一致：接受 true/1/yes。
+                let enabled = matches!(flag.as_str(), "true" | "1" | "yes");
+                if enabled {
+                    event = event.with_spawn_instance(true);
+                }
+            }
+
             events.push(event);
 
             // Move past this event
-            let total_consumed = start_idx + tag_end + 1 + close_idx + 8; // 8 = "</event>".len()
-            remaining = &remaining[total_consumed..];
+            if let Some(total_consumed) = total_consumed {
+                remaining = &remaining[total_consumed..];
+            } else {
+                // EOF 容错分支：我们已经消费到末尾,无需再继续扫描.
+                break;
+            }
         }
 
         events
@@ -410,6 +447,21 @@ Some trailing text.
     }
 
     #[test]
+    fn test_parse_event_with_spawn_instance() {
+        let output =
+            r#"<event topic="build.task" target="writer" spawn_instance="true">Do it</event>"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].spawn_instance,
+            Some(true),
+            "spawn_instance should be parsed from event attributes"
+        );
+    }
+
+    #[test]
     fn test_parse_event_with_reply() {
         let output = r#"<event topic="build.done" reply="writer#1:7">Done</event>"#;
         let parser = EventParser::new();
@@ -417,6 +469,39 @@ Some trailing text.
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].reply.as_deref(), Some("writer#1:7"));
+    }
+
+    #[test]
+    fn test_parse_incomplete_reply_human_message_event_is_salvaged_at_eof() {
+        let output = r#"<event topic="reply.human.message" reply="E1">hello"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].topic.as_str(), "reply.human.message");
+        assert_eq!(events[0].reply.as_deref(), Some("E1"));
+        assert_eq!(events[0].payload, "hello");
+    }
+
+    #[test]
+    fn test_parse_incomplete_non_reply_event_is_ignored() {
+        let output = r#"<event topic="build.task">do it"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 0);
+    }
+
+    #[test]
+    fn test_incomplete_reply_does_not_swallow_following_events() {
+        let output = r#"<event topic="reply.human.message" reply="E1">hello
+<event topic="impl.done">done</event>"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].topic.as_str(), "impl.done");
+        assert_eq!(events[0].payload, "done");
     }
 
     #[test]

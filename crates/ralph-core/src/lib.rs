@@ -10,6 +10,7 @@
 //! - Terminal capture for session recording
 //! - Benchmark task definitions and workspace isolation
 
+mod agents_snapshot;
 mod cli_capture;
 mod config;
 pub mod diagnostics;
@@ -36,6 +37,7 @@ mod text;
 pub mod utils;
 pub mod workspace;
 
+pub use agents_snapshot::{AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot};
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
     CliConfig, CoreConfig, EventLoopConfig, EventMetadata, GateConfig, HatBackend, HatConfig,

@@ -182,16 +182,43 @@ pub fn find_workspace_root() -> Option<PathBuf> {
 /// This ensures e2e tests run against the locally built code, not a system-installed version.
 pub fn resolve_ralph_binary() -> PathBuf {
     if let Some(root) = find_workspace_root() {
-        // Check for release binary first (faster)
+        // -----------------------------------------------------------------
+        // 说明:
+        // - 这里不能无脑“优先 release”：
+        //   - 在开发期,你很可能刚 `cargo test`/`cargo run` 生成了新的 debug 二进制,
+        //     但旧的 release 二进制仍然存在。
+        //   - 若 E2E 选择了旧 release,会出现“CLI flag 不存在/行为不匹配”的假失败。
+        //
+        // 策略:
+        // - release/debug 都存在时,选择 mtime 更新的那个。
+        // - 仅存在一个时,选择那个。
+        // - 都不存在时,回退到 PATH 查找(字符串 "ralph")。
+        // -----------------------------------------------------------------
         let release_binary = root.join("target/release/ralph");
-        if release_binary.exists() {
-            return release_binary;
-        }
-
-        // Fall back to debug binary
         let debug_binary = root.join("target/debug/ralph");
-        if debug_binary.exists() {
-            return debug_binary;
+
+        match (release_binary.exists(), debug_binary.exists()) {
+            (true, true) => {
+                let release_mtime = std::fs::metadata(&release_binary)
+                    .and_then(|m| m.modified())
+                    .ok();
+                let debug_mtime = std::fs::metadata(&debug_binary)
+                    .and_then(|m| m.modified())
+                    .ok();
+
+                if let (Some(r), Some(d)) = (release_mtime, debug_mtime) {
+                    if d > r {
+                        return debug_binary;
+                    }
+                    return release_binary;
+                }
+
+                // mtime 取不到时回退到 release(更快)
+                return release_binary;
+            }
+            (true, false) => return release_binary,
+            (false, true) => return debug_binary,
+            (false, false) => {}
         }
     }
 
@@ -242,7 +269,8 @@ impl RalphExecutor {
 
     /// Executes ralph with the given configuration.
     pub async fn run(&self, config: &ScenarioConfig) -> Result<ExecutionResult, ExecutorError> {
-        self.run_with_timeout(config, config.timeout).await
+        self.run_with_timeout_and_env(config, config.timeout, &[])
+            .await
     }
 
     /// Executes ralph with a specific timeout.
@@ -250,6 +278,29 @@ impl RalphExecutor {
         &self,
         config: &ScenarioConfig,
         timeout: Duration,
+    ) -> Result<ExecutionResult, ExecutorError> {
+        self.run_with_timeout_and_env(config, timeout, &[]).await
+    }
+
+    /// Executes ralph with a specific timeout and extra env overrides.
+    ///
+    /// 说明:
+    /// - 用于少数场景需要对 ralph 子进程注入环境变量(例如覆盖 PATH 注入 fake backend)。
+    /// - 这里的 env 只作用于本次 `ralph run` 子进程,不会污染当前测试进程的全局环境。
+    pub async fn run_with_extra_env(
+        &self,
+        config: &ScenarioConfig,
+        extra_env: &[(String, String)],
+    ) -> Result<ExecutionResult, ExecutorError> {
+        self.run_with_timeout_and_env(config, config.timeout, extra_env)
+            .await
+    }
+
+    async fn run_with_timeout_and_env(
+        &self,
+        config: &ScenarioConfig,
+        timeout: Duration,
+        extra_env: &[(String, String)],
     ) -> Result<ExecutionResult, ExecutorError> {
         use std::process::Stdio;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -286,6 +337,11 @@ impl RalphExecutor {
             .env("RALPH_WORKSPACE_ROOT", &self.workspace)
             // Use Haiku for faster, cheaper E2E tests
             .env("CLAUDE_MODEL", "haiku");
+
+        // 额外环境变量(场景级覆盖)
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
 
         // Unix: make Ralph the leader of a new process group.
         //

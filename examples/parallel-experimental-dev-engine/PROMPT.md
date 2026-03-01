@@ -2,32 +2,36 @@
 
 ## Run ID
 
-- TODO: 本次运行的标识(例如 demo / bugfix-2026-02-11)
+- parallel-smoke (建议改成你自己的 run id,例如 demo / bugfix-2026-02-11)
 
 ## 目标(Objective)
 
-- TODO: 用一句话描述你要达成的最终状态
+- 验证并行 runtime 是否真的并发跑起来(>=2 个 runner 同时 running),并且能闭环收敛:
+  - experiment.* -> review -> integration.* -> experiment.complete -> LOOP_COMPLETE
 
 ## 补充背景(Context, 可选)
 
-- TODO: 当前现象/错误信息/日志关键片段(贴必要的即可)
-- TODO: 你认为相关的模块/文件(如果不确定也没关系)
+- (可选) 当前现象/错误信息/日志关键片段(贴必要的即可)
+- (可选) 你认为相关的模块/文件(如果不确定也没关系)
 
 ## 选择标准(Selection Criteria)
 
-- TODO: 你要怎么决定"采纳哪个实验结果"
-- 例: 风险最小 / 改动最少 / 性能最好 / 体验最佳
+- 你必须先并行跑完本计划列出的并行自检实验(exp-par-001 与 exp-par-002),并且都通过审计:
+  - `experiment.reviewed.evidence_ok=true`
+- 如果两个实验结果都等价: 优先选择 `exp-par-001`(减少不确定性)
 
 ## 最终验收(Final Verification / 主工作区)
 
-- TODO: 在主工作区集成后,需要跑哪些最终验收命令
-- 例: `cargo test -p xxx`、`cargo clippy --all-targets --all-features -- -D warnings`
+- 在主工作区集成后,需要跑的最终验收命令(必须真跑):
+  - `rg -n "exp-par-00[12]" parallel_smoke_*.txt`
 
 ## 约束(Constraints, 可选)
 
-- TODO: 不能改动的文件/模块(或明确允许改动的范围)
-- TODO: 风险偏好(保守/激进)
-- TODO: 时间预算(例如 30m/2h/1d)
+- 你必须在第一批窗口里一次性发布两条 `experiment.task`(exp-par-001 与 exp-par-002),不要只发布一条.
+- 在 exp-par-001 与 exp-par-002 都完成 `experiment.reviewed` 且 `evidence_ok=true` 之前,你不得进入 integration.
+- 禁止 websearch/外部依赖.
+- 每个实验只允许修改各自对应的 marker 文件,不要修改其他文件.
+- 每个实验必须把改动压成 1 个 commit(便于 cherry-pick/审计/回滚).
 
 ## 实验任务(可选)
 
@@ -50,7 +54,7 @@
 
 1. 创建文件 `parallel_smoke_001.txt`,内容必须包含字符串: `exp-par-001`
 2. 将改动提交为 1 个 commit(用命令级 git 身份,避免环境缺失导致 commit 失败):
-   - `git add -A`
+   - `git add parallel_smoke_001.txt`
    - `git -c user.name="ralph" -c user.email="ralph@local" commit -m "exp-par-001: parallel smoke marker"`
 3. 不要修改其他文件
 
@@ -80,7 +84,7 @@ PY
 
 1. 创建文件 `parallel_smoke_002.txt`,内容必须包含字符串: `exp-par-002`
 2. 将改动提交为 1 个 commit(用命令级 git 身份,避免环境缺失导致 commit 失败):
-   - `git add -A`
+   - `git add parallel_smoke_002.txt`
    - `git -c user.name="ralph" -c user.email="ralph@local" commit -m "exp-par-002: parallel smoke marker"`
 3. 不要修改其他文件
 

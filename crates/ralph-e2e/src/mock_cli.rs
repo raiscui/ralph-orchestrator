@@ -93,19 +93,23 @@ pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockC
     // - 同一 instance 第 N 次被调用 → 回放第 N 段输出
     let invocation_index = next_invocation_index(instance_filter.as_deref())?;
 
-    // 3) 回放前先提取命令（避免边回放边扫描）
-    let commands = if allow.is_some() {
-        extract_commands_from_bus_events(player.bus_events())
-    } else {
-        Vec::new()
-    };
-
-    // 4) 选择本次调用要回放的 terminal writes（按 instance_id + invocation_index 分段）
+    // 3) 选择本次调用要回放的 terminal writes（按 instance_id + invocation_index 分段）
     let selected_writes = select_terminal_writes_for_invocation(
         &player,
         instance_filter.as_deref(),
         invocation_index,
     )?;
+
+    // 4) 回放前先提取“可执行命令”
+    //
+    // 说明：
+    // - `bus.*`：用于 tasks/memories 这类“工具调用”场景
+    // - `[E2E_CMD]`：用于并行场景里从 terminal 输出中提取命令（例如 `ralph emit ...`）
+    let mut commands = Vec::new();
+    if allow.is_some() {
+        commands.extend(extract_commands_from_bus_events(player.bus_events()));
+        commands.extend(extract_commands_from_terminal_writes(&selected_writes)?);
+    }
 
     // 5) 回放 terminal writes（近似 timing）
     let stdout = io::stdout();
@@ -119,6 +123,57 @@ pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockC
     }
 
     Ok(())
+}
+
+/// 从 terminal writes 中提取“可执行命令”。
+///
+/// 约定格式：
+/// - 只识别包含 `[E2E_CMD]` 的行
+/// - 命令文本为该 marker 后的内容（trim 后）
+///
+/// 示例：
+/// - `[E2E_CMD] ralph emit spawn.task "marker: X" --target worker --spawn-instance`
+fn extract_commands_from_terminal_writes(
+    records: &[&TimestampedRecord],
+) -> Result<Vec<String>, MockCliError> {
+    const MARKER: &str = "[E2E_CMD]";
+
+    // ---------------------------------------------------------------------
+    // 说明：
+    // - terminal 输出可能被切成多条 write，因此这里先拼接再按行扫描。
+    // - 优先用 `TerminalWrite.text`（若 cassette 新版本包含该字段），否则回退到 decode bytes。
+    // ---------------------------------------------------------------------
+    let mut combined = String::new();
+    for record in records {
+        let write: TerminalWrite =
+            serde_json::from_value(record.record.data.clone()).map_err(|e| {
+                MockCliError::CassetteParse(format!("invalid ux.terminal.write payload: {e}"))
+            })?;
+
+        if let Some(text) = write.text.as_deref() {
+            combined.push_str(text);
+            continue;
+        }
+
+        let bytes = write.decode_bytes().map_err(|e| {
+            MockCliError::CassetteParse(format!("failed to decode base64 terminal bytes: {e}"))
+        })?;
+        combined.push_str(&String::from_utf8_lossy(&bytes));
+    }
+
+    let mut commands = Vec::new();
+    for line in combined.lines() {
+        let Some(idx) = line.find(MARKER) else {
+            continue;
+        };
+
+        let cmd = line[idx + MARKER.len()..].trim();
+        if !cmd.is_empty() {
+            commands.push(cmd.to_string());
+        }
+    }
+
+    Ok(commands)
 }
 
 /// 回放选中的 terminal writes（已经按 instance/分段筛选过）。
@@ -429,10 +484,25 @@ fn execute_command(command: &str) -> Result<(), MockCliError> {
 
     let (program, args) = parts.split_first().unwrap();
 
+    // -----------------------------------------------------------------
+    // 说明:
+    // - E2E runner 通常用 `target/debug/ralph` 或 `target/release/ralph` 的绝对路径启动.
+    // - 但 allowlist 命令里经常写的是 `ralph ...`（不一定在 PATH 里）.
+    // - 因此这里对 `ralph` 做一次“本地构建优先”的解析,保证 mock-mode 可稳定运行.
+    // -----------------------------------------------------------------
+    let resolved_program: PathBuf = if program == "ralph" {
+        crate::executor::resolve_ralph_binary()
+    } else {
+        PathBuf::from(program)
+    };
+
     // 不走 shell，直接执行
-    let output = Command::new(program).args(args).output().map_err(|e| {
-        MockCliError::CommandError(format!("failed to execute '{}': {}", command, e))
-    })?;
+    let output = Command::new(&resolved_program)
+        .args(args)
+        .output()
+        .map_err(|e| {
+            MockCliError::CommandError(format!("failed to execute '{}': {}", command, e))
+        })?;
 
     // 回显 stdout/stderr（便于调试）
     if !output.stdout.is_empty() {

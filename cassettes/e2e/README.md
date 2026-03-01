@@ -14,6 +14,7 @@ cassettes/e2e/
 ├── multi-iter.jsonl    # Multi-iteration orchestration
 ├── parallel-starting-event-inference-codex.jsonl  # Parallel starting_event inference (Codex)
 ├── parallel-starting-event-inference-multi-candidate-codex.jsonl  # Parallel starting_event inference (multi-candidate, Codex)
+├── parallel-emit-spawn-instance-codex.jsonl  # Parallel: ralph emit --spawn-instance (Codex)
 └── ...
 ```
 
@@ -28,6 +29,7 @@ cassettes/e2e/
 | `multi-iter.jsonl` | Multi-iteration | ⚠️ Iteration count fails (architecture limitation) |
 | `parallel-starting-event-inference-codex.jsonl` | Parallel starting_event inference | ✅ Passes Codex |
 | `parallel-starting-event-inference-multi-candidate-codex.jsonl` | Parallel starting_event inference (multi-candidate) | ✅ Passes Codex |
+| `parallel-emit-spawn-instance-codex.jsonl` | Parallel emit spawn_instance | ✅ Passes Codex |
 
 ## Known Limitations
 

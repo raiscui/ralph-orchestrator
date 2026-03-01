@@ -104,6 +104,10 @@ Validates the **parallel hat instances** runtime against real backends.
 - `ParallelHatInstancesScenario` - Fanout routing + multi-instance attributed output
 - `ParallelStartingEventInferenceScenario` - starting_event unset → ralph#1 infers workflow entry event
 - `ParallelStartingEventInferenceScenario` (multi-candidate variant) - multiple entry candidates → ralph#1 chooses correct entry for required workflow
+- `ParallelEmitSpawnInstanceScenario` - ralph emit --spawn-instance creates dynamic instance + ACK
+- `ParallelAppServerSteerMultiTurnScenario` - Codex App Server turn/steer multi-turn injection (in-flight)
+- `ParallelAppServerSteerMultiTurnLiveScenario` - REAL codex app-server turn/steer multi-turn injection + client-side RPC trace (in-flight)
+- `ParallelAppServerSteerLiveReplyMultiTurnScenario` - REAL codex app-server turn/steer multi-turn injection + requires visible reply output (answers)
 
 ## Reports
 

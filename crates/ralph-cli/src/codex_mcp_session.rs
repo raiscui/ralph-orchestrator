@@ -298,7 +298,8 @@ impl CodexMcpSession {
         self.flush_pending_line(job, output_tx, &mut stream_pending, &mut streamed_text)
             .await;
         Ok(HatJobResult {
-            output: String::new(),
+            output_for_parsing: String::new(),
+            observed_stderr: String::new(),
             success: false,
             exit_code: None,
             timed_out,
@@ -438,7 +439,8 @@ impl CodexMcpSession {
         let _ = streamed_text; // 保留变量用于后续需要时做诊断比对
 
         HatJobResult {
-            output,
+            output_for_parsing: output,
+            observed_stderr: String::new(),
             success: !timed_out && !canceled,
             exit_code: None,
             timed_out,
@@ -690,7 +692,7 @@ impl CodexMcpRuntime {
             .await?;
 
         if instance_key == "ralph#1" && result.success {
-            let summary = truncate_summary(&result.output);
+            let summary = truncate_summary(&result.output_for_parsing);
             *self.latest_ralph_primary_summary.lock().await = Some(summary);
         }
 

@@ -12,9 +12,11 @@
 //! - Code task generation via `ralph code-task`
 //! - Work item tracking via `ralph task`
 
+mod autopilot;
 mod codex_app_server_session;
 mod codex_mcp_session;
 mod display;
+mod doctor;
 mod hats;
 mod init;
 mod loop_runner;
@@ -32,6 +34,7 @@ use ralph_core::{EventHistory, RalphConfig};
 use std::fs;
 use std::io::{IsTerminal, Write, stdout};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::{info, warn};
 
 // Unix-specific process management for process group leadership
@@ -262,6 +265,9 @@ enum Commands {
     /// View event history for debugging
     Events(EventsArgs),
 
+    /// List active hat instances (parallel mode)
+    Agents(AgentsArgs),
+
     /// Initialize a new ralph.yml configuration file
     Init(InitArgs),
 
@@ -285,6 +291,12 @@ enum Commands {
 
     /// Inspect/validate configured hats and render topology diagrams
     Hats(hats::HatsArgs),
+
+    /// Headless automation: run in a Git repo, record session, then judge JSONL
+    Autopilot(autopilot::AutopilotArgs),
+
+    /// Diagnose common startup issues and provide safe fixes
+    Doctor(doctor::DoctorArgs),
 }
 
 /// Arguments for the init subcommand.
@@ -345,6 +357,16 @@ struct RunArgs {
     // ─────────────────────────────────────────────────────────────────────────
     // Execution Mode Options
     // ─────────────────────────────────────────────────────────────────────────
+    /// (Parallel mode) Idle start when prompt is missing/empty.
+    ///
+    /// 说明:
+    /// - 用于 headless/CI/E2E: 在没有 `PROMPT.md` 且未传 `-p/-P` 时,仍允许启动并行 Supervisor 并待机。
+    /// - 该模式下不会自动投递 `task.start`,因此可以做到 0 token 真待机。
+    /// - 仅当 prompt 缺失/为空时生效；若 prompt 存在则保持原有启动行为。
+    /// - 与 `--continue` 冲突,避免与 resume 语义混淆。
+    #[arg(long, conflicts_with = "continue_mode")]
+    idle_start: bool,
+
     /// Disable TUI observation mode (TUI is enabled by default)
     #[arg(long, conflicts_with = "autonomous")]
     no_tui: bool,
@@ -479,6 +501,30 @@ struct EventsArgs {
     clear: bool,
 }
 
+/// Arguments for the agents subcommand.
+#[derive(Parser, Debug)]
+struct AgentsArgs {
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    format: OutputFormat,
+
+    /// Path to agents snapshot file (default: .ralph/agents.json)
+    #[arg(long)]
+    file: Option<PathBuf>,
+
+    /// Watch agents snapshot and refresh periodically (table format only).
+    ///
+    /// 说明:
+    /// - stdout 是 TTY 时,会清屏并原地刷新.
+    /// - stdout 不是 TTY 时,不会输出清屏控制序列,改为分隔符追加输出,便于日志/CI.
+    #[arg(long)]
+    watch: bool,
+
+    /// Refresh interval in milliseconds for --watch.
+    #[arg(long, value_name = "MS", default_value_t = 1000)]
+    watch_interval_ms: u64,
+}
+
 /// Arguments for the clean subcommand.
 #[derive(Parser, Debug)]
 struct CleanArgs {
@@ -518,6 +564,21 @@ struct EmitArgs {
     /// Example: `--target-instance writer#1`
     #[arg(long, value_name = "HAT#KEY")]
     pub target_instance: Option<String>,
+
+    /// Optional target hat for delivery (parallel mode).
+    ///
+    /// Example: `--target writer`
+    #[arg(long, value_name = "HAT")]
+    pub target: Option<String>,
+
+    /// Force spawn a fresh hat instance for this delivery (parallel mode).
+    ///
+    /// 说明:
+    /// - 用于实现“new_instance”投递模式(上下文隔离)。
+    /// - 需要同时提供 `--target <hat_id>`。
+    /// - 与 `--target-instance` 互斥。
+    #[arg(long, conflicts_with = "target_instance", requires = "target")]
+    pub spawn_instance: bool,
 
     /// Optional workspace strategy override (parallel mode).
     ///
@@ -751,6 +812,7 @@ async fn main() -> Result<()> {
             resume_command(cli.config, cli.verbose, cli.color, args).await
         }
         Some(Commands::Events(args)) => events_command(cli.color, args),
+        Some(Commands::Agents(args)) => agents_command(cli.color, args),
         Some(Commands::Init(args)) => init_command(cli.color, args),
         Some(Commands::Clean(args)) => clean_command(cli.config, cli.color, args),
         Some(Commands::Emit(args)) => emit_command(cli.color, args),
@@ -760,6 +822,10 @@ async fn main() -> Result<()> {
         Some(Commands::Tools(args)) => tools::execute(args, cli.color.should_use_colors()),
         Some(Commands::Hats(args)) => {
             hats::execute(&cli.config, args, cli.color.should_use_colors())
+        }
+        Some(Commands::Autopilot(args)) => autopilot::execute(cli.config, args).await,
+        Some(Commands::Doctor(args)) => {
+            doctor::execute(cli.config, args, cli.color.should_use_colors()).await
         }
         None => {
             // Default to run with TUI enabled (new default behavior)
@@ -771,6 +837,7 @@ async fn main() -> Result<()> {
                 completion_promise: None,
                 dry_run: false,
                 continue_mode: false,
+                idle_start: false,
                 no_tui: false, // TUI enabled by default
                 plain: false,
                 autonomous: false,
@@ -871,6 +938,10 @@ async fn run_command(
 
     // Apply CLI overrides (after normalization so they take final precedence)
     // Per spec: CLI -p and -P are mutually exclusive (enforced by clap)
+    //
+    // 并行 TUI 的“自动待机”仅在没有 CLI prompt 覆盖时允许触发:
+    // - 避免用户显式指定了 prompt(-p/-P)但路径/内容有误时被静默吞掉。
+    let allow_tui_auto_idle = args.prompt_text.is_none() && args.prompt_file.is_none();
     if let Some(text) = args.prompt_text {
         config.event_loop.prompt = Some(text);
         config.event_loop.prompt_file = String::new(); // Clear file path
@@ -980,6 +1051,12 @@ async fn run_command(
     let enable_tui = !args.no_tui && !args.autonomous;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
     let custom_args = args.custom_args.clone();
+
+    // --idle-start 只允许在并行模式下使用(串行没有“外部事件驱动的待机”语义)。
+    if args.idle_start && !config.parallel.enabled {
+        anyhow::bail!("`--idle-start` requires `parallel.enabled=true` in config.");
+    }
+
     let reason = if config.parallel.enabled {
         parallel_runner::run_parallel_loop_impl(
             config,
@@ -989,6 +1066,8 @@ async fn run_command(
                 enable_tui,
                 plain: args.plain,
                 show_stderr: args.show_stderr,
+                idle_start: args.idle_start,
+                allow_tui_auto_idle,
             },
             verbosity,
             args.record_session,
@@ -1132,6 +1211,8 @@ async fn resume_command(
                 enable_tui,
                 plain: args.plain,
                 show_stderr: args.show_stderr,
+                idle_start: false,
+                allow_tui_auto_idle: false,
             },
             verbosity,
             args.record_session,
@@ -1253,9 +1334,14 @@ fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
     // This ensures `ralph events` reads from the same events file as the active run
     let history = match args.file {
         Some(path) => EventHistory::new(path),
-        None => fs::read_to_string(".ralph/current-events")
-            .map(|s| EventHistory::new(s.trim()))
-            .unwrap_or_else(|_| EventHistory::default_path()),
+        None => {
+            // 说明:
+            // - 与 `ralph emit` 一致: 支持在子目录执行时自动定位到 active run 的 events 文件。
+            // - 找不到 marker 时,回退到默认 `.ralph/events.jsonl`。
+            let path =
+                resolve_events_file_from_marker_in_parents(PathBuf::from(".ralph/events.jsonl"));
+            EventHistory::new(path)
+        }
     };
 
     // Handle clear command
@@ -1321,6 +1407,217 @@ fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn agents_command(color_mode: ColorMode, args: AgentsArgs) -> Result<()> {
+    let use_colors = color_mode.should_use_colors();
+
+    if args.watch && args.format == OutputFormat::Json {
+        anyhow::bail!("`ralph agents --watch` 目前只支持表格输出.请移除 `--format json`.");
+    }
+
+    if args.watch && args.watch_interval_ms < 1 {
+        anyhow::bail!(
+            "`--watch-interval-ms` 必须 >= 1,当前为 {}.",
+            args.watch_interval_ms
+        );
+    }
+
+    // 默认行为：在子目录执行时也能自动定位到最近的 `.ralph/agents.json`。
+    // 这样用户不需要手工 `cd` 回 workspace root。
+    //
+    // watch 模式的特殊点:
+    // - 如果用户尚未启动并行 run,快照文件可能暂时不存在.
+    // - 因此在 watch 循环里,当 `--file` 未指定时我们会持续做“向上遍历探测”,一旦生成就自动发现.
+    let mut path = match args.file.clone() {
+        Some(path) => path,
+        None => find_agents_snapshot_in_parents(".ralph/agents.json")
+            .unwrap_or_else(|| PathBuf::from(".ralph/agents.json")),
+    };
+
+    if args.watch {
+        let interval = Duration::from_millis(args.watch_interval_ms);
+        let is_tty = stdout().is_terminal();
+
+        loop {
+            // watch 模式下的 auto-detect: 未指定 --file 时,每轮都向上探测一次.
+            if args.file.is_none()
+                && let Some(found) = find_agents_snapshot_in_parents(".ralph/agents.json")
+            {
+                path = found;
+            }
+
+            // =================================================================
+            // 刷新策略:
+            // - TTY: 清屏 + 光标归位,原地刷新.
+            // - 非 TTY: 追加分隔符,不输出 ANSI 控制序列(便于日志/CI).
+            // =================================================================
+            if is_tty {
+                // ANSI: clear screen + cursor home
+                print!("\x1b[2J\x1b[H");
+            } else {
+                println!("\n---");
+            }
+
+            if use_colors {
+                println!(
+                    "{}Watching{} {} (every {}ms). Ctrl+C to quit.",
+                    colors::DIM,
+                    colors::RESET,
+                    path.display(),
+                    args.watch_interval_ms
+                );
+            } else {
+                println!(
+                    "Watching {} (every {}ms). Ctrl+C to quit.",
+                    path.display(),
+                    args.watch_interval_ms
+                );
+            }
+
+            if !path.exists() {
+                if use_colors {
+                    println!(
+                        "{}No agents snapshot found yet.{} Waiting for `.ralph/agents.json`...",
+                        colors::DIM,
+                        colors::RESET
+                    );
+                } else {
+                    println!("No agents snapshot found yet. Waiting for `.ralph/agents.json`...");
+                }
+            } else {
+                match fs::read_to_string(&path) {
+                    Ok(content) => {
+                        match serde_json::from_str::<ralph_core::AgentsSnapshot>(&content) {
+                            Ok(snapshot) => {
+                                display::print_agents_table(&snapshot, use_colors);
+                            }
+                            Err(e) => {
+                                // 说明:
+                                // - watch 模式下不因一次解析失败退出,避免“正在写入/临时损坏”导致体验差.
+                                // - 下轮刷新可能就恢复了.
+                                if use_colors {
+                                    println!(
+                                        "{}Invalid agents snapshot JSON:{} {}",
+                                        colors::RED,
+                                        colors::RESET,
+                                        e
+                                    );
+                                } else {
+                                    println!("Invalid agents snapshot JSON: {e}");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if use_colors {
+                            println!("{}Failed to read:{} {}", colors::RED, colors::RESET, e);
+                        } else {
+                            println!("Failed to read: {e}");
+                        }
+                    }
+                }
+            }
+
+            // Flush: 确保在被 kill/管道场景下尽量不丢输出.
+            let _ = stdout().flush();
+            std::thread::sleep(interval);
+        }
+    }
+
+    if !path.exists() {
+        if use_colors {
+            println!(
+                "{}No agents snapshot found.{} Run `ralph run` (parallel mode) to generate `.ralph/agents.json`.",
+                colors::DIM,
+                colors::RESET
+            );
+        } else {
+            println!(
+                "No agents snapshot found. Run `ralph run` (parallel mode) to generate `.ralph/agents.json`."
+            );
+        }
+        return Ok(());
+    }
+
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read: {}", path.display()))?;
+    let snapshot: ralph_core::AgentsSnapshot = serde_json::from_str(&content)
+        .with_context(|| format!("Invalid agents snapshot JSON: {}", path.display()))?;
+
+    match args.format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(&snapshot)?;
+            println!("{json}");
+        }
+        OutputFormat::Table => {
+            display::print_agents_table(&snapshot, use_colors);
+        }
+    }
+
+    Ok(())
+}
+
+fn find_agents_snapshot_in_parents(relative: &str) -> Option<PathBuf> {
+    find_file_in_parents(relative)
+}
+
+fn find_file_in_parents(relative: &str) -> Option<PathBuf> {
+    // 说明：
+    // - 从当前工作目录向上遍历父目录,寻找最近的目标文件。
+    // - 这是 best-effort 的 UX 改良: 找不到就返回 None,由调用方决定回退策略。
+    let cwd = std::env::current_dir().ok()?;
+    find_file_in_parents_from(&cwd, relative)
+}
+
+fn find_file_in_parents_from(start: &Path, relative: &str) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        let candidate = dir.join(relative);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_events_file_from_marker_in_parents(fallback: PathBuf) -> PathBuf {
+    // 说明:
+    // - 从当前目录向上查找 `.ralph/current-events` marker。
+    // - 找到则解析 marker 的内容(支持绝对/相对)。
+    // - 找不到或解析失败则回退到 fallback。
+    let Ok(cwd) = std::env::current_dir() else {
+        return fallback;
+    };
+    resolve_events_file_from_marker_in_parents_from(&cwd, fallback)
+}
+
+fn resolve_events_file_from_marker_in_parents_from(start: &Path, fallback: PathBuf) -> PathBuf {
+    let Some(marker_path) = find_file_in_parents_from(start, ".ralph/current-events") else {
+        return fallback;
+    };
+    resolve_events_file_from_marker(&marker_path).unwrap_or(fallback)
+}
+
+fn resolve_events_file_from_marker(marker_path: &Path) -> Option<PathBuf> {
+    // 说明:
+    // - marker 文件位于 `<workspace_root>/.ralph/current-events`。
+    // - marker 内容是一行路径,通常是相对 `<workspace_root>` 的相对路径。
+    // - 如果 marker 内容是绝对路径,则直接使用。
+    let raw = fs::read_to_string(marker_path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let configured = PathBuf::from(trimmed);
+    if configured.is_absolute() {
+        return Some(configured);
+    }
+
+    // 注意: marker 内容的相对路径是相对 `<workspace_root>`(包含 `.ralph/` 的那个目录),
+    // 而不是相对 `.ralph/` 目录本身。
+    let workspace_root = marker_path.parent()?.parent()?;
+    Some(workspace_root.join(configured))
 }
 
 fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -> Result<()> {
@@ -1438,6 +1735,11 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
     let workspace_strategy = args.workspace_strategy.map(|v| v.to_string());
     let session_strategy = args.session_strategy.map(|v| v.to_string());
     let turn_action = args.turn_action.map(|v| v.to_string());
+    let spawn_instance = if args.spawn_instance {
+        Some(true)
+    } else {
+        None
+    };
 
     // Validate JSON payload if --json flag is set
     let payload = if args.json && !args.payload.is_empty() {
@@ -1461,17 +1763,21 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
             serde_json::Value::String(payload)
         },
         "ts": ts,
+        "target": args.target,
         "target_instance": args.target_instance,
+        "spawn_instance": spawn_instance,
         "workspace_strategy": workspace_strategy,
         "session_strategy": session_strategy,
         "turn_action": turn_action,
     });
 
-    // Read events path from marker file, fall back to CLI arg if marker doesn't exist
-    // This ensures `ralph emit` writes to the same events file as the active run
-    let events_file = fs::read_to_string(".ralph/current-events")
-        .map(|s| PathBuf::from(s.trim()))
-        .unwrap_or_else(|_| args.file.clone());
+    // Read events path from marker file, fall back to CLI arg if marker doesn't exist.
+    //
+    // 说明:
+    // - marker 文件由 `ralph run` 创建: `.ralph/current-events`。
+    // - 为了避免在子目录(例如 `.ralph/worktrees/...`)执行 `ralph emit` 时写错文件,
+    //   这里会向上遍历父目录寻找最近的 marker,并把 marker 指向的 events 路径解析为绝对路径。
+    let events_file = resolve_events_file_from_marker_in_parents(args.file.clone());
 
     // Ensure parent directory exists
     if let Some(parent) = events_file.parent()
@@ -1731,5 +2037,83 @@ mod tests {
             ConfigSource::File(path) => assert_eq!(path, std::path::PathBuf::from("ralph.yml")),
             _ => panic!("Expected File variant"),
         }
+    }
+
+    #[test]
+    fn resolve_current_events_marker_relative_path_is_workspace_root_relative() {
+        // 说明:
+        // - `.ralph/current-events` 的内容通常是相对路径(例如 `.ralph/events-<id>.jsonl`)。
+        // - 该相对路径应当以 "workspace root"(包含 `.ralph/` 的目录)为基准解析,
+        //   而不是以 `.ralph/` 目录为基准解析。
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp_dir.path();
+
+        std::fs::create_dir_all(workspace_root.join(".ralph")).expect("mkdir .ralph");
+        std::fs::write(
+            workspace_root.join(".ralph/current-events"),
+            ".ralph/events-123.jsonl\n",
+        )
+        .expect("write marker");
+
+        let nested = workspace_root.join("a/b/c");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+
+        let fallback = PathBuf::from("fallback.jsonl");
+        let resolved = resolve_events_file_from_marker_in_parents_from(&nested, fallback);
+
+        assert_eq!(resolved, workspace_root.join(".ralph/events-123.jsonl"));
+    }
+
+    #[test]
+    fn resolve_current_events_marker_absolute_path_is_used_as_is() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp_dir.path();
+
+        std::fs::create_dir_all(workspace_root.join(".ralph")).expect("mkdir .ralph");
+        let absolute_events_path = workspace_root.join("events-abs.jsonl");
+        std::fs::write(
+            workspace_root.join(".ralph/current-events"),
+            absolute_events_path.to_string_lossy().to_string(),
+        )
+        .expect("write marker");
+
+        let nested = workspace_root.join("subdir");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+
+        let fallback = PathBuf::from("fallback.jsonl");
+        let resolved = resolve_events_file_from_marker_in_parents_from(&nested, fallback);
+
+        assert_eq!(resolved, absolute_events_path);
+    }
+
+    #[test]
+    fn resolve_current_events_marker_missing_falls_back() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp_dir.path();
+        let nested = workspace_root.join("a/b");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+
+        let fallback = PathBuf::from("fallback.jsonl");
+        let resolved = resolve_events_file_from_marker_in_parents_from(&nested, fallback.clone());
+
+        assert_eq!(resolved, fallback);
+    }
+
+    #[test]
+    fn resolve_current_events_marker_blank_falls_back() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp_dir.path();
+
+        std::fs::create_dir_all(workspace_root.join(".ralph")).expect("mkdir .ralph");
+        std::fs::write(workspace_root.join(".ralph/current-events"), "   \n")
+            .expect("write marker");
+
+        let nested = workspace_root.join("a");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+
+        let fallback = PathBuf::from("fallback.jsonl");
+        let resolved = resolve_events_file_from_marker_in_parents_from(&nested, fallback.clone());
+
+        assert_eq!(resolved, fallback);
     }
 }

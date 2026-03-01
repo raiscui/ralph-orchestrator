@@ -90,7 +90,15 @@ impl Default for MockConfig {
             cassette_dir: PathBuf::from(DEFAULT_CASSETTE_DIR),
             // CI 默认尽可能快（不引入 sleep）
             speed: 0.0,
-            allow_commands: Some("ralph task add,ralph task close,ralph tools memory add".into()),
+            // -----------------------------------------------------------------
+            // 说明:
+            // - mock-mode 下允许执行的本地命令白名单(逗号分隔).
+            // - 默认只开放 E2E 需要的最小集合,避免 cassette 被滥用执行任意命令.
+            // - `ralph emit` 用于并行场景里测试“外部事件注入 → 动态实例 spawn”的闭环.
+            // -----------------------------------------------------------------
+            allow_commands: Some(
+                "ralph task add,ralph task close,ralph tools memory add,ralph emit".into(),
+            ),
         }
     }
 }

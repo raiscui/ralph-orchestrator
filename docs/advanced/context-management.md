@@ -14,6 +14,36 @@ Managing context windows effectively is crucial for Ralph Orchestrator's success
 | Gemini | 32K tokens | 32,768 | ~130,000 chars |
 | Q Chat | 8K tokens | 8,192 | ~32,000 chars |
 
+## Ralph: 运行前护栏(doctor)
+
+Ralph 的 `ralph doctor` 会在运行前做确定性检查,并提供可执行的修复建议。
+其中包含一个可选的 context window guard(上下文窗护栏),用于提前 warn/block:
+
+- 上下文窗口太小(例如 <32k tokens)时,长工作流很容易失败或质量明显下降。
+- prompt 体积已经接近/超过上下文窗时,大概率会出现“跑不起来但还在烧 token”的情况。
+
+### 启用方式(配置驱动)
+
+由于 Ralph 无法从各个 CLI 后端稳定获取“模型上下文窗”信息,因此需要在 `ralph.yml` 里显式声明:
+
+```yaml
+adapters:
+  claude:
+    context_window_tokens: 200000
+  codex:
+    context_window_tokens: 128000
+```
+
+然后运行:
+
+```bash
+ralph doctor --strict
+```
+
+说明:
+- `context_window_tokens` 只用于预算/护栏提示,不会直接传给后端 CLI。
+- prompt 的 token 估算是粗略值(chars/4),建议留出余量(例如 >=15%)。
+
 ## Context Components
 
 ### What Consumes Context

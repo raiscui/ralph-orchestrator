@@ -52,7 +52,7 @@ flowchart LR
 
 ### 1) 填写你的实验计划（最重要）
 
-打开 `examples/parallel-experimental-dev-engine/PROMPT.md`。
+打开本目录的 `PROMPT.md`。
 它是一份 Markdown 的 `EXPERIMENT_PLAN` 模板。
 你只需要按模板把字段填成你自己的任务即可。
 如果你暂时不知道怎么拆实验，
@@ -70,18 +70,32 @@ flowchart LR
 同时强制产出验证证据。
 
 说明（固定 vs 可变）：
-- `PROMPT.md`：只放你需要改的实验计划（Markdown，尽量别把“固定协议”写进来，避免误改）。
-- `ralph.yml`：固定协议/协调语义锚点在 `event_loop.ralph_prompt`（一般不需要改）。
+- `config/all_hat.md`: 项目级通用定义/原则(会注入所有 hat prompt,且编译期内嵌).
+- `PROMPT.md`：只放你需要改的实验计划(Markdown,尽量别把"固定协议"写进来,避免误改).
+- `ralph.yml`: 只保留本 example 独有的 topic 与硬门槛;协调语义锚点在 `event_loop.ralph_prompt`(一般不需要改).
+
+提示：
+- `config/all_hat.md` 当前是编译期内嵌配置,修改后需要重新编译才能生效.
+  - 用 `cargo run` 运行时通常会自动触发重编译.
+  - 如果你直接运行已构建的 `target/release/ralph`,需要显式重新 `cargo build --release -p ralph-cli --bin ralph`.
 
 ### 2) 运行
 
-在仓库根目录执行：
+推荐在本 example 目录执行(默认 `ralph.yml` + `PROMPT.md`,最省心):
 
 ```bash
 # 推荐(TUI,可对话/可 steer):
-# - 目标 prompt 在 examples/parallel-experimental-dev-engine/PROMPT.md
+# - 目标 prompt 在本目录 PROMPT.md
+cd examples/parallel-experimental-dev-engine
+cargo run --bin ralph -- run
+```
+
+如果你希望在仓库根目录执行(不切目录),请显式指定 prompt_file:
+
+```bash
 cargo run --bin ralph -- run \
-  -c examples/parallel-experimental-dev-engine/ralph.yml
+  -c examples/parallel-experimental-dev-engine/ralph.yml \
+  -P examples/parallel-experimental-dev-engine/PROMPT.md
 ```
 
 提示:
@@ -92,8 +106,17 @@ cargo run --bin ralph -- run \
 日志模式(无人值守,无交互输入,适合 CI/脚本):
 
 ```bash
+cd examples/parallel-experimental-dev-engine
+cargo run --bin ralph -- run \
+  --no-tui
+```
+
+仓库根目录执行(不切目录)的等价写法:
+
+```bash
 cargo run --bin ralph -- run \
   -c examples/parallel-experimental-dev-engine/ralph.yml \
+  -P examples/parallel-experimental-dev-engine/PROMPT.md \
   --no-tui
 ```
 
@@ -107,6 +130,7 @@ cargo run --bin ralph -- run \
 ```bash
 cargo run --bin ralph -- run \
   -c examples/parallel-experimental-dev-engine/ralph.yml \
+  -P examples/parallel-experimental-dev-engine/PROMPT.md \
   -b codex
 ```
 
@@ -134,9 +158,9 @@ cargo run --bin ralph -- run \
    方式A(推荐): 用 `ralph emit` 注入 `human.message`:
 
    ```bash
-   # 注意: 最好在启动 ralph 的同一工作区根目录执行,避免写错文件
-   cargo run --bin ralph -- emit human.message "继续" --target-instance ralph#1
-   ```
+	   # 注意: 最好在启动 ralph 的同一工作区根目录执行,避免写错文件
+	   cargo run --bin ralph -- emit human.message "继续" --target-instance ralph#1
+	   ```
 
    方式B(推荐,用于 steer/interrupt): 直接用 `ralph emit` 写入控制字段:
 

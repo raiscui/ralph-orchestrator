@@ -323,13 +323,13 @@ fn validate_hats<W: Write>(
     Ok(())
 }
 
-enum CheckResult {
+pub(crate) enum CheckResult {
     Ok,
     Warn,
     Error,
 }
 
-fn print_check<W: Write>(
+pub(crate) fn print_check<W: Write>(
     writer: &mut W,
     result: CheckResult,
     msg: &str,

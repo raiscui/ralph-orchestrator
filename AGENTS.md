@@ -103,6 +103,20 @@ cargo test -p ralph-core kiro
 
 **IMPORTANT**: You must smoke test after you make code changes.
 
+### Autopilot (Isolated Runs)
+
+When validating `ralph autopilot` against a repo with local uncommitted changes, prefer the script
+wrapper with `--isolate`:
+
+```bash
+bash scripts/run_autopilot.sh --repo-dir . --config ralph.yml --isolate --skip-agent-analysis
+```
+
+Notes:
+- `--isolate` uses `git clone --local` to preserve full history (important for commit lookups in integration flows),
+  then `rsync --delete` to overlay the current working tree (including untracked files).
+- Evidence stays in `/tmp/ralph-autopilot-out-<timestamp>` by default, and the temp repo is cleaned on PASS.
+
 ### Recording New Fixtures
 
 To create a new fixture from a live session:
@@ -210,6 +224,7 @@ bash scripts/run-parallel-hat-instances-codex.sh
 - Prefer `--no-tui` for E2E runs/captures: ANSI control sequences can pollute output parsing and fixtures.
 - Event parsing: only parse `<event ...>` from worker **stdout**. stderr may contain backend echoes (including `<event>` examples) and will cause false positives.
 - `--keep-workspace` is for debugging artifacts. Re-running the same scenario is expected to start from a clean workspace to avoid `.ralph/events.jsonl` accumulation affecting assertions.
+- Codex app-server `turn/steer` 验证建议拆分为 transport vs reply 两类场景: transport 只断言 steer send/recv + 收敛; reply 场景用“两轮 turn/iteration(step2)”稳定产出可见 `answer`(不要假设 steer 会立刻打断当前输出)。
 
 ### Test Tiers
 

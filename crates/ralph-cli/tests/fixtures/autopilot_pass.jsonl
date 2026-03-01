@@ -1,0 +1,8 @@
+{"ts":1000,"event":"bus.publish","data":{"topic":"experiment.task","payload":"start"}}
+{"ts":1010,"event":"bus.publish","data":{"topic":"experiment.result","payload":"{\"commit\":\"abc123\"}"}}
+{"ts":1011,"event":"bus.publish","data":{"topic":"experiment.reviewed","payload":"evidence_ok: true"}}
+{"ts":1012,"event":"bus.publish","data":{"topic":"integration.task","payload":"{}"}}
+{"ts":1013,"event":"bus.publish","data":{"topic":"integration.applied","payload":"{}"}}
+{"ts":1014,"event":"bus.publish","data":{"topic":"experiment.complete","payload":"{}"}}
+{"ts":1015,"event":"ux.terminal.write","data":{"bytes":"TE9PUF9DT01QTEVURQo=","text":"LOOP_COMPLETE\\n","stdout":true,"offset_ms":0}}
+{"ts":1020,"event":"_meta.termination","data":{"reason":"CompletionPromise","iterations":1,"elapsed_secs":0.1,"ux_writes":1}}

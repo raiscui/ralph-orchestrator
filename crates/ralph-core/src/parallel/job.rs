@@ -77,8 +77,19 @@ pub struct HatJob {
 /// 一次 job 执行完成后的摘要。
 #[derive(Debug, Clone)]
 pub struct HatJobResult {
-    /// 该 job 的完整输出（stdout + stderr，按收到顺序拼接）。
-    pub output: String,
+    /// 用于事件解析的输出(必须是 stdout-only 或已抽取的 assistant 文本)。
+    ///
+    /// 重要:
+    /// - 该字段会被 `EventParser` 解析,并用于路由/收敛判断。
+    /// - 绝不能把 stderr(例如 prompt transcript/后端日志/示例 `<event ...>` 文本)混入这里,
+    ///   否则可能触发“假事件/假 completion/重复路由”等 flaky 回归。
+    pub output_for_parsing: String,
+    /// stderr 可观测输出(不参与事件解析)。
+    ///
+    /// 说明:
+    /// - 该字段是 best-effort: 某些执行器可能只做“流式转发 + cassette 落盘”,并不在结果里累积。
+    /// - 字段存在的主要目的,是把“可解析输出”和“可观测 stderr”在类型层面拆开,避免误用。
+    pub observed_stderr: String,
     /// 是否成功（exit code == 0 且未超时/未取消）。
     pub success: bool,
     /// 退出码（可能为空，例如被信号终止）。

@@ -189,6 +189,19 @@ pub struct Event {
     /// - 当缺失时,等价于 `start`（新开 turn）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_action: Option<TurnAction>,
+
+    /// Optional routing hint: spawn a fresh hat instance for this delivery (parallel mode).
+    ///
+    /// 说明：
+    /// - 该字段用于表达“我要一个崭新的实例接收这条消息”(上下文隔离)。
+    /// - 这是 Supervisor 的路由提示信号,不是业务事件的一部分。
+    /// - 推荐用法：
+    ///   - `spawn_instance=true` + `target="<hat_id>"`：强制为该 hat 创建动态实例并直达投递。
+    /// - 约束：
+    ///   - 与 `target_instance` 互斥（已经指定实例就不需要 spawn）。
+    ///   - 若缺少 `target`，Supervisor 会降级为普通路由（并 best-effort escalate 一条 routing.escalate）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_instance: Option<bool>,
 }
 
 impl Event {
@@ -207,6 +220,7 @@ impl Event {
             workspace_strategy: None,
             session_strategy: None,
             turn_action: None,
+            spawn_instance: None,
         }
     }
 
@@ -286,6 +300,16 @@ impl Event {
     #[must_use]
     pub fn with_turn_action(mut self, action: TurnAction) -> Self {
         self.turn_action = Some(action);
+        self
+    }
+
+    /// Requests the Supervisor to spawn a fresh instance for delivery (parallel mode).
+    ///
+    /// 说明：
+    /// - 传入 `false` 会被规范化为 None（等价于“不请求 spawn”），避免落盘噪音。
+    #[must_use]
+    pub fn with_spawn_instance(mut self, enabled: bool) -> Self {
+        self.spawn_instance = if enabled { Some(true) } else { None };
         self
     }
 }

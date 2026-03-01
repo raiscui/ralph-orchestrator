@@ -4,7 +4,9 @@
 //! - 直接跑仓库自带的 example：`examples/parallel-trigger-routing`
 //! - 用“并行 stdout 的 job_id 去重统计”来断言 hat 的运行次数
 
-use super::parallel::{JobRunCounts, parse_parallel_job_line, replace_top_level_yaml_block};
+use super::parallel::{
+    JobRunCounts, parse_parallel_job_line, read_agents_snapshot, replace_top_level_yaml_block,
+};
 use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
 use crate::Backend;
 use crate::executor::{ExecutionResult, PromptSource, RalphExecutor, ScenarioConfig};
@@ -191,6 +193,46 @@ impl ParallelTriggerRoutingExampleScenario {
             builder.failed().build()
         }
     }
+
+    fn agents_snapshot_written(&self, executor: &RalphExecutor) -> crate::models::Assertion {
+        // -----------------------------------------------------------------
+        // 说明:
+        // - `.ralph/agents.json` 是并行 Supervisor 的运行态快照,用于 `ralph agents`。
+        // - 本 example 的目标之一是展示“多实例 + 多 hat 并行”在运行期可观测,
+        //   因此 E2E 要求该快照存在且至少包含关键 hat。
+        // -----------------------------------------------------------------
+        let snapshot = match read_agents_snapshot(executor.workspace()) {
+            Ok(s) => s,
+            Err(e) => {
+                return AssertionBuilder::new("Agents snapshot written (example)")
+                    .expected(".ralph/agents.json exists and is valid JSON")
+                    .actual(e)
+                    .failed()
+                    .build();
+            }
+        };
+
+        let instance_count = snapshot.instances.len();
+        let has_writer = snapshot.instances.iter().any(|i| i.hat_id == "spec_writer");
+        let has_reviewer = snapshot
+            .instances
+            .iter()
+            .any(|i| i.hat_id == "spec_reviewer");
+        let has_logger = snapshot.instances.iter().any(|i| i.hat_id == "spec_logger");
+
+        let ok = instance_count >= 3 && has_writer && has_reviewer && has_logger;
+        let builder = AssertionBuilder::new("Agents snapshot written (example)")
+            .expected("agents.json contains spec_writer + spec_reviewer + spec_logger (and instance_count>=3)")
+            .actual(format!(
+                "instance_count={instance_count}, writer={has_writer}, reviewer={has_reviewer}, logger={has_logger}"
+            ));
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
 }
 
 impl Default for ParallelTriggerRoutingExampleScenario {
@@ -272,6 +314,7 @@ impl TestScenario for ParallelTriggerRoutingExampleScenario {
             Assertions::exit_code_success_or_limit(&execution),
             Assertions::no_timeout(&execution),
             self.parallel_mode_visible(&execution),
+            self.agents_snapshot_written(executor),
             self.hat_run_counts_expected(&execution),
             self.no_new_jobs_started_after_loop_complete(&execution),
         ];

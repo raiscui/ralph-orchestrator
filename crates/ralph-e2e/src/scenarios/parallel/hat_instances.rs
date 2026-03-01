@@ -282,6 +282,45 @@ impl ParallelHatInstancesScenario {
             builder.failed().build()
         }
     }
+
+    fn agents_snapshot_written(&self, executor: &RalphExecutor) -> crate::models::Assertion {
+        // -----------------------------------------------------------------
+        // 说明:
+        // - `.ralph/agents.json` 是并行 Supervisor 的运行态快照,用于 `ralph agents`.
+        // - 该断言用于覆盖“最近新增的可观测性能力”是否回归:
+        //   - 文件能否落盘
+        //   - JSON 是否可解析
+        //   - 是否包含本场景关键 hat: writer/tester/collector
+        // -----------------------------------------------------------------
+        let snapshot = match super::read_agents_snapshot(executor.workspace()) {
+            Ok(s) => s,
+            Err(e) => {
+                return AssertionBuilder::new("Agents snapshot written")
+                    .expected(".ralph/agents.json exists and is valid JSON")
+                    .actual(e)
+                    .failed()
+                    .build();
+            }
+        };
+
+        let instance_count = snapshot.instances.len();
+        let has_writer = snapshot.instances.iter().any(|i| i.hat_id == "writer");
+        let has_tester = snapshot.instances.iter().any(|i| i.hat_id == "tester");
+        let has_collector = snapshot.instances.iter().any(|i| i.hat_id == "collector");
+
+        let ok = instance_count >= 3 && has_writer && has_tester && has_collector;
+        let builder = AssertionBuilder::new("Agents snapshot written")
+            .expected("agents.json contains writer + tester + collector (and instance_count>=3)")
+            .actual(format!(
+                "instance_count={instance_count}, has_writer={has_writer}, has_tester={has_tester}, has_collector={has_collector}"
+            ));
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
 }
 
 impl Default for ParallelHatInstancesScenario {
@@ -744,6 +783,7 @@ status: 这段绝不能被记录为真实事件
             Assertions::exit_code_success_or_limit(&execution),
             Assertions::no_timeout(&execution),
             self.parallel_mode_visible(&execution),
+            self.agents_snapshot_written(executor),
             self.attributed_outputs_visible(&execution),
             self.expected_events_recorded(&execution),
             self.routing_escalate_recorded(&execution),

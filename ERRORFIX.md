@@ -1,1000 +1,543 @@
 # ERRORFIX
 
-> 说明：历史 ERRORFIX 记录已归档到 `ERRORFIX_2026-02-01_1538.md`（文件超过 1000 行自动轮转）。
+> 说明: 历史 ERRORFIX 已归档到 `archive/ERRORFIX_2026-02-18_102134.md`(文件超过 1000 行自动轮转).
 
-## 2026-02-01 15:28 +0800｜hats graph：中文/emoji hat 名称导致 unicode/ascii 只剩 task.start→Ralph
 
-### 现象
-- 在 `examples/parallel-trigger-routing/ralph.yml` 这类配置下：
-  - `ralph hats graph --format mermaid` 输出完整 hats 拓扑
-  - 但 `ralph hats graph --format unicode/ascii/compact` 只剩 task.start→Ralph
-
-### 根因
-- Mermaid 图生成时把节点 ID 直接用 `hat.name`（中文/emoji）拼出来。
-- `beautiful-mermaid-rs` 对 Unicode 节点 ID 兼容性不足，会吞边/吞节点但不报错。
-
-### 修复
-- `crates/ralph-cli/src/hats.rs`：
-  - Mermaid 输出改为“节点 ID / label 分离”：
-    - ID：`Hat_{sanitize(hat.id)}`（ASCII `[A-Za-z0-9_]` + 前缀避免冲突）
-    - label：继续用 `hat.name`（保留中文/emoji）
-  - hats 按 `hat.id` 排序，降低 HashMap 迭代顺序导致的布局波动。
-  - 新增回归测试：unicode 渲染结果必须包含中文 hat 名称，避免再次回退为“只剩 Start→Ralph”。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-
----
-
-## 2026-02-05 15:55 +0800｜Fix：`parallel-experimental-dev-engine` 的 PROMPT 被误当成 YAML
-
-### 问题
-
-- `examples/parallel-experimental-dev-engine/PROMPT.md` 被改成了“纯 YAML”。
-- 这与约定不一致：
-  - `PROMPT.md` 应该是给 agent 的 prompt（Markdown 文本）。
-  - `event_loop.ralph_prompt` 也是 prompt（Markdown 文本）。
-
-### 原因
-
-- 为了把实验计划结构化，同时又想移除 marker/HTML 注释，我把“计划模板”误实现成了“把 PROMPT.md 当数据文件”。
-- 结果导致读者语义误解：看起来像 Ralph 会解析 YAML 配置，而实际它只是在读 prompt 文本。
-
-### 修复
-
-- 把 `examples/parallel-experimental-dev-engine/PROMPT.md` 改回 Markdown 的实验计划模板（结构化标题 + TODO 占位）。
-- 同步 `examples/parallel-experimental-dev-engine/ralph.yml` 与 `examples/parallel-experimental-dev-engine/README.md`：
-  - 去掉“PROMPT.md 是 YAML”的描述；
-  - 明确 `experiment.start` payload 是“拷贝 PROMPT.md 的 Markdown 文本”。
-- 同步 `crates/ralph-e2e/src/scenarios/parallel_experimental_dev_engine_example.rs`：
-  - E2E 预填的 PROMPT 改为 Markdown；
-  - `final_verification` 改成对 `exp-001/exp-002` 任一候选都能通过，降低真后端波动。
-
-### 验证
-
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-
----
-
-## 2026-02-05 11:40 +0800｜修复：`experiment.result` 嵌入 patch 导致 payload 超长/易截断（改为 commit-only）
+## 2026-02-18 10:21 +0800 | Fix: autopilot agent analysis 在 custom backend 下默认失败
 
 ### 现象
 
-- 旧约定要求 runner 在 `experiment.result` 中嵌入 `git diff` 的 unified diff patch 文本。
-- 当改动规模变大时，patch 可能达到几千行，常见后果：
-  - event payload 膨胀；
-  - 模型输出被截断；
-  - auditor / integrator 难以可靠搬运与复现。
+- 运行 `ralph autopilot analyze` 时:
+  - hard verdict PASS.
+  - agent analysis 失败,report.json/analysis_output.json 出现类似错误:
+    - "Custom backend requires a command - set 'cli.command' in config".
 
 ### 根因
 
-- 把“可搬运产物”选择成了文本 diff。
-- 在 LLM 输出通道里，长文本属于高风险产物（容易超长/截断/丢行）。
+- `run_agent_analysis()` 之前只从主配置读取 `cli.backend` 字符串.
+- 当 `cli.backend=custom` 时,生成的 `analysis_ralph.yml` 丢失 `cli.command/cli.args`.
+- 子进程 `ralph run --config analysis_ralph.yml` 在 config validate 阶段直接退出.
 
 ### 修复
 
-- 协议改为 commit-only（以 git commit hash 作为交换载体）：
-  - `experiment.result` **必须**包含 `commit`
-  - `integration.task` 传递 `commit`
-  - integrator 在主工作区用 `git cherry-pick <hash>` 集成并做最终验收
-- 同步更新 example / spec / fixture / tests，避免出现“文档说 A，测试断言 B”的漂移。
-
-### 验证
-
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-
----
-
-## 2026-02-05 11:05 +0800｜修复：`complete_publishes` 没有“明确发布者”导致配置不自洽（并补硬门禁）
-
-### 现象
-
-- 配置里可以写 `event_loop.complete_publishes: "<topic>"`，但如果没有任何 hat 声明发布该 topic：
-  - completion candidate 没有明确生产者；
-  - workflow 可能永远等不到收敛信号（隐式卡死）；
-  - `ralph hats graph` 会出现 `Complete[complete]` 但没有任何入边（悬空终点）。
-- 另一个隐蔽问题：`_suppress_warnings: true` 会导致 `validate()` 直接提前返回，
-  从而绕过所有错误校验（这会让“硬门禁”形同虚设）。
-
-### 根因
-
-- `RalphConfig::validate()` 之前只做了 `complete_publishes` 的“非空字符串”校验，
-  没有把它与 hats 拓扑（`hats.*.publishes`）做一致性检查。
-- `validate()` 在 `self.suppress_warnings=true` 时早退，误把“抑制 warning”实现成了“跳过校验”。
-
-### 修复
-
-- `crates/ralph-core/src/config.rs`
-  - 新增 hard gate：
-    - 当存在自定义 hats（`hats` 非空）且设置了 `complete_publishes` 时，
-      必须至少有一个 hat 的 `publishes` 声明包含该 topic，否则报错拒绝配置。
-  - 重构 `validate()`：
-    - `_suppress_warnings` 仅抑制 warning，不再绕过错误校验。
-- `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
-  - 对齐 hard gate：
-    - 让 `collector` 显式声明并发出 `routing.escalate`（使 `complete_publishes: routing.escalate` 具备明确 hat publisher）。
-- 规格/文档同步：
-  - `specs/hats-graph-logical-view.spec.md`、`docs/guide/configuration.md`
-
-### 验证
-
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
----
-
-## 2026-02-03 18:15 +0800｜tui hat graph radar：旧事件线拖太久且新事件不替换（需求口径改为 Running 驱动）
-
-### 现象
-- event 线路动画会持续很久（甚至新 event 出现仍在播旧线路）。
-- 你明确说：event 线路不需要持续很久；并且应以 Running 状态为准：
-  - 目标 box 不再 Running 就取消线路动画；
-  - 新 box 进入 Running，则显示该 box 高亮 + “导致它 Running 的 event”线路动画。
-
-### 根因
-- 之前实现的是“全局最新 event”的动画状态 + 额外的“循环播放/驻留”策略：
-  - 这会让旧线路在视觉上持续存在；
-  - 同时新事件可能被节流/延后，从而出现“新 event 来了仍在播旧线”的观感。
-
-### 修复
-- 规范同步：
-  - `specs/terminal-ui.spec.md`：删除“循环 + 60s 驻留”要求，改为 Running 目标驱动的短动画规则。
-- TUI 状态机重构（按目标 hat）：
-  - `crates/ralph-tui/src/state.rs`
-    - 记录最近业务事件：`hat_graph_recent_events`（用于推断 cause event）。
-    - 保存目标 hat 的短动画：`hat_graph_edge_animations`。
-    - 在 `ParallelInstanceState` 中捕捉“进入 Running”跃迁并启动动画；
-      在退出 Running 且该 hat 已无 Running 实例时立刻取消动画。
-    - tick 负责清理过期事件/动画与目标不 Running 的动画。
-- 渲染改造：
-  - `crates/ralph-tui/src/app.rs`
-    - 不再渲染“全局最新 event”；
-    - 只渲染 `hat_graph_edge_animations`，并且目标不 Running 直接隐藏。
-
-### 验证
-- `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 15:14 +0800｜开发过程踩坑记录：meta API 测试用例与 clippy 门禁
-
-### 1) TS roundtrip 测试在极端紧凑参数下失败
-
-- 现象：
-  - 新增 `renderMermaidAsciiWithMeta` 后，为了模拟 Radar compact（padding=0），
-    我在测试里用了 `{ paddingX: 0, paddingY: 0, boxBorderPadding: 0 }`。
-  - 结果 `reverseFlowchartAsciiToMermaid(text)` 反解出来的边为空。
-- 根因：
-  - 反向解析并不保证在“极端压缩”参数下仍可稳定识别箭头/出边 marker（线段可能退化/覆盖）。
-- 修复：
-  - 将该测试改为使用默认 spacing，仅验证：
-    - `text` 与旧 API 完全一致
-    - `meta` 非空
-    - 默认渲染仍可 roundtrip（逻辑一致）
-
-### 2) `cargo clippy -D warnings` 阻塞：unused import
-
-- 现象：
-  - `crates/ralph-tui/src/app.rs` 引入了 `HatGraphRadarMeta`，但实现里只用到了方法调用，
-    没有直接引用类型名，导致 clippy 报 unused import。
-- 修复：
-  - 删除未使用的 import 后重新通过 clippy。
-
----
-
-## 2026-02-03 12:55 +0800｜tui hat graph radar：贴右上角（消除 2 行空隙）+ zoom 尺寸自适配字符图
-
-### 现象
-- TUI 右上角 Hat Graph Radar 面板距离终端右上角有 2 行空隙。
-- `p` 放大（zoom）后，面板尺寸不适配字符图：
-  - 有时字符图被裁切（面板不够大）。
-  - 有时留白很多（面板过大）。
-
-### 根因
-- `crates/ralph-tui/src/app.rs`
-  - Header 固定高度=2（内容 1 行 + bottom border 1 行）。
-  - Radar 之前用 `content_area` 作为 bounds：
-    - `content_area.y == 2`，因此 Radar 从 y=2 开始绘制，视觉上“离右上角空 2 行”。
-  - Radar 之前的尺寸策略与字符图尺寸无关：
-    - mini：固定上限（<=36x10）
-    - zoom：按 content_area 的 2/3 + 上限（<=120x40）
-
-### 修复
-- `crates/ralph-tui/src/app.rs`
-  - Radar 的 bounds 改为“整屏去掉 footer”（高度截止到 footer 起始行）：
-    - 让 Radar y=0，真正贴到右上角，同时避免覆盖 footer。
-  - 新增 `measure_text_diagram_size`：
-    - 用 `unicode_width::UnicodeWidthStr` 测量每行 display width（避免 emoji/东亚字符宽度误判）。
-  - `hat_graph_radar_area` 调整为“优先适配字符图尺寸”：
-    - zoom：按 `diagram_size + border` 自适配，再按 bounds 裁剪。
-    - mini：保留雷达上限（<=36x10），但图更小时会收缩，减少留白。
-  - 新增回归测试，锁死：
-    - Unicode display width 计算正确
-    - area 锚定到 bounds 的 y=0
-    - zoom 自适配与 bounds clamp
-- `specs/terminal-ui.spec.md`
-  - 更新 Radar 锚点语义（frame 去掉 footer）。
-  - 补充 zoom 尺寸 SHOULD 自适配字符图尺寸。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
----
-
-## 2026-02-03 19:54 +0800｜流程纠错：误把“补充 change”当成“进入实现阶段”
-
-### 现象
-- 用户要的是：把 `ralph.yml` 配置方案补充到 OpenSpec change：`parallel-hat-solution-eval-example`。
-- 我误把它当成可以直接进入 apply/实现阶段，导致把 example/fixture/tests 落盘到了主仓库实现层。
-
-### 根因
-- 没有把需求约束锁定在 OpenSpec workflow 的“artifact 产出”层。
-- 对“补充到 change”语义理解偏差：把“方案内容”当成“需要马上实现的仓库文件”。
-
-### 修复
-- 回滚实现层落盘内容（不在主仓库新增 example/fixture/tests）。
-- 把配置草案与使用说明补充回 change artifacts：
-  - `openspec/changes/parallel-hat-solution-eval-example/design.md`（Appendix：`ralph.yml` + `README.md` 草案）
-
-### 验证
-- `cargo test -p ralph-core --test smoke_runner` ✅
-
----
-
-## 2026-02-03 13:16 +0800｜tui hat graph radar：澄清“偏移”语义（向内偏移到左下）
-
-### 现象
-- 我把“与右上角间隔两行字符”误解成要“消除空隙”，导致 Radar 被顶到右上角贴边（y=0）。
-- 你实际想要的是：Radar **从右上角向内偏移**（往左下移），保留留白。
-
-### 根因
-- 缺少对“偏移方向”的明确定义（是贴边对齐，还是向内 inset）。
-
-### 修复
-- `crates/ralph-tui/src/app.rs`
-  - 增加 `HAT_GRAPH_RADAR_INSET_X/Y = 2`，让 Radar 从右上角向内（左下）偏移。
-  - 同时用 `bounds - inset` 计算可用空间，避免越界；并保持 zoom 按字符图尺寸自适配。
-- `specs/terminal-ui.spec.md`
-  - 补充：Radar SHOULD inset from top-right（shift inward）。
-- 回归测试
-  - 从期望 `y=0` 改为期望 `y=HAT_GRAPH_RADAR_INSET_Y`，并同步 x/width/height 的 clamp 预期。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-01 23:32 +0800｜hats graph：Mermaid 输出不应出现 Ralph（调度员应隐藏），Hat→Hat 应为实线
-
-### 现象
-- `ralph hats graph --format mermaid` 输出包含 `Ralph` 节点：
-  - 订阅/发布都表现为 `Ralph <-> Hat`
-  - Hat→Hat 的逻辑关系用虚线 `-.->`
-- 当 hats 多时，视觉上接近“全连接”，阅读体验很差。
-
-### 根因
-- Mermaid 生成逻辑把“内部调度拓扑（经 Ralph 路由）”直接暴露给用户：
-  - 既画了 `Ralph -> Hat`（订阅）
-  - 也画了 `Hat -> Ralph`（发布）
-  - 同时又额外用虚线再画一遍 Hat→Hat
-- 这导致图包含过多“实现细节”，噪声远大于信息量。
-
-### 修复
-- `crates/ralph-cli/src/hats.rs`：
-  - Mermaid 输出改为“逻辑视图”：
-    - 不再输出 `Ralph` 节点
-    - 不再输出任何 `Ralph <-> Hat` 的边
-    - Hat→Hat 传播关系统一用实线 `-->`
-  - 当 `event_loop.starting_event` 显式存在时：
-    - 增加 `Start[task.start] -->|starting_event| Hat` 入口边（否则不输出 Start，避免孤立节点）
-  - 边集合按 `(source_id, topic, target_id)` 排序并去重，确保输出确定性。
-- 新增/更新回归测试断言：
-  - Mermaid 输出必须包含 `Hat_A -->|mid| Hat_B`
-  - Mermaid 输出不得包含 `Ralph` 与 `-.->`
-
-### 验证
-- `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
----
-
-## 2026-02-03 20:45 +0800｜TUI Radar：事件连线动画“只亮一半/像断线”
-
-### 现象
-- Hat Graph Radar 的 event 连线动画看起来“显示一半就不显示了”。
-
-### 根因
-- `beautiful-mermaid-rs` 提供的 meta 中，`AsciiRenderMetaEdge.path` 是“关键点序列”（拐点/箭头等），不是“线段上每个 cell”。
-- TUI 侧如果直接按关键点逐段上色，就会造成肉眼观感上的“线段缺失/只亮半截”。
-
-### 修复
-- `crates/ralph-cli/src/hats.rs`：
-  - 在 `convert_ascii_meta_to_radar_meta` 注入 meta 时，对每条 edge 做 `edge.path` 补点：
-    - 水平/垂直段补齐为逐 cell 的连续路径
-    - 非正交段保守回退为“只连接关键点”
-  - 新增回归测试：`densify_hat_graph_radar_path_fills_horizontal_and_vertical_segments`
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 17:55 +0800｜tui hat graph radar：边动画“播完就停/一闪而过” + pending 永不切换 + 遮挡 Output 边线
-
-### 现象
-- Radar 覆盖层会遮挡 Output 的边线（尤其是并行模式 Output panel 的 top border 附近）。
-- 最新 event 的线段动画看不到，或只是一闪而过。
-- 你要求：没有新 event 时也要一直循环播放；新 event 来太快也必须至少展示 60 秒再切换。
-
-### 根因
-- `crates/ralph-tui/src/app.rs`
-  - 边动画之前用 `elapsed <= total_ms` 做“播完就停”，`total_ms` 通常很短，导致观感像“闪一下就没了”。
-- `crates/ralph-tui/src/state.rs`
-  - 虽然实现了 `tick_hat_graph_radar_animation(...)`（用于 60 秒后 pending→current 切换），
-    但渲染主循环没有调用它，导致 pending 永远不会生效。
-- `crates/ralph-core/src/parallel/instance.rs`
-  - 并行模式下解析 `<event ...>` 后只补齐了 `source_instance` 与 `id`，没有补齐 `event.source`，
-    导致 UI/诊断在“发布者 hat”维度的归因不够直接。
-
-### 修复
-- Radar 位置：
-  - `crates/ralph-tui/src/app.rs`：`HAT_GRAPH_RADAR_INSET_Y` 从 `3` 调整为 `4`，把覆盖层整体再下移 1 行。
-- 边动画循环播放：
-  - `crates/ralph-tui/src/app.rs`：改为“按步进取模”的循环渲染逻辑（progressive reveal + hold + repeat），不再播完就停。
-- 60 秒驻留切换：
-  - `crates/ralph-tui/src/app.rs`：在每帧 render tick 调用 `state.tick_hat_graph_radar_animation(Instant::now())`，让 pending 能在驻留到期后切换。
-- 事件发布者归因：
-  - `crates/ralph-core/src/parallel/instance.rs`：`decorate_outgoing_event` 在缺失时补齐 `event.source=hat_id`，并继续补齐 `source_instance`。
-- 回归测试同步：
-  - `crates/ralph-tui/src/app.rs`：因为 inset_y 增大导致可用高度减少，更新了相关断言（高度从 7 → 6）。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 16:55 +0800｜tui hat graph radar：并行模式不应自动填充 event.source；改用 source_instance 驱动边动画
-
-### 现象 / 反馈
-- 你指出：把 `event.source` 自动填为“当前实例的 hat_id”不正确。
-- 你提供的 `.ralph/events.jsonl` 记录显示：publisher 信息在 `hat` 字段里，而不是 `source` 字段里。
-
-### 根因
-- `EventRecord.hat` 与 `Event.source` 是两套概念：
-  - `EventRecord.hat` 由 Supervisor 在 `EventLogger::log_event(iteration, hat_id, event, triggered)` 处写入；
-  - 并行模式下 `<event ...>` 文本协议本身不携带 `source`，因此 `Event.source` 允许为空。
-- 我们之前让 Radar 动画强依赖 `Event.source`，导致并行模式下容易“漏触发”。
-
-### 修复
-- `crates/ralph-core/src/parallel/instance.rs`
-  - 回滚：不再自动补齐 `event.source`
-  - 保留：继续补齐 `event.source_instance` 与 `event.id`
-- `crates/ralph-cli/src/parallel_runner.rs`
-  - 事件转发过滤：加入 `event.source_instance.is_some()`（避免因 source 为空漏事件）
-- `crates/ralph-tui/src/state.rs`
-  - Radar 动画触发：`source` 优先；否则用 `source_instance.split_hat_id()` 推导发布者 hat
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 16:21 +0800｜tui hat graph radar：Running 高亮闪烁 + event 边动画不触发
-
-### 现象
-- 并行模式下，Running hat 的 box 蓝色高亮“闪一下就没了”（看起来被回退到 created）。
-- Radar 看不到任何 event 边动画（线段逐段点亮没有出现）。
-
-### 根因
-- 根因 A：`crates/ralph-tui/src/state/parallel.rs` 的 `ParallelTuiState::append_output()`：
-  - 每次 output chunk 都会 `register_instance(..., Created)`；
-  - 导致已进入 Running/Idle 的实例状态被覆盖回 Created。
-- 根因 B：`crates/ralph-cli/src/parallel_runner.rs` 的 event_observer：
-  - 只转发 `gate.*` / `human.message` 到 TUI；
-  - 带 `source` 的业务事件无法进入 UI reducer，因此 `hat_graph_animation` 无法启动。
-
-### 修复
-- `crates/ralph-tui/src/state/parallel.rs`
-  - `append_output` 仅在实例不存在时才注册 Created；实例存在时不再覆盖 state。
-  - 新增回归单测：`parallel_append_output_does_not_override_instance_state`
-- `crates/ralph-cli/src/parallel_runner.rs`
-  - 放宽并行模式事件转发：`gate.*` / `human.message` / `event.source.is_some()` 都转发到 TUI。
-  - 抽出 `should_forward_event_to_tui` 并新增单测锁死策略。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 16:45 +0800｜tui hat graph radar：Running 高亮色改为 #a9dc76；并行事件补齐 source 修复边动画不可见
-
-### 现象
-- 你要求：Running hat 的 box 高亮色从“蓝色”改成 `#a9dc76`。
-- 你仍然观察不到 event 的线段动画。
-
-### 根因
-- 并行模式下 hat 输出的 `<event ...>` 被解析后没有 `event.source`（仅有 `source_instance`）：
-  - `crates/ralph-core/src/parallel/instance.rs` 的 `decorate_outgoing_event` 之前只补齐了 `source_instance`；
-  - TUI 侧动画触发依赖 `event.source`（发布者 hat），因此动画无法启动。
-
-### 修复
-- 颜色改动：
-  - `crates/ralph-tui/src/theme.rs`：新增语义化颜色 `TuiTheme::hat_graph_running_hat_fg()`，固定为 `#a9dc76`
-  - `crates/ralph-tui/src/app.rs`：Running hats 的 box 高亮改用该语义色
-- 并行事件归因修复：
-  - `crates/ralph-core/src/parallel/instance.rs`：在 `decorate_outgoing_event` 中补齐 `event.source=hat_id`（若原本为空）
-  - 新增回归单测：锁死 `source` 与 `source_instance` 都必须存在
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 13:44 +0800｜tui hat graph radar：再下移 1 行，避免遮挡 Output top border
-
-### 现象
-- Radar 已向内偏移，但仍会盖住并行模式 Output 面板的顶部边线（border）。
-
-### 根因
-- Output 面板 top border 通常位于 y=2（header 高度=2，content_area 从 y=2 开始）。
-- Radar 纵向 inset 之前为 2，导致 Radar 的 top border 也落在 y=2，发生覆盖。
-
-### 修复
-- `crates/ralph-tui/src/app.rs`
-  - `HAT_GRAPH_RADAR_INSET_Y: 2 → 3`，让 Radar top border 从 y=2 下移到 y=3。
-  - 更新 clamp 回归测试的期望值（可用高度随 inset_y 变化）。
-- `specs/terminal-ui.spec.md`
-  - 补充说明：inset 也用于避免覆盖关键 pane 边框（例如 Output top border）。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-03 00:45 +0800｜tui hat graph radar：对齐 `beautiful-mermaid-rs --ascii` 默认输出（Unicode 文字图，不要纯 ASCII）
-
-### 现象
-- TUI 右上角 Hat Graph Radar 的拓扑“文字图”目前是纯 ASCII（+--|）。
-- 这与你期望的 `beautiful-mermaid-rs --ascii` 默认效果（Unicode box-drawing：┌─┐│└┘▶）不一致。
-
-### 根因
-- `crates/ralph-cli/src/hats.rs` 的 `render_hat_graph_radar_ascii(...)`：
-  - compact 渲染使用 `use_ascii: Some(true)`，等价于强制 `--use-ascii`；
-  - full 渲染走 `GraphFormat::Ascii`，同样是纯 ASCII。
-
-### 修复
-- `crates/ralph-cli/src/hats.rs`：
-  - compact/full 统一改为 `use_ascii: Some(false)`，输出 Unicode box-drawing 文字图，语义对齐 `beautiful-mermaid-rs --ascii`。
-  - 新增回归测试 `test_render_hat_graph_radar_uses_unicode_box_drawing`，锁死该行为。
-- `specs/terminal-ui.spec.md`：
-  - 把 Hat Graph Radar 的 “ASCII-only” 修正为“文本图（默认 Unicode box-drawing）”，避免再次误读。
-- `crates/ralph-tui/src/lib.rs`：
-  - 更新注释，明确 Radar 注入的是“文字图”，默认 Unicode。
-
-### 验证
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-02 00:35 +0800｜hats graph：complete_publishes（如 spec.approved）无订阅者时在逻辑视图里“消失”
-
-### 现象
-- 配置 `event_loop.complete_publishes: "spec.approved"` 后：
-  - Mermaid 逻辑视图里看不到 `spec.approved`
-  - 因为没有任何 hat 订阅该 topic，图上缺少“结束”路径
-
-### 根因
-- 逻辑视图只画 Hat→Hat 订阅关系：
-  - `(A publishes T) && (B subscribes T)` 才画边
-- `complete_publishes` 是工作流的“结束候选事件”，不要求被 hat 订阅。
-  因此会被上述规则过滤掉。
-
-### 修复
-- `crates/ralph-cli/src/hats.rs`：
-  - 当 `event_loop.complete_publishes = C` 存在时：
-    - 固定输出 `Complete[complete]`
-    - 对所有发布 `C` 的 hat 画 `Hat_X -->|C| Complete`
-- `specs/hats-graph-logical-view.spec.md`：补充 `G5` 规范
-- 增加回归测试：`test_generate_mermaid_string_includes_complete_publishes`
-
-### 验证
-- `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test -p ralph-core kiro` ✅
-
----
-
-## 2026-02-05 00:45 +0800｜hats graph：coordinator-driven workflow 在 logical view 下“看起来断开”，需要可选 physical view
-
-### 现象
-
-- 在 `examples/parallel-experimental-dev-engine/` 下运行 `ralph hats graph`（logical view）：
-  - 只剩少量 Hat→Hat 内部边（例如 `experiment.result`）
-  - `experiment_integrator`、`complete` 等节点容易变成孤岛
-- 用户直觉会认为“拓扑图渲染坏了/配置没生效”。
-
-### 根因
-
-- logical view 的语义是：
-  - 刻意隐藏 `ralph#1`（coordinator）
-  - 只画 Hat→Hat 的 topic 传播关系
-- 但 coordinator-driven workflow（并行 supervisor 典型模式）里：
-  - 大量关键 topic 实际是 `ralph#1` 发布（例如 `*.task` / `*.complete`）
-  - 以及由 `ralph#1` 消费（例如 `*.reviewed` / `integration.*`）
-- 当 `ralph#1` 被隐藏后，这些边自然“消失”，图就会显得断开。
-
-### 修复
-
-- `crates/ralph-cli/src/hats.rs`
-  - 为 `ralph hats graph` 增加 `--view`：
-    - `logical`：隐藏 `ralph#1`，只看 Hat→Hat
-    - `physical`：显式画出 `ralph#1 (coordinator)`，并补齐“边界 topic”的 Ralph↔Hat 边
-- 文档：
-  - `specs/hats-graph-logical-view.spec.md`：明确该 spec 约束的是 `--view logical`
-  - `README.md` / `examples/parallel-experimental-dev-engine/README.md`：补充 `--view physical` 用法与解释
-- 回归测试：
-  - 新增 `test_generate_mermaid_string_physical_view_adds_ralph_boundary_edges`
-
-### 验证
-
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-
----
-
-## 2026-02-05 00:48 +0800｜hats graph：physical view 在 unicode/ascii 渲染触发 QuickJS exception（beautiful-mermaid-rs 不稳定）
-
-### 现象
-
-- `ralph hats graph --view physical` 默认 `--format unicode` 时：
-  - 在 `parallel-experimental-dev-engine` 这类图里报错：
-    - `Failed to render Mermaid topology as ASCII/Unicode`
-    - `JS 引擎错误: Exception generated by QuickJS`
-- 但同一份 Mermaid 用 SVG（不加 `--ascii`）可以成功渲染。
-
-### 根因
-
-- 该异常来自 `beautiful-mermaid-rs` 的 Mermaid→ASCII/Unicode 渲染链路。
-- 经最小化对比发现：
-  - 图中涉及 `Ralph` 的多条边（同一对节点间多 topic）会显著放大渲染器的不稳定性
-  - 并导致 QuickJS 直接抛异常（ASCII 模式失败）
-
-### 修复
-
-- `crates/ralph-cli/src/hats.rs`
-  - 在 physical view 输出前，对“涉及 Ralph 的边”做折叠：
-    - 同一对节点（from,to）之间的多个 topic 合并为一条边
-    - label 用 `" / "` 拼接（例如 `integration.applied / integration.blocked / integration.rejected`）
-  - 目的：
-    - 降低噪声
-    - 规避 `beautiful-mermaid-rs --ascii` 的不稳定点
-
-### 验证
-
-- `ralph hats graph --view physical`（unicode/ascii/compact）✅
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
----
-
-## 2026-02-05 09:30 +0800｜跟进：physical view 设为默认（取消必须写 `--view physical`），Radar 也默认 physical
-
-### 背景
-
-- 仅仅“提供 physical view”还不够：
-  - 你在 example 目录里直接跑 `ralph hats graph` 时，还是会先看到 logical view 的“断开感”。
-- 因此需要把“physical（全貌视图）”设为默认，降低误判成本。
-
-### 修复
-
-- CLI：`ralph hats graph` 默认 view=physical
-- TUI：右上角 Hats Graph Radar 默认使用 physical view（与 CLI 对齐）
-
-### 验证
-
-- `cargo fmt --check` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-
----
-
-## 2026-02-06 12:00 +0800｜hats graph：Mermaid 输出的节点 label 含 `()`（未加引号）导致标准 Mermaid 解析失败
-
-### 现象
-
-- `ralph hats graph --format mermaid` 输出包含：`Hat_ralph[ralph#1 (coordinator)]`
-- 将该 Mermaid 文本交给标准 Mermaid 解析器（`mermaid-cli`）会直接报 Parse error。
-
-### 根因
-
-- Mermaid flowchart 的 `Node[label]` 语法对 `(` / `)` 很敏感：
-  - 在未加引号的 label 里，括号会被当作语法 token（形状/节点语法的一部分），从而造成歧义并触发解析错误。
-- 正确写法应为：`Node["label (x)"]`（括号在字符串里作为普通字符）。
-
-### 修复
-
-- `crates/ralph-cli/src/hats.rs`
-  - 引入 `MermaidLabelMode::Strict`：
-    - 仅用于 `--format mermaid` 输出；
-    - label 里包含 `(` / `)` 时，自动改用 `["..."]` 并做转义。
-  - ASCII/Unicode 渲染仍使用 `MermaidLabelMode::TerminalPretty`：
-    - 避免 `beautiful-mermaid-rs` 在终端图里把引号也画出来，影响阅读体验。
-
-### 验证
-
-- 单测：新增 `test_generate_mermaid_string_strict_quotes_parentheses_in_node_labels` ✅
-- `cargo fmt` ✅
-- `cargo test` ✅
-
-## 2026-02-07 12:37 +0800 | `E0063 missing field max_width` 修复记录
-
-### 问题
-
-- 命令: `cargo build --release`
-- 错误: `missing field max_width in initializer of AsciiRenderOptions`
-- 位置: `crates/ralph-cli/src/hats.rs:409` 与 `crates/ralph-cli/src/hats.rs:466`
-
-### 原因
-
-- 上游 `beautiful-mermaid-rs` 给 `AsciiRenderOptions` 新增 `max_width: Option<usize>`。
-- 本仓库调用点仍保留旧的完整结构体字面量初始化,未补齐字段。
-
-### 修复
-
-- 将两处完整字面量初始化改为追加 `..Default::default()`。
-- 保持既有参数(`use_ascii/padding_x/padding_y/box_border_padding`)不变。
-- 让新增字段 `max_width` 由默认值接管,避免语义漂移。
-
-### 验证
-
-- `cargo build --release` -> 通过。
-- `cargo test` -> 全量通过(含 smoke tests 与 doctests)。
-
-### 复盘与防再发
-
-- 对第三方或兄弟仓库导出的 options struct,优先使用 `..Default::default()` 承接未来字段扩展。
-- 对“完整字面量初始化”定期做静态扫描,减少依赖升级时的结构体字段缺失回归。
-
-## 2026-02-07 12:52 +0800 | 继续优化: 从“局部补字段”升级为“统一构造入口”
-
-### 问题演进
-
-- 初次修复通过补 `..Default::default()` 解决了 `E0063`。
-- 但 `AsciiRenderOptions` 初始化仍分散在多个位置,未来字段继续演进时仍有漏改风险。
-
-### 根因本质
-
-- 问题本质不是某一个字段缺失,而是“同一配置对象在多个调用点重复构造”。
-- 当结构体字段变化时,重复初始化天然脆弱。
-
-### 升级修复
-
-- 引入统一构造函数:
-  - `unicode_render_options()`
-  - `ascii_render_options()`
-  - `compact_unicode_render_options()`
-- 统一替换调用点,将字段演进风险收敛到单点。
-- 增加回归测试锁定 `max_width=None` 等默认承接行为。
-
-### 验证
-
-- `cargo build --release` 通过。
-- `cargo test` 全量通过。
-- `cargo fmt --check` 通过。
-
-## 2026-02-07 13:08 +0800 | Mermaid 边标签过长导致图横向拉宽
-
-### 问题
-
-- 命令: `ralph hats graph --format mermaid`
-- 现象: `Hat_experiment_integrator -->|experiment.complete / integration.applied / integration.blocked / integration.rejected| Hat_ralph` 这类长标签导致图被拉得很宽。
-
-### 原因
-
-- `generate_mermaid_string_physical` 对 Ralph 相关边做了统一折叠,把多个 topic 用 `" / "` 拼成单个 edge label。
-- 该逻辑最初是为 TerminalPretty 渲染稳定性服务,但被同样用于 Strict mermaid 输出,引发可读性问题。
-
-### 修复
-
-- 按 `MermaidLabelMode` 分层处理:
-  - Strict: 不折叠 Ralph 多 topic 边。
-  - TerminalPretty: 继续折叠 Ralph 多 topic 边。
-- 新增回归测试:
-  - `test_generate_mermaid_string_physical_strict_does_not_collapse_ralph_topics`
-  - `test_generate_mermaid_string_physical_terminal_pretty_keeps_ralph_topic_collapsed`
-
-### 验证
-
-- `cargo build --release` 通过。
-- `cargo test` 全量通过。
-- `cargo fmt --check` 通过。
-
-## 2026-02-07 13:21 +0800 | 默认 `ralph hats graph` 仍出现超长边标签
-
-### 问题
-
-- `--format mermaid` 已不折叠 Ralph 多 topic 边,标签不长。
-- 但默认 `ralph hats graph`(TerminalPretty) 仍会把多 topic 全量拼接为单条超长 label,终端图被横向拉宽。
-
-### 原因
-
-- TerminalPretty 分支虽保留“单边折叠”稳定性策略,但折叠后的 label 没有长度治理。
-
-### 修复
-
-- 新增 `summarize_terminal_pretty_collapsed_topics`。
-- 逻辑:
-  - 折叠后短标签保持完整。
-  - 折叠后长标签压缩为 `first_topic / +N more`。
-- 保持 Strict/TerminalPretty 分层策略不变:
-  - Strict: 不折叠 Ralph 多 topic 边。
-  - TerminalPretty: 折叠但摘要长标签。
-
-### 验证
-
-- `cargo build --release` 通过。
-- `cargo test` 全量通过。
-- `cargo fmt --check` 通过。
-
-## 2026-02-07 13:33 +0800 | 用户要求默认终端图也必须拆分多边
-
-### 问题
-
-- 默认 `ralph hats graph` 仍输出合并边标签(此前是全量拼接,后是 `+N more` 摘要)。
-- 用户明确要求: 默认图也不要合并,必须拆分多边。
-
-### 修复
-
-- 删除 TerminalPretty 的 Ralph 边折叠逻辑。
-- 现在 Strict 与 TerminalPretty 都是一 topic 一条边。
-- 同步更新回归测试,禁止出现 ` / +N more` 与全量合并标签。
-
-### 验证
-
-- `cargo build --release` 通过。
-- `cargo test` 全量通过。
-- `cargo fmt --check` 通过。
-
-## 2026-02-08 15:24 +0800 |  修复记录
-
-### 问题
-
-- 命令: cargo clippy --all-targets --all-features -- -D warnings
-- 错误: AsciiRenderOptions 没有 max_width 字段
-- 位置: crates/ralph-cli/src/hats.rs(回归测试)
-
-### 原因
-
-- 当前仓库依赖的 beautiful-mermaid-rs 中, AsciiRenderOptions 仅包含 use_ascii/padding_x/padding_y/box_border_padding。
-- 回归测试引用了不存在的字段,导致编译失败。
-- 同时 compact options 使用 ..Default::default() 会触发 clippy needless_update(因为当前 struct 字段已被完全显式赋值)。
-
-### 修复
-
-- 构造器改为 Default + 覆盖字段(let mut options = AsciiRenderOptions::default(); ...),同时满足:
-  - 未来字段扩展可自动承接默认值。
-  - 当前字段齐全时不会触发 clippy needless_update。
-- 回归测试改为断言 Default + 覆盖后的整体相等,不再引用 max_width。
-
-### 验证
-
-- cargo fmt --check ✅
-- cargo clippy --all-targets --all-features -- -D warnings ✅
-- cargo test ✅
-
-备注: 上条记录对应 Rust 错误码 E0609(no field max_width)。
-
-## 2026-02-11 12:05 +0800 | parallel-experimental-dev-engine: worktree 在工具沙箱下无法 git commit
-
-### 现象
-
-- 在 `examples/parallel-experimental-dev-engine` 的 runner worktree 中执行 `git commit` 可能失败.
-- 典型报错:
-  - `fatal: Unable to create .../.git/worktrees/.../index.lock: Operation not permitted`
-
-### 根因
-
-- `git worktree` 的 `.git` 并不在 workdir 内.
-- workdir 的 `.git` 会指向上级仓库的 `.git/worktrees/<name>/...`.
-- 当 runner 运行在"只能写当前目录"的工具沙箱里时,写入上级 `.git/worktrees/...` 会被拒绝.
-- 结果是 commit-only 协议被卡死,runner 无法产出可搬运的 commit hash.
-
-### 修复
-
-- 新增并行 workspace 运行时配置 `parallel.workspace.worktree_backend`:
-  - `worktree`(默认): 仍使用 `git worktree add/remove`.
-  - `clone`: 使用 `git clone --no-hardlinks` 创建独立 `.git`,兼容 sandbox.
-- clone 模式下,在回收 workdir 前由 orchestrator 自动把 clone 的 HEAD 引入主仓库:
-  - fetch 到 `refs/ralph/workspaces/<instance>/job-<job_id>`.
-  - 这样即使删除 clone 目录,integrator 仍可按 commit hash cherry-pick.
-- example 同步:
-  - `examples/parallel-experimental-dev-engine/ralph.yml` 默认启用 `worktree_backend: clone`.
-  - `event_loop.ralph_prompt` 增强: 明确"1 个 experiment.task = 1 个实验",批次派发必须输出多个 `<event ...>` block,避免把多个实验塞进一个 payload 导致串行.
+- `crates/ralph-cli/src/autopilot.rs`:
+  - agent analysis 默认继承主配置的完整 `cli`(custom 时包含 command/args/prompt_mode/prompt_flag).
+  - `--analysis-backend` 仅覆盖 backend 字段.
+  - 在 analysis config 注入严格 `event_loop.ralph_prompt`,并收紧护栏:
+    - `max_iterations=3`
+    - `max_runtime_seconds=300`
+  - 子进程若因护栏退出(exit code=2),但 stdout 已产出可解析的 `analyze.complete` JSON,则继续判定为分析成功.
 
 ### 验证
 
 - `cargo fmt` ✅
-- `cargo clippy --all-targets --all-features -- -D warnings` ✅
-- `cargo test` ✅
-
-### 补充(你反馈的两类流程坑)
-
-- [记录写入错误]: 使用未加引号 heredoc 时,反引号会触发命令替换.
-  - 建议固定使用 `<<'EOF'` 写入/追加 Markdown,避免意外执行.
-- [二次写入偏差]: 阻塞信息追加时再次触发命令替换.
-  - 同上,一律用带引号 heredoc,并尽量避免在 heredoc 内容里出现反引号.
-
-## 2026-02-11 22:48 +0800 | 错误修复: parallel-hat-instances 在真实 Codex 下超时与收敛失败
-
-### 问题
-
-- `parallel-hat-instances` / `parallel-hat-instances-zh` 在真实 Codex E2E 中出现:
-  - `routing.escalate` 缺失
-  - `LOOP_COMPLETE` 未出现
-  - 120s 超时
-  - 固定实例计数断言不稳定
-
-### 原因
-
-- 场景流程对模型时序依赖过高:
-  - 二次任务落点、collector 条件分支、手工 completion candidate 之间存在漂移.
-- 断言过于绑定固定实例编号,与动态并行调度天然有冲突.
-
-### 修复
-
-- 场景配置改为确定性链路:
-  - `writer.instances=2`
-  - `tester` 用 `target_instance=writer#2` 固定第二任务落点
-  - `collector` 只发 invalid target `build.task(target=ghost_hat)`,由 Supervisor 自动生成 `routing.escalate`
-  - `max_runtime_seconds` 调整为 180
-- 断言改为语义稳定:
-  - 按 hat 总运行次数校验 + `writer#2` 必须出现
-- 脚本基线修复:
-  - run 脚本改为 release 构建 + 清理整个 scenario workspace
-
-### 验证
-
-- `bash scripts/run-parallel-hat-instances-codex.sh` 通过(2/2)
-- `cargo test -p ralph-e2e` 全通过
-
-### 经验
-
-- 并行 E2E 优先使用“实例直达 + 运行时自动错误路径”构造 completion candidate。
-- 断言应优先验证语义,避免死绑固定实例号.
-
-## 2026-02-11 23:19 +0800 | 修复: all_hat 编译期改造后的旧语义测试失败
-
-### 问题
-
-- 在执行 `cargo test` 时,`crates/ralph-core/tests/event_loop_ralph.rs` 的
-  `test_ralph_prompt_includes_all_hat_overlay_from_workspace_config` 失败.
-
-### 根因
-
-- 该测试仍基于旧语义:
-  - 运行时在临时 workspace 创建 `config/all_hat.md` 并断言 prompt 读取到该文件.
-- 但本次需求已将 all_hat 改为编译期内嵌,运行时 workspace 文件不再参与.
-
-### 修复
-
-- 将测试改为编译期语义断言:
-  - 使用 `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/all_hat.md"))` 作为期望来源.
-  - 取首个非空行作为锚点,断言 prompt 包含该锚点.
-- 用例重命名为:
-  - `test_ralph_prompt_includes_all_hat_overlay_from_compiled_config`.
-
-### 验证
-
-- `cargo test -p ralph-core --test event_loop_ralph test_ralph_prompt_includes_all_hat_overlay_from_compiled_config` ✅
-- `cargo test` ✅
-
-## 2026-02-14 15:38 +0800 | 修复: HatJobExecutor execute 签名扩展后测试编译失败
-
-### 现象
-
-- 执行 `cargo test` 编译失败:
-  - E0050: `execute` 参数数量不匹配(测试里的 Fake Executor 仍是旧签名).
-  - E0063: 初始化 `HatInstanceActor` 时缺少新字段 `control_tx` 与 `running_session_strategy`.
-
-### 根因
-
-- 为支持 Codex App Server 的 in-flight `turn/steer`,我们把 `HatJobExecutor::execute(...)` 扩展为带 `control_rx`.
-- 同时 `HatInstanceActor` 增加了 in-flight 控制通道字段.
-- 但部分单元测试没有同步更新,导致编译期直接失败.
-
-### 修复
-
-- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
-  - 所有 `HatJobExecutor` 测试实现补齐 `_control_rx: mpsc::Receiver<HatJobControl>`.
-- `crates/ralph-core/src/parallel/instance.rs`
-  - 单测初始化 `HatInstanceActor { ... }` 补齐:
-    - `running_session_strategy: None`
-    - `control_tx: None`
-- 运行 `cargo fmt` 统一格式.
-
-### 验证
-
-- `cargo fmt --check` ✅
-- `cargo test` ✅
+- `cargo test -p ralph-cli` ✅
 - `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
 
-## 2026-02-14 18:01 +0800 | 修复: ralph-e2e `parallel-hat-instances` 英文场景在 180s max_runtime 下不收敛
+## 2026-02-18 14:07 +0800 | Fix: 并行模式动态 ralph#2 prompt 缺失导致 topic 漂移,进而触发 autopilot hard fail
 
 ### 现象
 
-- 运行 `bash scripts/run-parallel-hat-instances-codex.sh`:
-  - `parallel-hat-instances` 180s 内未看到 `LOOP_COMPLETE`,最终以 max_runtime 退出.
-  - `parallel-hat-instances-zh` 可通过.
+- 执行 `$parallel-engine-autopilot` 的并行 example 时,autopilot hard verdict 失败:
+  - report.json 里 `required_topic:integration.applied` 缺失.
+  - record-session JSONL 里出现了 `integration.done`(非协议 topic).
 
 ### 根因
 
-- `routing.escalate` 的触发依赖 collector 输出 invalid target 事件.
-- 英文 collector 在真实 Codex 下会输出较长解释文本,导致 `routing.escalate` 出现偏晚.
-- `ralph#1` 第二轮收敛 job 启动后,剩余时间不足以稳定输出 `LOOP_COMPLETE`.
+- 并行 Supervisor 会在 `ralph#1` 忙时按需创建 `ralph#2` 作为备用协调实例.
+- 之前 `ralph#2` 没有拿到与 `ralph#1` 等价的 coordinator instructions:
+  - 缺少官方语义段落与 `event_loop.ralph_prompt` 注入.
+  - 因此更容易 prompt 漂移,发布不在协议内的 topic(例如 `integration.done`),导致 autopilot/CI 硬断言失败.
 
 ### 修复
 
-- `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
-  - 收敛 Collector 的 instructions,消除“单行 stdout vs 多行 event block”的歧义.
-  - `event_loop.max_runtime_seconds: 180 -> 240`.
-- `crates/ralph-e2e/src/executor.rs`
-  - E2E best-effort 落盘 stdout/stderr 到 `${workspace}/.e2e/`,便于复盘失败现场.
+- 让所有 ralph 实例(包括动态创建的 `ralph#2`)都使用同一套 coordinator instructions 生成逻辑.
+- 把 config 的 `event_loop.ralph_prompt` 同等注入到 `ralph#2`.
+- 增加单元测试锁死行为:
+  - `busy_ralph_secondary_includes_coordinator_instructions_and_config_prompt`
+
+### 验证
+
+- 实跑 autopilot 通过:
+  - out_dir: `/tmp/ralph-autopilot-out-parallel-20260218-133409`
+  - record-session: `/tmp/ralph-autopilot-out-parallel-20260218-133409/session.jsonl`
+  - exit_code: 0
+- `cargo fmt` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
+
+## 2026-02-23 18:28 +0800 | Fix: mock-cli allowlist 被空 `RALPH_MOCK_ALLOW` 意外覆盖
+
+### 现象
+
+- 运行 mock-mode 时,terminal 里能看到 `[E2E_CMD] ...`，但 allowlist 命令未执行:
+  - `ralph emit ...` 没有被执行,因此 `spawn_instance` 不会发生.
+  - 场景会卡到 `max_runtime_seconds`，最终 exit code=2 或直接失败断言.
+
+### 根因
+
+- `ralph-e2e` 的 mock-cli 子命令 allowlist 解析逻辑:
+  - 环境变量 `RALPH_MOCK_ALLOW` 优先于 CLI `--allow`。
+  - 但当该环境变量存在且为空字符串时,会把 allowlist 覆盖为空.
+- allowlist 为空会导致 `execute_whitelisted_commands()` 直接 early return,命令完全不执行.
+
+### 修复
+
+- `crates/ralph-e2e/src/main.rs`:
+  - 对 `RALPH_MOCK_ALLOW` 做 `trim()` 并过滤空字符串.
+  - 空字符串视为“未提供”,不再覆盖 CLI allowlist.
 
 ### 验证
 
 - `cargo test -p ralph-e2e` ✅
-- `bash scripts/run-parallel-hat-instances-codex.sh` ✅
-## 2026-02-15 12:00 +0800 | prompt: ralph_hat_instance_id 置顶(避免示例歧义)
-- 现象: overlay 示例后紧跟 ralph_hat_instance_id,模型误当示例续行.
-- 根因: overlay 注入无条件置顶,导致 runtime id 不在第一行.
-- 修复: prompt_overlay 在 runtime id 行之后插入 overlay.
-- 回归: 新增单测锁死 "runtime id 第一行".
-- 验证: cargo fmt && cargo test ✅
+- `cargo run -p ralph-e2e -- --mock --filter parallel-emit-spawn-instance` ✅
+- `cargo test` ✅
+
+## 2026-02-23 21:12 +0800 | Fix: busy ralph 改投破坏 turn/steer 与 turn/interrupt
+
+### 现象
+
+- 并行模式下,当 `ralph#1` 处于 Running 时,外部显式投递到 `ralph#1` 的 in-flight 控制信号有概率被改投到 `ralph#2`:
+  - `ralph emit ... --turn-action steer --target-instance ralph#1`
+  - `ralph emit ... --turn-action interrupt --target-instance ralph#1`
+- 结果:
+  - `ralph#1` 的 in-flight turn 收不到 steer/interrupt,导致 turn 无法按预期被影响(例如 E2E 稳定卡死到 MaxRuntime)。
+
+### 根因
+
+- `crates/ralph-core/src/parallel/supervisor/routing.rs` 的 `rewrite_target_for_busy_ralph()` 会在 `ralph#1` Running 时把显式 `target_instance=ralph#1` 的事件改投到 `ralph#2`。
+- 该策略对“普通协调面事件”有价值,但对 `turn_action=Steer|Interrupt` 属于语义破坏:
+  - 这类事件必须直达正在运行的目标实例,否则无法影响 in-flight turn。
+
+### 修复
+
+- 对 `event.turn_action == Steer|Interrupt` 直接跳过改投逻辑,保持直达目标实例(例如 `ralph#1`)。
+- 增加单元测试锁死:
+  - `busy_ralph_primary_explicit_target_is_not_redirected_for_turn_steer`
+  - `busy_ralph_primary_explicit_target_is_not_redirected_for_turn_interrupt`
+
+### 验证
+
+- `cargo test -p ralph-e2e` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-app-server-steer-multi-turn` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-02-23 23:12 +0800 | Codex app-server steer 回执缺失/过早 steer 失败,导致 live E2E 不可信
+
+### 问题
+
+- `parallel-app-server-steer-multi-turn-live`(真实 codex app-server)中:
+  - human-log 看不到 `turn/steer` 的 response 回执.
+  - 即使有回执,也可能是 error response,但 trace 不显示.
+  - 部分 run 中 `turn/started` 后立刻发 steer,会收到 error: "no active turn to steer".
+  - 部分 real 版本不稳定出现 `turn/completed`,导致 job 完成判定不可靠.
+
+### 原因
+
+- `CodexAppServerSession::trace_recv` 只记录 `{id,result}` response,忽略 `{id,error}` response.
+  - 导致 e2e/human-log 里看不到“runner 回复了错误回执”,误以为没回复.
+- `turn/started` 并不等价于“turn 已进入可 steer 的 active 状态”.
+  - real codex 更可靠的门槛是 `codex/event/task_started`.
+- completion 判定只等 `turn/completed`,在部分 real 版本下不稳定.
+
+### 修复
+
+- `crates/ralph-cli/src/codex_app_server_session.rs`
+  - trace: 增加对 error response 的日志输出(包含 error_code/message 截断).
+  - steer: 等 `codex/event/task_started` 后再 flush `pending_steers`,并提供 2s 兜底.
+  - completion: 兼容 `codex/event/task_complete|task_completed` 作为完成信号.
+  - 可观测性: 增大 stderr broadcast buffer,降低 trace 丢失概率.
+
+- `crates/ralph-e2e/src/scenarios/parallel/app_server_steer_multi_turn_live.rs`
+  - 断言: 要求 steer 成功 response>=2(排除 error_code),确保“能力可用”而非“只是收到了错误”.
+  - human-log: 增加精选握手/回执证据段落.
+
+### 验证
+
+- `cargo run -p ralph-e2e -- codex --filter parallel-app-server-steer-multi-turn-live` PASS(看到 steer send+成功 response).
+
+## 2026-02-24 09:56 +0800 | Fix: fake steer 计算结果为 <unknown> + steer 不触发(缺 task_started)
+
+### 现象
+
+- 场景: `parallel-app-server-steer-multi-turn`(fake codex app-server)
+- 失败表现(两个阶段):
+  1) fake app-server 不触发 `turn/steer`:
+     - stdout 只看到 `WAITING_FOR_STEER`,随后卡到 `max_runtime_seconds`。
+  2) 修复 flush 后,仍出现:
+     - `TASK_FEEDBACK[*]: answer: <unknown>`
+     - 断言找不到 `answer: 164`/`answer: 15`。
+
+### 根因
+
+1) steer flush 门槛升级后,fake app-server 与真实协议不一致:
+- `CodexAppServerRuntime` 会优先等 `codex/event/task_started` 再认为“可安全 steer”。
+- fake app-server 如果在 `turn/started` 后进入静默(不再推送 notify),
+  并且 steer 发生在前 2s 内,会导致 pending steer 长时间无法被触发 flush。
+
+2) Python regex 在 Rust raw string 中误用双反斜杠:
+- 把 `\d` 写成 `\\d` 会让 regex 实际匹配字面量 `\d`,导致永远匹配不到数字。
+
+### 修复
+
+- `crates/ralph-e2e/src/scenarios/parallel/app_server_steer_multi_turn.rs`
+  - fake app-server 在 `turn/started` 后补发 `codex/event/task_started`,
+    对齐真实 app-server 的语义门槛。
+  - 修正加法 regex: `r"(\d+)\s*\+\s*(\d+)\s*=\?"`(单反斜杠)。
+  - human-log 摘录补齐 `TASK_FEEDBACK`/`answer:` 行,覆盖“任务反馈”证据。
+
+### 验证
+
+- `cargo test -p ralph-e2e` ✅
+- `cargo run -p ralph-e2e -- codex --filter "multiple steers"` ✅
+
+## 2026-02-24 20:02 +0800 | Fix: live-reply 场景“有 steer ACK 但看起来无回复”(补齐可见 answer 闭环)
+
+### 问题
+
+- 场景: `parallel-app-server-steer-live-reply-multi-turn`(真实 codex app-server)
+- 失败表现(旧版本):
+  - `turn/steer` 已 send/recv,但 stdout 里看不到 `TASK_FEEDBACK`/`answer`/`LOOP_COMPLETE`。
+  - human-log 只有 RPC trace,难以判断“到底是模型没回复,还是输出没进我们可见通道”。
+
+### 原因
+
+- 真实 app-server 下,steer 输入进入 thread 历史,但不保证能在同一轮 in-flight turn 里立刻产生“可见回复”。
+- 如果 prompt 让模型“等 steer 才输出”,模型可能长时间停留在 reasoning/summary 的输出节奏里,导致从 stdout 观测像“无回复”。
+
+### 修复
+
+- 新增/强化 live-reply 场景,改为“两轮 turn/iteration”闭环:
+  1) 第 1 轮(`[task.start]`): 输出 30 行 `STEER_WINDOW_OPEN`,只负责开 steer 窗口,不结束 loop。
+  2) 外部注入 2 次 `turn/steer`(含具体任务 payload)。
+  3) 第 2 轮(emit `e2e.reply.step2`): 明确要求从 thread 历史读取两条输入并输出:
+     - `TASK_REQUEST[n]`
+     - `TASK_FEEDBACK[n]: answer: ...`
+     - 最后 `LOOP_COMPLETE`
+- human-log 补齐 hat runner stdout/state 摘录:
+  - 直接摘录 `answer: 164/15` 与 `LOOP_COMPLETE`,让“是否真的有回复”一眼可读。
+
+### 额外踩坑(已规避)
+
+- 真实 codex app-server 不支持 `type=inputText`:
+  - error: `-32600 unknown variant inputText, expected text/image/localImage/skill/mention`
+  - 因此继续使用 `type=text`。
+
+### 验证
+
+- `cargo test -p ralph-e2e` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-app-server-steer-live-reply-multi-turn` ✅
+
+### 证据
+
+- `.e2e-tests/artifacts/parallel-app-server-steer-live-reply-multi-turn/human-log.md`
+- `.e2e-tests/artifacts/parallel-app-server-steer-live-reply-multi-turn/stdout.txt`
+
+## 2026-02-25 19:22 +0800 | 修复: ralph-e2e 误选旧 release ralph 导致 `--idle-start` 报 "unexpected argument"
+
+### 问题
+
+- 现象:
+  - 运行新场景 `parallel-app-server-idle-start` 时,stderr 报:
+    - `error: unexpected argument '--idle-start' found`
+  - 导致 E2E stdout 为空,injector 等不到 `.ralph/agents.json`，最终以超时/无回复失败。
+
+### 原因
+
+- `crates/ralph-e2e/src/executor.rs` 的 `resolve_ralph_binary()` 之前无脑优先 `target/release/ralph`。
+- 在开发期常见状态是:
+  - 旧的 `target/release/ralph` 仍存在
+  - 新的改动只编译到了 `target/debug/ralph`(例如你刚跑了 `cargo test`)
+- 结果: E2E 实际跑的是旧 release,因此缺少新 flag(例如 `--idle-start`)。
+
+### 修复
+
+- `resolve_ralph_binary()` 调整为:
+  - release/debug 都存在时,按文件 mtime 选择更新的那个。
+  - 避免 E2E 被旧二进制污染,减少“假失败”。
+
+### 验证
+
+- `cargo test -p ralph-e2e` ✅
+- `cargo run -p ralph-e2e -- codex --filter "fake codex shim"` ✅
+
+## 2026-02-25 23:53 +0800 | Fix: example 子目录运行时报 "Prompt file ... not found"
+
+### 现象
+
+- 在 `examples/parallel-experimental-dev-engine/` 目录执行 `ralph run`(或 `cargo run --bin ralph -- run`)时,报错:
+  - `Prompt file 'examples/parallel-experimental-dev-engine/PROMPT.md' not found...`
+
+### 原因
+
+- `examples/parallel-experimental-dev-engine/ralph.yml` 的 `event_loop.prompt_file` 使用了仓库根目录相对路径.
+- 当用户在 example 子目录内直接运行时,该路径不再成立,导致找不到 prompt 文件.
+
+### 修复
+
+- 让 example 目录自包含:
+  - `examples/parallel-experimental-dev-engine/ralph.yml`: `prompt_file` 改为 `PROMPT.md`(同目录).
+  - `examples/parallel-experimental-dev-engine/README.md`: 同步更新运行方式说明.
+- 增加回归测试:
+  - `crates/ralph-cli/tests/integration_examples.rs`: 断言 example config 包含 `prompt_file: "PROMPT.md"` 且不再写死仓库根路径.
+
+### 验证
+
+- 在 example 目录 `--dry-run` 显示 `Prompt file: PROMPT.md`.
+- `cargo test -p ralph-cli` ✅
+
+## 2026-02-26 10:08 +0800 | Fix: 并行 TUI idle chat 下 ralph#1 自己回复自己(human.message loop)
+
+### 现象
+
+- 在并行 TUI 的 chat idle 模式下,给 `ralph#1` 发一条 `human.message` 后:
+  - ralph#1 会发布 `human.message` 作为“回复”。
+  - 该回复又会被 Supervisor 再次路由回 ralph,触发 ralph#1 继续回复自己的 `human.message`,形成循环。
+- 复现证据:
+  - `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-talk-example.jsonl`
+
+### 原因
+
+- `human.message` 的协议语义是“外部输入”(human -> hats)。
+- 但 parallel Supervisor 的默认路由会把 hat 产出的任何事件(包括 `human.message`)继续参与路由。
+- 当 ralph#1(兜底协调者,订阅 "*")反向发布 `human.message` 时,该事件会被再次投递给 ralph,从而形成自我对话回路。
+
+### 修复
+
+- 在 `ParallelSupervisor::route_event()` 增加护栏:
+  - 若 `topic=="human.message"` 且事件带 `source` 或 `source_instance`:
+    - 仍推送给 TUI event_observer 做展示。
+    - 但不再参与后续 routing/delivery(直接返回),从机制上打断回路。
+- 对应文件:
+  - `crates/ralph-core/src/parallel/supervisor/routing.rs`
+
+### 验证
+
+- 回归测试:
+  - `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`:
+    - `parallel_does_not_route_hat_sourced_human_message_to_prevent_self_chat_loop`
+- `cargo test -p ralph-core` ✅
+
+## 2026-02-26 12:21 +0800 | Fix: ralph 回复 topic 改为 reply.human.message + 忽略该 topic 防循环; app-server trace 打印 turn/start prompt
+
+### 现象
+
+1) 回复 topic 不够干净:
+- ralph#1 在回复 human 时会输出:
+  - `<event topic="human.message" reply="...">...`
+- 这会让 `human.message` 同时像“输入”和“输出”,理解成本高,也更容易再次引入自问自答回路。
+
+2) app-server trace 看不到启动注入的 prompt:
+- 即使设置:
+  - `RALPH_CODEX_APP_SERVER_TRACE=1`
+  - `RALPH_CODEX_APP_SERVER_TRACE_STEER_INPUT=1`
+- 仍然看不到 `turn/start` 注入的 prompt(你反馈以前 `codex exec` 能从 stderr 看到)。
+
+### 原因
+
+- `human.message` 没有区分输入/回复输出语义。
+- app-server trace 之前只对 `turn/steer` 打印 input 预览,`turn/start` 只打印 method/id,所以看不到启动 prompt。
+
+### 修复
+
+1) 语义拆分:
+- 引入 `reply.human.message` 作为“回复输出 topic”。
+- `ParallelSupervisor::route_event()` 对 `reply.human.message` 做 UI-only early-return:
+  - 允许 TUI 展示/录制。
+  - 但不参与路由,避免 ralph(订阅 "*")再次收到导致循环。
+- ralph#1 内置协调器指令明确:
+  - human-facing reply 必须用 `reply.human.message`。
+
+2) turn/start trace:
+- 在 `turn/start` 的 send trace 中输出:
+  - `input_len`
+  - 开启 `RALPH_CODEX_APP_SERVER_TRACE_STEER_INPUT=1` 时输出 `input_preview`(截断)。
+
+### 验证
+
+- 回归测试:
+  - `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`:
+    - `parallel_does_not_route_reply_human_message_topic`
+- `cargo test -p ralph-core -p ralph-cli -p ralph-tui` ✅
+
+## 2026-02-26 10:57 +0800 | Fix: app-server 默认显示注入 prompt(像 codex exec stderr) + 保留 ANSI 色彩
+
+### 现象
+
+- Codex app-server(session_strategy=app_server)下,默认看不到 "turn/start 注入了什么".
+  - 你期望像以前 `codex exec` 一样,stderr 会显示 ralph prompt / sys / user 等转录.
+- 并行输出展示里 stderr 会被弱化:
+  - TUI 的 stderr-muted 会覆盖 fg,导致 ANSI 色彩信息被吞掉.
+  - log mode 对 stderr 外层包 GRAY,也会破坏原始色彩语义.
+
+### 原因
+
+- `codex app-server` 通道本身不负责 echo prompt.
+- 之前的 ralph 仅在 trace env 下输出 turn/start 的截断预览,默认不可观测.
+- TUI/log-mode 的 stderr 弱化策略是 "无条件覆盖",未考虑 "stderr 自带 ANSI" 的情况.
+
+### 修复
+
+1) 默认 prompt transcript
+- 在 `CodexAppServerRuntime::execute_job()` 每次 `turn/start` 前,把完整 prompt 以多行 transcript 写入 stderr 流.
+- transcript 支持 ANSI 色彩,并受 `--color` 控制.
+- 对应文件:
+  - `crates/ralph-cli/src/codex_app_server_session.rs`
+
+2) ANSI 保真
+- TUI: 当 stderr chunk 含 ANSI 时,不再强制 muted 覆盖 fg.
+  - `crates/ralph-tui/src/state/parallel.rs`
+- log mode: 当 stderr 行含 ANSI 时,不再外层包 GRAY.
+  - `crates/ralph-cli/src/parallel_runner.rs`
+
+### 验证
+
+- 新增回归测试:
+  - `crates/ralph-cli/src/codex_app_server_session.rs`: transcript 生成包含 ANSI,并保留尾部空行.
+  - `crates/ralph-tui/src/state/parallel.rs`: stderr 含 ANSI 时不被 force muted.
+- `cargo test -p ralph-core -p ralph-cli -p ralph-tui` ✅
+
+### 额外验证
+
+- `cargo test` ✅
+
+## 2026-02-26 14:50 +0800 | 修复: reply.human.message 偶发缺 `</event>` 导致 chat 看起来“没回复”; app-server thinking 不可见
+
+### 现象
+
+- 并行 TUI chat 里,有时能看到 stdout 里输出了 `<event topic="reply.human.message" ...>` 的开头与正文,
+  但缺少 `</event>`。
+- Supervisor 的 `EventParser` 需要看到闭合标签才能发布 `bus.publish`,
+  因此 UI 侧会像“问了但没回复”(或回复不进入事件链)。
+- 同时在 `session_strategy=app_server` 路径下,你看不到像 `codex exec` 那样的 thinking 文本
+  (真实 app-server 会推送 `item/reasoning/summaryTextDelta`)。
+
+### 根因
+
+- 协议层: `<event ...>` 是严格闭合标签; 模型偶发未按协议输出,会导致事件丢失。
+- 运行时: app-server runtime 之前在切到 `item/agentMessage/delta` 后,会忽略后续 summary delta,
+  导致 thinking 不可见。
+- 解析器: 遇到“未闭合但后面又出现新 `<event ...>`”的输出时,
+  简单的 `find("</event>")` 会把后续 event 的 closing tag 误当成当前 event 的 closing,
+  进而吞掉后续事件(不稳健)。
+
+### 修复
+
+1) prompt 硬约束(减少模型违约概率)
+- `crates/ralph-core/src/parallel/supervisor.rs`
+  - 明确要求每个 `<event ...>` 必须闭合 `</event>`。
+  - 推荐单行 event,降低跨行/截断导致的解析失败。
+
+2) app-server thinking 回显(不影响事件解析)
+- `crates/ralph-cli/src/codex_app_server_session.rs`
+  - 当输出源为 `AgentMessageDelta` 时:
+    - `item/reasoning/summaryTextDelta` 持续回显到 stderr(更像 `codex exec` 的体验)。
+    - 但不进入 `HatJobResult.output`(仍坚持 stdout-only 事件解析边界)。
+
+3) parser 最小容错(只针对 UI-only 回复 topic)
+- `crates/ralph-core/src/event_parser.rs`
+  - `reply.human.message` 若在 EOF 缺失 `</event>`,允许把 EOF 当作隐式闭合,避免 chat 看起来“没回复”。
+  - 若 payload 内出现新的 `<event `,则认为当前 event 未闭合,跳过并继续扫描后续事件,避免吞事件。
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo test -p ralph-core -p ralph-cli -p ralph-tui` ✅
+
+## 2026-02-26 21:29 +0800 | 修复: 并行模式中断退出导致 record-session JSONL 尾部丢失(误判“没回复就 end”)
+
+### 现象
+
+- `--record-session` 生成的 JSONL 里:
+  - 只有 `_meta.loop_start` + prompt transcript 等早期输出。
+  - 缺少 `reply.human.message` 与 `_meta.termination`。
+- 但 `.ralph/events.jsonl` 里能找到同一条 `human.message` 的真实回复,说明“系统确实回复了”。
+
+### 根因
+
+- `crates/ralph-cli/src/parallel_runner.rs` 的 interrupt 分支会早退:
+  - 退出前没有写 `_meta.termination`,也没有 `SessionRecorder.flush()`。
+- main 对非 0 exit code 可能调用 `std::process::exit(...)`,
+  `BufWriter<File>` 的尾部缓冲区无法保证落盘。
+
+### 修复
+
+- 在 parallel runner 的两条早退路径补齐:
+  - 写 `_meta.termination`
+  - `recorder.flush()`
+  - 适用路径:
+    1) Ctrl+C/SIGTERM/SIGHUP interrupt
+    2) supervisor.run 返回 Err(e)
+- 对应文件:
+  - `crates/ralph-cli/src/parallel_runner.rs`
+
+### 验证
+
+- `cargo test -p ralph-cli` ✅
+
+## 2026-02-27 12:38 +0800 | 修复: 子目录执行 `ralph emit` 可能写错 events 文件; coordinator prompt 误导“只能发 `<event>`”
+
+### 现象
+
+- 在并行 idle/chat 场景里,你希望:
+  - 随时用 `ralph emit ... --target-instance <hat#n>` 向任意 instance 注入消息/steer。
+  - 且不必被 prompt 误导为"只能输出 `<event ...>...</event>` 才能发消息"。
+- 但当你在子目录(尤其是 `.ralph/worktrees/...`)执行 `ralph emit` 时:
+  - 可能读不到 `.ralph/current-events` marker,从而写入错误的 fallback `.ralph/events.jsonl`。
+  - 结果表现为"注入了但 run 没反应"或"events 路径不对"。
+
+### 根因
+
+- `ralph emit` 与 `ralph events` 之前只在当前工作目录读取 `.ralph/current-events`:
+  - 在子目录执行时,无法命中 workspace root 的 marker。
+- marker 内容通常是相对路径(例如 `.ralph/events-<run_id>.jsonl`):
+  - 若按当前 cwd 解析,也可能拼出错误路径。
+
+### 修复
+
+1) coordinator prompt 明确双通道 + 单轮多事件
+- `crates/ralph-core/src/parallel/supervisor.rs`
+  - 允许单轮输出多条 `<event ...>...</event>`。
+  - 明确: 当 backend 支持 tool/shell 时,也可以 out-of-band 执行 `ralph emit ...` 注入事件。
+
+2) `ralph emit`/`ralph events` 子目录自动定位 marker
+- `crates/ralph-cli/src/main.rs`
+  - 向上遍历父目录寻找最近的 `.ralph/current-events`。
+  - 解析 marker 相对路径时,以 workspace root(包含 `.ralph/` 的目录)为基准。
+  - 并复用到 `ralph events` 保持一致行为。
+
+### 验证
+
+- `cargo fmt --check` ✅
+- `cargo test -p ralph-core -p ralph-cli -p ralph-tui` ✅
+- `cargo test -p ralph-core smoke_runner` ✅
+
+## 2026-02-28 15:26 +0800 | 修复: macOS `cargo test` 报 "You have not agreed to the Xcode license"(exit 69)
+
+### 现象
+
+- 运行 `cargo test`(或某些会触发编译/链接的命令)时,报错:
+  - `You have not agreed to the Xcode license agreements...`
+  - 并以 exit code 69 退出。
+
+### 根因
+
+- `cargo test` 会触发编译/链接,间接调用 Apple toolchain(例如 clang/ld)。
+- 本机 `xcode-select -p` 指向 `/Applications/Xcode.app/Contents/Developer`。
+- 当 Xcode.app license 未接受时,`xcrun` 会拒绝执行 clang/ld,从而让 cargo 的构建/链接失败。
+
+### 修复
+
+- 无需 sudo 的修复(推荐本仓库开发/CI 语境): 跑 cargo 时显式指定 Command Line Tools:
+  - `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test ...`
+- 全局修复(需要管理员权限,不适合在受限环境里做):
+  - `sudo xcodebuild -license accept`
+  - 或 `sudo xcode-select --switch /Library/Developer/CommandLineTools`
+
+### 验证
+
+- `DEVELOPER_DIR=/Library/Developer/CommandLineTools xcrun --find clang` ✅
+- `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test -p ralph-cli` ✅
+- `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test -p ralph-core smoke_runner` ✅
+- `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test` ✅

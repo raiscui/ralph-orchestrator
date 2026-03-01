@@ -56,8 +56,14 @@ use ralph_e2e::{
     MockCliError,
     MockConfig,
     MultiIterScenario,
-    ParallelExperimentalDevEngineExampleScenario,
+    ParallelAppServerIdleStartLiveScenario,
+    ParallelAppServerIdleStartScenario,
     // Tier 8: Parallel Runtime
+    ParallelAppServerSteerLiveReplyMultiTurnScenario,
+    ParallelAppServerSteerMultiTurnLiveScenario,
+    ParallelAppServerSteerMultiTurnScenario,
+    ParallelEmitSpawnInstanceScenario,
+    ParallelExperimentalDevEngineExampleScenario,
     ParallelHatInstancesScenario,
     ParallelStartingEventInferenceScenario,
     ParallelTriggerRoutingExampleScenario,
@@ -276,6 +282,12 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(ParallelHatInstancesScenario::new_zh()),
         Box::new(ParallelStartingEventInferenceScenario::new()),
         Box::new(ParallelStartingEventInferenceScenario::new_multi_candidate()),
+        Box::new(ParallelEmitSpawnInstanceScenario::new()),
+        Box::new(ParallelAppServerIdleStartScenario::new()),
+        Box::new(ParallelAppServerIdleStartLiveScenario::new()),
+        Box::new(ParallelAppServerSteerMultiTurnScenario::new()),
+        Box::new(ParallelAppServerSteerMultiTurnLiveScenario::new()),
+        Box::new(ParallelAppServerSteerLiveReplyMultiTurnScenario::new()),
         Box::new(ParallelTriggerRoutingExampleScenario::new()),
         Box::new(ParallelExperimentalDevEngineExampleScenario::new()),
     ]
@@ -292,7 +304,13 @@ fn main() {
                 speed,
                 allow,
             } => {
-                let allow_from_env = std::env::var("RALPH_MOCK_ALLOW").ok();
+                // 说明：
+                // - 环境变量优先用于 CI 注入。
+                // - 但若该变量存在且为空字符串,应视为“未提供”(避免意外覆盖 CLI 的 allowlist)。
+                let allow_from_env = std::env::var("RALPH_MOCK_ALLOW")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
                 // 环境变量优先（便于 CI 注入），否则使用 CLI 传入的 allow。
                 let allow_effective = allow_from_env.as_deref().or(allow.as_deref());
 

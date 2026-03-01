@@ -35,6 +35,36 @@ pub(crate) struct ExecutionOutcome {
     pub termination: Option<TerminationReason>,
 }
 
+pub(crate) fn clear_scratchpad_for_fresh_run(
+    scratchpad_path: &std::path::Path,
+    context_label: &str,
+) -> Result<()> {
+    // ------------------------------------------------------------------
+    // 说明:
+    // - fresh run 只能“清空/截断” scratchpad,不能删除文件。
+    //   否则后续 `--continue/--resume` 可能因为文件缺失而失败(典型回归)。
+    // - 当文件不存在时,这里保持 no-op(与现有语义一致,避免无意创建目录/文件)。
+    // ------------------------------------------------------------------
+
+    if !scratchpad_path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = scratchpad_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create scratchpad parent directory ({context_label}): {parent:?}")
+        })?;
+    }
+
+    fs::write(scratchpad_path, "").with_context(|| {
+        format!("Failed to clear scratchpad for fresh run ({context_label}): {scratchpad_path:?}")
+    })?;
+
+    debug!("Cleared scratchpad for fresh run ({context_label}): {scratchpad_path:?}");
+
+    Ok(())
+}
+
 fn backend_name_for_timeout(hat_backend: &HatBackend) -> String {
     match hat_backend {
         HatBackend::Named(name) => name.clone(),
@@ -135,23 +165,7 @@ pub async fn run_loop_impl(
         } else {
             scratchpad_path
         };
-        if resolved_scratchpad_path.exists() {
-            if let Some(parent) = resolved_scratchpad_path.parent() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create scratchpad parent directory: {:?}", parent)
-                })?;
-            }
-            fs::write(&resolved_scratchpad_path, "").with_context(|| {
-                format!(
-                    "Failed to clear scratchpad for fresh run: {:?}",
-                    resolved_scratchpad_path
-                )
-            })?;
-            debug!(
-                "Cleared scratchpad for fresh run: {:?}",
-                resolved_scratchpad_path
-            );
-        }
+        clear_scratchpad_for_fresh_run(&resolved_scratchpad_path, "serial")?;
     }
 
     // Initialize event loop
@@ -1051,6 +1065,7 @@ pub(crate) fn resolve_prompt_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_pty_always_enabled_for_streaming() {
@@ -1165,6 +1180,45 @@ mod tests {
             convert_termination_type(termination_type, false),
             Some(TerminationReason::Interrupted),
             "ForceKill should terminate in autonomous mode"
+        );
+    }
+
+    #[test]
+    fn guardrail_scratchpad_clear_truncates_but_does_not_delete() {
+        // ------------------------------------------------------------------
+        // 目标:
+        // - 锁死 fresh run 的 scratchpad 清理语义: truncate(清空)而不是 delete。
+        // - 这能防止后续 `--continue/--resume` 因 scratchpad 缺失而失败的回归。
+        // ------------------------------------------------------------------
+
+        let dir = tempdir().expect("tempdir should be created");
+        let scratchpad_path = dir.path().join("scratchpad.md");
+        fs::write(&scratchpad_path, "hello").expect("scratchpad should be writable");
+
+        clear_scratchpad_for_fresh_run(&scratchpad_path, "test").expect("clear should succeed");
+
+        assert!(
+            scratchpad_path.exists(),
+            "scratchpad must still exist after clear"
+        );
+        let content = fs::read_to_string(&scratchpad_path).expect("scratchpad should be readable");
+        assert_eq!(content, "");
+    }
+
+    #[test]
+    fn guardrail_scratchpad_clear_is_noop_when_missing() {
+        // ------------------------------------------------------------------
+        // 说明:
+        // - 保持现有语义: 文件不存在时不创建(避免无意创建目录/文件影响工作区)。
+        // ------------------------------------------------------------------
+
+        let dir = tempdir().expect("tempdir should be created");
+        let scratchpad_path = dir.path().join("missing.md");
+
+        clear_scratchpad_for_fresh_run(&scratchpad_path, "test").expect("clear should succeed");
+        assert!(
+            !scratchpad_path.exists(),
+            "missing scratchpad should remain missing (no implicit create)"
         );
     }
 }

@@ -71,7 +71,12 @@ pub use memory::{
     MemoryRapidWriteScenario, MemorySearchScenario,
 };
 pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
-pub use parallel::{ParallelHatInstancesScenario, ParallelStartingEventInferenceScenario};
+pub use parallel::{
+    ParallelAppServerIdleStartLiveScenario, ParallelAppServerIdleStartScenario,
+    ParallelAppServerSteerLiveReplyMultiTurnScenario, ParallelAppServerSteerMultiTurnLiveScenario,
+    ParallelAppServerSteerMultiTurnScenario, ParallelEmitSpawnInstanceScenario,
+    ParallelHatInstancesScenario, ParallelStartingEventInferenceScenario,
+};
 pub use parallel_experimental_dev_engine_example::ParallelExperimentalDevEngineExampleScenario;
 pub use parallel_trigger_routing_example::ParallelTriggerRoutingExampleScenario;
 pub use tasks::{TaskAddScenario, TaskCloseScenario, TaskCompletionScenario, TaskReadyScenario};

@@ -409,6 +409,17 @@ impl TestRunner {
                     }
                 }
 
+                // -----------------------------------------------------------------
+                // E2E 可读日志保留(不依赖 --keep-workspace)
+                //
+                // 说明：
+                // - Executor 会把 stdout/stderr 落盘到 `${workspace}/.e2e/`。
+                // - 但 runner 默认会清理 workspace，因此这里在 cleanup 前把 `.e2e/` 复制到
+                //   `${base}/artifacts/<scenario-id>/`，便于人类排障与审计。
+                // - best-effort：复制失败不应导致测试误判为 FAIL（但会打印 warning）。
+                // -----------------------------------------------------------------
+                self.persist_e2e_artifacts(&scenario_id, &workspace_path);
+
                 // Cleanup unless keeping workspaces
                 if !config.keep_workspaces {
                     scenario.cleanup(&workspace_path).ok();
@@ -557,6 +568,56 @@ impl TestRunner {
             .map_err(|e| RunnerError::WorkspaceError(format!("Failed to write ralph.yml: {e}")))?;
 
         Ok(())
+    }
+
+    fn persist_e2e_artifacts(&self, scenario_id: &str, workspace_path: &Path) {
+        let source_dir = workspace_path.join(".e2e");
+        if !source_dir.exists() {
+            return;
+        }
+
+        let artifacts_dir = self
+            .workspace_mgr
+            .base_path()
+            .join("artifacts")
+            .join(scenario_id);
+
+        // 重要：每次运行覆盖旧 artifacts，避免“上次残留”污染排障与断言判断。
+        let _ = std::fs::remove_dir_all(&artifacts_dir);
+        if std::fs::create_dir_all(&artifacts_dir).is_err() {
+            eprintln!(
+                "[e2e] Warning: failed to create artifacts dir: {}",
+                artifacts_dir.display()
+            );
+            return;
+        }
+
+        if let Err(e) = copy_dir_recursive(&source_dir, &artifacts_dir) {
+            eprintln!(
+                "[e2e] Warning: failed to copy artifacts from {} to {}: {e}",
+                source_dir.display(),
+                artifacts_dir.display()
+            );
+        }
+
+        fn copy_dir_recursive(source: &Path, dest: &Path) -> std::io::Result<()> {
+            std::fs::create_dir_all(dest)?;
+
+            for entry in std::fs::read_dir(source)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                let from = entry.path();
+                let to = dest.join(entry.file_name());
+
+                if file_type.is_dir() {
+                    copy_dir_recursive(&from, &to)?;
+                } else if file_type.is_file() {
+                    std::fs::copy(&from, &to)?;
+                }
+            }
+
+            Ok(())
+        }
     }
 }
 

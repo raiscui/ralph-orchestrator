@@ -93,9 +93,25 @@ pub struct Event {
     pub payload: Option<String>,
     pub ts: String,
 
+    /// Optional target hat for delivery (parallel mode).
+    ///
+    /// 说明：
+    /// - 与 `<event ... target="writer">` 语义一致。
+    /// - 并行 Supervisor 会把它作为路由收敛信号使用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+
     /// Optional target instance for direct delivery (parallel mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_instance: Option<String>,
+
+    /// Optional routing hint: spawn a fresh instance for delivery (parallel mode).
+    ///
+    /// 说明：
+    /// - `true` 表示“为本次投递强制创建一个新实例”(上下文隔离)。
+    /// - 与 `target_instance` 互斥：指定实例时不应再请求 spawn。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_instance: Option<bool>,
 
     /// Optional per-event workspace strategy override (parallel mode).
     ///

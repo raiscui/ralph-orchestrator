@@ -198,6 +198,44 @@ impl ParallelStartingEventInferenceScenario {
             builder.failed().build()
         }
     }
+
+    fn agents_snapshot_written(&self, executor: &RalphExecutor) -> crate::models::Assertion {
+        // -----------------------------------------------------------------
+        // 说明:
+        // - `.ralph/agents.json` 是最近新增的并行可观测性能力.
+        // - 这个断言不关心具体实例数量(避免 autoscale/动态实例引入 flaky),
+        //   只要求:
+        //   1) 文件存在且 JSON 可解析
+        //   2) 至少包含本场景的关键 hat: planner/builder
+        // -----------------------------------------------------------------
+        let snapshot = match super::read_agents_snapshot(executor.workspace()) {
+            Ok(s) => s,
+            Err(e) => {
+                return AssertionBuilder::new("Agents snapshot written")
+                    .expected(".ralph/agents.json exists and is valid JSON")
+                    .actual(e)
+                    .failed()
+                    .build();
+            }
+        };
+
+        let instance_count = snapshot.instances.len();
+        let has_planner = snapshot.instances.iter().any(|i| i.hat_id == "planner");
+        let has_builder = snapshot.instances.iter().any(|i| i.hat_id == "builder");
+
+        let ok = instance_count >= 2 && has_planner && has_builder;
+        let builder = AssertionBuilder::new("Agents snapshot written")
+            .expected("agents.json contains planner + builder (and instance_count>=2)")
+            .actual(format!(
+                "instance_count={instance_count}, has_planner={has_planner}, has_builder={has_builder}"
+            ));
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
 }
 
 impl Default for ParallelStartingEventInferenceScenario {
@@ -456,6 +494,7 @@ Constraints:
             Assertions::exit_code_success_or_limit(&execution),
             Assertions::no_timeout(&execution),
             self.parallel_mode_visible(&execution),
+            self.agents_snapshot_written(executor),
             self.workflow_entry_inferred(&execution),
             self.workflow_progressed(&execution),
             self.loop_complete_detected(&execution),

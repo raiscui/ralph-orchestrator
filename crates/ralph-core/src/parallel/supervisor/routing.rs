@@ -18,7 +18,7 @@ use ralph_proto::{
     Delivery, Event, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
     MissingInstancePolicy, QueueDecisionRecord, QueueSelection, SessionStrategy,
     TOPIC_DISPATCH_DECISION, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT, Topic,
-    TopicContract, new_event_id,
+    TopicContract, TurnAction, new_event_id,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -29,6 +29,36 @@ impl ParallelSupervisor {
     pub(super) async fn route_event(&mut self, event: Event) -> anyhow::Result<()> {
         let mut event = event;
         self.ensure_event_id(&mut event);
+
+        // ---------------------------------------------------------------------
+        // reply.human.message 语义护栏(并行 TUI chat 输出):
+        // - `reply.human.message` 表示 hat -> human 的“回复消息”(输出)。
+        // - 该 topic 的唯一目的应是 UI 展示/日志证据,而不是再次参与路由。
+        // - 否则 ralph(订阅 "*") 会再次收到它,形成自问自答循环。
+        // ---------------------------------------------------------------------
+        if event.topic.as_str() == "reply.human.message" {
+            if let Some(observer) = &self.event_observer {
+                observer(&event);
+            }
+            return Ok(());
+        }
+
+        // ---------------------------------------------------------------------
+        // human.message 语义护栏(并行 TUI idle chat):
+        // - `human.message` 是“外部输入事件”(human -> hats)。
+        // - 如果某个 hat 反向发布 `human.message`(带 source/source_instance),
+        //   该事件应只用于 UI 展示,不应再次参与路由。
+        // - 否则会形成“ralph#1 回复 -> 事件被路由回 ralph -> ralph#1 再回复”的自我对话回路。
+        // ---------------------------------------------------------------------
+        if event.topic.as_str() == "human.message"
+            && (event.source.is_some() || event.source_instance.is_some())
+        {
+            if let Some(observer) = &self.event_observer {
+                observer(&event);
+            }
+            return Ok(());
+        }
+
         // ---------------------------------------------------------------------
         // Ralph 双实例路由补偿:
         // - 如果事件显式指向 ralph#1,但它当前正在 Running,
@@ -88,6 +118,83 @@ impl ParallelSupervisor {
         // - event.target / event.target_instance 是“收敛语义”，不允许绕过订阅拓扑任意投递。
         // - 对少数控制面 topic 做特例（例如 gate.*），避免把运行时信号误判为非法。
         let control_plane = Self::is_control_plane_topic(event.topic.as_str());
+
+        // =====================================================================
+        // spawn_instance：显式请求“新实例投递”(上下文隔离)
+        // =====================================================================
+        //
+        // 说明：
+        // - 这是一个“路由提示信号”，用于实现消息的 3 种投递模式之一：new_instance。
+        // - 语义约束：
+        //   - 与 target_instance 互斥。
+        //   - 推荐必须同时提供 target(目标 hat)，否则无法确定为哪个 hat 开新实例。
+        //
+        // 策略：
+        // - 成功: 创建动态实例并把 event.target_instance 指向它(直达投递)。
+        // - 失败: best-effort escalate + 降级为普通路由(避免丢消息)。
+        if matches!(event.spawn_instance, Some(true)) {
+            // 清空该字段: 不应该进入 LLM prompt 的业务事件列表.
+            event.spawn_instance = None;
+
+            if event.target_instance.is_some() {
+                self.escalate_delivery_failure(
+                    &event,
+                    "invalid spawn_instance: target_instance is already set (mutually exclusive)"
+                        .to_string(),
+                    &[],
+                    &[],
+                )
+                .await?;
+            } else if let Some(target_hat) = event.target.clone() {
+                // 对非控制面 topic，spawn 之前先做一次订阅校验，避免“先 spawn 再被 strict target 拒绝”。
+                if !control_plane && !self.hat_is_subscriber(&target_hat, &event.topic) {
+                    self.escalate_delivery_failure(
+                        &event,
+                        format!(
+                            "invalid spawn_instance: hat \"{}\" is not subscribed to topic \"{}\"",
+                            target_hat, event.topic
+                        ),
+                        &[],
+                        &[],
+                    )
+                    .await?;
+                } else if target_hat.as_str() == "ralph" {
+                    // ralph 有专门的双实例路由补偿,不再额外支持显式 spawn。
+                    self.escalate_delivery_failure(
+                        &event,
+                        "invalid spawn_instance: explicit spawn is not supported for hat \"ralph\""
+                            .to_string(),
+                        &[],
+                        &[],
+                    )
+                    .await?;
+                } else {
+                    match self.spawn_dynamic_instance(&target_hat) {
+                        Ok(instance_id) => {
+                            event.target_instance = Some(instance_id);
+                        }
+                        Err(e) => {
+                            self.escalate_delivery_failure(
+                                &event,
+                                format!("spawn_instance failed: {e}"),
+                                &[],
+                                &[],
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            } else {
+                self.escalate_delivery_failure(
+                    &event,
+                    "invalid spawn_instance: missing target hat id; add target=\"<hat_id>\""
+                        .to_string(),
+                    &[],
+                    &[],
+                )
+                .await?;
+            }
+        }
 
         if !control_plane {
             if let Some(target_hat) = &event.target
@@ -177,6 +284,11 @@ impl ParallelSupervisor {
         // - 直达投递不应该被 TopicContract 配置“意外阻断”（尤其是 gate.resolve 回送）
         // - strict 校验失败已在上游拦住；这里假设 instance 存在（否则直接 fail-fast）
         if let Some(target_instance) = event.target_instance.clone() {
+            // 可观测性: 记录“该实例最近一次收到的输入”(best-effort).
+            if self.instances.contains_key(&target_instance) {
+                self.record_agents_last_input(&target_instance, &event);
+            }
+
             let Some(handle) = self.instances.get(&target_instance) else {
                 self.escalate_delivery_failure(
                     &event,
@@ -196,6 +308,7 @@ impl ParallelSupervisor {
                 .await
                 .context("Failed to deliver event to target_instance")?;
             self.mark_inflight_delivery(&target_instance);
+            self.write_agents_snapshot_best_effort();
             return Ok(());
         }
 
@@ -662,6 +775,7 @@ impl ParallelSupervisor {
         recipients: &[HatInstanceId],
     ) -> anyhow::Result<()> {
         for instance_id in recipients {
+            self.record_agents_last_input(instance_id, &event);
             if let Some(handle) = self.instances.get(instance_id) {
                 handle
                     .cmd_tx
@@ -671,6 +785,7 @@ impl ParallelSupervisor {
                 self.mark_inflight_delivery(instance_id);
             }
         }
+        self.write_agents_snapshot_best_effort();
         Ok(())
     }
 
@@ -745,6 +860,7 @@ impl ParallelSupervisor {
         event: Event,
         instance_id: HatInstanceId,
     ) -> anyhow::Result<()> {
+        self.record_agents_last_input(&instance_id, &event);
         let Some(handle) = self.instances.get(&instance_id) else {
             anyhow::bail!("deliver_to_instance_id: instance not found: {instance_id}");
         };
@@ -754,6 +870,7 @@ impl ParallelSupervisor {
             .await
             .context("Failed to deliver event to chosen instance")?;
         self.mark_inflight_delivery(&instance_id);
+        self.write_agents_snapshot_best_effort();
         Ok(())
     }
 
@@ -889,7 +1006,7 @@ Candidates:\n\
             );
         }
 
-        let parsed = EventParser::new().parse(&result.output);
+        let parsed = EventParser::new().parse(&result.output_for_parsing);
         let Some(decision_event) = parsed
             .into_iter()
             .find(|e| e.topic.as_str() == TOPIC_DISPATCH_DECISION)
@@ -981,7 +1098,17 @@ Candidates:\n\
         let hat_id = HatId::new(hat_id_str);
 
         let (hat, hat_config) = if hat_id.as_str() == "ralph" {
-            (Hat::new("ralph", "Ralph").subscribe("*"), None::<HatConfig>)
+            // 说明:
+            // - ralph#2 是按需创建的"协调者备用实例"(busy ralph#1 时接管投递).
+            // - 如果不给它注入与 ralph#1 等价的 coordinator 指令,它会退回到极小兜底 prompt,
+            //   从而更容易漂移,发布不在协议内的 topic(例如 integration.done),导致 autopilot/CI 硬断言失败.
+            let hat = Hat::new("ralph", "Ralph")
+                .with_description(
+                    "Parallel coordinator: handles true-orphan events and makes completion decisions",
+                )
+                .subscribe("*")
+                .with_instructions(self.build_ralph_coordinator_instructions(&instance_id));
+            (hat, None::<HatConfig>)
         } else {
             let hat = self
                 .registry
@@ -1011,6 +1138,7 @@ Candidates:\n\
             output_tx,
             instance_tx,
             Arc::clone(&self.job_semaphore),
+            Arc::clone(&self.command_queue),
             is_dynamic,
             dynamic_idle_ttl,
         );
@@ -1100,6 +1228,16 @@ Candidates:\n\
         };
 
         if target_instance.as_str() != "ralph#1" {
+            return Ok(());
+        }
+
+        // turn/steer 与 turn/interrupt 属于“运行时 in-flight 控制信号”：
+        // - 它们必须直达目标实例(例如 ralph#1),否则会变成“改投到 ralph#2 但无法影响正在运行的 turn”。
+        // - 这会造成 steer/interrupt 看似成功写入外部事件文件,但实际无效的黑盒体验。
+        if matches!(
+            event.turn_action,
+            Some(TurnAction::Steer | TurnAction::Interrupt)
+        ) {
             return Ok(());
         }
 
