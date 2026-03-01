@@ -139,7 +139,7 @@
   - `openspec/changes/emit-control-plane-fail-closed/`
 - 已完成 OpenSpec proposal:
   - `openspec/changes/emit-control-plane-fail-closed/proposal.md`
-- 下一步: `openspec` 已解锁 `design/specs`,按“一次只写一个 artifact”的节奏继续(优先 design,再 specs,最后 tasks).
+- 下一步: `openspec` 继续写 `specs`(delta spec),再写 `tasks`(实现清单).
 
 ## 2026-03-01 22:40 +0800 | 继续: 为 change 写 `proposal.md`(先锁定边界与反馈语义)
 
@@ -163,3 +163,28 @@
   - `proposal` = done
   - `design/specs` = ready
   - `tasks` = blocked(等待 design+specs)
+
+## 2026-03-01 23:54 +0800 | 继续: 为 change 写 `design.md`(收敛实现决策与风险)
+
+- 我正在做什么:
+  - 读取 `openspec instructions design` 与 proposal,起草并落盘 `openspec/changes/emit-control-plane-fail-closed/design.md`。
+- 为什么这样做:
+  - proposal 只回答 why/what,但本 change 属于安全边界收敛,需要把“怎么做”写清楚:
+    - 哪些校验在 CLI 做,哪些在 Supervisor 做(防御纵深)。
+    - 哪些行为必须拒绝而不是降级(真正 fail-closed)。
+    - 对 TUI/manual JSONL 注入的影响与兼容策略。
+- 计划产出:
+  - design.md 至少包含:
+    - 关键决策与备选方案对比(为什么不用 guard token/为什么先做 4.2)。
+    - 失败场景与 mitigation(误触发、误投递、无回应排查)。
+    - 测试策略(哪些路径必须有回归测试)。
+
+## 2026-03-01 23:57 +0800 | 完成: design.md 已落盘,下一步写 specs
+
+- 已落盘:
+  - `openspec/changes/emit-control-plane-fail-closed/design.md`
+- `openspec status` 结果:
+  - `proposal` = done
+  - `design` = done
+  - `specs` = ready
+  - `tasks` = blocked(等待 specs)

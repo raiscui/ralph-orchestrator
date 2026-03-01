@@ -955,3 +955,14 @@
   - fail-closed: hat job 环境禁止 `ralph emit --turn-action ...`,且 `--turn-action` 必须显式 `--target-instance ralph#1`。
 - 当前状态:
   - `openspec status --change "emit-control-plane-fail-closed"`: proposal=done,design/specs=ready,tasks=blocked
+
+## 2026-03-01 23:57 +0800 | chore(openspec): 完成 design,收敛实现决策与风险
+
+- 已落盘:
+  - `openspec/changes/emit-control-plane-fail-closed/design.md`
+- design 关键点:
+  - CLI: hat job 环境(检测 `RALPH_HAT_INSTANCE_ID`)拒绝 `ralph emit --turn-action steer|interrupt`(让 hat 立即自纠).
+  - Supervisor: 对任何外部事件的 `turn_action=steer|interrupt` 做最终校验,只允许 `target_instance=ralph#1`(防御纵深).
+  - TUI: `!steer/!interrupt` 做本地预检,只允许作用于 `ralph#1`(减少黑盒排障).
+- 当前状态:
+  - `openspec status --change "emit-control-plane-fail-closed"`: proposal=done,design=done,specs=ready,tasks=blocked

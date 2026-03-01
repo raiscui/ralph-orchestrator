@@ -274,3 +274,19 @@
   - 使用 `--turn-action` 时必须显式 `--target-instance ralph#1`,否则拒绝(避免误投递)。
 - 状态:
   - `openspec status` 已解锁 `design/specs`(ready)。
+
+## 2026-03-01 23:57 +0800 | OpenSpec: design 已完成(实现落点与风险收敛)
+
+- 产物:
+  - `openspec/changes/emit-control-plane-fail-closed/design.md`
+- design 的关键决策(摘录):
+  - CLI 侧快速自纠:
+    - hat job 环境(检测 `RALPH_HAT_INSTANCE_ID`)硬拒绝 `ralph emit --turn-action steer|interrupt`。
+  - Supervisor 侧最终裁判(防御纵深):
+    - 任意外部事件只要携带 `turn_action=steer|interrupt`,就必须显式且仅能 `target_instance=ralph#1`,否则拒绝并告警.
+  - TUI 侧本地预检:
+    - `!steer/!interrupt` 仅允许作用于 `ralph#1`,避免“写入后被拒绝”的黑盒体验.
+- 明确 trade-off:
+  - 放弃对 worker hats 的 in-flight steer/interrupt,换取无人值守环境下的稳定性与可预期.
+- 后续增强方向(未纳入 4.2):
+  - guard token 或 source attribution,把“只有 ExternalInput 能 steer/interrupt”做成更强约束.
