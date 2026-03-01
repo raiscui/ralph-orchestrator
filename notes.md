@@ -290,3 +290,14 @@
   - 放弃对 worker hats 的 in-flight steer/interrupt,换取无人值守环境下的稳定性与可预期.
 - 后续增强方向(未纳入 4.2):
   - guard token 或 source attribution,把“只有 ExternalInput 能 steer/interrupt”做成更强约束.
+
+## 2026-03-02 00:31 +0800 | OpenSpec: specs + tasks 已完成(可进入 apply)
+
+- delta specs(Modified Capabilities):
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-hat-instances/spec.md`
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-trigger-routing/spec.md`
+- tasks:
+  - `openspec/changes/emit-control-plane-fail-closed/tasks.md`
+- 规格要点(再次强调边界,避免实现漂移):
+  - data-plane: hats 之间/hat->ralph 只用普通 `topic/payload`。
+  - control-plane: `turn_action=steer|interrupt` 必须显式 target 到 `ralph#1`,其余一律 fail-closed 拒绝。

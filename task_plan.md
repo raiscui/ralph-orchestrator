@@ -188,3 +188,25 @@
   - `design` = done
   - `specs` = ready
   - `tasks` = blocked(等待 specs)
+
+## 2026-03-02 00:28 +0800 | 快进: $openspec-ff-change 生成 specs + tasks(到 apply-ready)
+
+- 我正在做什么:
+  - 按 proposal 的 Modified Capabilities,一次性生成 delta specs:
+    - `specs/parallel-hat-instances/spec.md`
+    - `specs/parallel-trigger-routing/spec.md`
+  - 生成 `tasks.md`,把 4.2 落地拆成可执行清单(含测试与文档同步)。
+- 为什么现在做:
+  - 你明确要 fast-forward,目标是尽快进入实现阶段.
+  - applyRequires=tasks,所以把 specs+tasks 补齐后就可以直接 `/opsx:apply`。
+
+## 2026-03-02 00:31 +0800 | 完成: specs + tasks 已齐全(change apply-ready)
+
+- 已新增 delta specs:
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-hat-instances/spec.md`
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-trigger-routing/spec.md`
+- 已新增 tasks:
+  - `openspec/changes/emit-control-plane-fail-closed/tasks.md`
+- `openspec status` 结果:
+  - `proposal/design/specs/tasks` 均为 done
+  - `isComplete=true`

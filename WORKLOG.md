@@ -966,3 +966,13 @@
   - TUI: `!steer/!interrupt` 做本地预检,只允许作用于 `ralph#1`(减少黑盒排障).
 - 当前状态:
   - `openspec status --change "emit-control-plane-fail-closed"`: proposal=done,design=done,specs=ready,tasks=blocked
+
+## 2026-03-02 00:31 +0800 | chore(openspec): fast-forward 补齐 specs + tasks(change apply-ready)
+
+- 已新增 delta specs:
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-hat-instances/spec.md`
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-trigger-routing/spec.md`
+- 已新增 tasks:
+  - `openspec/changes/emit-control-plane-fail-closed/tasks.md`
+- 当前状态:
+  - `openspec status --change "emit-control-plane-fail-closed"`: isComplete=true(已满足 applyRequires=tasks)
