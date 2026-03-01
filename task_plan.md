@@ -210,3 +210,12 @@
 - `openspec status` 结果:
   - `proposal/design/specs/tasks` 均为 done
   - `isComplete=true`
+
+## 2026-03-02 00:36 +0800 | 补充: 把 hat-to-hat “只回最终结论,不在中途 reply”写入 change
+
+- 我正在做什么:
+  - 更新 `openspec/changes/emit-control-plane-fail-closed/design.md`,增加 D5 决策,明确 request/result 协作约束.
+  - 更新 `openspec/changes/emit-control-plane-fail-closed/tasks.md`,把该约束加入 docs 同步任务(4.3).
+- 为什么这样做:
+  - 这是你明确提出并认可的高 ROI 行为约束,但之前只记录在 `notes.md/task_plan.md`,没有进入 OpenSpec change 的“可实现契约”.
+  - 把它写进 design/tasks,实现阶段才不会忘,也避免后续人员误用“中途 reply”导致上游漂移.

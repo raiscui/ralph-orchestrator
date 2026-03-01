@@ -976,3 +976,12 @@
   - `openspec/changes/emit-control-plane-fail-closed/tasks.md`
 - 当前状态:
   - `openspec status --change "emit-control-plane-fail-closed"`: isComplete=true(已满足 applyRequires=tasks)
+
+## 2026-03-02 00:36 +0800 | docs(openspec): 补写 hat-to-hat 子任务回传约束(只回最终结论)
+
+- 背景:
+  - 你明确要求: A hat 触发 B hat 的子任务时,B 不要在 job/turn 中途 reply A,而是只在结束时回传最终结论.
+  - 该约束之前记录在 `notes.md/task_plan.md`,但未进入 OpenSpec change 文档.
+- 已补写:
+  - `openspec/changes/emit-control-plane-fail-closed/design.md` 新增 D5(决策: request/result,只回最终结论)
+  - `openspec/changes/emit-control-plane-fail-closed/tasks.md` 新增 4.3(要求同步到 `specs/parallel-event-channels.spec.md`)

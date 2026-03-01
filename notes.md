@@ -301,3 +301,11 @@
 - 规格要点(再次强调边界,避免实现漂移):
   - data-plane: hats 之间/hat->ralph 只用普通 `topic/payload`。
   - control-plane: `turn_action=steer|interrupt` 必须显式 target 到 `ralph#1`,其余一律 fail-closed 拒绝。
+
+## 2026-03-02 00:36 +0800 | 补充: hat-to-hat “不在中途 reply,只回最终结论”已写入 OpenSpec change
+
+- 已补写到:
+  - `openspec/changes/emit-control-plane-fail-closed/design.md` 新增 D5:
+    - A 触发 B 的子任务后,B 仅在自身 job/turn 结束时回传一次最终结论(例如 `subtask.result`),不在中途回传半成品.
+  - `openspec/changes/emit-control-plane-fail-closed/tasks.md` 新增 4.3:
+    - 要求把该约定同步写入 `specs/parallel-event-channels.spec.md`(面向 code agent 的使用指南)。

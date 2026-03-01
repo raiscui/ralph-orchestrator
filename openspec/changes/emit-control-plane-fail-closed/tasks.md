@@ -19,6 +19,7 @@
 
 - [ ] 4.1 更新 `specs/parallel-event-channels.spec.md`,补充 control-plane 边界: `turn_action=steer|interrupt` 仅 ExternalInput -> `ralph#1`
 - [ ] 4.2 (可选) 更新 `examples/parallel-experimental-dev-engine/README.md`,明确 steer/interrupt 只能 target `ralph#1`,并提示 hats 不得使用 `--turn-action`
+- [ ] 4.3 更新 `specs/parallel-event-channels.spec.md`,补充 hat-to-hat 的 request/result 约定: B hat 只在 job/turn 结束时回传最终结论,不在中途 reply
 
 ## 5. 验证与回归
 

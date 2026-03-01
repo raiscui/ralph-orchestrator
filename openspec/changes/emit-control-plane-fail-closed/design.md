@@ -121,6 +121,27 @@ Supervisor 会持续轮询该 JSONL,把每行映射为 `ralph_proto::Event` 并�
 
 - 把错误尽可能前移到交互层,减少“写入了但被 Supervisor 拒绝”的排障成本.
 
+### D5: Hat-to-hat 子任务通信采用 request/result,且只回传最终结论(不在中途 reply)
+
+**Decision**
+
+- 当 A hat 通过 data-plane(普通 `ralph emit topic=...`)触发 B hat 的一个子任务时:
+  - B hat MUST NOT 在 job/turn 进行中用 `ralph emit` 向 A hat 回传“中间进度/半成品结论”。
+  - B hat MUST 在自己的 job/turn 完成时,仅回传一次最终结论(例如 `subtask.result`),让 A hat 在下一轮 job/turn 中消费并推进。
+
+**Rationale**
+
+- 避免 A 被中途半成品驱动继续推进,导致“先推进后修正”的反复与不稳定.
+- 在并行运行时,目标实例即使处于 Running,Supervisor 也会把 data-plane 事件入队,稳定地在下一轮消费.
+- 该约束不依赖 control-plane(不需要 `turn_action=steer|interrupt`),因此不会引入额外安全面.
+
+**Alternatives considered**
+
+- B 在中途持续回传进度:
+  - 对人类交互友好,但对无人值守的 code agent 容易造成上游误判与流程漂移.
+- 用 `turn_action=steer` 强行“插话”到 A 的 in-flight:
+  - 这是 control-plane,风险等级更高,且本 change 目标是把这类信号做 fail-closed 收敛.
+
 ## Risks / Trade-offs
 
 - [风险] hat 仍可能通过“手工 unset 环境变量”绕过 CLI 侧拦截.
