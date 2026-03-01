@@ -932,3 +932,26 @@
   - `cargo test -p ralph-cli` ✅
   - `cargo test -p ralph-core smoke_runner` ✅
   - `cargo test` ✅
+
+## 2026-03-01 17:46 +0800 | chore(openspec): 创建 OpenSpec change `emit-control-plane-fail-closed`
+
+- 背景:
+  - 已明确边界: hat-to-hat 只走 data-plane(`ralph emit topic=...`),不使用 `turn_action=steer|interrupt` 回传结果.
+  - control-plane 的 `turn_action=steer|interrupt` 仅允许 ExternalInput -> `ralph#1`(in-flight).
+- 已创建 change:
+  - `openspec new change "emit-control-plane-fail-closed"`
+  - 路径: `openspec/changes/emit-control-plane-fail-closed/`
+- 当前状态:
+  - `openspec status --change "emit-control-plane-fail-closed"`: 0/4 artifacts complete
+  - 首个 artifact: `proposal`(ready)
+
+## 2026-03-01 22:45 +0800 | chore(openspec): 完成 proposal,解锁 design/specs
+
+- 已落盘:
+  - `openspec/changes/emit-control-plane-fail-closed/proposal.md`
+- proposal 关键点:
+  - data-plane: hats 互通只用普通 `ralph emit topic=... payload=...`。
+  - control-plane: `turn_action=steer|interrupt` 仅允许 ExternalInput -> `ralph#1`。
+  - fail-closed: hat job 环境禁止 `ralph emit --turn-action ...`,且 `--turn-action` 必须显式 `--target-instance ralph#1`。
+- 当前状态:
+  - `openspec status --change "emit-control-plane-fail-closed"`: proposal=done,design/specs=ready,tasks=blocked

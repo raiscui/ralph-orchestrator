@@ -96,3 +96,70 @@
 
 - 已实现 `ralph doctor --format json/--json`(schema v1,含 check_id/category/status/message/fix).
 - 已补齐回归测试,并跑完 `cargo fmt`/`cargo test` 验证.
+
+# 任务计划: 设计 fail-closed 的外部事件注入边界(ralph emit / turn_action)(2026-03-01 17:38 +0800)
+
+## 目标
+
+- 允许 hats 在运行过程中用 `ralph emit` 点对点沟通,不要求输出 `<event ...>`.
+- 同时把 `turn_action=steer|interrupt` 等控制面信号做成 fail-closed,避免模型误触发造成运行时被打断/被劫持.
+- 输出一份"边界规则 + 落地点"清单,后续可以直接按清单实现和写回归测试.
+
+## 两种路线(供选择)
+
+1. 最佳方案(更安全,投入更大): 为 `ralph emit` 增加"来源归因"(source/source_instance)并在 Supervisor 侧做权限校验; 对 `<event ...>` 协议引入 guard token.
+2. 先能用(更快落地): 先在 `ralph emit` CLI 层基于环境变量(`RALPH_HAT_ID`/`RALPH_HAT_INSTANCE_ID`)做硬拒绝,禁止 hat 发送 steer/interrupt; Supervisor 侧先做最小防御(发现 steer/interrupt 且疑似来自 hat 就拒绝并回送错误).
+
+## 我将采用
+
+- 先走路线2 交付 4.2(快速止血,高 ROI).
+- 路线1 作为 4.1/4.3 的增强(需要明确 threat model,避免过度设计).
+
+## 阶段
+
+- [x] 阶段1: 盘点现状(ralph emit/外部事件读取/turn_action 路径)
+- [x] 阶段2: 明确边界规则(谁能 steer,谁只能 request)
+- [x] 阶段3: 设计 fail-closed 的反馈协议(错误如何回送给 hat)
+- [x] 阶段4: 开 OpenSpec/change,再进入实现
+
+## 状态
+
+**目前在阶段4**:
+
+- 已定位关键代码点:
+  - `crates/ralph-cli/src/main.rs`(emit args/emit_command)
+  - `crates/ralph-core/src/parallel/supervisor.rs`(外部事件->Event)
+  - `crates/ralph-cli/src/parallel_runner.rs`(给 hat 进程注入 RALPH_HAT_ID/INSTANCE_ID)
+  - `crates/ralph-core/src/event_parser.rs`(`<event>` 协议解析)
+- 已确认边界:
+  - hats 之间沟通只走 data-plane(`ralph emit topic=...`).
+  - `turn_action=steer|interrupt` 仅用于 ExternalInput -> ralph#1(control-plane).
+  - hat-to-hat 采用 request/result,由 B 在 job 结束时回传最终结论,不使用 steer.
+- 已创建 OpenSpec change:
+  - `openspec/changes/emit-control-plane-fail-closed/`
+- 已完成 OpenSpec proposal:
+  - `openspec/changes/emit-control-plane-fail-closed/proposal.md`
+- 下一步: `openspec` 已解锁 `design/specs`,按“一次只写一个 artifact”的节奏继续(优先 design,再 specs,最后 tasks).
+
+## 2026-03-01 22:40 +0800 | 继续: 为 change 写 `proposal.md`(先锁定边界与反馈语义)
+
+- 我正在做什么:
+  - 读取 `openspec status/instructions` 获取 proposal 模板与输出路径。
+  - 起草并落盘 `openspec/changes/emit-control-plane-fail-closed/proposal.md`。
+- 为什么现在做:
+  - change 已创建,但没有任何 artifact,当前仍处于“口头结论”.
+  - 先把 data-plane vs control-plane 的边界规则写进 proposal,后续 design/specs 才能对齐并可测试。
+- 计划产出(本轮最小闭环):
+  - `proposal.md` 明确:
+    - 哪些字段属于 control-plane(必须 fail-closed)。
+    - 哪些属于 data-plane(允许 hats 互通)。
+    - fail-closed 的错误反馈应如何让 hat 自行纠正(面向 4.2)。
+
+## 2026-03-01 22:45 +0800 | 完成: proposal.md 已落盘,解锁 design/specs
+
+- 已落盘:
+  - `openspec/changes/emit-control-plane-fail-closed/proposal.md`
+- `openspec status` 结果:
+  - `proposal` = done
+  - `design/specs` = ready
+  - `tasks` = blocked(等待 design+specs)

@@ -195,3 +195,82 @@
 
 - `specs/ralph-doctor.spec.md` 目前把 `--json` 放在 "后续扩展".
 - 本次实现会把它提升为正式能力,并补齐回归测试(保证 schema 稳定).
+
+## 2026-03-01 17:38 +0800 | 设计探索: hats 用 `ralph emit` 通信,同时对 `turn_action` 做 fail-closed 边界
+
+### 现状(代码证据)
+
+- `ralph emit` 已存在,支持 `--target/--target-instance/--spawn-instance/--workspace-strategy/--session-strategy/--turn-action`:
+  - `crates/ralph-cli/src/main.rs`(EmitArgs)
+  - `crates/ralph-cli/src/main.rs`(emit_command 写 JSONL)
+- 并行 Supervisor 会轮询 `.ralph/current-events` 指向的 JSONL,把外部事件映射为 `ralph_proto::Event` 并路由:
+  - `crates/ralph-core/src/parallel/supervisor.rs`(外部事件读取与映射)
+  - 映射时当前会把 `turn_action` 直接带入,没有权限校验.
+- 并行 runner 在 spawn hat backend 进程时,已经注入了:
+  - `RALPH_HAT_ID`
+  - `RALPH_HAT_INSTANCE_ID`
+  - `crates/ralph-cli/src/parallel_runner.rs`(Spawning headless job)
+
+### 风险
+
+- 只要 hat 能执行 shell,就能执行 `ralph emit ... --turn-action interrupt`,从而在运行时打断 ralph#1 的 in-flight turn.
+- 这属于典型的"控制面信号被数据面误用"问题,和普通 topic 消息不是一个风险等级.
+
+### 我建议的边界(满足: hats 可沟通,但 steer/interrupt 不乱飞)
+
+- 数据面(允许所有 hats): topic + payload(+可选 target/target_instance,且仍受订阅拓扑 strict 校验约束).
+- 控制面(默认拒绝,fail-closed): `turn_action=steer|interrupt`(以及通常需要 app_server 的那类 in-flight 控制).
+- hats 如果确实需要"打断/插话",改为发 request:
+  - `turn_action.request` 或 `control.request_interrupt` 之类 topic,交给 ralph#1 或 Supervisor 决策并执行真正的 steer/interrupt.
+
+### 4.2 的"先能用"落地思路(不依赖 guard token)
+
+- 在 `ralph emit` CLI 里:
+  - 如果检测到环境变量 `RALPH_HAT_INSTANCE_ID` 存在(说明是在 hat job 环境里调用),
+    就直接拒绝 `--turn-action steer|interrupt` 并输出可行动的错误信息.
+  - 这样模型误触发时会当场失败,hat 能从 tool 输出里自我纠正.
+
+### 4.1 的增强(后续)
+
+- 对 `<event ...>` 协议引入 guard token(或干脆在并行模式禁用 `<event>` 解析),进一步降低"文本里举例导致误触发"。
+
+## 2026-03-01 17:45 +0800 | 决策: hat-to-hat 采用 request/result(数据面),不使用 steer 回传结果
+
+### 结论(你已确认)
+
+- hats 之间沟通只走 data-plane: `ralph emit <topic> <payload>`。
+- `turn_action=steer|interrupt` 仅用于 ExternalInput -> ralph#1 的 control-plane。
+
+### 为什么“B 回传 A 的结论”不需要 steer
+
+- 即使 A 正在 Running,Supervisor 仍会把 B 的结果事件路由到 A 的 instance。
+- A instance 在 Running 时不会被“真 in-flight 注入”(因为没有 turn_action),而是把事件放进 pending 队列。
+- 因此 A 会在下一次 job/turn 中消费该结果,实现稳定的“异步 await”。
+
+### 推荐协议形态(最小字段,够用即可)
+
+- A -> B: `subtask.request`(或更具体的 topic)
+  - payload(JSON) 包含:
+    - `request_id`: 稳定关联 id
+    - `task`: B 要做的事(必须足够自包含,避免依赖 A 的上下文)
+    - `reply_to`: `{ "topic": "subtask.result", "target_instance": "hatA#1" }`
+
+- B -> A: `subtask.result`
+  - payload(JSON) 包含:
+    - `request_id`
+    - `status`: `"ok"|"error"`
+    - `final`: `true`(A 只在 final=true 时推进,避免中途消息污染)
+    - `result` 或 `error`
+
+## 2026-03-01 22:45 +0800 | OpenSpec: proposal 已完成(emit-control-plane-fail-closed)
+
+- 产物:
+  - `openspec/changes/emit-control-plane-fail-closed/proposal.md`
+- proposal 锁定的边界:
+  - data-plane: hats 间沟通只用普通 `ralph emit topic=... payload=...`。
+  - control-plane: `turn_action=steer|interrupt` 仅允许 ExternalInput 对 `ralph#1` 使用。
+- fail-closed 策略:
+  - hat job 环境(`RALPH_HAT_INSTANCE_ID` 存在)禁止 `ralph emit --turn-action ...`。
+  - 使用 `--turn-action` 时必须显式 `--target-instance ralph#1`,否则拒绝(避免误投递)。
+- 状态:
+  - `openspec status` 已解锁 `design/specs`(ready)。
