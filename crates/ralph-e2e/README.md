@@ -126,7 +126,7 @@ Reports are generated in `.e2e-tests/`:
 ### Report Formats
 
 ```bash
-# Markdown only (default)
+# Markdown + JSON snapshot (default)
 cargo run -p ralph-e2e -- --report markdown
 
 # JSON only

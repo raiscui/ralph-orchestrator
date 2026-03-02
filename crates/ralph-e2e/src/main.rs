@@ -221,7 +221,7 @@ pub struct TestOpts {
 /// Report output format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum ReportFormat {
-    /// Markdown format (agent-readable)
+    /// Markdown format (agent-readable, and refreshes JSON snapshot)
     #[default]
     Markdown,
     /// JSON format (machine-readable)
@@ -231,10 +231,13 @@ pub enum ReportFormat {
 }
 
 impl ReportFormat {
-    /// Converts CLI report format to library report format.
+    /// Converts CLI report format to the effective library report format.
+    ///
+    /// Default markdown mode also refreshes `report.json` so both artifacts
+    /// always reflect the same run and avoid stale JSON confusion.
     fn to_lib_format(self) -> LibReportFormat {
         match self {
-            ReportFormat::Markdown => LibReportFormat::Markdown,
+            ReportFormat::Markdown => LibReportFormat::Both,
             ReportFormat::Json => LibReportFormat::Json,
             ReportFormat::Both => LibReportFormat::Both,
         }
@@ -570,5 +573,25 @@ async fn run_tests(opts: &TestOpts, verbosity: Verbosity) {
     // Exit with appropriate code
     if !results.all_passed() {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_mode_also_writes_json_snapshot() {
+        assert_eq!(ReportFormat::Markdown.to_lib_format(), LibReportFormat::Both);
+    }
+
+    #[test]
+    fn json_mode_remains_json_only() {
+        assert_eq!(ReportFormat::Json.to_lib_format(), LibReportFormat::Json);
+    }
+
+    #[test]
+    fn both_mode_remains_both() {
+        assert_eq!(ReportFormat::Both.to_lib_format(), LibReportFormat::Both);
     }
 }
