@@ -1770,6 +1770,141 @@ async fn invalid_target_is_rejected_and_escalated() {
 }
 
 #[tokio::test]
+async fn external_turn_action_missing_target_instance_is_rejected_and_escalated() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path.clone());
+
+    let event = Event::new("human.message", "please steer")
+        .with_id("e-ext-turn-missing-target")
+        .with_turn_action(TurnAction::Steer);
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(executor.started.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        executor.seen.lock().await.clone(),
+        vec!["ralph#1".to_string()]
+    );
+
+    let events_log =
+        std::fs::read_to_string(&events_path).expect("events.jsonl should be readable");
+    assert!(events_log.contains("routing.escalate"));
+    assert!(events_log.contains("invalid external control-plane target"));
+}
+
+#[tokio::test]
+async fn external_turn_action_non_ralph_target_is_rejected_and_escalated() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path.clone());
+
+    let event = Event::new("human.message", "please stop")
+        .with_id("e-ext-turn-non-ralph")
+        .with_target_instance(HatInstanceId::new("writer#1"))
+        .with_turn_action(TurnAction::Interrupt);
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(executor.started.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        executor.seen.lock().await.clone(),
+        vec!["ralph#1".to_string()]
+    );
+
+    let events_log =
+        std::fs::read_to_string(&events_path).expect("events.jsonl should be readable");
+    assert!(events_log.contains("routing.escalate"));
+    assert!(events_log.contains("writer#1"));
+}
+
+#[tokio::test]
+async fn external_turn_action_with_target_or_spawn_hint_is_rejected_and_escalated() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    let executor = NotifyExecutor {
+        expected_starts: 2,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path.clone());
+
+    let with_target = Event::new("human.message", "invalid target hint")
+        .with_id("e-ext-turn-target-hint")
+        .with_target("writer")
+        .with_target_instance(HatInstanceId::new("ralph#1"))
+        .with_turn_action(TurnAction::Steer);
+    supervisor
+        .route_event(with_target)
+        .await
+        .expect("route_event should succeed");
+
+    let with_spawn = Event::new("human.message", "invalid spawn hint")
+        .with_id("e-ext-turn-spawn-hint")
+        .with_target_instance(HatInstanceId::new("ralph#1"))
+        .with_spawn_instance(true)
+        .with_turn_action(TurnAction::Interrupt);
+    supervisor
+        .route_event(with_spawn)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    assert!(
+        executor.started.load(Ordering::SeqCst) >= 1,
+        "at least one escalation should be delivered to ralph"
+    );
+
+    let events_log =
+        std::fs::read_to_string(&events_path).expect("events.jsonl should be readable");
+    assert!(events_log.contains("explicit target_instance"));
+    assert!(events_log.contains("spawn_instance=true"));
+    let escalate_count = events_log.match_indices("routing.escalate").count();
+    assert!(
+        escalate_count >= 2,
+        "expected at least two escalation records, got {escalate_count}\n{events_log}"
+    );
+}
+
+#[tokio::test]
 async fn autoscale_spawns_below_cap_and_stops_at_cap() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");

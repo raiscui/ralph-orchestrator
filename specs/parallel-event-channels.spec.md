@@ -154,6 +154,30 @@ Supervisor 会在主循环里周期性轮询外部事件文件(JSONL),并把新�
 - 文件: `crates/ralph-core/src/parallel/instance.rs`
 - 关键逻辑: `HatInstanceCommand::Deliver(...)` 分支里对 `event.turn_action` 的处理。
 
+### S5.1: external control-plane 必须 fail-closed 且仅允许 `ralph#1`
+
+对于 out-of-band external JSONL 注入(例如 `ralph emit` 或 TUI chat 写入外部事件文件):
+
+- `turn_action=steer|interrupt` 仅允许显式 `target_instance=ralph#1`。
+- 出现以下任一条件时必须拒绝(不路由)并告警到 `ralph#1`:
+  - 缺失 `target_instance`
+  - `target_instance != ralph#1`
+  - 同时携带 hat-level 路由提示(`target` 或 `spawn_instance=true`)
+- 在 hat job 环境里(`RALPH_HAT_INSTANCE_ID` 存在),`ralph emit --turn-action steer|interrupt` 必须被 CLI 直接拒绝。
+
+约束目的:
+
+- 把 control-plane 信号限制为“ExternalInput -> ralph#1”的窄边界。
+- 避免 worker/hat 误触发 in-flight 打断导致流程漂移。
+
+### S5.2: hat-to-hat 子任务回传采用 request/result,且只回最终结论
+
+当 A hat 触发 B hat 执行子任务时:
+
+- B hat 应通过 data-plane 普通 topic 回传结果(例如 `subtask.result`)。
+- B hat 只在自身 job/turn 结束时回传一次最终结论。
+- B hat 不应在 job/turn 中途回传半成品结论或进度消息驱动 A 继续推进。
+
 ### S6: `.ralph/current-events` marker 的定位规则
 
 外部事件文件的路径由 marker 指示:
@@ -230,7 +254,7 @@ ralph emit human.message "继续推进,并把并行度控制在 P=2" --target-in
 
 ```bash
 ralph emit human.message "补充: 只需要改 routing.rs,不要动其他文件" \
-  --target-instance writer#1 \
+  --target-instance ralph#1 \
   --turn-action steer \
   --session-strategy app_server
 ```

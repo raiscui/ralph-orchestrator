@@ -822,6 +822,27 @@ fn resolve_human_message_target_instance(
     explicit.or_else(|| selected_instance_id.map(|id| id.to_string()))
 }
 
+fn validate_human_message_turn_action_target(
+    target_instance: Option<&str>,
+    turn_action: Option<&str>,
+) -> Result<(), String> {
+    let Some(action) = turn_action.map(str::trim) else {
+        return Ok(());
+    };
+
+    if !matches!(action, "steer" | "interrupt") {
+        return Ok(());
+    }
+
+    if target_instance != Some("ralph#1") {
+        return Err(format!(
+            "control-plane `{action}` 仅允许目标实例 `ralph#1`。请使用 `!{action} @ralph#1 ...`。"
+        ));
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // Clipboard（复制/粘贴）支持
 // =============================================================================
@@ -1785,6 +1806,19 @@ impl App {
                                                                             Some("send failed: no instance selected".to_string());
                                                                         continue;
                                                                     }
+
+                                                                    // control-plane fail-closed:
+                                                                    // - `!steer/!interrupt` 只允许作用于 `ralph#1`。
+                                                                    // - 非 `ralph#1` 在 TUI 侧直接拒绝,避免写入 JSONL 后再被 Supervisor 拒绝。
+                                                                    if let Err(msg) = validate_human_message_turn_action_target(
+                                                                        resolved_target.as_deref(),
+                                                                        turn_action.as_deref(),
+                                                                    ) {
+                                                                        state.parallel.chat_status =
+                                                                            Some(format!("send failed: {msg}"));
+                                                                        continue;
+                                                                    }
+
                                                                     let writer = ExternalEventWriter::new();
                                                                     match writer.append("human.message", payload, resolved_target, session_strategy, turn_action) {
                                                                         Ok(()) => {
@@ -3308,6 +3342,27 @@ mod tests {
         let selected = HatInstanceId::from("writer#2");
         let got = resolve_human_message_target_instance(None, Some(&selected));
         assert_eq!(got, Some("writer#2".to_string()));
+    }
+
+    #[test]
+    fn validate_human_message_turn_action_target_rejects_non_ralph_primary() {
+        let err = validate_human_message_turn_action_target(Some("writer#1"), Some("steer"))
+            .expect_err("non-ralph target must be rejected for control-plane");
+        assert!(err.contains("仅允许目标实例 `ralph#1`"));
+    }
+
+    #[test]
+    fn validate_human_message_turn_action_target_allows_ralph_primary() {
+        validate_human_message_turn_action_target(Some("ralph#1"), Some("interrupt"))
+            .expect("ralph#1 should be accepted");
+    }
+
+    #[test]
+    fn validate_human_message_turn_action_target_ignores_non_control_plane_action() {
+        validate_human_message_turn_action_target(Some("writer#1"), Some("start"))
+            .expect("non control-plane action should pass");
+        validate_human_message_turn_action_target(Some("writer#1"), None)
+            .expect("missing turn action should pass");
     }
 
     #[test]

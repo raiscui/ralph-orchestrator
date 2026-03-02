@@ -60,6 +60,18 @@ impl ParallelSupervisor {
         }
 
         // ---------------------------------------------------------------------
+        // external control-plane fail-closed:
+        // - 4.2 范围仅收敛“external JSONL 注入”的 turn_action=steer|interrupt。
+        // - in-band `<event ...>` 路径暂不在此处收口(该路径会带 source/source_instance)。
+        // ---------------------------------------------------------------------
+        if !self
+            .validate_external_control_plane_turn_action(&event)
+            .await?
+        {
+            return Ok(());
+        }
+
+        // ---------------------------------------------------------------------
         // Ralph 双实例路由补偿:
         // - 如果事件显式指向 ralph#1,但它当前正在 Running,
         //   则自动改投 ralph#2(按需创建)。
@@ -544,6 +556,98 @@ impl ParallelSupervisor {
         }
 
         hat.is_subscribed(topic)
+    }
+
+    fn is_external_jsonl_event(event: &Event) -> bool {
+        event.source.is_none() && event.source_instance.is_none()
+    }
+
+    async fn reject_external_control_plane_turn_action(
+        &mut self,
+        event: &Event,
+        action: TurnAction,
+        reason: String,
+    ) -> anyhow::Result<bool> {
+        let action_name = match action {
+            TurnAction::Start => "start",
+            TurnAction::Steer => "steer",
+            TurnAction::Interrupt => "interrupt",
+        };
+
+        tracing::warn!(
+            event_id = %event.id.as_deref().unwrap_or("<none>"),
+            topic = %event.topic,
+            turn_action = action_name,
+            target_instance = %event
+                .target_instance
+                .as_ref()
+                .map(HatInstanceId::as_str)
+                .unwrap_or("<missing>"),
+            target = %event.target.as_ref().map(HatId::as_str).unwrap_or("<none>"),
+            spawn_instance = ?event.spawn_instance,
+            reason = %reason,
+            "Rejected external control-plane turn_action event"
+        );
+
+        self.escalate_delivery_failure(event, reason, &[], &[])
+            .await?;
+        Ok(false)
+    }
+
+    async fn validate_external_control_plane_turn_action(
+        &mut self,
+        event: &Event,
+    ) -> anyhow::Result<bool> {
+        // 仅处理 external JSONL 注入事件，避免影响 in-band `<event ...>` 路径。
+        if !Self::is_external_jsonl_event(event) {
+            return Ok(true);
+        }
+
+        let Some(action) = event.turn_action else {
+            return Ok(true);
+        };
+
+        if !matches!(action, TurnAction::Steer | TurnAction::Interrupt) {
+            return Ok(true);
+        }
+
+        if let Some(target_hat) = event.target.as_ref().map(HatId::as_str) {
+            return self
+                .reject_external_control_plane_turn_action(
+                    event,
+                    action,
+                    format!(
+                        "invalid external control-plane routing: turn_action requires explicit target_instance=\"ralph#1\" only; target=\"{target_hat}\" is not allowed"
+                    ),
+                )
+                .await;
+        }
+
+        if matches!(event.spawn_instance, Some(true)) {
+            return self
+                .reject_external_control_plane_turn_action(
+                    event,
+                    action,
+                    "invalid external control-plane routing: turn_action cannot be combined with spawn_instance=true".to_string(),
+                )
+                .await;
+        }
+
+        let target_instance = event.target_instance.as_ref().map(HatInstanceId::as_str);
+        if target_instance != Some("ralph#1") {
+            let got = target_instance.unwrap_or("<missing>");
+            return self
+                .reject_external_control_plane_turn_action(
+                    event,
+                    action,
+                    format!(
+                        "invalid external control-plane target: turn_action requires target_instance=\"ralph#1\" (got \"{got}\")"
+                    ),
+                )
+                .await;
+        }
+
+        Ok(true)
     }
 
     fn is_control_plane_topic(topic: &str) -> bool {

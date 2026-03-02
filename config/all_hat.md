@@ -240,10 +240,11 @@ ralph emit experiment.task '{"run_id":"manual","objective":"...","experiment_id"
 写法:
 
 ```text
-<event topic="human.message" target_instance="writer#1" turn_action="steer" session_strategy="app_server">...</event>
+<event topic="human.message" target_instance="ralph#1" turn_action="steer" session_strategy="app_server">...</event>
 ```
 
 约束与说明:
+- `turn_action="steer|interrupt"` 属于 control-plane 信号,只允许 ExternalInput -> `ralph#1`.
 - steer 只有在目标实例当前处于 running,且会话策略为 app_server 时才会“真 steer”.
 - 若目标实例不在 running,或不是 app_server,该信号会自动降级为 turn(排队),以避免丢消息.
 - 如果你没写 `session_strategy`,系统在 steer 时会强制升级为 `app_server`(避免丢语义).
@@ -266,5 +267,9 @@ ralph agents --watch --watch-interval-ms 1000
 ralph emit human.message "开一个新实例继续聊" --target writer --spawn-instance --session-strategy app_server
 
 # steer: 立即注入 in-flight turn(不满足条件会自动降级为排队)
-ralph emit human.message "补充关键信息,请立刻考虑" --target-instance writer#1 --turn-action steer --session-strategy app_server
+ralph emit human.message "补充关键信息,请立刻考虑" --target-instance ralph#1 --turn-action steer --session-strategy app_server
 ```
+
+重要边界:
+- hats/worker 禁止使用 `--turn-action steer|interrupt`。
+- hat-to-hat 协作请使用 data-plane topic(例如 request/result),并在 job 结束时只回传最终结论。

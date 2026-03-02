@@ -143,9 +143,10 @@ cargo run --bin ralph -- run \
      - 发送 `human.message` 到"当前选中实例".
      - 如果提示 `send failed: no instance selected`,先在实例列表里选中一个实例(例如 `ralph#1`).
    - `@ralph#1 hello`: 定向发送到 `ralph#1`.
-   - `!steer <text...>`: 以 app-server 的 `turn/steer` 方式追加输入(默认定向到选中实例).
+   - `!steer <text...>`: 以 app-server 的 `turn/steer` 方式追加输入(仅允许目标为 `ralph#1`)。
+     - 如果当前选中实例不是 `ralph#1`,TUI 会直接报错并拒绝写入外部事件。
    - `!steer @ralph#1 <text...>`: 定向 steer 到 `ralph#1`.
-   - `!interrupt [@<instance>]`: 中断当前 turn(不中断 thread).
+   - `!interrupt [@ralph#1]`: 中断当前 turn(不中断 thread,仅允许 `ralph#1`)。
 
 2) 另开一个终端,通过"外部事件文件(JSONL)"注入消息(适合 `--no-tui` 或你不方便进 TUI):
 
@@ -180,6 +181,10 @@ cargo run --bin ralph -- run \
        --target-instance ralph#1 \
        --turn-action interrupt
      ```
+
+   重要边界:
+   - `turn_action=steer|interrupt` 仅允许 `--target-instance ralph#1`。
+   - hats/worker 之间协作请使用普通 data-plane topic,不要使用 `--turn-action`。
 
    方式C(高级,可选): 手工追加一行 JSONL,支持 steer/interrupt(当你不想依赖 CLI 参数时):
 

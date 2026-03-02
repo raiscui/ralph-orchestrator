@@ -1723,6 +1723,13 @@ fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -
 fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
     let use_colors = color_mode.should_use_colors();
 
+    // 先做控制面 fail-closed 校验,避免把非法 turn_action 写入 external JSONL。
+    // 说明:
+    // - 这里是“最快反馈层”,让发起方(尤其是 hat 内工具调用)立刻看到可行动错误。
+    // - Supervisor 侧仍会做最终裁判,形成 defense-in-depth。
+    let hat_instance_env = std::env::var("RALPH_HAT_INSTANCE_ID").ok();
+    validate_emit_control_plane_args(&args, hat_instance_env.as_deref())?;
+
     // Generate timestamp if not provided
     let ts = args.ts.unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
@@ -1808,6 +1815,64 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
         );
     } else {
         println!("Event emitted: {}", args.topic);
+    }
+
+    Ok(())
+}
+
+/// 校验 `ralph emit` 中 control-plane 相关参数的 fail-closed 规则。
+///
+/// 规则:
+/// - 在 hat job 环境(`RALPH_HAT_INSTANCE_ID` 存在)下,禁止 `--turn-action steer|interrupt`。
+/// - 使用 `--turn-action steer|interrupt` 时:
+///   - 必须 `--target-instance ralph#1`
+///   - 禁止 `--target`
+///   - 禁止 `--spawn-instance`
+fn validate_emit_control_plane_args(args: &EmitArgs, hat_instance_env: Option<&str>) -> Result<()> {
+    let Some(turn_action) = args.turn_action else {
+        return Ok(());
+    };
+
+    if !matches!(
+        turn_action,
+        EmitTurnAction::Steer | EmitTurnAction::Interrupt
+    ) {
+        return Ok(());
+    }
+
+    if let Some(instance_id) = hat_instance_env
+        && !instance_id.trim().is_empty()
+    {
+        anyhow::bail!(
+            "control-plane turn_action is reserved for ExternalInput: hat instance \"{instance_id}\" cannot use `--turn-action {turn_action}`. \
+Please remove `--turn-action` and emit a data-plane topic instead (for example `subtask.request` / `subtask.result`)."
+        );
+    }
+
+    if args.target.is_some() {
+        anyhow::bail!(
+            "invalid control-plane routing: `--turn-action {turn_action}` cannot be combined with `--target`. \
+Use `--target-instance ralph#1` explicitly."
+        );
+    }
+
+    if args.spawn_instance {
+        anyhow::bail!(
+            "invalid control-plane routing: `--turn-action {turn_action}` cannot be combined with `--spawn-instance`. \
+Use `--target-instance ralph#1` to control an existing in-flight turn."
+        );
+    }
+
+    let target_instance = args.target_instance.as_deref().map(str::trim);
+    if target_instance != Some("ralph#1") {
+        anyhow::bail!(
+            "invalid control-plane target: `--turn-action {turn_action}` requires `--target-instance ralph#1` (got {}).",
+            args.target_instance
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("<missing>")
+        );
     }
 
     Ok(())
@@ -2115,5 +2180,121 @@ mod tests {
         let resolved = resolve_events_file_from_marker_in_parents_from(&nested, fallback.clone());
 
         assert_eq!(resolved, fallback);
+    }
+
+    #[test]
+    fn emit_turn_action_rejects_hat_environment() {
+        let args = EmitArgs {
+            topic: "human.message".to_string(),
+            payload: "hi".to_string(),
+            json: false,
+            ts: None,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            target_instance: Some("ralph#1".to_string()),
+            target: None,
+            spawn_instance: false,
+            workspace_strategy: None,
+            session_strategy: None,
+            turn_action: Some(EmitTurnAction::Steer),
+        };
+
+        let err = validate_emit_control_plane_args(&args, Some("writer#1"))
+            .expect_err("hat env must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("reserved for ExternalInput"));
+        assert!(message.contains("cannot use `--turn-action steer`"));
+    }
+
+    #[test]
+    fn emit_turn_action_rejects_missing_target_instance() {
+        let args = EmitArgs {
+            topic: "human.message".to_string(),
+            payload: "hi".to_string(),
+            json: false,
+            ts: None,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            target_instance: None,
+            target: None,
+            spawn_instance: false,
+            workspace_strategy: None,
+            session_strategy: None,
+            turn_action: Some(EmitTurnAction::Interrupt),
+        };
+
+        let err = validate_emit_control_plane_args(&args, None)
+            .expect_err("missing target_instance must be rejected");
+        assert!(
+            err.to_string()
+                .contains("requires `--target-instance ralph#1`")
+        );
+    }
+
+    #[test]
+    fn emit_turn_action_rejects_non_ralph_primary_target() {
+        let args = EmitArgs {
+            topic: "human.message".to_string(),
+            payload: "hi".to_string(),
+            json: false,
+            ts: None,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            target_instance: Some("writer#1".to_string()),
+            target: None,
+            spawn_instance: false,
+            workspace_strategy: None,
+            session_strategy: None,
+            turn_action: Some(EmitTurnAction::Steer),
+        };
+
+        let err = validate_emit_control_plane_args(&args, None)
+            .expect_err("non-ralph target must be rejected");
+        assert!(err.to_string().contains("got writer#1"));
+    }
+
+    #[test]
+    fn emit_turn_action_rejects_target_hat_hint() {
+        let args = EmitArgs {
+            topic: "human.message".to_string(),
+            payload: "hi".to_string(),
+            json: false,
+            ts: None,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            target_instance: Some("ralph#1".to_string()),
+            target: Some("writer".to_string()),
+            spawn_instance: false,
+            workspace_strategy: None,
+            session_strategy: None,
+            turn_action: Some(EmitTurnAction::Steer),
+        };
+
+        let err = validate_emit_control_plane_args(&args, None)
+            .expect_err("target hint must be rejected");
+        assert!(
+            err.to_string()
+                .contains("cannot be combined with `--target`")
+        );
+    }
+
+    #[test]
+    fn emit_turn_action_rejects_spawn_instance_hint() {
+        let args = EmitArgs {
+            topic: "human.message".to_string(),
+            payload: "hi".to_string(),
+            json: false,
+            ts: None,
+            file: PathBuf::from(".ralph/events.jsonl"),
+            target_instance: Some("ralph#1".to_string()),
+            target: None,
+            spawn_instance: true,
+            workspace_strategy: None,
+            session_strategy: None,
+            turn_action: Some(EmitTurnAction::Interrupt),
+        };
+
+        let err = validate_emit_control_plane_args(&args, None)
+            .expect_err("spawn_instance hint must be rejected");
+        assert!(
+            err.to_string()
+                .contains("cannot be combined with `--spawn-instance`")
+        );
     }
 }
