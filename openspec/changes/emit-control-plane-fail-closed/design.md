@@ -38,7 +38,7 @@ Supervisor 会持续轮询该 JSONL,把每行映射为 `ralph_proto::Event` 并�
   - control-plane: `turn_action=steer|interrupt`,仅允许 ExternalInput 对 `ralph#1` 使用。
 - 对所有“可能产生 control-plane 效果”的入口做 fail-closed:
   - 在 hat job 环境里,禁止 `ralph emit --turn-action steer|interrupt`。
-  - 任意来源一旦携带 `turn_action=steer|interrupt`,必须显式且仅能 `target_instance=ralph#1`。
+  - 任意外部事件(JSONL 注入)一旦携带 `turn_action=steer|interrupt`,必须显式且仅能 `target_instance=ralph#1`。
 - 错误反馈要可行动:
   - hat 误用时,工具调用应直接失败并输出“怎么改”的信息。
   - Supervisor 侧拒绝时,至少要有可观测日志,并建议对 `ralph#1` 给出可见告警。
@@ -49,6 +49,7 @@ Supervisor 会持续轮询该 JSONL,把每行映射为 `ralph_proto::Event` 并�
 **Non-Goals:**
 
 - 不做 guard token/签名这类“强认证”(属于后续 4.1/4.3 增强)。
+- 不在 4.2 中收口 in-band `<event ...>` 产生的 `turn_action=steer|interrupt`(后续再做)。
 - 不支持对非 `ralph#1` 的 worker hats 做 in-flight steer/interrupt。
 - 不改变 `TurnAction::Steer|Interrupt` 在实例侧的执行语义(保持现有降级与取消逻辑)。
 - 不引入新的消息协议来替代 hats 间普通 emit(仅收敛边界,不发明平台)。
@@ -99,7 +100,7 @@ Supervisor 会持续轮询该 JSONL,把每行映射为 `ralph_proto::Event` 并�
 - Supervisor 在把 JSONL 行映射为 `ralph_proto::Event` 前,对 `turn_action=steer|interrupt` 做校验:
   - 缺失 `target_instance` 或 `target_instance != ralph#1` 时,拒绝该事件(不路由)。
   - 并输出可观测 warning(日志)。
-  - 推荐同时向 `ralph#1` 发布一条“被拒绝的 control-plane 注入”告警事件,避免无人值守时静默吞掉.
+  - 并通过现有 `routing.escalate` 机制向 `ralph#1` 发布一条可见告警事件(包含拒绝原因与关键字段),避免无人值守时静默吞掉。
 
 **Rationale**
 
@@ -175,8 +176,6 @@ Supervisor 会持续轮询该 JSONL,把每行映射为 `ralph_proto::Event` 并�
 
 - 是否要把 `turn_action=start` 也视为 control-plane 并在 hat 环境禁止?
   - 倾向: 不需要,start 本质是“默认语义”,且实例侧会清空该字段避免 prompt 污染.
-- 是否要为 Supervisor 的拒绝引入稳定 topic(例如 `control.reject`)?
-  - 倾向: 先复用已有 escalation/diagnostics 机制,避免新增协议面.
 - 未来的 4.1/4.3 增强:
   - guard token(ExternalInput 才有)或 source attribution(写入 source_instance/source_kind),
     以便把“只有 ExternalInput 能 steer/interrupt”做成更强的可验证约束.

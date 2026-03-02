@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
-### Requirement: Control-plane turn actions are reserved for ExternalInput to ralph#1
-In parallel mode, the system MUST treat `turn_action=steer|interrupt` as a control-plane signal reserved for ExternalInput and deliverable only to `ralph#1`.
+### Requirement: External turn_action steer/interrupt are reserved for ExternalInput to ralph#1
+For out-of-band external events (JSONL ingest via `ralph emit` or Supervisor TUI), the system MUST treat `turn_action=steer|interrupt` as a control-plane signal reserved for ExternalInput and deliverable only to `ralph#1`.
 
 #### Scenario: Hat job cannot emit steer/interrupt via ralph emit
 - **GIVEN** a headless hat job environment where `RALPH_HAT_INSTANCE_ID` is set

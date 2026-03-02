@@ -7,8 +7,9 @@
 ## 2. Supervisor fail-closed validation (external JSONL ingest)
 
 - [ ] 2.1 在 `crates/ralph-core` 的外部事件 ingest 路径中,对 `turn_action=steer|interrupt` 做最终校验: 仅允许 `target_instance=ralph#1`,否则拒绝且不路由
-- [ ] 2.2 拒绝时增加可观测性: 至少输出 warning(日志)并包含拒绝原因与关键字段(turn_action/target_instance/topic)
+- [ ] 2.2 拒绝时增加可观测性: 输出 warning(日志)并包含拒绝原因与关键字段(turn_action/target_instance/topic)
 - [ ] 2.3 新增 `crates/ralph-core` 路由层回归测试: `turn_action` 事件不得被改投到 `ralph#2`(即使 `ralph#1` Running)
+- [ ] 2.4 拒绝时必须给 `ralph#1` 发一个可见告警事件(优先复用 `routing.escalate`),避免无人值守时“看起来像没回应”
 
 ## 3. TUI 本地预检(减少黑盒排障)
 
@@ -20,6 +21,7 @@
 - [ ] 4.1 更新 `specs/parallel-event-channels.spec.md`,补充 control-plane 边界: `turn_action=steer|interrupt` 仅 ExternalInput -> `ralph#1`
 - [ ] 4.2 (可选) 更新 `examples/parallel-experimental-dev-engine/README.md`,明确 steer/interrupt 只能 target `ralph#1`,并提示 hats 不得使用 `--turn-action`
 - [ ] 4.3 更新 `specs/parallel-event-channels.spec.md`,补充 hat-to-hat 的 request/result 约定: B hat 只在 job/turn 结束时回传最终结论,不在中途 reply
+- [ ] 4.4 更新 `config/all_hat.md`,移除/改写会误导 hats 的示例(例如对 `writer#1` steer),改为仅对 `ralph#1` steer/interrupt,并明确 hats 禁止使用 `--turn-action`
 
 ## 5. 验证与回归
 
