@@ -985,3 +985,15 @@
 - 已补写:
   - `openspec/changes/emit-control-plane-fail-closed/design.md` 新增 D5(决策: request/result,只回最终结论)
   - `openspec/changes/emit-control-plane-fail-closed/tasks.md` 新增 4.3(要求同步到 `specs/parallel-event-channels.spec.md`)
+
+## 2026-03-02 12:34 +0800 | docs(openspec): 明确 external-only 范围 + 拒绝必须告警到 ralph#1
+
+- 变更点:
+  - 明确 4.2 暂不收口 in-band `<event ...>` 产生的 `turn_action`(只处理 external JSONL 注入)。
+  - Supervisor 拒绝 external control-plane 注入时,必须让 `ralph#1` 可见(复用 `routing.escalate`)。
+  - tasks 增加 `config/all_hat.md` 的同步任务,避免 hats 被示例误导去 steer worker.
+- 涉及文件:
+  - `openspec/changes/emit-control-plane-fail-closed/design.md`
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-hat-instances/spec.md`
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-trigger-routing/spec.md`
+  - `openspec/changes/emit-control-plane-fail-closed/tasks.md`

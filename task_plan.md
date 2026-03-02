@@ -219,3 +219,15 @@
 - 为什么这样做:
   - 这是你明确提出并认可的高 ROI 行为约束,但之前只记录在 `notes.md/task_plan.md`,没有进入 OpenSpec change 的“可实现契约”.
   - 把它写进 design/tasks,实现阶段才不会忘,也避免后续人员误用“中途 reply”导致上游漂移.
+
+## 2026-03-02 12:34 +0800 | 决策落盘: external-only + rejection escalate + 修正 all_hat 示范
+
+- 你给出的反馈与决策:
+  - `<event ...>` 这条 in-band 路暂不收口(4.2 只做 external JSONL 注入的 fail-closed).
+  - all_hat 示例可以改,避免 hats 学到“对 worker steer”的用法.
+  - Supervisor 拒绝 external control-plane 注入时,要让 `ralph#1` 明确看到(不只写日志).
+- 我做的同步:
+  - 已更新 OpenSpec change 文档与 specs/tasks,明确:
+    - external-only 的适用范围.
+    - 拒绝时复用 `routing.escalate` 告警到 `ralph#1`.
+    - tasks 增加 `config/all_hat.md` 同步任务.

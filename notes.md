@@ -309,3 +309,17 @@
     - A 触发 B 的子任务后,B 仅在自身 job/turn 结束时回传一次最终结论(例如 `subtask.result`),不在中途回传半成品.
   - `openspec/changes/emit-control-plane-fail-closed/tasks.md` 新增 4.3:
     - 要求把该约定同步写入 `specs/parallel-event-channels.spec.md`(面向 code agent 的使用指南)。
+
+## 2026-03-02 12:34 +0800 | 确认决策: `<event>` 暂不收口,但 external turn_action 拒绝需可见告警
+
+- 你确认的范围:
+  - 4.2 暂不处理 in-band `<event ...>` 产生的 `turn_action=steer|interrupt`。
+  - 4.2 只收敛 out-of-band external JSONL 注入(`ralph emit`/TUI 写 JSONL)的 `turn_action`.
+- 你确认的行为:
+  - all_hat 文档示例允许改掉,避免 hats 学到“对 worker 做 steer”的用法.
+  - Supervisor 拒绝 external control-plane 注入时,需要让 `ralph#1` 明确看到(不只写日志)。
+- 已同步到 OpenSpec change:
+  - `openspec/changes/emit-control-plane-fail-closed/design.md`: 明确 external-only 范围,并指定拒绝时复用 `routing.escalate` 给 `ralph#1` 发告警.
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-hat-instances/spec.md`: requirement 文案改为 external-only.
+  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-trigger-routing/spec.md`: rejection 场景要求 emit `routing.escalate`。
+  - `openspec/changes/emit-control-plane-fail-closed/tasks.md`: 增加 2.4(告警)与 4.4(更新 `config/all_hat.md`)。
