@@ -1,7 +1,7 @@
 ## 1. CLI fail-closed guards (`ralph emit`)
 
 - [ ] 1.1 在 `crates/ralph-cli` 中,当检测到 `RALPH_HAT_INSTANCE_ID` 存在时,拒绝 `ralph emit --turn-action steer|interrupt` 并输出可行动的错误信息
-- [ ] 1.2 在 `crates/ralph-cli` 中,当 `--turn-action steer|interrupt` 被使用时,强制要求 `--target-instance ralph#1`(缺失或非 ralph#1 均拒绝)
+- [ ] 1.2 在 `crates/ralph-cli` 中,当 `--turn-action steer|interrupt` 被使用时,强制要求 `--target-instance ralph#1`,并拒绝与 `--target/--spawn-instance` 同时使用(直接报错给发送者,提示正确写法)
 - [ ] 1.3 为以上两条新增 CLI 回归测试(至少覆盖: hat 环境拒绝,缺失 target_instance 拒绝,非 ralph#1 拒绝)
 
 ## 2. Supervisor fail-closed validation (external JSONL ingest)
@@ -10,6 +10,7 @@
 - [ ] 2.2 拒绝时增加可观测性: 输出 warning(日志)并包含拒绝原因与关键字段(turn_action/target_instance/topic)
 - [ ] 2.3 新增 `crates/ralph-core` 路由层回归测试: `turn_action` 事件不得被改投到 `ralph#2`(即使 `ralph#1` Running)
 - [ ] 2.4 拒绝时必须给 `ralph#1` 发一个可见告警事件(优先复用 `routing.escalate`),避免无人值守时“看起来像没回应”
+- [ ] 2.5 在 Supervisor 侧拒绝 `turn_action=steer|interrupt` 搭配 hat-level routing hints(`target` 或 `spawn_instance=true`)的外部事件,并同样告警到 `ralph#1`
 
 ## 3. TUI 本地预检(减少黑盒排障)
 

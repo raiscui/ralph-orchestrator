@@ -82,11 +82,15 @@ Supervisor 会持续轮询该 JSONL,把每行映射为 `ralph_proto::Event` 并�
 - 只要 `--turn-action` 为 `steer|interrupt`,就强制要求:
   - `--target-instance ralph#1`
   - 且禁止使用 `--target <hat>` 这类“触发式路由”(必须直达 instance)
+  - 且禁止使用 `--spawn-instance`(new_instance 模式没有 in-flight turn,不具备 steer/interrupt 的前提)
 
 **Rationale**
 
 - control-plane 信号一旦被“默认路由”或“模糊投递”,最容易发生误投递与越权.
 - 把“必须显式指向 `ralph#1`”写死,能极大降低 operator/脚本误用的概率.
+- `--target`/`--spawn-instance` 的语义是“让系统选一个实例”或“开新实例接收”.
+  - 这两者都无法保证存在一个可被 steer/interrupt 的 in-flight turn.
+  - 因此把这类组合视为“没想清楚的用法”,直接 fail-closed 报错,让发送者立刻修正.
 
 **Trade-off**
 
