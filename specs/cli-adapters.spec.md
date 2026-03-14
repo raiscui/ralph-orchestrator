@@ -66,7 +66,7 @@ Custom adapters are appropriate when:
 | Backend | Auto-Approve Flag | Prompt Delivery | TTY Required | Structured Output |
 |---------|-------------------|-----------------|--------------|-------------------|
 | Claude | `--dangerously-skip-permissions` | `-p "prompt"` | **Yes** | `--output-format stream-json` |
-| Gemini | `--yolo` | `-p "prompt"` | No | — |
+| Gemini | `--approval-mode yolo` | `-p "prompt"` | No | `--output-format json` |
 | Kiro | `--trust-all-tools` | positional arg | No | — |
 | Codex | `--full-auto` | positional arg | No | `--json` |
 | Amp | `--dangerously-allow-all` | `-x "prompt"` | No | — |

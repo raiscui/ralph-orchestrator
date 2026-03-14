@@ -192,11 +192,16 @@ ralph emit experiment.task '{"run_id":"manual","objective":"...","experiment_id"
 - `reply.human.message` 是“回复输出”topic:
   - hat -> human(回复人类用户)。
   - 重要: 该 topic 在运行时只用于 UI 展示/日志证据,不会再次被路由回 hats(避免自问自答循环)。
+- `reply.hat.message` 是“答案回流”topic:
+  - hat -> hat(把答案回给原请求方实例)。
+  - 必须配合 `reply="EVENT_ID"` 使用。
+  - 重要: 该 topic 不是普通 workflow event。运行时会根据被回复事件的 `source_instance` 自动回送,不要把它拿来当常规流程推进 topic。
 
 示例:
 
 ```text
 <event topic="reply.human.message" reply="EVENT_ID">我已收到,这里是我的回复...</event>
+<event topic="reply.hat.message" reply="EVENT_ID">这是回给请求方 hat 的答案...</event>
 ```
 
 ### 1) new_instance: 立即开一个崭新实例接收消息(上下文隔离)

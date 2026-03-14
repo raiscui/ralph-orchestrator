@@ -1,0 +1,238 @@
+# Parallel PR Review example
+#
+# 目标:
+# - 演示多 reviewer 并行审查同一份 PR packet
+# - 演示 `ralph#1` 做 fanout / fanin 收敛
+# - 演示 reviewer 完成后再由 synthesizer 给出统一结论
+
+cli:
+  backend: "codex"
+
+event_loop:
+  # 说明:
+  # - 真实 PR 内容放在同目录的 `PROMPT.md`
+  # - `ralph_prompt` 只保留协调者协议,避免污染 reviewer
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel PR Review
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入是 `PROMPT.md` 里的 `PR_REVIEW_PACKET`。
+    该 packet 会包含:
+    - PR 编号
+    - 变更摘要
+    - 3 个 reviewer 的专属 section:
+      - `## Correctness Packet`
+      - `## Security Packet`
+      - `## Architecture Packet`
+
+    重要规则:
+    - 你必须先 fanout,再 fanin,最后才允许结束。
+    - 你不能跳过 reviewer 直接产出最终 verdict。
+    - 只有看到 `review.complete` 后,你才可以输出 `LOOP_COMPLETE`。
+
+    当你收到 `task.start` 时,你必须:
+    1) 从 `PR_REVIEW_PACKET` 中提炼 3 条 review task
+    2) 在同一条输出里连续发布:
+       - `review.correctness`
+       - `review.security`
+       - `review.architecture`
+    3) 每条 task 都必须携带:
+       - pr_id
+       - review_lane
+       - focus
+       - evidence_packet
+
+    当你观察到以下 3 个事件都已经出现后:
+    - `correctness.done`
+    - `security.done`
+    - `architecture.done`
+
+    你必须发布 `synthesis.request`,并把 3 条 reviewer 结果整合进去。
+    重要:
+    - `synthesis.request` 只允许发布一次。
+    - 一旦你已经发布过 `synthesis.request`,后续即使再收到重复或迟到的 `*.done`,也必须忽略。
+    - 一旦你已经收到任意一条 `review.complete`,绝对不能再发布新的 `synthesis.request`。
+
+    当你收到 `review.complete` 时:
+    1) 先输出一段最终结论摘要
+       - 至少包含: `pr_id`、最终 verdict、必须修复项
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本,不要原样照抄转义形式:
+
+    &lt;event topic="review.correctness"&gt;
+    pr_id: ...
+    review_lane: correctness
+    focus: ...
+    evidence_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "review.complete"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  correctness_reviewer:
+    name: "🎯 Correctness Reviewer"
+    description: "并行检查逻辑正确性与测试缺口。"
+    triggers: ["review.correctness"]
+    publishes: ["correctness.done"]
+    instances: 1
+    instructions: |
+      你是 `correctness_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 每次只发布 1 条 `correctness.done`。
+
+      你收到的是一个 review packet。
+      你只根据 packet 内容判断,不要脑补仓库外信息。
+
+      判定规则:
+      - 如果 packet 明确写着 `expected_approval: conditional`
+        - 你必须给出 `approval: conditional`
+        - 并把 `expected_issue` 改写成 `must_fix`
+      - 如果 packet 明确写着 `expected_approval: approved`
+        - 你输出 `approval: approved`
+        - `must_fix: none`
+
+      输出 payload 最低要求:
+      - review_lane: correctness
+      - approval: approved | conditional
+      - must_fix
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="correctness.done"&gt;
+      review_lane: correctness
+      approval: conditional
+      must_fix: ...
+      summary: ...
+      &lt;/event&gt;
+
+  security_reviewer:
+    name: "🔒 Security Reviewer"
+    description: "并行检查安全边界与风险暴露。"
+    triggers: ["review.security"]
+    publishes: ["security.done"]
+    instances: 1
+    instructions: |
+      你是 `security_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 每次只发布 1 条 `security.done`。
+
+      你只根据收到的 security packet 判断。
+
+      判定规则:
+      - `expected_approval: approved` -> `approval: approved`
+      - `expected_approval: conditional` -> `approval: conditional`
+      - 若 packet 写了 `expected_issue: none`
+        - 你的 `must_fix` 必须写成 `none`
+
+      输出 payload 最低要求:
+      - review_lane: security
+      - approval
+      - must_fix
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="security.done"&gt;
+      review_lane: security
+      approval: approved
+      must_fix: none
+      summary: ...
+      &lt;/event&gt;
+
+  architecture_reviewer:
+    name: "🏗️ Architecture Reviewer"
+    description: "并行检查分层、职责边界与长期维护性。"
+    triggers: ["review.architecture"]
+    publishes: ["architecture.done"]
+    instances: 1
+    instructions: |
+      你是 `architecture_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 每次只发布 1 条 `architecture.done`。
+
+      你只根据收到的 architecture packet 判断。
+
+      判定规则:
+      - `expected_approval: conditional` -> `approval: conditional`
+      - `expected_approval: approved` -> `approval: approved`
+
+      输出 payload 最低要求:
+      - review_lane: architecture
+      - approval
+      - must_fix
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="architecture.done"&gt;
+      review_lane: architecture
+      approval: conditional
+      must_fix: ...
+      summary: ...
+      &lt;/event&gt;
+
+  review_synthesizer:
+    name: "📋 Review Synthesizer"
+    description: "汇总 3 条 reviewer 结论,输出最终 PR verdict。"
+    triggers: ["synthesis.request"]
+    publishes: ["review.complete"]
+    instances: 1
+    instructions: |
+      你是 `review_synthesizer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `review.complete`。
+
+      你会收到 correctness / security / architecture 三条 reviewer 结果。
+
+      verdict 规则:
+      - 只要任一 reviewer 给出 `approval: conditional`
+        - 最终 verdict 必须是 `REQUEST_CHANGES`
+      - 三条都 `approved`
+        - 最终 verdict 才能是 `APPROVE`
+
+      输出 payload 最低要求:
+      - verdict
+      - must_fix
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="review.complete"&gt;
+      verdict: REQUEST_CHANGES
+      must_fix: ...
+      summary: ...
+      &lt;/event&gt;

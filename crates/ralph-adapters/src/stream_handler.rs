@@ -13,6 +13,7 @@ use ratatui::{
     style::{Color as RatatuiColor, Style},
     text::{Line, Span},
 };
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -671,21 +672,12 @@ impl PrettyStreamHandler {
 
         let text = std::mem::take(&mut self.text_buffer);
 
-        // 说明：
-        // - Plain：原样输出（Markdown 控制符可见）。
-        // - 含 ANSI：直接原样输出，避免二次渲染吞掉样式/控制码。
-        if self.render_mode == MarkdownRenderMode::Plain || contains_ansi(&text) {
-            let _ = self.stdout.write_all(text.as_bytes());
-            let _ = self.stdout.flush();
-            return;
-        }
-
-        let wrap_width = usize::from(terminal_wrap_width()).max(3);
-
-        // termimad 会把 Markdown 渲染成带 ANSI 的终端文本（并在给定宽度下 hard-wrap）。
-        // 对于非 TUI（stdout）场景，直接输出 ANSI 最简单，
-        // 也避免了“ratatui::Line → ANSI”的二次转换带来的额外开销与差异。
-        let rendered = render_markdown_with_codeblocks_to_ansi(&text, wrap_width);
+        // 说明:
+        // - Plain: 原样输出(Markdown 控制符可见).
+        // - 含 ANSI: 直接原样输出,避免二次渲染吞掉样式/控制码.
+        // - Rendered: termimad 渲染 Markdown,但必须做展示层改写,避免 `<event ...>` 被吞掉.
+        let wrap_width = terminal_wrap_width();
+        let rendered = render_text_to_ansi_for_pretty_output(&text, self.render_mode, wrap_width);
 
         let _ = self.stdout.write_all(rendered.as_bytes());
         let _ = self.stdout.flush();
@@ -1025,6 +1017,123 @@ fn render_markdown_to_lines(text: &str, wrap_width: u16) -> Option<Vec<Line<'sta
     }
 }
 
+/// 在 Markdown 渲染前,对 `reply.human.message` 的 `<event ...>...</event>` 做“展示层改写”。
+///
+/// 背景:
+/// - 并行 TUI chat 场景里,`reply.human.message` 是“给人看的回复 topic”.
+/// - 但在 `MarkdownRenderMode::Rendered` 下,`termimad` 会把形如 `<event ...>` 的文本当作 HTML 片段处理,
+///   结果常见表现是: 标签块被吞掉,用户在 TUI Output 面板里看不到任何回复。
+///
+/// 设计原则:
+/// - 这是“仅用于展示”的改写,不影响事件解析与路由。
+/// - 只对 `topic="reply.human.message"` 生效,避免把其它 `<event ...>` 误改写成普通文本。
+/// - 优先抽出 payload,隐藏 `<event ...>` 外壳,让用户能看到真正的回复内容。
+fn rewrite_reply_human_message_events_for_display(text: &str) -> Cow<'_, str> {
+    // 兼容:
+    // - `<event topic="...">`(最常见)
+    // - `<event\n topic="...">`(模型偶发格式化成多行 opening tag)
+    // - `<event\ttopic="...">`
+    if !text.contains("<event") || !text.contains("reply.human.message") {
+        return Cow::Borrowed(text);
+    }
+
+    fn extract_attr<'a>(opening_tag: &'a str, name: &str) -> Option<&'a str> {
+        let needle = format!("{name}=\"");
+        let start = opening_tag.find(&needle)? + needle.len();
+        let rest = &opening_tag[start..];
+        let end = rest.find('"')?;
+        Some(&rest[..end])
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start_idx) = remaining.find("<event") {
+        // 先拷贝 event tag 之前的内容.
+        out.push_str(&remaining[..start_idx]);
+        let after_start = &remaining[start_idx..];
+
+        // 防误判:
+        // - `<eventual>` / `<event-handler>` 这类不是 `<event ...>` tag,需要跳过.
+        // - `<event>` / `<event ...>` 则允许解析.
+        if after_start.len() > "<event".len() {
+            let next = after_start.as_bytes()["<event".len()];
+            if next != b'>' && !next.is_ascii_whitespace() {
+                out.push('<');
+                remaining = &after_start[1..];
+                continue;
+            }
+        }
+
+        // 找 opening tag 的结束位置.
+        let Some(tag_end) = after_start.find('>') else {
+            // opening tag 不完整: 按原样输出剩余内容,避免丢信息.
+            out.push_str(after_start);
+            return Cow::Owned(out);
+        };
+
+        let opening_tag = &after_start[..tag_end + 1];
+        let topic = extract_attr(opening_tag, "topic");
+
+        // 非 reply.human.message: 原样保留,不做展示层改写.
+        if topic != Some("reply.human.message") {
+            if let Some(close_idx) = after_start.find("</event>") {
+                let total_consumed = close_idx + 8;
+                out.push_str(&after_start[..total_consumed]);
+                remaining = &after_start[total_consumed..];
+            } else {
+                out.push_str(after_start);
+                remaining = "";
+            }
+            continue;
+        }
+
+        // reply.human.message: 把 payload 提取出来显示,隐藏 event 外壳.
+        let content_start = &after_start[tag_end + 1..];
+        let nested_event_idx = content_start.find("<event");
+        let close_idx = content_start.find("</event>");
+
+        if let Some(close_idx) = close_idx
+            && nested_event_idx.is_none_or(|nested| nested > close_idx)
+        {
+            // 注意: payload 允许多行,这里做 trim 主要是去掉 event wrapper 带来的首尾空白.
+            out.push_str(content_start[..close_idx].trim());
+            remaining = &content_start[close_idx + 8..];
+        } else {
+            // 没有 closing tag: best-effort 把 EOF 当作隐式 closing,至少把内容展示出来.
+            out.push_str(content_start.trim_end());
+            remaining = "";
+        }
+    }
+
+    out.push_str(remaining);
+    Cow::Owned(out)
+}
+
+/// Pretty(stdout) 输出路径的渲染入口: 把文本渲染成 ANSI(或保持原样)。
+///
+/// 说明:
+/// - 这是为了避免 “TUI 用一套渲染器,stdout Pretty 用另一套渲染器” 导致行为分叉.
+/// - 我们在这里复用与 TUI 相同的 “reply.human.message 展示层改写” 规则:
+///   - Rendered: 显示 payload,隐藏 `<event ...>` 外壳(避免 termimad 吞掉整段 HTML).
+///   - Plain/含 ANSI: 原样输出,用于排障与保持语义色彩.
+fn render_text_to_ansi_for_pretty_output(
+    text: &str,
+    mode: MarkdownRenderMode,
+    wrap_width: u16,
+) -> Cow<'_, str> {
+    if mode == MarkdownRenderMode::Plain || contains_ansi(text) {
+        return Cow::Borrowed(text);
+    }
+
+    let wrap_width = usize::from(normalize_wrap_width(wrap_width)).max(3);
+    let rewritten = rewrite_reply_human_message_events_for_display(text);
+    Cow::Owned(render_markdown_with_codeblocks_to_ansi(
+        rewritten.as_ref(),
+        wrap_width,
+    ))
+}
+
 /// 把文本转换为带样式的 `ratatui` 行（`Line<'static>`），同时处理 ANSI 与 Markdown。
 ///
 /// 说明：
@@ -1050,7 +1159,10 @@ pub fn render_text_to_lines(
     }
 
     match mode {
-        MarkdownRenderMode::Rendered => render_markdown_to_lines_best_effort(text, wrap_width),
+        MarkdownRenderMode::Rendered => {
+            let rewritten = rewrite_reply_human_message_events_for_display(text);
+            render_markdown_to_lines_best_effort(rewritten.as_ref(), wrap_width)
+        }
         MarkdownRenderMode::Plain => plain_text_to_lines(text),
     }
 }
@@ -2633,6 +2745,128 @@ mod tests {
             assert!(
                 !text.contains("```"),
                 "Rendered should hide fence markers: {text}"
+            );
+        }
+
+        #[test]
+        fn markdown_rendered_mode_shows_reply_human_message_payload() {
+            // 目的:
+            // - 并行 TUI chat 场景里,模型常用 `<event topic="reply.human.message">...</event>` 回复 human.
+            // - 但 termimad 的 Markdown 渲染可能会把 `<event ...>` 当作 HTML,导致整段被吞掉。
+            // - 因此这里锁定: Rendered 模式下至少能看到 payload,且不会把 `<event ...>` 外壳原样展示出来.
+            let input = r#"<event topic="reply.human.message" reply="E1">hello</event>
+"#;
+
+            let lines = render_text_to_lines(input, MarkdownRenderMode::Rendered, 80);
+            let text = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                text.contains("hello"),
+                "Rendered should show reply payload. Got: {text:?}"
+            );
+            assert!(
+                !text.contains("<event"),
+                "Rendered should hide <event> wrapper for reply.human.message. Got: {text:?}"
+            );
+        }
+
+        #[test]
+        fn markdown_rendered_mode_shows_reply_human_message_payload_with_multiline_opening_tag() {
+            // 回归:
+            // - 模型偶发把 `<event ...>` 的 opening tag 格式化成多行(换行/缩进).
+            // - 这种情况下 `<event` 仍会被 termimad 当作 HTML 吞掉,必须同样可见。
+            let input = r#"<event
+  topic="reply.human.message" reply="E1">hello</event>
+"#;
+
+            let lines = render_text_to_lines(input, MarkdownRenderMode::Rendered, 80);
+            let text = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                text.contains("hello"),
+                "Rendered should show reply payload. Got: {text:?}"
+            );
+            assert!(
+                !text.contains("<event"),
+                "Rendered should hide <event> wrapper for reply.human.message. Got: {text:?}"
+            );
+        }
+
+        #[test]
+        fn markdown_plain_mode_keeps_reply_human_message_event_text() {
+            // 目的:
+            // - Plain 模式用于排障与复制粘贴.
+            // - 因此必须保留 `<event ...>` 原文,不做展示层改写.
+            let input = r#"<event topic="reply.human.message" reply="E1">hello</event>
+"#;
+
+            let lines = render_text_to_lines(input, MarkdownRenderMode::Plain, 80);
+            let text = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                text.contains("<event "),
+                "Plain should keep <event> wrapper visible. Got: {text:?}"
+            );
+            assert!(
+                text.contains("hello"),
+                "Plain should keep payload content. Got: {text:?}"
+            );
+        }
+
+        #[test]
+        fn pretty_rendered_mode_shows_reply_human_message_payload() {
+            // 目的:
+            // - `--no-tui` 或 stdout 非 TTY 时,会走 Pretty(stdout) 输出路径.
+            // - 该路径同样使用 termimad 渲染 Markdown,因此也存在 `<event ...>` 被吞掉的风险.
+            // - 这里锁死: Rendered 模式下,reply.human.message 必须能看到 payload.
+            let input = r#"<event topic="reply.human.message" reply="E1">hello</event>
+"#;
+
+            let rendered =
+                render_text_to_ansi_for_pretty_output(input, MarkdownRenderMode::Rendered, 80);
+            let rendered = rendered.as_ref();
+
+            assert!(
+                rendered.contains("hello"),
+                "Pretty rendered should show reply payload. Got: {rendered:?}"
+            );
+            assert!(
+                !rendered.contains("<event"),
+                "Pretty rendered should hide <event> wrapper for reply.human.message. Got: {rendered:?}"
+            );
+        }
+
+        #[test]
+        fn pretty_plain_mode_keeps_reply_human_message_event_text() {
+            // 目的:
+            // - Plain 模式用于排障与复制粘贴.
+            // - 因此 stdout Pretty 输出路径也必须保留 `<event ...>` 原文.
+            let input = r#"<event topic="reply.human.message" reply="E1">hello</event>
+"#;
+
+            let rendered =
+                render_text_to_ansi_for_pretty_output(input, MarkdownRenderMode::Plain, 80);
+            let rendered = rendered.as_ref();
+
+            assert!(
+                rendered.contains("<event"),
+                "Pretty plain should keep <event> wrapper visible. Got: {rendered:?}"
+            );
+            assert!(
+                rendered.contains("hello"),
+                "Pretty plain should keep payload content. Got: {rendered:?}"
             );
         }
 

@@ -1,0 +1,233 @@
+# Parallel Partner Launch Coordination example
+#
+# 目标:
+# - 演示 partner launch 前的多输入线并行推进
+# - 演示 solution / legal / marketing / sales 收齐后再发布 partner launch packet
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Partner Launch Coordination
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `PARTNER_LAUNCH_PACKET`。
+    其中至少包含:
+    - `## Solution Enablement Packet`
+    - `## Legal Terms Packet`
+    - `## Channel Marketing Packet`
+    - `## Sales Handoff Packet`
+
+    重要规则:
+    - 你必须先并行派发 4 条 partner launch 任务。
+    - 只有 4 条 ready 事件全部到齐后,才允许发布 `partner.launch.packet.request`。
+    - `partner.launch.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+    - 在 `partner.launch.ready` 出现前,禁止输出任何普通文本、分析文本或解释文本。
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次。在那之前,连提及都不允许。
+    - 如果某个 lane 只输出了 `&lt;event ...&gt;` 这类转义展示文本,不要把它当成 ready 事件。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `partner.solution.enablement.review`
+       - `partner.legal.terms.review`
+       - `partner.channel.marketing.review`
+       - `partner.sales.handoff.review`
+    2) 每条任务都必须携带:
+       - partner_launch_id
+       - lane
+       - review_packet
+
+    当你观察到:
+    - `solution.ready`
+    - `legal.ready`
+    - `marketing.ready`
+    - `sales.ready`
+    全部出现后:
+    - 你必须只发布一次 `partner.launch.packet.request`
+    - 后续重复或迟到的 `*.ready` 必须忽略
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持静默,空输出是合法且首选的
+    - 不要输出任何等待说明、分析文本、topic 名称或 completion promise
+    - 不要重复发布已发过的 fanout 任务
+
+    当你收到 `partner.launch.ready` 时:
+    1) 输出 partner launch summary
+       - 至少包含 partner_launch_id、partner_launch_status、launch_region、next_checkpoint
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="partner.solution.enablement.review"&gt;
+    partner_launch_id: ...
+    lane: solution
+    review_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "partner.launch.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  solution_enablement_lead:
+    name: "Solution Enablement Lead"
+    description: "确认 solution enablement 资产与伙伴赋能准备。"
+    triggers: ["partner.solution.enablement.review"]
+    publishes: ["solution.ready"]
+    instances: 1
+    instructions: |
+      你是 `solution_enablement_lead`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `solution.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: solution
+      - status: ready
+      - enablement_state
+      - summary
+      - `summary` 保持 1 句短句,不要写分析过程。
+
+  legal_terms_owner:
+    name: "Legal Terms Owner"
+    description: "确认 partner launch 相关条款与外部表述边界。"
+    triggers: ["partner.legal.terms.review"]
+    publishes: ["legal.ready"]
+    instances: 1
+    instructions: |
+      你是 `legal_terms_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `legal.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: legal
+      - status: ready
+      - terms_state
+      - summary
+      - `summary` 保持 1 句短句,不要补额外免责声明。
+
+  channel_marketing_manager:
+    name: "Channel Marketing Manager"
+    description: "确认联合营销资产和投放节奏。"
+    triggers: ["partner.channel.marketing.review"]
+    publishes: ["marketing.ready"]
+    instances: 1
+    instructions: |
+      你是 `channel_marketing_manager`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `marketing.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: marketing
+      - status: ready
+      - campaign_state
+      - summary
+      - `summary` 保持 1 句短句,不要扩展成多段总结。
+
+  sales_handoff_manager:
+    name: "Sales Handoff Manager"
+    description: "确认 field handoff 与销售承接准备。"
+    triggers: ["partner.sales.handoff.review"]
+    publishes: ["sales.ready"]
+    instances: 1
+    instructions: |
+      你是 `sales_handoff_manager`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `sales.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: sales
+      - status: ready
+      - handoff_state
+      - summary
+      - `summary` 保持 1 句短句,不要加额外说明。
+
+  partner_launch_manager:
+    name: "Partner Launch Manager"
+    description: "汇总 4 条 ready 信号,形成最终 partner launch packet。"
+    triggers: ["partner.launch.packet.request"]
+    publishes: ["partner.launch.ready"]
+    instances: 1
+    instructions: |
+      你是 `partner_launch_manager`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `partner.launch.ready`。
+      - 当你收到 `partner.launch.packet.request` 时,必须立刻输出且只输出 1 条 `partner.launch.ready`。
+      - 你的最终回复必须直接从 `partner.launch.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      决策规则:
+      - 如果 4 条 lane 都 `status: ready`
+      - 最终 `partner_launch_status` 必须是 `READY_TO_ANNOUNCE`
+      - `launch_region` 必须是 `NORTH_AMERICA`
+      - `next_checkpoint` 必须是 `channel_enablement`
+
+      输出 payload 最低要求:
+      - partner_launch_id
+      - partner_launch_status
+      - launch_region
+      - next_checkpoint
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="partner.launch.ready"&gt;
+      partner_launch_id: PL-NA-2026-06
+      partner_launch_status: READY_TO_ANNOUNCE
+      launch_region: NORTH_AMERICA
+      next_checkpoint: channel_enablement
+      summary: ...
+      &lt;/event&gt;

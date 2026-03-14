@@ -130,5 +130,34 @@ When a hat instance aggregates multiple pending events into a single job, the jo
 - **WHEN** two events are combined into one job, and one requests `workspace_strategy=shared` and the other requests `workspace_strategy=patch`
 - **THEN** the job MUST use `patch` workspace strategy
 
+### Requirement: External control-plane turn actions require explicit targeting
+When ingesting external events, the system MUST reject any event carrying `turn_action=steer|interrupt` unless it explicitly targets `target_instance="ralph#1"`.
+
+When rejecting such an external event, the system MUST emit a visible escalation event to `ralph#1` (e.g., `routing.escalate`) so the operator/coordinator can see the rejection reason.
+
+When ingesting external events with `turn_action=steer|interrupt`, the system MUST also reject any event that attempts hat-level routing hints (`target="..."` or `spawn_instance=true`), since these do not identify an existing in-flight turn to control.
+
+#### Scenario: Missing target_instance is rejected
+- **WHEN** the Supervisor ingests an external JSONL event with `turn_action="steer"` and no `target_instance`
+- **THEN** the system MUST reject the event
+- **THEN** the system MUST NOT deliver the event to any hat instance
+- **THEN** the system MUST emit `routing.escalate` to `ralph#1` with the rejection reason
+
+#### Scenario: Non-ralph target_instance is rejected
+- **WHEN** the Supervisor ingests an external JSONL event with `turn_action="interrupt"` and `target_instance="writer#1"`
+- **THEN** the system MUST reject the event
+- **THEN** the system MUST NOT deliver the event to `writer#1`
+- **THEN** the system MUST emit `routing.escalate` to `ralph#1` with the rejection reason
+
+#### Scenario: Hat-level routing hints are rejected for turn_action
+- **WHEN** the Supervisor ingests an external JSONL event with `turn_action="steer"` and (`target="writer"` or `spawn_instance=true`)
+- **THEN** the system MUST reject the event
+- **THEN** the system MUST emit `routing.escalate` to `ralph#1` with the rejection reason
+
+#### Scenario: Turn-action events are not redirected to secondary ralph
+- **GIVEN** `ralph#1` is `Running` and a secondary `ralph#2` exists
+- **WHEN** the Supervisor ingests an external JSONL event with `turn_action="steer"` and `target_instance="ralph#1"`
+- **THEN** the system MUST deliver the event to `ralph#1` (not rewritten to `ralph#2`)
+
 ## Change History
 - 2026-01-28: Synced from `openspec/changes/parallel-trigger-routing/specs/parallel-trigger-routing/spec.md`.

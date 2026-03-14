@@ -1,0 +1,185 @@
+# Parallel Release Checklist example
+#
+# 目标:
+# - 演示 release 前置检查项并行执行
+# - 演示全部检查完成后,由 `ralph#1` 做收敛
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Release Checklist
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `RELEASE_PACKET`。
+    它至少包含:
+    - version
+    - `## QA Packet`
+    - `## Docs Packet`
+    - `## Ops Packet`
+
+    重要规则:
+    - 你必须先派发 3 条检查任务。
+    - 只有 3 条 ready 事件全部到齐后,才允许发布 `release.summary.request`。
+    - `release.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+
+    当你收到 `task.start` 时:
+    1) 从 `RELEASE_PACKET` 中提炼 3 条检查任务
+    2) 在同一条输出里连续发布:
+       - `release.qa.check`
+       - `release.docs.check`
+       - `release.ops.check`
+
+    当你观察到:
+    - `qa.ready`
+    - `docs.ready`
+    - `ops.ready`
+    全部出现后:
+    - 你必须发布 `release.summary.request`
+    - `release.summary.request` 只允许发布一次
+    - 后续即使再看到重复或迟到的 `*.ready`,也必须忽略
+
+    当你收到 `release.ready` 时:
+    1) 先输出 release 结论摘要
+       - 至少包含 `version`、关键证据、剩余注意事项
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+      &lt;event topic="release.qa.check"&gt;
+    version: ...
+    checklist_lane: qa
+    evidence_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "release.ready"
+  max_iterations: 16
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 5
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  qa_checker:
+    name: "🧪 QA Checker"
+    description: "并行确认测试与验证证据是否齐全。"
+    triggers: ["release.qa.check"]
+    publishes: ["qa.ready"]
+    instances: 1
+    instructions: |
+      你是 `qa_checker`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      你只根据收到的 QA packet 判断。
+
+      判定规则:
+      - `expected_status: ready` -> 输出 `status: ready`
+      - 必须把 evidence 里的关键信息压缩成一行 summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="qa.ready"&gt;
+      checklist_lane: qa
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  docs_checker:
+    name: "📝 Docs Checker"
+    description: "并行确认 release notes 与升级说明是否就绪。"
+    triggers: ["release.docs.check"]
+    publishes: ["docs.ready"]
+    instances: 1
+    instructions: |
+      你是 `docs_checker`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      你只根据收到的 Docs packet 判断。
+
+      判定规则:
+      - `expected_status: ready` -> 输出 `status: ready`
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="docs.ready"&gt;
+      checklist_lane: docs
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  ops_checker:
+    name: "🛟 Ops Checker"
+    description: "并行确认 rollout 窗口、回滚预案与 on-call 安排。"
+    triggers: ["release.ops.check"]
+    publishes: ["ops.ready"]
+    instances: 1
+    instructions: |
+      你是 `ops_checker`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      你只根据收到的 Ops packet 判断。
+
+      判定规则:
+      - `expected_status: ready` -> 输出 `status: ready`
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="ops.ready"&gt;
+      checklist_lane: ops
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  release_synthesizer:
+    name: "📦 Release Synthesizer"
+    description: "汇总 QA / Docs / Ops 结果,产出 release.ready。"
+    triggers: ["release.summary.request"]
+    publishes: ["release.ready"]
+    instances: 1
+    instructions: |
+      你是 `release_synthesizer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `release.ready`。
+
+      你会收到 QA / Docs / Ops 三条 ready 结果的汇总。
+
+      你的任务:
+      - 提炼一个简短、可审计的 release summary
+      - 在 payload 里保留 `version`
+      - 明确说明 3 条 readiness lane 都已经就绪
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="release.ready"&gt;
+      version: v2.4.0
+      status: ready
+      summary: ...
+      &lt;/event&gt;

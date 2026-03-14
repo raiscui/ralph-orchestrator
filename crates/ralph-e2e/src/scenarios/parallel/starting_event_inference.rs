@@ -75,6 +75,8 @@ impl ParallelStartingEventInferenceScenario {
   command: codex
   args:
     - exec
+    - -m
+    - gpt-5-codex
     - --full-auto
     - -c
     - 'model_reasoning_effort="low"'

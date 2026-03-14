@@ -105,9 +105,35 @@ Validates the **parallel hat instances** runtime against real backends.
 - `ParallelStartingEventInferenceScenario` - starting_event unset → ralph#1 infers workflow entry event
 - `ParallelStartingEventInferenceScenario` (multi-candidate variant) - multiple entry candidates → ralph#1 chooses correct entry for required workflow
 - `ParallelEmitSpawnInstanceScenario` - ralph emit --spawn-instance creates dynamic instance + ACK
-- `ParallelAppServerSteerMultiTurnScenario` - Codex App Server turn/steer multi-turn injection (in-flight)
-- `ParallelAppServerSteerMultiTurnLiveScenario` - REAL codex app-server turn/steer multi-turn injection + client-side RPC trace (in-flight)
-- `ParallelAppServerSteerLiveReplyMultiTurnScenario` - REAL codex app-server turn/steer multi-turn injection + requires visible reply output (answers)
+- `ParallelAppServerSteerMultiTurnScenario` - 覆盖 Codex App Server 的 turn/steer 多轮注入场景,当前仍在推进
+- `ParallelAppServerSteerMultiTurnLiveScenario` - 覆盖真实 codex app-server 的 turn/steer 多轮注入,并保留客户端 RPC trace,当前仍在推进
+- `ParallelAppServerSteerLiveReplyMultiTurnScenario` - 覆盖真实 codex app-server 的 turn/steer 多轮注入,并要求看到可见回复输出
+- `ParallelTriggerRoutingExampleScenario` - 直接覆盖 `examples/parallel-trigger-routing`
+- `ParallelExperimentalDevEngineExampleScenario` - 直接覆盖 `examples/parallel-experimental-dev-engine`
+- `ParallelPrReviewExampleScenario` - 直接覆盖 `examples/parallel-pr-review`
+- `ParallelReleaseChecklistExampleScenario` - 直接覆盖 `examples/parallel-release-checklist`
+- `ParallelHumanApprovalGateExampleScenario` - 直接覆盖 `examples/parallel-human-approval-gate`,并在运行中注入真实 `ralph emit` 批准事件
+- `ParallelIncidentResponseWarRoomExampleScenario` - 直接覆盖 `examples/parallel-incident-response-war-room`
+- `ParallelSecurityExceptionReviewExampleScenario` - 直接覆盖 `examples/parallel-security-exception-review`
+- `ParallelCustomerRenewalDeskExampleScenario` - 直接覆盖 `examples/parallel-customer-renewal-desk`
+- `ParallelAuditEvidencePackExampleScenario` - 直接覆盖 `examples/parallel-audit-evidence-pack`
+- `ParallelFinanceCloseControlRoomExampleScenario` - 直接覆盖 `examples/parallel-finance-close-control-room`
+- `ParallelHiringDebriefPanelExampleScenario` - 直接覆盖 `examples/parallel-hiring-debrief-panel`
+- `ParallelCustomerOnboardingActivationExampleScenario` - 直接覆盖 `examples/parallel-customer-onboarding-activation`
+- `ParallelSupportEscalationDeskExampleScenario` - 直接覆盖 `examples/parallel-support-escalation-desk`
+- `ParallelPartnerLaunchCoordinationExampleScenario` - 直接覆盖 `examples/parallel-partner-launch-coordination`
+- `ParallelFieldEnablementRolloutExampleScenario` - 直接覆盖 `examples/parallel-field-enablement-rollout`
+- `ParallelRevopsQuoteDeskExampleScenario` - 直接覆盖 `examples/parallel-revops-quote-desk`
+- `ParallelExecutiveBusinessReviewPrepExampleScenario` - 直接覆盖 `examples/parallel-executive-business-review-prep`
+- `ParallelCustomerAdvisoryBoardPrepExampleScenario` - 直接覆盖 `examples/parallel-customer-advisory-board-prep`
+- `ParallelRegionalOperatingReviewExampleScenario` - 直接覆盖 `examples/parallel-regional-operating-review`
+- `ParallelRenewalRiskCalibrationExampleScenario` - 直接覆盖 `examples/parallel-renewal-risk-calibration`
+- `ParallelMultiRegionPipelineSyncExampleScenario` - 直接覆盖 `examples/parallel-multi-region-pipeline-sync`
+- `ParallelLaunchReadinessCommandExampleScenario` - 直接覆盖 `examples/parallel-launch-readiness-command`
+- `ParallelMigrationRehearsalExampleScenario` - 直接覆盖 `examples/parallel-migration-rehearsal`
+- `ParallelPostmortemActionBoardExampleScenario` - 直接覆盖 `examples/parallel-postmortem-action-board`
+- `ParallelProposalAssemblyExampleScenario` - 直接覆盖 `examples/parallel-proposal-assembly`
+- `ParallelVendorSecurityProcurementExampleScenario` - 直接覆盖 `examples/parallel-vendor-security-procurement`
 
 ## Reports
 
@@ -202,6 +228,8 @@ impl TestScenario for MyScenario {
 ```
 
 3. Register in `src/scenarios/mod.rs` and `src/lib.rs`
+   - 如果这是“直接覆盖 examples/ 下 runnable example”的场景,优先放在 `src/scenarios/` 顶层
+   - 如果它是通用并行 helper / 非 example 场景,再放到 `src/scenarios/parallel/`
 4. Add to `get_all_scenarios()` in `src/main.rs`
 
 ## Environment Variables

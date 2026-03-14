@@ -52,6 +52,13 @@ pub struct HatJob {
     pub hat_id: HatId,
     /// 本次要执行的 prompt。
     pub prompt: String,
+    /// 持续会话(app_server 等)在“首 turn 之后”可使用的增量输入。
+    ///
+    /// 说明:
+    /// - 首 turn 仍然发送 `prompt`(完整上下文)。
+    /// - 后续 turn 可只发送“新事件 + 极短续聊提示”，避免重复注入整段大 prompt。
+    /// - 不支持持续会话的后端可忽略该字段,继续只使用 `prompt`。
+    pub continuation_prompt: Option<String>,
     /// 后端选择规则。
     pub backend: JobBackend,
     /// 会话策略(一次性 exec vs 持续 mcp/app_server).

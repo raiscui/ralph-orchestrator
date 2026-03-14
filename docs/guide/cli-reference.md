@@ -65,6 +65,84 @@ ralph run --max-iterations 50
 ralph run --record-session debug.jsonl
 ```
 
+### ralph record
+
+Work with `--record-session` JSONL files.
+
+```bash
+ralph record <SUBCOMMAND>
+```
+
+#### ralph record summary
+
+Summarize a completed record-session JSONL file.
+
+```bash
+ralph record summary <FILE>
+```
+
+**Examples:**
+
+```bash
+# Summarize an existing record-session
+ralph record summary /tmp/session.jsonl
+```
+
+#### ralph record watch
+
+Follow a growing record-session JSONL file (tail -f style).
+
+- Prints newly appended *complete* JSONL lines as-is (raw).
+- Tolerates a trailing partial line (missing final `\n`) without crashing or printing it early.
+
+```bash
+ralph record watch [FILE] [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--interval-ms <MS>` | Poll interval (milliseconds) |
+| `--from-start` | Print from the beginning, then follow |
+| `--until-event <EVENT>` | Exit once a record with this `event` is observed (agent automation) |
+| `--until-topic <TOPIC>` | Exit once a `bus.publish` record with this `data.topic` is observed (agent automation) |
+| `--timeout-secs <SECS>` | Timeout (requires `--until-*`). Exit code is `2` on timeout |
+| `-q, --quiet` | Do not print streamed lines (rely on exit code) |
+
+**Exit codes (agent automation):**
+
+- `0`: condition satisfied
+- `2`: timed out (only when `--timeout-secs` is provided)
+- other: interrupted or error (e.g., SIGINT is typically `130` on Unix)
+
+**Auto-locate (omit FILE):**
+
+When you run `ralph run --record-session <FILE>`, Ralph writes a pointer file at the workspace root:
+
+- `.ralph/record-session.latest` → points to `<FILE>` (record file may live outside `.ralph/`)
+
+Then you can run `ralph record watch` from the workspace or any subdirectory without providing `FILE`.
+
+**Examples:**
+
+```bash
+# Start a run that records to a file
+ralph run --idle-start --no-tui --record-session /tmp/session.jsonl
+
+# Watch the file (raw JSONL lines)
+ralph record watch /tmp/session.jsonl
+
+# Watch without providing FILE (uses .ralph/record-session.latest)
+ralph record watch
+
+# Replay existing lines first, then follow
+ralph record watch /tmp/session.jsonl --from-start
+
+# Agent automation: wait for a specific topic (exit 0 when seen, 2 on timeout)
+ralph record watch /tmp/session.jsonl --until-topic reply.human.message --timeout-secs 30 --quiet
+```
+
 ### ralph init
 
 Initialize configuration file.

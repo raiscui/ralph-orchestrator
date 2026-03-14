@@ -78,6 +78,8 @@ impl ParallelHatInstancesScenario {
   command: codex
   args:
     - exec
+    - -m
+    - gpt-5-codex
     - --full-auto
     # 降低推理强度/总结输出（避免 E2E 噪音与延迟）。
     - -c

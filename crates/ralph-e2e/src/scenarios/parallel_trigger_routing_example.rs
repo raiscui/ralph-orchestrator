@@ -58,6 +58,8 @@ impl ParallelTriggerRoutingExampleScenario {
   command: codex
   args:
     - exec
+    - -m
+    - gpt-5-codex
     - --full-auto
     - -c
     - 'model_reasoning_effort="low"'
@@ -238,6 +240,34 @@ impl ParallelTriggerRoutingExampleScenario {
 impl Default for ParallelTriggerRoutingExampleScenario {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// 这条回归专门锁住 example 提示词里的协议示例污染。
+    /// 一旦有人把 raw `<event ...>` 写回 example，真实后端很容易把它照抄成伪事件。
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config = include_str!("../../../../examples/parallel-trigger-routing/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
+    }
+
+    #[test]
+    fn example_config_does_not_embed_placeholder_payload_templates() {
+        let config = include_str!("../../../../examples/parallel-trigger-routing/ralph.yml");
+
+        assert!(
+            !config.contains("...规格内容...")
+                && !config.contains("&gt;...&lt;/event&gt;")
+                && !config.contains("- spec.start: ...")
+                && !config.contains("- spec.rejected: ..."),
+            "example config must not teach placeholder payloads that the model can echo back"
+        );
     }
 }
 

@@ -36,6 +36,7 @@ pub(crate) fn inject_all_hat_prompt(prompt: String, all_hat_prompt: Option<&str>
     let Some(extra) = all_hat_prompt.map(str::trim).filter(|s| !s.is_empty()) else {
         return prompt;
     };
+    let sanitized = sanitize_overlay_protocol_examples(extra);
 
     // ---------------------------------------------------------------------
     // 重要: `ralph_hat_instance_id` 必须置顶
@@ -68,11 +69,25 @@ pub(crate) fn inject_all_hat_prompt(prompt: String, all_hat_prompt: Option<&str>
             // 剩余正文: 去掉第一行以及其后所有空行(主要是 `\n\n`),
             // 由我们统一用 `\n\n` 重新分隔,避免出现多余空白.
             let rest = prompt[line_end..].trim_start_matches(|c| c == '\r' || c == '\n');
-            return format!("{first_line}\n\n{ALL_HAT_PROMPT_HEADER}\n\n{extra}\n\n{rest}");
+            return format!("{first_line}\n\n{ALL_HAT_PROMPT_HEADER}\n\n{sanitized}\n\n{rest}");
         }
     }
 
-    format!("{ALL_HAT_PROMPT_HEADER}\n\n{extra}\n\n{prompt}")
+    format!("{ALL_HAT_PROMPT_HEADER}\n\n{sanitized}\n\n{prompt}")
+}
+
+/// 把 overlay 里的协议示例改成“展示文本”，避免被模型直接照抄成真实事件。
+///
+/// 说明：
+/// - `config/all_hat.md` 会注入所有 hat prompt。
+/// - 其中存在不少 `<event ...>` 示例块，适合人看，但不适合直接喂给 worker。
+/// - 实际 E2E 里已经观察到 worker 会把这些示例话术当成真实输出，
+///   进而发布 `build.task` / `reply.human.message` 等与当前拓扑无关的事件。
+/// - 这里仅把 overlay 中的协议标签做 HTML 转义，不改各 hat 自己 instructions 里的真实协议示例。
+fn sanitize_overlay_protocol_examples(extra: &str) -> String {
+    extra
+        .replace("</event>", "&lt;/event&gt;")
+        .replace("<event", "&lt;event")
 }
 
 #[cfg(test)]
@@ -134,6 +149,25 @@ mod tests {
         assert!(
             overlay.contains("文件上下文位置特殊情况转移"),
             "compiled overlay should contain content from config/all_hat.md"
+        );
+    }
+
+    #[test]
+    fn inject_all_hat_prompt_escapes_protocol_examples() {
+        let prompt = "ralph_hat_instance_id:\"writer#1\"\n\nbase prompt".to_string();
+        let overlay = r#"Example:
+<event topic="build.task" target="writer">...</event>
+"#;
+
+        let merged = inject_all_hat_prompt(prompt, Some(overlay));
+
+        assert!(
+            merged.contains("&lt;event topic=\"build.task\" target=\"writer\">...&lt;/event&gt;"),
+            "overlay protocol examples should be escaped to avoid accidental event replay"
+        );
+        assert!(
+            !merged.contains("<event topic=\"build.task\" target=\"writer\">"),
+            "raw protocol tags from overlay should not remain in injected prompt"
         );
     }
 }

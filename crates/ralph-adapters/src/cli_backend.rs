@@ -1,6 +1,7 @@
 //! CLI backend definitions for different AI tools.
 
 use ralph_core::{CliConfig, HatBackend};
+use serde_json::Value;
 use std::fmt;
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -16,6 +17,8 @@ pub enum OutputFormat {
     Text,
     /// Newline-delimited JSON stream (Claude with --output-format stream-json)
     StreamJson,
+    /// Single JSON document with final response payload (Gemini headless)
+    Json,
 }
 
 /// Error when creating a custom backend without a command.
@@ -218,10 +221,15 @@ impl CliBackend {
     pub fn gemini() -> Self {
         Self {
             command: "gemini".to_string(),
-            args: vec!["--yolo".to_string()],
+            args: vec![
+                "--approval-mode".to_string(),
+                "yolo".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+            ],
             prompt_mode: PromptMode::Arg,
             prompt_flag: Some("-p".to_string()),
-            output_format: OutputFormat::Text,
+            output_format: OutputFormat::Json,
         }
     }
 
@@ -333,6 +341,56 @@ impl CliBackend {
             prompt_flag: Some("-i".to_string()), // NOT -p!
             output_format: OutputFormat::Text,
         }
+    }
+
+    /// Whether this backend emits a structured final response instead of plain text.
+    pub fn emits_structured_response(&self) -> bool {
+        self.output_format == OutputFormat::Json
+    }
+
+    /// Finalizes captured stdout/stderr into the text that higher layers should consume.
+    ///
+    /// 说明:
+    /// - 普通文本 backend 继续沿用“stdout + 带 `[stderr]` 前缀的 stderr”。
+    /// - 结构化 JSON backend 优先提取最终 `response`，这样上层拿到的是稳定正文。
+    /// - 若 JSON 解析失败，则回退到原始 stdout/stderr 组合，避免排障信息丢失。
+    pub fn finalize_headless_output(&self, stdout: &str, stderr: &str) -> String {
+        if let Some(response) = self.extract_structured_response(stdout) {
+            return response;
+        }
+
+        combine_stdout_stderr(stdout, stderr)
+    }
+
+    /// Returns the text that should be shown to users after structured capture completes.
+    ///
+    /// 说明:
+    /// - 对 JSON backend，优先显示提取后的 `response`。
+    /// - 如果提取失败，则退回 stdout 原文，至少保留原始证据。
+    pub fn finalize_structured_stdout_for_display(&self, stdout: &str) -> Option<String> {
+        if !self.emits_structured_response() {
+            return None;
+        }
+
+        if let Some(response) = self.extract_structured_response(stdout) {
+            return Some(response);
+        }
+
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        Some(trimmed.to_string())
+    }
+
+    /// Extracts the final response text from a structured backend payload.
+    pub fn extract_structured_response(&self, stdout: &str) -> Option<String> {
+        if !self.emits_structured_response() {
+            return None;
+        }
+
+        extract_json_response(stdout)
     }
 
     /// Codex in interactive TUI mode (no exec subcommand).
@@ -543,6 +601,52 @@ impl CliBackend {
     }
 }
 
+fn combine_stdout_stderr(stdout: &str, stderr: &str) -> String {
+    let mut combined = String::new();
+
+    if !stdout.is_empty() {
+        combined.push_str(stdout);
+    }
+
+    for line in stderr.lines() {
+        combined.push_str("[stderr] ");
+        combined.push_str(line);
+        combined.push('\n');
+    }
+
+    combined
+}
+
+fn extract_json_response(raw_output: &str) -> Option<String> {
+    let value = parse_json_object(raw_output)?;
+    let response = value.get("response")?.as_str()?.trim();
+
+    if response.is_empty() {
+        return None;
+    }
+
+    Some(response.to_string())
+}
+
+fn parse_json_object(raw_output: &str) -> Option<Value> {
+    let trimmed = raw_output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return Some(value);
+    }
+
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end < start {
+        return None;
+    }
+
+    serde_json::from_str::<Value>(&trimmed[start..=end]).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,8 +736,20 @@ mod tests {
         let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
 
         assert_eq!(cmd, "gemini");
-        assert_eq!(args, vec!["--yolo", "-p", "test prompt"]);
+        assert_eq!(
+            args,
+            vec![
+                "--approval-mode",
+                "yolo",
+                "--output-format",
+                "json",
+                "-p",
+                "test prompt"
+            ]
+        );
         assert!(stdin.is_none());
+        assert_eq!(backend.output_format, OutputFormat::Json);
+        assert!(backend.emits_structured_response());
     }
 
     #[test]
@@ -774,7 +890,17 @@ mod tests {
 
         assert_eq!(cmd, "gemini");
         assert_eq!(args_auto, args_interactive);
-        assert_eq!(args_auto, vec!["--yolo", "-p", "test prompt"]);
+        assert_eq!(
+            args_auto,
+            vec![
+                "--approval-mode",
+                "yolo",
+                "--output-format",
+                "json",
+                "-p",
+                "test prompt"
+            ]
+        );
         assert_eq!(stdin_auto, stdin_interactive);
         assert!(stdin_auto.is_none());
     }
@@ -996,6 +1122,46 @@ mod tests {
         assert_eq!(args, vec!["--yolo", "-i", "test prompt"]);
         assert_eq!(backend.prompt_flag, Some("-i".to_string()));
         assert!(stdin.is_none());
+    }
+
+    #[test]
+    fn test_gemini_finalize_headless_output_extracts_response() {
+        let backend = CliBackend::gemini();
+        let stdout = r#"{
+  "session_id": "abc",
+  "response": "Final answer from gemini"
+}"#;
+
+        let output = backend.finalize_headless_output(stdout, "");
+
+        assert_eq!(output, "Final answer from gemini");
+    }
+
+    #[test]
+    fn test_gemini_finalize_headless_output_handles_mixed_logs() {
+        let backend = CliBackend::gemini();
+        let stdout = r#"YOLO mode is enabled.
+{
+  "session_id": "abc",
+  "response": "Stable final text"
+}
+Server update listener ready."#;
+
+        let output = backend.finalize_headless_output(stdout, "");
+
+        assert_eq!(output, "Stable final text");
+    }
+
+    #[test]
+    fn test_gemini_finalize_headless_output_falls_back_when_json_invalid() {
+        let backend = CliBackend::gemini();
+        let stdout = "not-json";
+        let stderr = "some warning";
+
+        let output = backend.finalize_headless_output(stdout, stderr);
+
+        assert!(output.contains("not-json"));
+        assert!(output.contains("[stderr] some warning"));
     }
 
     #[test]

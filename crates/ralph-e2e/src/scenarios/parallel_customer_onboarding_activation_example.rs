@@ -1,0 +1,388 @@
+//! Tier 8: Parallel Runtime (experimental) - real-world example coverage.
+//!
+//! 目标:
+//! - 直接覆盖 `examples/parallel-customer-onboarding-activation`
+//! - 验证 customer onboarding 多输入线并行推进后由 finalizer 汇总 `onboarding.activation.ready`
+
+use super::parallel::{
+    parse_parallel_job_line, read_agents_snapshot, setup_prompt_file_example_workspace,
+};
+use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
+use crate::Backend;
+use crate::executor::{ExecutionResult, RalphExecutor, ScenarioConfig};
+use crate::models::TestResult;
+use async_trait::async_trait;
+use std::collections::HashSet;
+use std::path::Path;
+
+/// 直接覆盖 `examples/parallel-customer-onboarding-activation` 的端到端场景。
+pub struct ParallelCustomerOnboardingActivationExampleScenario {
+    id: String,
+    description: String,
+    tier: String,
+}
+
+impl ParallelCustomerOnboardingActivationExampleScenario {
+    pub fn new() -> Self {
+        Self {
+            id: "parallel-customer-onboarding-activation-example".to_string(),
+            description: "Directly runs examples/parallel-customer-onboarding-activation and asserts onboarding lanes converge into onboarding.activation.ready".to_string(),
+            tier: "Tier 8: Parallel Runtime".to_string(),
+        }
+    }
+
+    fn parallel_mode_visible(&self, result: &ExecutionResult) -> crate::models::Assertion {
+        let visible = result.stdout.contains("[supervisor] instances");
+        let builder =
+            AssertionBuilder::new("Parallel mode visible (customer onboarding activation example)")
+                .expected("stdout contains '[supervisor] instances' banner")
+                .actual(if visible {
+                    "Found supervisor instance banner".to_string()
+                } else {
+                    "Missing supervisor instance banner".to_string()
+                });
+
+        if visible {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
+    fn agents_snapshot_written(&self, executor: &RalphExecutor) -> crate::models::Assertion {
+        let snapshot = match read_agents_snapshot(executor.workspace()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return AssertionBuilder::new(
+                    "Agents snapshot written (customer onboarding activation example)",
+                )
+                .expected(".ralph/agents.json exists and is valid JSON")
+                .actual(error)
+                .failed()
+                .build();
+            }
+        };
+
+        let instance_count = snapshot.instances.len();
+        let has_integration = snapshot
+            .instances
+            .iter()
+            .any(|instance| instance.hat_id == "integration_lead");
+        let has_security_handoff = snapshot
+            .instances
+            .iter()
+            .any(|instance| instance.hat_id == "security_handoff_owner");
+        let has_enablement = snapshot
+            .instances
+            .iter()
+            .any(|instance| instance.hat_id == "enablement_coordinator");
+        let has_success_plan = snapshot
+            .instances
+            .iter()
+            .any(|instance| instance.hat_id == "success_plan_owner");
+        let has_activation_manager = snapshot
+            .instances
+            .iter()
+            .any(|instance| instance.hat_id == "activation_manager");
+
+        let ok = instance_count >= 5
+            && has_integration
+            && has_security_handoff
+            && has_enablement
+            && has_success_plan
+            && has_activation_manager;
+
+        let builder = AssertionBuilder::new(
+            "Agents snapshot written (customer onboarding activation example)",
+        )
+        .expected("agents.json contains 4 lane hats + activation manager")
+        .actual(format!(
+            "instance_count={instance_count}, integration={has_integration}, security_handoff={has_security_handoff}, enablement={has_enablement}, success_plan={has_success_plan}, activation_manager={has_activation_manager}"
+        ));
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
+    fn required_topic_chain_observed(&self, result: &ExecutionResult) -> crate::models::Assertion {
+        let required = [
+            "onboarding.integration.review",
+            "onboarding.security.handoff",
+            "onboarding.enablement.plan",
+            "onboarding.success.plan.review",
+            "integration.ready",
+            "security.handoff.ready",
+            "enablement.ready",
+            "success.plan.ready",
+            "onboarding.activation.request",
+            "onboarding.activation.ready",
+        ];
+
+        let missing = required
+            .iter()
+            .filter(|topic| !result.events.iter().any(|event| event.topic == **topic))
+            .copied()
+            .collect::<Vec<_>>();
+
+        let ok = missing.is_empty();
+        let builder = AssertionBuilder::new(
+            "Required topic chain observed (customer onboarding activation example)",
+        )
+        .expected("all onboarding lane topics + onboarding.activation.ready are present")
+        .actual(format!("missing={missing:?}"));
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
+    fn no_unexpected_gates(&self, result: &ExecutionResult) -> crate::models::Assertion {
+        let gates = result
+            .events
+            .iter()
+            .filter(|event| event.topic.starts_with("gate.") || event.topic == "approval.requested")
+            .map(|event| event.topic.clone())
+            .collect::<Vec<_>>();
+        let ok = gates.is_empty();
+        let builder =
+            AssertionBuilder::new("No unexpected gates (customer onboarding activation example)")
+                .expected("no gate.* or approval.requested topics")
+                .actual(format!("gate_topics={gates:?}"));
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
+    fn final_payload_expected(&self, result: &ExecutionResult) -> crate::models::Assertion {
+        let payload = result
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.topic == "onboarding.activation.ready")
+            .map(|event| event.payload.clone())
+            .unwrap_or_default();
+
+        let ok = onboarding_activation_payload_matches(&payload);
+        let builder = AssertionBuilder::new(
+            "Final payload expected (customer onboarding activation example)",
+        )
+        .expected(
+            "onboarding.activation.ready payload semantically contains READY_FOR_KICKOFF, LOW, and api_sandbox_enablement",
+        )
+        .actual(if payload.is_empty() {
+            "onboarding.activation.ready payload missing".to_string()
+        } else {
+            payload
+        });
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
+    fn no_new_jobs_started_after_loop_complete(
+        &self,
+        result: &ExecutionResult,
+    ) -> crate::models::Assertion {
+        let completion_promise = "LOOP_COMPLETE";
+        let mut completion_seen = false;
+
+        let mut jobs_before: HashSet<(String, u64)> = HashSet::new();
+        let mut new_jobs_after: HashSet<(String, u64)> = HashSet::new();
+
+        for line in result.stdout.lines() {
+            if let Some((instance_id, job_id)) = parse_parallel_job_line(line) {
+                let key = (instance_id, job_id);
+                if completion_seen {
+                    if !jobs_before.contains(&key) {
+                        new_jobs_after.insert(key);
+                    }
+                } else {
+                    jobs_before.insert(key);
+                }
+            }
+
+            if !completion_seen
+                && line.trim_start().starts_with("[ralph#")
+                && line.contains(":out:job=")
+                && let Some((_prefix, payload)) = line.split_once("] ")
+                && payload.trim() == completion_promise
+            {
+                completion_seen = true;
+            }
+        }
+
+        let mut new_jobs = new_jobs_after.into_iter().collect::<Vec<_>>();
+        new_jobs.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+
+        let ok = completion_seen && new_jobs.is_empty();
+        let builder = AssertionBuilder::new(
+            "No new jobs after LOOP_COMPLETE (customer onboarding activation example)",
+        )
+        .expected("After LOOP_COMPLETE, no new job_id should appear in stdout")
+        .actual(format!(
+            "completion_seen={completion_seen}, new_jobs_after={new_jobs:?}"
+        ));
+
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+}
+
+fn onboarding_activation_payload_matches(payload: &str) -> bool {
+    if payload.is_empty() {
+        return false;
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+        let onboarding_status = value
+            .get("onboarding_status")
+            .and_then(|value| value.as_str());
+        let primary_risk = value.get("primary_risk").and_then(|value| value.as_str());
+        let first_milestone = value
+            .get("first_milestone")
+            .and_then(|value| value.as_str());
+
+        return onboarding_status == Some("READY_FOR_KICKOFF")
+            && primary_risk == Some("LOW")
+            && first_milestone == Some("api_sandbox_enablement");
+    }
+
+    payload.contains("onboarding_status: READY_FOR_KICKOFF")
+        && payload.contains("primary_risk: LOW")
+        && payload.contains("first_milestone: api_sandbox_enablement")
+}
+
+impl Default for ParallelCustomerOnboardingActivationExampleScenario {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_silent_wait_before_all_ready_lanes() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
+
+        assert!(
+            config.contains("当 4 条 ready 还没有全部到齐时:")
+                && config.contains("你必须保持静默,空输出是合法且首选的")
+                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
+            "parallel-customer-onboarding-activation config must explicitly forbid interim prose before all ready lanes arrive"
+        );
+    }
+
+    #[test]
+    fn example_config_forbids_self_closing_events() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
+
+        assert!(
+            config.contains("不要使用自闭合 `&lt;event .../&gt;` 形式。")
+                && config.contains("不要把业务字段塞进 opening tag 属性。"),
+            "customer onboarding example must forbid self-closing events and attribute-only payloads"
+        );
+    }
+
+    #[test]
+    fn payload_matcher_accepts_json_and_line_payloads() {
+        let json_payload = r#"{"onboarding_id":"ONB-2026-04","onboarding_status":"READY_FOR_KICKOFF","primary_risk":"LOW","first_milestone":"api_sandbox_enablement"}"#;
+        let line_payload = "onboarding_id: ONB-2026-04
+onboarding_status: READY_FOR_KICKOFF
+primary_risk: LOW
+first_milestone: api_sandbox_enablement";
+
+        assert!(super::onboarding_activation_payload_matches(json_payload));
+        assert!(super::onboarding_activation_payload_matches(line_payload));
+    }
+}
+
+#[async_trait]
+impl TestScenario for ParallelCustomerOnboardingActivationExampleScenario {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn tier(&self) -> &str {
+        &self.tier
+    }
+
+    fn supported_backends(&self) -> Vec<Backend> {
+        vec![Backend::Codex]
+    }
+
+    fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
+        setup_prompt_file_example_workspace(
+            workspace,
+            backend,
+            "parallel-customer-onboarding-activation",
+            18,
+        )
+    }
+
+    async fn run(
+        &self,
+        executor: &RalphExecutor,
+        config: &ScenarioConfig,
+    ) -> Result<TestResult, ScenarioError> {
+        let start = std::time::Instant::now();
+        let execution = executor.run(config).await.map_err(|error| {
+            ScenarioError::ExecutionError(format!("ralph execution failed: {error}"))
+        })?;
+        let duration = start.elapsed();
+
+        let assertions = vec![
+            Assertions::response_received(&execution),
+            Assertions::exit_code(&execution, 0),
+            Assertions::no_timeout(&execution),
+            self.parallel_mode_visible(&execution),
+            self.agents_snapshot_written(executor),
+            self.required_topic_chain_observed(&execution),
+            self.no_unexpected_gates(&execution),
+            self.final_payload_expected(&execution),
+            self.no_new_jobs_started_after_loop_complete(&execution),
+        ];
+
+        let all_passed = assertions.iter().all(|assertion| assertion.passed);
+
+        Ok(TestResult {
+            scenario_id: self.id.clone(),
+            scenario_description: self.description.clone(),
+            backend: String::new(),
+            tier: self.tier.clone(),
+            passed: all_passed,
+            assertions,
+            duration,
+        })
+    }
+}

@@ -16,6 +16,7 @@ use crate::models::TestResult;
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 // 这里的实验数量与 `fill_experiment_plan` 的预填内容对齐。
@@ -73,6 +74,8 @@ impl ParallelExperimentalDevEngineExampleScenario {
   prompt_mode: "arg"
   args:
     - "exec"
+    - "-m"
+    - "gpt-5-codex"
     - "--sandbox"
     - "danger-full-access"
     - "-c"
@@ -366,10 +369,11 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
 - 优先采纳：改动更小、且验证证据更完整的 commit
 - 如果两个实验结果都等价：优先选择 `exp-001`（减少不确定性）
+- 如果某个候选缺少明确的顶层 `commit` 字段,它不能直接进入 integration。
 
 ## 最终验收（Final Verification / 主工作区）
 
-- `rg -n "exp-00[12]" e2e_marker.txt`
+- `rg -n "exp-00[12]" . -g 'e2e_marker_exp_*.txt'`
 
 ## 实验列表（Experiments）
 
@@ -377,7 +381,7 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
 #### 实现（Implementation）
 
-1. 创建文件 `e2e_marker.txt`，内容必须包含字符串：`exp-001`
+1. 创建文件 `e2e_marker_exp_001.txt`，内容必须包含字符串：`exp-001`
 2. 将改动提交为 1 个 commit（用命令级 git 身份，避免环境缺失导致 commit 失败）：
    - `git add -A`
    - `git -c user.name="ralph" -c user.email="ralph@local" commit -m "exp-001: e2e marker file"`
@@ -385,18 +389,21 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
 #### 验证（Verification）
 
-- `rg -n "exp-001" e2e_marker.txt`
+- `rg -n "exp-001" e2e_marker_exp_001.txt`
 - `git show --name-only --oneline HEAD`
+- `git rev-parse HEAD`
 
 #### 备注（Notes，可选）
 
-- 产物要求：`experiment.result` 必须包含 `commit`（git hash），不要在 payload 里嵌入 patch 文本。
+- 产物要求：`experiment.result` 必须包含独立顶层 `commit:` 字段,并且放在 `verification_evidence` 之前。
+- `commit` 必须来自真实执行的 `git rev-parse HEAD`。
+- `experiment.reviewed` 在 `approved` 时也必须回写同一个顶层 `commit:` 字段。
 
 ### exp-002：alternative marker file
 
 #### 实现（Implementation）
 
-1. 创建文件 `e2e_marker.txt`，内容必须包含字符串：`exp-002`
+1. 创建文件 `e2e_marker_exp_002.txt`，内容必须包含字符串：`exp-002`
 2. 将改动提交为 1 个 commit（用命令级 git 身份，避免环境缺失导致 commit 失败）：
    - `git add -A`
    - `git -c user.name="ralph" -c user.email="ralph@local" commit -m "exp-002: e2e marker file"`
@@ -404,11 +411,79 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
 #### 验证（Verification）
 
-- `rg -n "exp-002" e2e_marker.txt`
+- `rg -n "exp-002" e2e_marker_exp_002.txt`
 - `git show --name-only --oneline HEAD`
+- `git rev-parse HEAD`
+
+#### 备注（Notes，可选）
+
+- 产物要求：`experiment.result` 必须包含独立顶层 `commit:` 字段,并且放在 `verification_evidence` 之前。
+- `commit` 必须来自真实执行的 `git rev-parse HEAD`。
+- `experiment.reviewed` 在 `approved` 时也必须回写同一个顶层 `commit:` 字段。
 
 "#;
         Ok(plan.to_string())
+    }
+
+    fn seed_workspace_git_clone(workspace: &Path, repo_root: &Path) -> Result<(), ScenarioError> {
+        // -----------------------------------------------------------------
+        // 说明：
+        // - 这个 example 的 runner / integrator 都会执行 git 命令。
+        // - 如果 E2E workspace 只是“仓库里的一个普通子目录”，`git rev-parse --show-toplevel`
+        //   会一路向上命中主仓库，把 experiment/integration 的副作用直接落到真实工作树。
+        // - 因此这里必须先在 scenario workspace 根部准备一份隔离 git clone，
+        //   让 shared workspace / worktree 都只作用于这份副本。
+        // - E2E 复跑常配合 `--keep-workspace`，因此 clone 前必须清掉旧目录，
+        //   否则第二次 setup 会直接报“destination path already exists”。
+        // -----------------------------------------------------------------
+        if workspace.exists() {
+            let metadata = std::fs::symlink_metadata(workspace).map_err(|e| {
+                ScenarioError::SetupError(format!(
+                    "failed to stat existing workspace {} before isolated clone: {e}",
+                    workspace.display()
+                ))
+            })?;
+
+            if metadata.is_dir() {
+                std::fs::remove_dir_all(workspace).map_err(|e| {
+                    ScenarioError::SetupError(format!(
+                        "failed to remove existing workspace dir {} before isolated clone: {e}",
+                        workspace.display()
+                    ))
+                })?;
+            } else {
+                std::fs::remove_file(workspace).map_err(|e| {
+                    ScenarioError::SetupError(format!(
+                        "failed to remove existing workspace file {} before isolated clone: {e}",
+                        workspace.display()
+                    ))
+                })?;
+            }
+        }
+
+        let output = Command::new("git")
+            .args(["clone", "--no-hardlinks"])
+            .arg(repo_root)
+            .arg(workspace)
+            .output()
+            .map_err(|e| {
+                ScenarioError::SetupError(format!(
+                    "failed to clone repo into isolated example workspace {}: {e}",
+                    workspace.display()
+                ))
+            })?;
+
+        if !output.status.success() {
+            return Err(ScenarioError::SetupError(format!(
+                "git clone for isolated example workspace failed: workspace={} exit_code={:?} stdout={} stderr={}",
+                workspace.display(),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -437,14 +512,16 @@ impl TestScenario for ParallelExperimentalDevEngineExampleScenario {
     }
 
     fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
+        let root = crate::executor::find_workspace_root().ok_or_else(|| {
+            ScenarioError::SetupError("failed to find workspace root (Cargo.toml)".to_string())
+        })?;
+
+        Self::seed_workspace_git_clone(workspace, &root)?;
+
         // 创建 `.agent/`（某些代码路径会假设其存在）
         let agent_dir = workspace.join(".agent");
         std::fs::create_dir_all(&agent_dir).map_err(|e| {
             ScenarioError::SetupError(format!("failed to create .agent directory: {e}"))
-        })?;
-
-        let root = crate::executor::find_workspace_root().ok_or_else(|| {
-            ScenarioError::SetupError("failed to find workspace root (Cargo.toml)".to_string())
         })?;
 
         let example_dir = root.join("examples/parallel-experimental-dev-engine");
@@ -541,5 +618,177 @@ impl TestScenario for ParallelExperimentalDevEngineExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn init_git_repo(root: &Path) {
+        std::fs::create_dir_all(root.join("examples/parallel-experimental-dev-engine"))
+            .expect("create example dir");
+        std::fs::write(
+            root.join("examples/parallel-experimental-dev-engine/ralph.yml"),
+            "event_loop:\n  prompt_file: \"PROMPT.md\"\n",
+        )
+        .expect("write example config");
+        std::fs::write(
+            root.join("examples/parallel-experimental-dev-engine/PROMPT.md"),
+            "# plan\n",
+        )
+        .expect("write example prompt");
+        std::fs::write(root.join("README.md"), "repo seed\n").expect("write repo seed");
+
+        let init = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init should succeed");
+
+        let add = Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .output()
+            .expect("git add");
+        assert!(add.status.success(), "git add should succeed");
+
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "user.name=ralph",
+                "-c",
+                "user.email=ralph@local",
+                "commit",
+                "-m",
+                "seed",
+            ])
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success(), "git commit should succeed");
+    }
+
+    #[test]
+    fn seed_workspace_git_clone_creates_isolated_git_repo() {
+        let repo_root = TempDir::new().expect("repo tempdir");
+        init_git_repo(repo_root.path());
+
+        let workspace_parent = TempDir::new().expect("workspace parent");
+        let workspace = workspace_parent.path().join("scenario-workspace");
+
+        ParallelExperimentalDevEngineExampleScenario::seed_workspace_git_clone(
+            &workspace,
+            repo_root.path(),
+        )
+        .expect("seed isolated clone");
+
+        assert!(
+            workspace.join(".git").exists(),
+            "workspace should become a git repo clone"
+        );
+        assert!(
+            workspace
+                .join("examples/parallel-experimental-dev-engine/ralph.yml")
+                .exists(),
+            "cloned workspace should contain example config"
+        );
+
+        let rev_parse = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git rev-parse");
+        assert!(
+            rev_parse.status.success(),
+            "isolated workspace clone should answer git rev-parse"
+        );
+        let actual = std::fs::canonicalize(String::from_utf8_lossy(&rev_parse.stdout).trim())
+            .expect("canonicalize git toplevel");
+        let expected = std::fs::canonicalize(&workspace).expect("canonicalize workspace");
+        assert_eq!(
+            actual, expected,
+            "git top-level should be the isolated workspace, not an ancestor repo"
+        );
+    }
+
+    #[test]
+    fn seed_workspace_git_clone_replaces_existing_workspace_dir() {
+        let repo_root = TempDir::new().expect("repo tempdir");
+        init_git_repo(repo_root.path());
+
+        let workspace_parent = TempDir::new().expect("workspace parent");
+        let workspace = workspace_parent.path().join("scenario-workspace");
+        std::fs::create_dir_all(&workspace).expect("create stale workspace dir");
+        std::fs::write(workspace.join("stale.txt"), "stale").expect("write stale file");
+
+        ParallelExperimentalDevEngineExampleScenario::seed_workspace_git_clone(
+            &workspace,
+            repo_root.path(),
+        )
+        .expect("replace workspace with isolated clone");
+
+        assert!(
+            workspace.join(".git").exists(),
+            "workspace should be replaced by a git repo clone"
+        );
+        assert!(
+            !workspace.join("stale.txt").exists(),
+            "stale workspace contents should be removed before clone"
+        );
+    }
+
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-experimental-dev-engine/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
+    }
+
+    #[test]
+    fn example_config_does_not_embed_placeholder_payload_templates() {
+        let config =
+            include_str!("../../../../examples/parallel-experimental-dev-engine/ralph.yml");
+
+        assert!(
+            !config.contains("...payload...") && !config.contains("### exp-001: ..."),
+            "example config must not teach placeholder payloads that the model can echo back"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_structured_commit_fields_for_review_and_integration() {
+        let config =
+            include_str!("../../../../examples/parallel-experimental-dev-engine/ralph.yml");
+
+        assert!(
+            config.contains("顶层 `commit` 字段")
+                && config.contains("experiment.reviewed.commit")
+                && config.contains("git rev-parse HEAD"),
+            "example config must require a top-level commit field that survives truncation and can flow into integration"
+        );
+    }
+
+    #[test]
+    fn filled_experiment_plan_requires_rev_parse_and_structured_commit_contract() {
+        let plan = ParallelExperimentalDevEngineExampleScenario::fill_experiment_plan("# template")
+            .expect("fill experiment plan");
+
+        assert!(
+            plan.matches("git rev-parse HEAD").count() >= 2,
+            "filled experiment plan should require rev-parse for both experiments"
+        );
+        assert!(
+            plan.contains("独立顶层 `commit:` 字段")
+                && plan.contains("experiment.reviewed")
+                && plan.contains("verification_evidence"),
+            "filled experiment plan should reinforce the structured commit contract"
+        );
     }
 }

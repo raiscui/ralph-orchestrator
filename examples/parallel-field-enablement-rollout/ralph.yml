@@ -1,0 +1,224 @@
+# Parallel Field Enablement Rollout example
+#
+# 目标:
+# - 演示 field enablement rollout 前的多工作面并行推进
+# - 演示 curriculum / demo / briefing / certification 收齐后再给 rollout 结论
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Field Enablement Rollout
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `FIELD_ENABLEMENT_PACKET`。
+    其中至少包含:
+    - `## Curriculum Packet`
+    - `## Demo Environment Packet`
+    - `## Manager Briefing Packet`
+    - `## Certification Plan Packet`
+
+    重要规则:
+    - 你必须先并行派发 4 条 field enablement 任务。
+    - 只有 4 条 ready 事件全部到齐后,才允许发布 `enablement.rollout.packet.request`。
+    - `enablement.rollout.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+    - 在 `enablement.rollout.ready` 出现前,禁止输出任何普通文本、分析文本或解释文本。
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次。在那之前,连提及都不允许。
+    - 如果某个 lane 只输出了 `&lt;event ...&gt;` 这类转义展示文本,不要把它当成 ready 事件。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `enablement.curriculum.review`
+       - `enablement.demo.environment.review`
+       - `enablement.manager.briefing.review`
+       - `enablement.certification.plan.review`
+    2) 每条任务都必须携带:
+       - rollout_id
+       - lane
+       - review_packet
+
+    当你观察到:
+    - `curriculum.ready`
+    - `demo.ready`
+    - `briefing.ready`
+    - `certification.ready`
+    全部出现后:
+    - 你必须只发布一次 `enablement.rollout.packet.request`
+    - 后续重复或迟到的 `*.ready` 必须忽略
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持静默,空输出是合法且首选的
+    - 不要输出任何等待说明、分析文本、topic 名称或 completion promise
+    - 不要重复发布已发过的 fanout 任务
+
+    当你收到 `enablement.rollout.ready` 时:
+    1) 输出 rollout summary
+       - 至少包含 rollout_id、rollout_status、audience、first_wave
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="enablement.curriculum.review"&gt;
+    rollout_id: ...
+    lane: curriculum
+    review_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "enablement.rollout.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  curriculum_designer:
+    name: "Curriculum Designer"
+    description: "确认课程内容是否达到 rollout 条件。"
+    triggers: ["enablement.curriculum.review"]
+    publishes: ["curriculum.ready"]
+    instances: 1
+    instructions: |
+      你是 `curriculum_designer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `curriculum.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: curriculum
+      - status: ready
+      - curriculum_state
+      - summary
+      - `summary` 保持 1 句短句,不要写分析过程。
+
+  demo_environment_owner:
+    name: "Demo Environment Owner"
+    description: "确认 demo 环境是否可供 field 实战演练。"
+    triggers: ["enablement.demo.environment.review"]
+    publishes: ["demo.ready"]
+    instances: 1
+    instructions: |
+      你是 `demo_environment_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `demo.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: demo_environment
+      - status: ready
+      - demo_state
+      - summary
+      - `summary` 保持 1 句短句,不要补额外说明。
+
+  manager_briefing_owner:
+    name: "Manager Briefing Owner"
+    description: "确认 frontline manager briefing 已可下发。"
+    triggers: ["enablement.manager.briefing.review"]
+    publishes: ["briefing.ready"]
+    instances: 1
+    instructions: |
+      你是 `manager_briefing_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `briefing.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: manager_briefing
+      - status: ready
+      - briefing_state
+      - summary
+      - `summary` 保持 1 句短句,不要写流程外延伸。
+
+  certification_tracker:
+    name: "Certification Tracker"
+    description: "确认认证计划与追踪节奏已就绪。"
+    triggers: ["enablement.certification.plan.review"]
+    publishes: ["certification.ready"]
+    instances: 1
+    instructions: |
+      你是 `certification_tracker`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `certification.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: certification
+      - status: ready
+      - certification_state
+      - summary
+      - `summary` 保持 1 句短句,不要补额外附录。
+
+  rollout_conductor:
+    name: "Rollout Conductor"
+    description: "汇总 enablement 输入,形成 rollout packet 结论。"
+    triggers: ["enablement.rollout.packet.request"]
+    publishes: ["enablement.rollout.ready"]
+    instances: 1
+    instructions: |
+      你是 `rollout_conductor`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `enablement.rollout.ready`。
+      - 当你收到 `enablement.rollout.packet.request` 时,必须立刻输出且只输出 1 条 `enablement.rollout.ready`。
+      - 你的最终回复必须直接从 `enablement.rollout.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      决策规则:
+      - 如果 4 条 lane 都 `status: ready`
+      - 最终 `rollout_status` 必须是 `READY_TO_ROLLOUT`
+      - `audience` 必须是 `field-sellers`
+      - `first_wave` 必须是 `ae_managers`
+
+      输出 payload 最低要求:
+      - rollout_id
+      - rollout_status
+      - audience
+      - first_wave
+      - summary
+      - `summary` 保持 1 句短句,不要补额外分析过程。

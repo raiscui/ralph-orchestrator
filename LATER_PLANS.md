@@ -218,6 +218,39 @@
   - 这会在你只想跑 fake 场景时,意外把 live 场景也跑了(真实 token 成本 + 时长)。
 
 - 后续建议(可选):
+## 2026-03-09 23:19:50 +0800 | 并行 completion promise 仍然容易被普通 prose 误触发(可选)
+
+- 现状:
+  - `crates/ralph-core/src/event_parser.rs` 的 `contains_promise()` 只要在事件标签外看到 completion token 就会命中。
+  - 这对严格 example 很有用,但也意味着 coordinator 如果在等待态的普通文本里提到 `LOOP_COMPLETE`,会直接改变控制面语义。
+
+- 本轮已落地的短期处理:
+  - 通过 example prompt 把等待态改成“静默优先”,先把 `parallel-migration-rehearsal-example` 收住了。
+
+- 后续可选增强:
+  - 评估是否把 completion promise 检测进一步收紧成:
+    - 独立单行匹配
+    - 或保留一个更强的保留字/sentinel 语义
+    - 或在并行模式下给 completion promise 增加结构化包裹/显式 event 替代
+
+- 价值:
+  - 可以降低 example prompt 对“不要随口提 completion token”这类软约束的敏感度。
+  - 也能减少真实后端在等待态自由发挥时带来的误触发风险。
+
+## 2026-03-09 12:34:05 +0800 | 后续可选增强: 给并行 E2E 增加结构化 job ledger
+
+- 现状:
+  - `parallel-trigger-routing-example` 这轮虽然通过了,但 `Hat job run counts` 仍然依赖 stdout 前缀 `[instance:out|err:job=...]`
+  - `result.events` 可以证明业务闭环,却不能证明 `spec_logger` 这类“不发事件的 hat”究竟跑了几次
+- 风险:
+  - 只要 future 再出现 stdout 形态变化/降噪策略变化,这类断言就容易再次漂移
+- 建议:
+  - 补一份结构化 job ledger,例如 `.ralph/jobs.jsonl`
+  - 或把 `job_id` 正式打通到 session recorder / supervisor 持久化路径
+  - 这样 example 场景就能把:
+    - 业务正确性 -> `events.jsonl`
+    - job 次数/实例运行 -> 结构化 ledger
+  - 和 stdout 的展示 contract 解耦
   - 提供更精确的筛选能力,例如:
     - `--filter-exact <scenario_id>`
     - 或 `--filter-regex <re>`
@@ -303,3 +336,126 @@
 - 边界提醒(避免做成平台):
   - 不建议把 ralph 扩成 "runtime OS"(channel/gateway/硬件外设/多租户存储全家桶).
   - 优先做 "协议清晰 + 审计证据 + 可复现测试" 这类薄层改良.
+
+## 2026-03-02 16:12 +0800 | 已完成回收: e2e 报告一致性
+
+- 已完成项:
+  - `2026-03-02 16:42 +0800 | e2e 报告一致性(可选优化)` 已落地。
+- 完成结果:
+  - 默认 `--report markdown` 现已同步刷新 `report.json`。
+  - `report.md` 与 `report.json` 不再出现“新旧轮次混用”的歧义。
+
+## 2026-03-04 14:05 +0800 | 可选: 面向编程智能体的"实时证据"工作流强化(record watch)
+
+- 背景:
+  - `ralph record watch`/`ralph record summary` 已经把 record-session 从“事后文件”升级为“可实时观测的证据流”。
+  - 但为了避免再次出现“智能体说修好了,人工测仍失败”的假阳性,需要把它纳入默认验证闭环.
+
+- 可选增强(偏流程/工具,按 ROI 排序):
+  1) record-session 元信息更自描述:
+     - `_meta.session_start` 增加 `current_exe`(实际二进制路径)与 `version`。
+     - 价值: 一眼区分“跑的是不是同一个 ralph”,减少口径歧义。
+  2) record watch 增强为可脚本化探针:
+     - `--until-topic <topic>` / `--timeout <secs>` / `--grep <pattern>` 之类的参数.
+     - 价值: 编程智能体可以用它做实时断言,而不是只能人工看输出.
+  3) 文档与 DoD 固化:
+     - 明确 "durability contract" 与 "display contract" 是两件事.
+     - display 类修复默认做 2x2 验证矩阵(TUI/Pretty x Rendered/Plain).
+
+## 2026-03-04 15:25 +0800 | 回溯: 2026-03-04 14:05 的"实时证据"增强已落地
+
+- 已落地:
+  - `_meta.session_start` 增加 `current_exe` 与 `version`.
+  - `ralph record watch` 增加 `--until-event/--until-topic/--timeout-secs/--quiet` 并约定 timeout exit code=2.
+  - 文档与规范已固化到:
+    - `docs/advanced/testing.md`
+    - `docs/guide/cli-reference.md`
+    - 根 `AGENTS.md`
+
+## 2026-03-06 10:42 +0800 | 并行 Output 滚动模型后续可选增强: 从"显示行预换行"进一步升级到"视觉行级滚动"
+
+- 本次已修复:
+  - reply 被长行包裹后顶出视口的问题
+  - 自动到底/底部可见性重新可靠
+- 仍可继续打磨(可选,不是本次 blocker):
+  - 当前手动 `j/k` 滚动仍按 buffer 行推进
+  - 由于 buffer 已是预换行后的显示行,大部分场景已足够
+  - 但如果未来要支持更细粒度的"行内继续滚动 / 复制跨包裹行",可以把并行 Output 进一步统一成真正的视觉行级 viewport 模型
+## 2026-03-07 16:34 +0800 | 跟进 `integration_agents` 里的 watch 测试稳定性
+
+- 现象:
+  - `cargo test -p ralph-cli` 中, `tests/integration_agents.rs::test_agents_command_watch_prints_output_at_least_once` 仍失败。
+  - 失败断言是 `stdout.contains("Watching")`。
+- 当前证据:
+  - 用 shell 重定向与 Python `pipe + kill + wait` 最小复现时, `ralph agents --watch --watch-interval-ms 50` 能稳定输出 `Watching`、表头和 `writer#1` 行。
+  - 因此问题不像主功能失效, 更像测试窗口太短、启动时序不稳, 或测试夹具与真实运行条件存在细微差异。
+- 后续建议:
+  - 单独为该测试做稳定性修正, 不与 Gemini backend 修复混做。
+  - 优先方向:
+    - 改为轮询 stdout 直到看到首轮输出, 而不是固定睡眠 `300ms` 后直接 kill。
+    - 或者在测试里延长等待窗口, 并把失败时的 stdout/stderr 原样打印出来。
+
+## 2026-03-08 13:08 +0800 | 可选后续: 收敛跨 crate 的 `<event ...>` 提取逻辑
+
+- 背景:
+  - 这次修 `ralph-e2e/src/analyzer.rs` 时,发现它和 `crates/ralph-cli/src/autopilot.rs` 对同一协议的提取规则已经出现细微分叉。
+- 建议:
+  - 评估把 `<event ...>` payload 提取收敛成共享 helper,或至少共享一组测试夹具。
+- 价值:
+  - 避免以后再次出现"主链路已兼容,旁路分析器仍卡在旧 regex"的隐性回归。
+
+## 2026-03-08 13:31 +0800 | 回收: `<event ...>` 提取收敛已落地
+
+- 已完成:
+  - `ralph-core::EventParser::extract_last_payload_for_topic()`
+  - `autopilot` 与 `ralph-e2e analyzer` 改用共享 helper
+  - 相关回归测试已补齐并通过
+- 因此,上面这条已不再是待办。
+
+## [2026-03-09 09:16:00] 后续计划: 修复 example 场景的错路由与工作区副作用
+
+- 排查 `parallel-trigger-routing-example` 与 `parallel-experimental-dev-engine-example` 的示例 prompt / scenario 构造,定位为什么运行时会持续产出 `build.task`、`human.message`、`reply.human.message` 的占位型事件,并触发 `build.task -> writer` 错路由。
+- 修复 example 场景在 `LOOP_COMPLETE` 之后仍继续拉起新 job 的问题,重新锁定 deterministic job run count。
+- 检查 `parallel-experimental-dev-engine-example` 的 integration workspace 选择逻辑,避免 example 测试直接在主仓库执行 `git cherry-pick` 并推进真实 HEAD。
+
+## 2026-03-09 13:42 +0800 | 可选后续: 收敛 parallel completion 后的 late JobCompleted / receiver 生命周期竞态
+
+- 先做一个最小验证:
+  - 在 `ParallelSupervisor::drain_shutdown()` 与 `HatInstanceActor::on_job_completed()` 两侧补临时 tracing,确认 receiver drop 与 late JobCompleted 的先后顺序。
+- 若验证成立,优先考虑两条方向:
+  - 方向1: 让 Supervisor 在 completion 后继续持有 `instance_rx` 直到所有实例真正退出,再 drop receiver。
+  - 方向2: completion/shutdown 期间若 `JobCompleted` 发送失败,视为收尾期非致命事件,避免把实例状态打成 failed。
+
+## 2026-03-09 16:35 +0800 | 第二批真实并行 example 候选
+
+- 背景:
+  - 第一批 3 个高价值范例已经补齐并验证通过:
+    - PR review
+    - release checklist
+    - human approval gate
+- 后续可继续扩的实际场景:
+  - incident response war-room
+    - triage / log analysis / rollback plan / status comms 并行推进
+  - migration rehearsal
+    - schema diff / backup check / smoke test / go-no-go gate
+  - proposal assembly
+    - research / pricing / legal review / executive signoff 并行收敛
+- 当前不立即继续的原因:
+  - live E2E 成本较高。
+  - 更适合等这一批 example 被实际使用一轮后,再按反馈补第二批。
+
+## 2026-03-12 13:50 +0800 | batch-9 可选方向: 继续扩经营材料与预测对齐
+
+- batch-8 已经补到:
+  - 区域经营周会
+  - 续费组合盘校准
+  - 多区域 pipeline 同步
+- 下一批如果继续扩,优先候选:
+  - 董事会材料预演
+  - 季度投资组合回顾
+  - forecast commit 对齐会
+  - 区域定价例外校准
+- 继续约束:
+  - 优先选能写出固定终态字段的场景
+  - 对高漂移 lane 默认给 literal 单行模板
+  - live E2E 仍优先使用 stdout out 行提取 final payload

@@ -17,18 +17,27 @@ use anyhow::Context;
 use ralph_proto::{
     Delivery, Event, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
     MissingInstancePolicy, QueueDecisionRecord, QueueSelection, SessionStrategy,
-    TOPIC_DISPATCH_DECISION, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT, Topic,
-    TopicContract, TurnAction, new_event_id,
+    TOPIC_DISPATCH_DECISION, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT,
+    TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN, Topic, TopicContract, TurnAction,
+    new_event_id,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
+enum RequestReplyResolution {
+    Resolved(HatInstanceId),
+    UnknownRequestId,
+    MissingRequesterSourceInstance,
+    MissingLiveRequesterInstance(HatInstanceId),
+}
+
 impl ParallelSupervisor {
     pub(super) async fn route_event(&mut self, event: Event) -> anyhow::Result<()> {
         let mut event = event;
         self.ensure_event_id(&mut event);
+        self.remember_request_reply_origin(&event);
 
         // ---------------------------------------------------------------------
         // reply.human.message 语义护栏(并行 TUI chat 输出):
@@ -41,6 +50,75 @@ impl ParallelSupervisor {
                 observer(&event);
             }
             return Ok(());
+        }
+
+        // ---------------------------------------------------------------------
+        // reply.hat.message 语义收口:
+        // - 这是 hat -> hat 的显式答案回流 topic。
+        // - 它不是普通 workflow event,也不应该落回 TopicContract / triggers 路由。
+        // - 运行时会根据 `reply=<request_event_id>` 找回原请求的 source_instance。
+        // ---------------------------------------------------------------------
+        if event.topic.as_str() == TOPIC_REPLY_HAT_MESSAGE {
+            let request_event_id = event.reply.clone();
+            let Some(reply_to) = request_event_id.as_deref() else {
+                self.log_requester_return_resolution(
+                    &event,
+                    "unresolved",
+                    None,
+                    Some("reply.hat.message requires a non-empty reply=<request_event_id>"),
+                );
+                return Ok(());
+            };
+
+            let resolution = self.resolve_request_reply_target(reply_to);
+
+            match resolution {
+                RequestReplyResolution::Resolved(target_instance) => {
+                    event.target_instance = Some(target_instance.clone());
+                    event.target = None;
+
+                    if let Some(observer) = &self.event_observer {
+                        observer(&event);
+                    }
+
+                    self.log_requester_return_resolution(
+                        &event,
+                        "delivered",
+                        Some(target_instance.as_str()),
+                        None,
+                    );
+
+                    self.deliver_to_instance_id(event, target_instance).await?;
+                    return Ok(());
+                }
+                RequestReplyResolution::UnknownRequestId => {
+                    self.log_requester_return_resolution(
+                        &event,
+                        "unresolved",
+                        None,
+                        Some("reply target event id was not found"),
+                    );
+                    return Ok(());
+                }
+                RequestReplyResolution::MissingRequesterSourceInstance => {
+                    self.log_requester_return_resolution(
+                        &event,
+                        "unresolved",
+                        None,
+                        Some("referenced request event has no source_instance"),
+                    );
+                    return Ok(());
+                }
+                RequestReplyResolution::MissingLiveRequesterInstance(target_instance) => {
+                    self.log_requester_return_resolution(
+                        &event,
+                        "unresolved",
+                        Some(target_instance.as_str()),
+                        Some("resolved requester instance is no longer registered"),
+                    );
+                    return Ok(());
+                }
+            }
         }
 
         // ---------------------------------------------------------------------
@@ -446,7 +524,9 @@ impl ParallelSupervisor {
             // - 两个都 Running: 回退 ralph#1(由实例内 pending 队列吸收)
             // -----------------------------------------------------------------
             if hat_id.as_str() == "ralph" {
-                chosen_instances.push(self.choose_ralph_instance_for_delivery()?);
+                chosen_instances.push(self.choose_ralph_instance_for_delivery(
+                    Self::may_redirect_to_secondary_ralph(&event),
+                )?);
                 continue;
             }
 
@@ -1085,6 +1165,7 @@ Candidates:\n\
             instance_id: decider_instance_id,
             hat_id: HatId::new("ralph"),
             prompt,
+            continuation_prompt: None,
             backend: JobBackend::Default,
             session_strategy: SessionStrategy::Exec,
             timeout: Some(Duration::from_secs(20)),
@@ -1143,6 +1224,56 @@ Candidates:\n\
         }
     }
 
+    fn remember_request_reply_origin(&mut self, event: &Event) {
+        let Some(event_id) = event.id.as_ref() else {
+            return;
+        };
+
+        self.request_reply_origins
+            .insert(event_id.clone(), event.source_instance.clone());
+    }
+
+    fn resolve_request_reply_target(&self, request_event_id: &str) -> RequestReplyResolution {
+        let Some(requester_source) = self.request_reply_origins.get(request_event_id) else {
+            return RequestReplyResolution::UnknownRequestId;
+        };
+
+        let Some(target_instance) = requester_source.clone() else {
+            return RequestReplyResolution::MissingRequesterSourceInstance;
+        };
+
+        if !self.instances.contains_key(&target_instance) {
+            return RequestReplyResolution::MissingLiveRequesterInstance(target_instance);
+        }
+
+        RequestReplyResolution::Resolved(target_instance)
+    }
+
+    fn log_requester_return_resolution(
+        &mut self,
+        event: &Event,
+        status: &str,
+        requester_instance: Option<&str>,
+        reason: Option<&str>,
+    ) {
+        let payload = serde_json::json!({
+            "status": status,
+            "answer_event_id": event.id.as_deref(),
+            "request_event_id": event.reply.as_deref(),
+            "requester_instance": requester_instance,
+            "reason": reason,
+        })
+        .to_string();
+
+        let diagnostic_event = Event::new(TOPIC_REQUESTER_RETURN, payload);
+        if let Err(error) = self
+            .event_logger
+            .log_event(0, "supervisor", &diagnostic_event, None)
+        {
+            tracing::warn!(%error, "Failed to log requester-return diagnostic event");
+        }
+    }
+
     pub(super) fn load_queue_decisions_from_history(&mut self) -> anyhow::Result<()> {
         let history = EventHistory::new(self.event_logger.path());
         let records = history.read_all().context("Failed to read event history")?;
@@ -1159,6 +1290,20 @@ Candidates:\n\
                     tracing::warn!(error = %e, payload_len = record.payload.len(), "Failed to parse dispatch.decision payload from history");
                 }
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn load_request_reply_origins_from_history(&mut self) -> anyhow::Result<()> {
+        let history = EventHistory::new(self.event_logger.path());
+        let records = history.read_all().context("Failed to read event history")?;
+        for record in records {
+            let Some(event_id) = record.id else {
+                continue;
+            };
+
+            let source_instance = record.source_instance.map(HatInstanceId::new);
+            self.request_reply_origins.insert(event_id, source_instance);
         }
         Ok(())
     }
@@ -1313,7 +1458,7 @@ Candidates:\n\
         );
 
         // 直接投递到 ralph 协调实例（不走 TopicContract，避免“配置没写 gate topic”导致二次失败）
-        let ralph_instance = self.choose_ralph_instance_for_delivery()?;
+        let ralph_instance = self.choose_ralph_instance_for_delivery(true)?;
         if let Some(handle) = self.instances.get(&ralph_instance) {
             handle
                 .cmd_tx
@@ -1345,12 +1490,22 @@ Candidates:\n\
             return Ok(());
         }
 
+        // -----------------------------------------------------------------
+        // 说明：
+        // - 只有“无来源”的协调事件，才适合在主协调实例忙时改投到 ralph#2。
+        // - 对 hat 内部产出的工作流事件（例如 experiment.reviewed），改投到全新 coordinator
+        //   会丢失上一轮上下文，容易把聚合状态打散，最后卡在 integration 前。
+        // -----------------------------------------------------------------
+        if !Self::may_redirect_to_secondary_ralph(event) {
+            return Ok(());
+        }
+
         let primary = HatInstanceId::from_parts("ralph", "1");
         if self.effective_state(&primary) != HatInstanceState::Running {
             return Ok(());
         }
 
-        let chosen = self.choose_ralph_instance_for_delivery()?;
+        let chosen = self.choose_ralph_instance_for_delivery(true)?;
         if chosen.as_str() != primary.as_str() {
             event.target_instance = Some(chosen);
             event.target = None;
@@ -1359,7 +1514,14 @@ Candidates:\n\
         Ok(())
     }
 
-    fn choose_ralph_instance_for_delivery(&mut self) -> anyhow::Result<HatInstanceId> {
+    fn may_redirect_to_secondary_ralph(event: &Event) -> bool {
+        event.source.is_none() && event.source_instance.is_none()
+    }
+
+    fn choose_ralph_instance_for_delivery(
+        &mut self,
+        allow_secondary: bool,
+    ) -> anyhow::Result<HatInstanceId> {
         let primary = HatInstanceId::from_parts("ralph", "1");
         if !self.instances.contains_key(&primary) {
             self.spawn_instance(primary.clone(), false)?;
@@ -1367,6 +1529,11 @@ Candidates:\n\
 
         // 主实例优先: 只要不是 Running,就固定走 ralph#1。
         if self.effective_state(&primary) != HatInstanceState::Running {
+            return Ok(primary);
+        }
+
+        // 内部 hat 产出的工作流事件需要沿用主协调实例的 pending 队列，避免把聚合状态切碎。
+        if !allow_secondary {
             return Ok(primary);
         }
 

@@ -32,6 +32,7 @@
 //! }
 //! ```
 
+use ralph_core::EventParser;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -533,6 +534,12 @@ event_loop:
   max_iterations: {max_iter}
   completion_promise: "ANALYSIS_COMPLETE"
 
+memories:
+  enabled: false
+
+tasks:
+  enabled: false
+
 hats:
   analyzer:
     name: "E2E Analyzer"
@@ -567,25 +574,25 @@ hats:
         )
     }
 
+    fn prepare_analysis_workspace(&self) -> Result<PathBuf, AnalyzerError> {
+        // 说明:
+        // - analyzer 每次都要从干净 `_analysis` 目录启动,避免复跑时复用旧 `.agent` 状态。
+        // - 这里直接整目录重建,比选择性删除更不容易漏掉新产物。
+        let analysis_workspace = self.workspace.join("_analysis");
+        if analysis_workspace.exists() {
+            std::fs::remove_dir_all(&analysis_workspace)?;
+        }
+        std::fs::create_dir_all(analysis_workspace.join(".agent"))?;
+        Ok(analysis_workspace)
+    }
+
     /// Parses the analysis response from Ralph output.
     pub fn parse_analysis_event(&self, output: &str) -> Result<AnalysisResponse, AnalyzerError> {
-        // Look for the analyze.complete event
-        let event_regex =
-            regex::Regex::new(r#"<event\s+topic="analyze\.complete">([\s\S]*?)</event>"#)
-                .map_err(|e| AnalyzerError::ParseError(e.to_string()))?;
-
-        let captures = event_regex
-            .captures(output)
+        let json_str = EventParser::extract_last_payload_for_topic(output, "analyze.complete")
             .ok_or(AnalyzerError::NoAnalysisEvent)?;
 
-        let json_str = captures
-            .get(1)
-            .ok_or(AnalyzerError::NoAnalysisEvent)?
-            .as_str()
-            .trim();
-
         // Parse the JSON
-        serde_json::from_str(json_str)
+        serde_json::from_str(&json_str)
             .map_err(|e| AnalyzerError::ParseError(format!("JSON parse error: {}", e)))
     }
 
@@ -633,9 +640,7 @@ hats:
         }
 
         // Create analysis workspace
-        let analysis_workspace = self.workspace.join("_analysis");
-        std::fs::create_dir_all(&analysis_workspace)?;
-        std::fs::create_dir_all(analysis_workspace.join(".agent"))?;
+        let analysis_workspace = self.prepare_analysis_workspace()?;
 
         // Write the analyzer config
         let config_path = analysis_workspace.join("ralph-analyzer.yml");
@@ -796,6 +801,8 @@ mod tests {
         assert!(config.contains("backend: claude"));
         assert!(config.contains("max_iterations: 1"));
         assert!(config.contains("completion_promise: \"ANALYSIS_COMPLETE\""));
+        assert!(config.contains("memories:\n  enabled: false"));
+        assert!(config.contains("tasks:\n  enabled: false"));
         assert!(config.contains("E2E Analyzer"));
         assert!(config.contains("analyze.request"));
         assert!(config.contains("analyze.complete"));
@@ -813,6 +820,39 @@ mod tests {
 
         assert!(yaml.contains("backend: kiro"));
         assert!(yaml.contains("max_iterations: 3"));
+    }
+
+    #[test]
+    fn test_prepare_analysis_workspace_cleans_stale_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join(".e2e-tests");
+        let analysis_workspace = workspace.join("_analysis");
+        std::fs::create_dir_all(analysis_workspace.join(".agent")).unwrap();
+        std::fs::write(analysis_workspace.join(".agent/memories.md"), "# stale").unwrap();
+        std::fs::write(
+            analysis_workspace.join(".agent/tasks.jsonl"),
+            "{\"id\":\"old\"}\n",
+        )
+        .unwrap();
+        std::fs::write(analysis_workspace.join("analysis-prompt.md"), "stale").unwrap();
+
+        let analyzer = MetaRalphAnalyzer::new(workspace.clone());
+        let prepared = analyzer.prepare_analysis_workspace().unwrap();
+
+        assert_eq!(prepared, analysis_workspace);
+        assert!(prepared.join(".agent").exists());
+        assert!(
+            !prepared.join(".agent/memories.md").exists(),
+            "stale memories must be removed before rerun"
+        );
+        assert!(
+            !prepared.join(".agent/tasks.jsonl").exists(),
+            "stale tasks must be removed before rerun"
+        );
+        assert!(
+            !prepared.join("analysis-prompt.md").exists(),
+            "stale analysis artifacts must be removed before rerun"
+        );
     }
 
     #[test]
@@ -864,6 +904,40 @@ ANALYSIS_COMPLETE
         assert_eq!(
             analysis.passed_analyses[0].analysis.quality_score,
             QualityScore::Optimal
+        );
+    }
+
+    #[test]
+    fn test_parse_analysis_event_accepts_topic_after_other_attributes() {
+        let analyzer = MetaRalphAnalyzer::new(PathBuf::from(".e2e-tests"));
+        let output = r#"
+<event
+  id="analysis-1"
+  source="ralph"
+  topic="analyze.complete"
+>
+{
+  "failed_analyses": [],
+  "passed_analyses": [
+    {
+      "scenario_id": "claude-connect",
+      "quality_score": "Good",
+      "warnings": [],
+      "optimizations": []
+    }
+  ],
+  "patterns": [],
+  "recommendations": []
+}
+</event>
+"#;
+
+        let analysis = analyzer.parse_analysis_event(output).unwrap();
+        assert_eq!(analysis.failed_analyses.len(), 0);
+        assert_eq!(analysis.passed_analyses.len(), 1);
+        assert_eq!(
+            analysis.passed_analyses[0].analysis.quality_score,
+            QualityScore::Good
         );
     }
 

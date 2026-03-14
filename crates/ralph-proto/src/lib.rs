@@ -28,7 +28,8 @@ pub use gate::{
 pub use hat::{Hat, HatId, HatInstanceId, HatInstanceState};
 pub use routing::{
     AudienceOverride, AudienceSelector, Delivery, MissingInstancePolicy, QueueDecisionRecord,
-    QueueSelection, TOPIC_DISPATCH_DECISION, TopicContract,
+    QueueSelection, TOPIC_DISPATCH_DECISION, TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN,
+    TopicContract,
 };
 pub use topic::Topic;
 pub use ux_event::{

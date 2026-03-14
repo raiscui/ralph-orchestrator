@@ -1,325 +1,808 @@
-# 笔记(续档)
-
-- 说明: 旧 `notes.md` 已超过 1000 行,已续档为 `archive/notes_2026-02-28_1706.md`。
-- 新笔记从这里开始记录。
-
-## 2026-02-28 17:17 +0800 | continuous-learning: 四文件摘要(因 task_plan 续档触发)
-
-## 四文件摘要(用于决定是否提取 skill)
-
-- 任务目标(task_plan):
-  - 续档 `task_plan.md`(超过 1000 行)并保持根目录“低噪音、可检索”。
-  - 回答你关于 openclaw 启发与 macOS Xcode license 的疑问,避免把环境问题误归因到 `cargo test`。
-- 关键决定(task_plan):
-  - 续档: `task_plan.md` -> `archive/task_plan_2026-02-28_1717.md`,新建 `task_plan.md`。
-  - 归档: 在完成四文件摘要后,把本次检索覆盖到的历史版本移动到 `archive/`(减少根目录噪音)。
-- 关键发现(notes):
-  - openclaw 的启发点已经被提炼并落地为多项工程机制:
-    - guardrails(可执行护栏进入 CI)
-    - doctor/wizard(把常见失败变成可修复路径)
-    - lanes + generation + draining(并发与退出收尾的确定性)
-    - no-output watchdog(把“卡住无输出”变成一等失败原因)
-    - context window guard(把上下文窗不足变成可执行预检)
-  - macOS Xcode license 的根因是 Apple toolchain(xcrun/xcode-select)的选择,不是 cargo 自身依赖。
-- 实际变更(WORKLOG):
-  - 已在更早的实现中补齐:
-    - `.envrc` 默认优先使用 Command Line Tools(`DEVELOPER_DIR=/Library/Developer/CommandLineTools`)来绕过 Xcode.app license。
-    - `DEVELOPMENT.md` 增加 macOS troubleshooting 小节,避免后续误判。
-- 错误与根因(ERRORFIX,如有):
-  - 历史上 `cargo test` 失败(exit 69)的根因是 `xcode-select -p` 指向未接受 license 的 Xcode.app,导致 `xcrun` 拒绝执行。
-- 可复用点候选(1-3 条):
-  1. 续档规则 + 归档流程要“强制化”(否则根目录噪音会持续增长)。
-  2. macOS toolchain 选择(`DEVELOPER_DIR`)应当作为“可执行默认”,而不是只写在聊天里。
-  3. 把 openclaw 的“机制”而非“口号”迁移到 Rust(guardrails/lanes/doctor)是高 ROI 路线。
-- 是否需要固化到 docs/specs: 否(已固化到 `.envrc`/`DEVELOPMENT.md`/`specs/*`/项目级 skills)。
-- 是否提取/更新 skill: 否(已存在对应的 `self-learning.*` skills,且本次没有新增更通用的新模式)。
-
-## 2026-02-28 18:31 +0800 | 研究: zeroclaw-labs/zeroclaw 值得借鉴点(映射到 ralph)
-
-## 来源(本地 clone)
-
-- /tmp/zeroclaw-20260228-1832
-
-## 我认为最有启发的设计点(带原文/代码证据)
-
-1. Trait 驱动 + 把扩展点写死成契约
-   - README.md 直接把定位写成: "runtime operating system".
-   - README.md 用一句话把卖点钉死: "Trait-driven architecture · secure-by-default runtime · provider/channel/tool swappable · pluggable everything".
-   - AGENTS.md 直接列出 "Key extension points"(Provider/Channel/Tool/Memory/Observer/RuntimeAdapter/...).
-   - 启发:
-     - 扩展点不要藏在脑子里.
-     - 用 trait + factory 注册点,把贡献路径固定下来.
-
-2. 工具系统: Tool trait + JSON schema + runtime 能力门控 + SecurityPolicy 注入
-   - src/tools/mod.rs 写得很明确:
-     - tool 需要 name/description/JSON schema/execute.
-     - "Security policy enforcement is injected via SecurityPolicy at construction time".
-   - src/runtime/traits.rs 用 has_shell_access/has_filesystem_access/supports_long_running 来声明能力.
-   - 启发:
-     - "能不能用"由 runtime 能力声明决定.
-     - "允不允许用"由 security policy 决定.
-     - 这两层分开后,很多 if/else 会自然消失.
-
-3. ApprovalManager: supervised 工具调用审批,带 session allowlist + audit log + 非 CLI 渠道 pending approvals
-   - src/approval/mod.rs 顶部注释: "session-scoped 'Always' allowlists and audit logging".
-   - needs_approval() 的优先级清晰:
-     - autonomy_level(full/read_only) -> always_ask -> auto_approve -> session_allowlist -> default supervised.
-   - 启发:
-     - "工具审批"要有可审计证据(审计日志).
-     - "Always" 这种临时放权,要显式建模成 session allowlist.
-     - 非 CLI 渠道(telegram/slack)不能阻塞式 prompt,就要做 pending request + 显式确认.
-
-4. Doctor: 结构化诊断结果 + 人类可读报告,并且能做错误分类
-   - src/doctor/mod.rs: "Structured diagnostic result for programmatic consumption (web dashboard, API)."
-   - check_config_semantics() 把配置问题分为 ok/warn/error,并给出可执行的 message.
-   - model probe 里把常见 401/403/429 归类为 auth/access,而不是一律 error.
-   - 启发:
-     - doctor 不只是"检查",而是"把常见失败变成可修复路径".
-     - 结构化结果(Vec<DiagResult>)比纯 stdout 更利于后续 TUI/CI/网页复用.
-
-5. 安全: PromptGuard(快速特征匹配) + E-stop(一等公民,并且 fail-closed)
-   - src/security/prompt_guard.rs: Aho-Corasick 多模式匹配 + regex 分类,输出 Safe/Suspicious/Blocked.
-   - src/security/estop.rs: state file 解析失败会进入 fail-closed(kill_all=true),并落盘.
-   - 启发:
-     - "注入检测"要做到可配置(action+sensitivity),并且输出可解释的 patterns.
-     - "紧急刹车"要先保证安全(失败即关闭),再谈易用.
-
-6. Sandboxing: Sandbox trait + backend 实现,并且文档明确区分 proposal vs current
-   - docs/sandboxing.md 头部明确标注: "Status: Proposal / Roadmap".
-   - src/security/firejail.rs 以 wrap_command 方式做最小侵入的命令封装,并用单测锁死 flags.
-   - 启发:
-     - 先从"命令包装"切入,比一开始做复杂容器编排更容易落地.
-     - proposal 文档必须显式标识,避免读者把未来设想当成现状.
-
-7. 供应链与合规: cargo-deny 的 deny.toml
-   - deny.toml 里把 unknown-registry/unknown-git 设为 deny.
-   - licenses 用 allowlist,并且 ignore 条目都写 reason.
-   - 启发:
-     - 依赖治理要可审计.
-     - ignore 不是"忽略",而是"带理由的延期偿还".
-
-8. 文档信息架构(IA): docs hub + 决策树 + 按受众分类
-   - docs/README.md 用表格回答 "I want to...".
-   - docs/security/README.md 把文档分成 "Current-Behavior" 和 "Proposal/Roadmap".
-   - 启发:
-     - 文档是产品的一部分.
-     - 对新手: 决策树.
-     - 对维护者: runbook.
-     - 对安全: 现状和设想分层.
-
-## 对 ralph 的可迁移清单(初稿,按 ROI 排序)
-
-- 低成本,高收益(建议优先考虑):
-  - 在 docs 入口增加 "10 秒决策树" 和 "按受众" 导航,降低新用户学习成本.
-  - 对现有 doctor 输出补一条 "结构化 JSON" 模式(若我们现在还没有),便于 TUI/CI 复用.
-  - 为重要 gate/审批/外部输入增加更明确的审计落盘(谁触发,为什么,结果是什么).
-
-- 中成本,高收益(需要确认边界,避免做成平台):
-  - 把 "工具审批" 从实现细节提升为一等协议,并和 gate.request/gate.resolve 统一起来.
-  - 引入轻量 PromptGuard,至少先覆盖最常见的系统覆盖/工具注入特征,并把命中证据写入日志.
-
-- 不建议直接照搬(会违背 ralph 的 thin-coordination 目标):
-  - 把 orchestrator 扩成 "runtime OS"(channel/memory/gateway/硬件外设全家桶).
-  - 过早引入大量 sandbox backend,优先把"允许什么"和"审计证据"做扎实.
-
-## 2026-02-28 20:46 +0800 | 设计: `ralph doctor` JSON 输出 schema(面向 code agent)
-
-### 为什么要做
-
-- 现状: `ralph doctor` 只有文本输出,CI/TUI/code agent 想做自动分流时,只能解析 stdout.
-- 目标: 提供稳定的机器可读 schema,同时不破坏原文本输出.
-
-### Schema(最小稳定字段)
-
-- 顶层:
-  - `schema_version`: u32(从 1 开始)
-  - `verdict`: "pass" | "fail_errors" | "fail_strict"
-  - `counts`: { `errors`: usize, `warnings`: usize }
-  - `args`: { `fix`: bool, `strict`: bool, `format`: "text"|"json" }
-  - `checks`: `DoctorCheck[]`
-
-- DoctorCheck:
-  - `id`: 稳定 check_id(用于分类)
-  - `category`: 稳定类别(例如 config/hats/backend/workspace/context_window/events_marker/binary)
-  - `status`: "ok" | "warn" | "err" | "skipped"
-  - `message`: 保留原文本 message(包含 Fix/Skipped/Fixed 等,便于人读和回放证据)
-  - `fix`: Option<String>(从 message 里解析 "Fix:" 后半段,便于程序直接展示/提取)
-
-### check_id 初版约定(够用即可,后续可扩)
-
-- config:
-  - config.load
-  - config.validate
-
-- hats:
-  - hats.validation.skipped
-  - hats.solo_mode
-  - hats.starting_event
-  - hats.orphan_event
-  - hats.dead_end
-
-- backend:
-  - backend.skipped
-  - backend.auto_detect
-  - backend.custom.command_required
-  - backend.custom.command_available
-  - backend.custom.version_failed
-  - backend.custom.command_not_runnable
-  - backend.available
-
-- context_window:
-  - context_window.skipped_backend_failed
-  - context_window.skipped_not_configured
-  - context_window.size
-  - context_window.prompt_fit
-  - context_window.prompt_fit.skipped
-
-- workspace/scratchpad:
-  - workspace.scratchpad.skipped
-  - workspace.scratchpad_dir
-  - workspace.scratchpad_exists
-  - workspace.scratchpad_writable
-  - workspace.scratchpad_path_kind
-
-- events marker:
-  - events_marker.missing
-  - events_marker.invalid
-  - events_marker.events_file_writable
-
-- binary freshness:
-  - binary_freshness.skipped
-  - binary_freshness.stale
-  - binary_freshness.ok
-
-### 与 spec 的关系
-
-- `specs/ralph-doctor.spec.md` 目前把 `--json` 放在 "后续扩展".
-- 本次实现会把它提升为正式能力,并补齐回归测试(保证 schema 稳定).
-
-## 2026-03-01 17:38 +0800 | 设计探索: hats 用 `ralph emit` 通信,同时对 `turn_action` 做 fail-closed 边界
-
-### 现状(代码证据)
-
-- `ralph emit` 已存在,支持 `--target/--target-instance/--spawn-instance/--workspace-strategy/--session-strategy/--turn-action`:
-  - `crates/ralph-cli/src/main.rs`(EmitArgs)
-  - `crates/ralph-cli/src/main.rs`(emit_command 写 JSONL)
-- 并行 Supervisor 会轮询 `.ralph/current-events` 指向的 JSONL,把外部事件映射为 `ralph_proto::Event` 并路由:
-  - `crates/ralph-core/src/parallel/supervisor.rs`(外部事件读取与映射)
-  - 映射时当前会把 `turn_action` 直接带入,没有权限校验.
-- 并行 runner 在 spawn hat backend 进程时,已经注入了:
-  - `RALPH_HAT_ID`
-  - `RALPH_HAT_INSTANCE_ID`
-  - `crates/ralph-cli/src/parallel_runner.rs`(Spawning headless job)
-
-### 风险
-
-- 只要 hat 能执行 shell,就能执行 `ralph emit ... --turn-action interrupt`,从而在运行时打断 ralph#1 的 in-flight turn.
-- 这属于典型的"控制面信号被数据面误用"问题,和普通 topic 消息不是一个风险等级.
-
-### 我建议的边界(满足: hats 可沟通,但 steer/interrupt 不乱飞)
-
-- 数据面(允许所有 hats): topic + payload(+可选 target/target_instance,且仍受订阅拓扑 strict 校验约束).
-- 控制面(默认拒绝,fail-closed): `turn_action=steer|interrupt`(以及通常需要 app_server 的那类 in-flight 控制).
-- hats 如果确实需要"打断/插话",改为发 request:
-  - `turn_action.request` 或 `control.request_interrupt` 之类 topic,交给 ralph#1 或 Supervisor 决策并执行真正的 steer/interrupt.
-
-### 4.2 的"先能用"落地思路(不依赖 guard token)
-
-- 在 `ralph emit` CLI 里:
-  - 如果检测到环境变量 `RALPH_HAT_INSTANCE_ID` 存在(说明是在 hat job 环境里调用),
-    就直接拒绝 `--turn-action steer|interrupt` 并输出可行动的错误信息.
-  - 这样模型误触发时会当场失败,hat 能从 tool 输出里自我纠正.
-
-### 4.1 的增强(后续)
-
-- 对 `<event ...>` 协议引入 guard token(或干脆在并行模式禁用 `<event>` 解析),进一步降低"文本里举例导致误触发"。
-
-## 2026-03-01 17:45 +0800 | 决策: hat-to-hat 采用 request/result(数据面),不使用 steer 回传结果
-
-### 结论(你已确认)
-
-- hats 之间沟通只走 data-plane: `ralph emit <topic> <payload>`。
-- `turn_action=steer|interrupt` 仅用于 ExternalInput -> ralph#1 的 control-plane。
-
-### 为什么“B 回传 A 的结论”不需要 steer
-
-- 即使 A 正在 Running,Supervisor 仍会把 B 的结果事件路由到 A 的 instance。
-- A instance 在 Running 时不会被“真 in-flight 注入”(因为没有 turn_action),而是把事件放进 pending 队列。
-- 因此 A 会在下一次 job/turn 中消费该结果,实现稳定的“异步 await”。
-
-### 推荐协议形态(最小字段,够用即可)
-
-- A -> B: `subtask.request`(或更具体的 topic)
-  - payload(JSON) 包含:
-    - `request_id`: 稳定关联 id
-    - `task`: B 要做的事(必须足够自包含,避免依赖 A 的上下文)
-    - `reply_to`: `{ "topic": "subtask.result", "target_instance": "hatA#1" }`
-
-- B -> A: `subtask.result`
-  - payload(JSON) 包含:
-    - `request_id`
-    - `status`: `"ok"|"error"`
-    - `final`: `true`(A 只在 final=true 时推进,避免中途消息污染)
-    - `result` 或 `error`
-
-## 2026-03-01 22:45 +0800 | OpenSpec: proposal 已完成(emit-control-plane-fail-closed)
-
-- 产物:
-  - `openspec/changes/emit-control-plane-fail-closed/proposal.md`
-- proposal 锁定的边界:
-  - data-plane: hats 间沟通只用普通 `ralph emit topic=... payload=...`。
-  - control-plane: `turn_action=steer|interrupt` 仅允许 ExternalInput 对 `ralph#1` 使用。
-- fail-closed 策略:
-  - hat job 环境(`RALPH_HAT_INSTANCE_ID` 存在)禁止 `ralph emit --turn-action ...`。
-  - 使用 `--turn-action` 时必须显式 `--target-instance ralph#1`,否则拒绝(避免误投递)。
-- 状态:
-  - `openspec status` 已解锁 `design/specs`(ready)。
-
-## 2026-03-01 23:57 +0800 | OpenSpec: design 已完成(实现落点与风险收敛)
-
-- 产物:
-  - `openspec/changes/emit-control-plane-fail-closed/design.md`
-- design 的关键决策(摘录):
-  - CLI 侧快速自纠:
-    - hat job 环境(检测 `RALPH_HAT_INSTANCE_ID`)硬拒绝 `ralph emit --turn-action steer|interrupt`。
-  - Supervisor 侧最终裁判(防御纵深):
-    - 任意外部事件只要携带 `turn_action=steer|interrupt`,就必须显式且仅能 `target_instance=ralph#1`,否则拒绝并告警.
-  - TUI 侧本地预检:
-    - `!steer/!interrupt` 仅允许作用于 `ralph#1`,避免“写入后被拒绝”的黑盒体验.
-- 明确 trade-off:
-  - 放弃对 worker hats 的 in-flight steer/interrupt,换取无人值守环境下的稳定性与可预期.
-- 后续增强方向(未纳入 4.2):
-  - guard token 或 source attribution,把“只有 ExternalInput 能 steer/interrupt”做成更强约束.
-
-## 2026-03-02 00:31 +0800 | OpenSpec: specs + tasks 已完成(可进入 apply)
-
-- delta specs(Modified Capabilities):
-  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-hat-instances/spec.md`
-  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-trigger-routing/spec.md`
-- tasks:
-  - `openspec/changes/emit-control-plane-fail-closed/tasks.md`
-- 规格要点(再次强调边界,避免实现漂移):
-  - data-plane: hats 之间/hat->ralph 只用普通 `topic/payload`。
-  - control-plane: `turn_action=steer|interrupt` 必须显式 target 到 `ralph#1`,其余一律 fail-closed 拒绝。
-
-## 2026-03-02 00:36 +0800 | 补充: hat-to-hat “不在中途 reply,只回最终结论”已写入 OpenSpec change
-
-- 已补写到:
-  - `openspec/changes/emit-control-plane-fail-closed/design.md` 新增 D5:
-    - A 触发 B 的子任务后,B 仅在自身 job/turn 结束时回传一次最终结论(例如 `subtask.result`),不在中途回传半成品.
-  - `openspec/changes/emit-control-plane-fail-closed/tasks.md` 新增 4.3:
-    - 要求把该约定同步写入 `specs/parallel-event-channels.spec.md`(面向 code agent 的使用指南)。
-
-## 2026-03-02 12:34 +0800 | 确认决策: `<event>` 暂不收口,但 external turn_action 拒绝需可见告警
-
-- 你确认的范围:
-  - 4.2 暂不处理 in-band `<event ...>` 产生的 `turn_action=steer|interrupt`。
-  - 4.2 只收敛 out-of-band external JSONL 注入(`ralph emit`/TUI 写 JSONL)的 `turn_action`.
-- 你确认的行为:
-  - all_hat 文档示例允许改掉,避免 hats 学到“对 worker 做 steer”的用法.
-  - Supervisor 拒绝 external control-plane 注入时,需要让 `ralph#1` 明确看到(不只写日志)。
-- 已同步到 OpenSpec change:
-  - `openspec/changes/emit-control-plane-fail-closed/design.md`: 明确 external-only 范围,并指定拒绝时复用 `routing.escalate` 给 `ralph#1` 发告警.
-  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-hat-instances/spec.md`: requirement 文案改为 external-only.
-  - `openspec/changes/emit-control-plane-fail-closed/specs/parallel-trigger-routing/spec.md`: rejection 场景要求 emit `routing.escalate`。
-  - `openspec/changes/emit-control-plane-fail-closed/tasks.md`: 增加 2.4(告警)与 4.4(更新 `config/all_hat.md`)。
+# 笔记: batch-6 收尾与续档摘要
+
+## 2026-03-11 21:17:47 +0800 | 六文件摘要（用于决定如何沉淀知识）
+
+- 涉及的上下文集:
+  - 默认组六文件
+- 任务目标:
+  - 完成 batch-6 的 3 个真实并行 example、direct scenario、README 入口、live E2E 与仓库级验证,并补齐六文件收尾
+- 关键决定:
+  - 题材选择为 support ops / partner ops / field enablement
+  - 继续沿用 `prompt_file: "PROMPT.md"` 的 direct example 模式
+  - 继续保持 `4 lane + 1 fan-in request + 1 final topic` 骨架
+  - coordinator 未收齐 ready 前保持静默
+  - worker / finalizer 继续强制 event-only
+  - 事件形态继续锁定为 `<event ...>payload</event>`
+- 关键发现:
+  - batch-6 没暴露新的根因,只是继续证明 direct example 方法论可横向迁移到 support、partner、enablement
+  - 固定终态字段依旧很有价值,可以把 live E2E 的断言锚定在清晰、可审计的业务终态上
+- 实际变更:
+  - 新增 spec:
+    - `specs/parallel-real-world-examples-batch-6.spec.md`
+  - 新增 examples:
+    - `examples/parallel-support-escalation-desk/`
+    - `examples/parallel-partner-launch-coordination/`
+    - `examples/parallel-field-enablement-rollout/`
+  - 新增 scenarios:
+    - `crates/ralph-e2e/src/scenarios/parallel_support_escalation_desk_example.rs`
+    - `crates/ralph-e2e/src/scenarios/parallel_partner_launch_coordination_example.rs`
+    - `crates/ralph-e2e/src/scenarios/parallel_field_enablement_rollout_example.rs`
+  - 同步入口:
+    - `crates/ralph-e2e/src/scenarios/mod.rs`
+    - `crates/ralph-e2e/src/lib.rs`
+    - `crates/ralph-e2e/src/main.rs`
+    - `crates/ralph-cli/tests/integration_examples.rs`
+    - `README.md`
+    - `crates/ralph-e2e/README.md`
+- 暂缓事项 / 后续方向:
+  - 当前没有新增必须记录到 `LATER_PLANS.md` 的 deferred item
+- 错误与根因:
+  - 本轮没有新增 bugfix,也没有新的动态证据推翻既有方法
+- 重大风险 / 灾难点 / 重要规律:
+  - 没有新增需要单独写入 `EPIPHANY_LOG.md` 的架构级结论
+  - 现有的重要规律依然成立: direct example 不只要锁 topic,也要锁 event 标签形态
+- 可复用点候选:
+  1. direct example 骨架已经证明可扩展到 support ops、partner ops、field enablement 这类非工程题材
+  2. finalizer 明确 owner,比让 coordinator 直接收尾更稳,也更利于 scenario 断言
+  3. 固定终态字段是 live E2E 稳定收敛的重要抓手
+- 最适合写到哪里:
+  - 已同步到本轮 spec 与 README,暂不需要新增 skill 或更新 `AGENTS.md`
+- 需要同步的现有 `docs/` / `specs/` / plan 文档:
+  - `specs/parallel-real-world-examples-batch-6.spec.md`
+  - `README.md`
+  - `crates/ralph-e2e/README.md`
+- 是否需要新增或更新 `docs/` / `specs/` / plan 文档:
+  - 否。本轮应该同步的文档已经随实现一起更新完成
+- 是否提取/更新 skill:
+  - 否。这轮没有形成新的非显然排障套路,更多是在验证既有模式的外推能力
+
+## 2026-03-11 21:17:47 +0800 | batch-6 验证摘要
+
+### 定向测试
+
+- `cargo fmt --all --check` ✅
+- `cargo test -p ralph-e2e parallel_support_escalation_desk_example` ✅
+- `cargo test -p ralph-e2e parallel_partner_launch_coordination_example` ✅
+- `cargo test -p ralph-e2e parallel_field_enablement_rollout_example` ✅
+- `cargo test -p ralph-cli --test integration_examples` ✅
+
+### live E2E
+
+- `cargo run -p ralph-e2e -- codex --filter parallel-support-escalation-desk-example --skip-analysis --keep-workspace --verbose` ✅ `96.1s`
+- `cargo run -p ralph-e2e -- codex --filter parallel-partner-launch-coordination-example --skip-analysis --keep-workspace --verbose` ✅ `130.0s`
+- `cargo run -p ralph-e2e -- codex --filter parallel-field-enablement-rollout-example --skip-analysis --keep-workspace --verbose` ✅ `98.8s`
+
+### 仓库级验证
+
+- `cargo test` ✅
+
+### 本轮结论
+
+- batch-6 继续把真实并行 example 的题材矩阵拉宽了。
+- 到目前为止,这套 direct example 方法已经覆盖:
+  - 工程协作
+  - 风险治理 / 合规
+  - 事故与复盘
+  - 财务 / 招聘 / 客户 onboarding
+  - support ops / partner ops / field enablement
+- 这说明 Ralph 的并行 example 不再只是“工程工作流演示”,而是已经具备更强的横向泛化能力。
+
+## 2026-03-11 22:52:08 +0800 | 中文方案化收尾摘要
+
+### 目标
+
+- 把真实并行 example 的说明层进一步收敛成中文。
+- 避免继续新增英文描述,同时保留路径、topic、类名这些必须与代码一致的标识。
+
+### 本轮实际修改
+
+- 新增中文总览文档:
+  - `docs/examples/parallel-real-world-examples.zh-CN.md`
+- 更新根 README 的并行范例入口说明:
+  - 把 parallel example 列表描述改成中文
+  - 增加中文总览入口
+- 更新 `crates/ralph-e2e/README.md`:
+  - 把 direct example scenario 列表描述改成中文
+- 更新 batch-6 三个 example README:
+  - `examples/parallel-support-escalation-desk/README.md`
+  - `examples/parallel-partner-launch-coordination/README.md`
+  - `examples/parallel-field-enablement-rollout/README.md`
+
+### 这轮新增的中文结构
+
+- 一份聚合总览:
+  - 说明共用骨架
+  - 给出按题材分组的快速选型
+  - 提供全量范例矩阵
+  - 单独解释 batch-6 三个场景
+  - 给出 batch-7 的中文选题建议
+
+### 验证
+
+- `git diff --check -- README.md crates/ralph-e2e/README.md docs/examples/parallel-real-world-examples.zh-CN.md examples/parallel-support-escalation-desk/README.md examples/parallel-partner-launch-coordination/README.md examples/parallel-field-enablement-rollout/README.md` ✅
+
+### 结论
+
+- 现在用户第一次进仓库时,已经能先看到中文总览,再按场景进入具体 example。
+- batch-6 的 3 个新增场景也已经有更完整的中文方案说明,不再只是目录名可见、描述偏英文。
+
+## 2026-03-11 23:08:21 +0800 | batch-1 到 batch-5 中文化摘要
+
+### 目标
+
+- 把 batch-1 到 batch-5 的真实并行 example README 统一成和 batch-6 接近的中文风格。
+- 把中文总览接到 docs 入口,避免它只存在于文件路径里。
+
+### 本轮实际修改
+
+- 中文统一的 example README:
+  - `examples/parallel-pr-review/README.md`
+  - `examples/parallel-release-checklist/README.md`
+  - `examples/parallel-human-approval-gate/README.md`
+  - `examples/parallel-incident-response-war-room/README.md`
+  - `examples/parallel-security-exception-review/README.md`
+  - `examples/parallel-customer-renewal-desk/README.md`
+  - `examples/parallel-audit-evidence-pack/README.md`
+  - `examples/parallel-finance-close-control-room/README.md`
+  - `examples/parallel-hiring-debrief-panel/README.md`
+  - `examples/parallel-customer-onboarding-activation/README.md`
+  - `examples/parallel-launch-readiness-command/README.md`
+  - `examples/parallel-migration-rehearsal/README.md`
+  - `examples/parallel-postmortem-action-board/README.md`
+  - `examples/parallel-proposal-assembly/README.md`
+  - `examples/parallel-vendor-security-procurement/README.md`
+- docs 入口更新:
+  - `docs/examples/index.md`
+
+### 统一后的风格
+
+- 标题尽量改成中文场景名
+- 说明结构统一为:
+  - 这是什么范例
+  - 它展示什么
+  - 适合演示什么
+  - 目录内容
+  - 运行
+  - 你应该看到什么
+  - 如何替换成你自己的场景
+- 路径名、topic、类名、prompt section 标题继续保留英文,避免和代码脱节
+
+### 验证
+
+- `git diff --check -- docs/examples/index.md docs/examples/parallel-real-world-examples.zh-CN.md examples/parallel-pr-review/README.md examples/parallel-release-checklist/README.md examples/parallel-human-approval-gate/README.md examples/parallel-incident-response-war-room/README.md examples/parallel-security-exception-review/README.md examples/parallel-customer-renewal-desk/README.md examples/parallel-audit-evidence-pack/README.md examples/parallel-finance-close-control-room/README.md examples/parallel-hiring-debrief-panel/README.md examples/parallel-customer-onboarding-activation/README.md examples/parallel-launch-readiness-command/README.md examples/parallel-migration-rehearsal/README.md examples/parallel-postmortem-action-board/README.md examples/parallel-proposal-assembly/README.md examples/parallel-vendor-security-procurement/README.md task_plan.md notes.md WORKLOG.md` ✅
+
+### 结论
+
+- 现在从 `docs/examples/index.md` 进入时,已经能顺着中文入口找到中文总览。
+- batch-1 到 batch-6 的真实并行 example 说明风格已经基本拉齐。
+
+## 2026-03-12 00:08:00 +0800 | batch-7 一致性复核摘要
+
+### 已核对文件
+
+- `specs/parallel-real-world-examples-batch-7.spec.md`
+- `examples/parallel-revops-quote-desk/ralph.yml`
+- `examples/parallel-executive-business-review-prep/ralph.yml`
+- `examples/parallel-customer-advisory-board-prep/ralph.yml`
+- `examples/parallel-revops-quote-desk/PROMPT.md`
+- `examples/parallel-executive-business-review-prep/PROMPT.md`
+- `examples/parallel-customer-advisory-board-prep/PROMPT.md`
+- 3 个对应的 Rust scenario
+
+### 现象
+
+- 3 个 batch-7 场景都沿用了已经稳定的 direct example 骨架:
+  - `prompt_file: "PROMPT.md"`
+  - 4 lane fanout
+  - 1 次 fan-in request
+  - 1 个 final topic
+  - coordinator 未收齐 ready 前保持静默
+- `parallel-revops-quote-desk` 与 `parallel-customer-advisory-board-prep` 的 finalizer 指令已经明确锁定固定终态字段和值。
+- `parallel-executive-business-review-prep` 的 `PROMPT.md` 已经写了 expected final outcome。
+
+### 候选风险
+
+- 现象:
+  - `parallel-executive-business-review-prep` 的 Rust scenario 断言 `ebr.packet.ready` 要包含:
+    - `ebr_status: READY_FOR_EXEC_REVIEW`
+    - `meeting_tier: Q2_BUSINESS_REVIEW`
+    - `narrative_owner: gm-office`
+    - `packet_summary`
+    - `next_action_owner: gm-office`
+  - 但 `examples/parallel-executive-business-review-prep/ralph.yml` 里 finalizer 指令只写了“字段最低要求”,没有把固定值写成硬约束。
+- 当前假设:
+  - 依赖 `PROMPT.md` 的 expected outcome 大概率能让真实后端产出正确值。
+  - 但相比前两例,这里的协议约束偏弱,live E2E 稳定性会更依赖模型自行遵守 prompt 语义。
+- 最强备选解释:
+  - 即使不补强 finalizer 指令,真实 backend 也可能稳定输出预期值,因为 coordinator summary 与 prompt 本身已经形成双重提示。
+- 推翻当前假设的证据:
+  - 如果定向测试与 live E2E 都稳定通过,说明这里更多是“可读性和协议强度偏弱”,不一定是实际失败点。
+
+## 2026-03-12 16:28:00 +0800 | OpenSpec: hat-request-reply-channel 实现与验证摘要
+
+### 目标
+
+- 把 `reply.hat.message` 从 OpenSpec 设计真正落到并行运行时。
+- 让 hat-to-hat 的答案回流和普通 workflow event 分离,避免继续靠临时 topic 或人工填写 `target_instance`。
+
+### 已落地实现
+
+- 协议常量:
+  - `crates/ralph-proto/src/routing.rs`
+  - 新增:
+    - `TOPIC_REPLY_HAT_MESSAGE`
+    - `TOPIC_REQUESTER_RETURN`
+- 协议导出:
+  - `crates/ralph-proto/src/lib.rs`
+- 路由与恢复:
+  - `crates/ralph-core/src/parallel/supervisor/routing.rs`
+  - `crates/ralph-core/src/parallel/supervisor.rs`
+  - 关键点:
+    - 在 `route_event()` 里对 `reply.hat.message` 做 special-case
+    - 用 `reply=<request_event_id>` 查原请求的 `source_instance`
+    - 成功时定向投递给 requester
+    - 失败时 fail-closed,不回退成普通 workflow routing
+    - 写入 `routing.requester_return` 诊断记录
+    - resume 时从 `events.jsonl` 恢复 `event_id -> source_instance` 薄索引
+- prompt / 文档:
+  - `crates/ralph-core/src/parallel/supervisor.rs`
+  - `config/all_hat.md`
+  - 说明了 `reply.human.message` 和 `reply.hat.message` 的职责边界
+
+### 静态结论
+
+- 当前实现采用“显式 topic + reply 关联 + runtime 解析 requester”的组合。
+- 没有把“所有带 reply 的事件”自动升级成回送语义,因此不会把普通 workflow event 误路由成答案回流。
+
+### 动态验证
+
+- 最小关键验证:
+  - `cargo test --package ralph-core --lib busy_ralph_secondary_includes_coordinator_instructions_and_config_prompt` ✅
+  - 说明: 新增的 coordinator prompt 断言已通过,`reply.hat.message` 说明已实际进入运行时 prompt
+- 路由测试集:
+  - `cargo test --package ralph-core --lib parallel::supervisor::routing_tests` ✅
+  - 结果: 38 passed
+  - 覆盖:
+    - 成功回送 requester
+    - unknown reply id fail-closed
+    - referenced request 无 `source_instance` fail-closed
+    - answer-return 与 workflow event 同批共存
+- 格式与包级验证:
+  - `cargo fmt --all --check` ❌ 首次发现格式漂移
+  - `cargo fmt --all` ✅ 已对齐
+  - `cargo fmt --all --check` ✅
+  - `cargo test -p ralph-core` ✅
+- 仓库级验证:
+  - `cargo test` ✅
+
+### 本轮结论
+
+- 现象:
+  - `reply.hat.message` 已有协议、prompt、路由、fail-closed、诊断、恢复与测试闭环。
+- 结论:
+  - 这个 change 可以认为已经实现完成。
+  - 下一步如果要继续推进,就不该再停留在 runtime 基础能力,而应该考虑是否补一个更贴近真实 example 的 live 场景。
+
+## 2026-03-13 00:16:00 +0800 | OpenSpec archive: `hat-request-reply-channel` sync 与归档摘要
+
+### 归档前检查
+
+- 用户明确选择了 `hat-request-reply-channel` 作为归档目标。
+- `openspec status --change "hat-request-reply-channel" --json` 显示:
+  - schema: `spec-driven`
+  - artifacts 全部 `done`
+- `tasks.md` 为 9/9 完成。
+
+### sync 结果
+
+- delta spec 来源:
+  - `openspec/changes/hat-request-reply-channel/specs/hat-request-reply-channel/spec.md`
+- 主 specs 原状:
+  - `openspec/specs/hat-request-reply-channel/spec.md` 不存在
+- 本轮已新增主 spec:
+  - `openspec/specs/hat-request-reply-channel/spec.md`
+- 同步内容:
+  - 新增 5 条 requirement:
+    - 显式 opt-in 的 `reply.hat.message`
+    - 按原请求 `source_instance` 回送
+    - answer-return 与 workflow event 共存
+    - unresolved fail-closed
+    - delivered answer 保留 `reply` 关联
+
+### 校验与归档
+
+- `git diff --check -- openspec/specs/hat-request-reply-channel/spec.md task_plan.md` ✅
+- `openspec validate hat-request-reply-channel --type change` ✅
+- 已归档到:
+  - `openspec/changes/archive/2026-03-13-hat-request-reply-channel/`
+- `openspec list --json` 已确认它不再出现在 active changes 列表中。
+
+### 本轮结论
+
+- 这个 change 现在既有主 specs 同步结果,也有 archive 落点。
+- 后续如果再查看这项能力,应优先读主 spec 而不是 archive 内的 delta spec。
+
+### 当前处理方向
+
+- 共享注册一定要补:
+  - `crates/ralph-e2e/src/scenarios/mod.rs`
+  - `crates/ralph-e2e/src/lib.rs`
+  - `crates/ralph-e2e/src/main.rs`
+  - `crates/ralph-cli/tests/integration_examples.rs`
+- 文档一定要补:
+  - `README.md`
+  - `crates/ralph-e2e/README.md`
+  - `docs/examples/parallel-real-world-examples.zh-CN.md`
+- `parallel-executive-business-review-prep/ralph.yml` 倾向顺手补成和另外两例一致的“固定终态字段硬约束”写法,减少 live backend 漂移。
+
+## 2026-03-12 00:52:00 +0800 | batch-7 验证与修复闭环摘要
+
+### 最终落地范围
+
+- 新增并接线:
+  - `parallel-revops-quote-desk`
+  - `parallel-executive-business-review-prep`
+  - `parallel-customer-advisory-board-prep`
+- 共享注册已同步到:
+  - `crates/ralph-e2e/src/scenarios/mod.rs`
+  - `crates/ralph-e2e/src/lib.rs`
+  - `crates/ralph-e2e/src/main.rs`
+  - `crates/ralph-cli/tests/integration_examples.rs`
+- 中文文档入口已同步到:
+  - `README.md`
+  - `crates/ralph-e2e/README.md`
+  - `docs/examples/parallel-real-world-examples.zh-CN.md`
+
+### 这轮出现过的两个真实问题
+
+#### 问题1: quote live E2E 首轮是假失败
+
+- 现象:
+  - `quote.packet.ready` 已经出现
+  - 但 `Final payload matches requirements` 失败
+- 静态证据:
+  - `.ralph/events.jsonl` 中 final payload 被截断成 `... [truncated, 436 chars total]`
+  - 固定字段 `pricing_owner` 落在截断点之后
+- 动态证据:
+  - `.e2e/stdout.txt` 里能看到完整 `quote.packet.ready`
+  - 原始输出中明确包含 `pricing_owner` 与 `pricing_approval`
+- 结论:
+  - 失败不在业务链路
+  - 是 parallel 场景直接读“带截断的 event 证据”造成的假失败
+- 处理:
+  - 在 `crates/ralph-e2e/src/scenarios/parallel/mod.rs` 新增并行 stdout payload 提取 helper
+  - batch-7 三个 scenario 的 final payload 断言统一优先从“剥掉 `[hat#n:out:job=m]` 前缀后的 stdout”提取
+
+#### 问题2: quote live E2E 第二轮是真失败
+
+- 现象:
+  - `billing.ready` 缺失,后续 `revops.quote.packet.request` 与 `quote.packet.ready` 都没有出现
+- 静态证据:
+  - `.ralph/events.jsonl` 只有 structure/pricing/terms 的 ready
+- 动态证据:
+  - `.e2e/stdout.txt` 中 `billing_setup_reviewer#1` 实际输出了:
+    - 开始标签
+    - 多行 payload
+    - 但结束标签写成 `</event`
+  - 因为少了 `>`,parser 没把它当成真实事件
+- 结论:
+  - 失败不在协调者逻辑
+  - 是 billing lane 在真实 backend 下把多行 line-style event 写坏了
+- 处理:
+  - 把 `billing_setup_reviewer` 收紧为:
+    - 单行真实事件
+    - 紧凑 JSON payload
+    - 结束标签必须精确 `&lt;/event&gt;`
+  - 增加静态测试锁住该要求
+
+### 最终验证结果
+
+- mermaid 校验:
+  - `beautiful-mermaid-rs --ascii` 校验 `specs/parallel-real-world-examples-batch-7.spec.md` 两个图块 ✅
+- 定向测试:
+  - `cargo test -p ralph-e2e parallel_revops_quote_desk_example` ✅
+  - `cargo test -p ralph-e2e parallel_executive_business_review_prep_example` ✅
+  - `cargo test -p ralph-e2e parallel_customer_advisory_board_prep_example` ✅
+  - `cargo test -p ralph-cli --test integration_examples` ✅
+- live E2E:
+  - `parallel-revops-quote-desk-example` ✅ `184.5s`
+  - `parallel-executive-business-review-prep-example` ✅ `146.6s`
+  - `parallel-customer-advisory-board-prep-example` ✅ `102.4s`
+- 仓库级验证:
+  - `cargo test` ✅
+  - `cargo fmt --all --check` ✅
+
+## 2026-03-12 10:31:00 +0800 | batch-8 题材收敛与协议草案
+
+### 现象
+
+- `docs/examples/parallel-real-world-examples.zh-CN.md` 已经把 batch-8 的候选方向收敛到:
+  - 区域经营周会收口
+  - 续费风险预测校准
+  - 董事会材料预演
+  - 多区域 pipeline 校准
+- batch-7 已经证明:
+  - 商业协同题材可以稳定复用 direct example 骨架
+  - 最终 payload 断言优先看去前缀后的 stdout out 行
+  - worker 若允许多行自然语言 event,真实 backend 下 closing tag 更容易漂移
+- 现有第 1 到第 7 批里已经覆盖:
+  - 工程协作
+  - 发布与迁移
+  - 治理、审查、财务、招聘
+  - 客户单案续约 / 激活
+  - 支持升级、伙伴协同、一线赋能
+  - 商业报价、高层业务回顾、顾问委员会筹备
+
+### 假设
+
+- 当前主假设:
+  - batch-8 最适合继续往“经营节奏 / 预测校准”扩,这样与 batch-7 连续,同时避免回到已很厚的工程与 launch 题材。
+- 最强备选解释:
+  - 如果 3 个场景都写成材料准备,那也能比较快落地,但会和 `parallel-executive-business-review-prep` 太近。
+- 能推翻当前主假设的证据:
+  - 如果实现时发现 3 个经营类场景无法拉开 topic 语义,或者固定终态字段难以稳定,就该回退到“董事会 / 高层材料预演”方向。
+
+### 当前决定
+
+- batch-8 默认采用 3 个场景:
+  1. `parallel-regional-operating-review`
+  2. `parallel-renewal-risk-calibration`
+  3. `parallel-multi-region-pipeline-sync`
+
+### 协议草案
+
+#### 场景1: `parallel-regional-operating-review`
+
+- 目标:
+  - 演示单一区域周会前,跨职能经营资料如何并行收口。
+- 4 条 lane:
+  - `regional.pipeline.health.review` -> `pipeline.ready`
+  - `regional.delivery.capacity.review` -> `delivery.ready`
+  - `regional.support.signal.review` -> `support.ready`
+  - `regional.talent.plan.review` -> `talent.ready`
+- finalizer:
+  - `regional_operating_lead`
+  - `regional.operating.packet.request` -> `regional.review.ready`
+- 固定终态字段:
+  - `review_status: READY_FOR_REGION_WEEKLY`
+  - `region_code: APAC_ENTERPRISE`
+  - `operating_owner: regional-chief-of-staff`
+
+#### 场景2: `parallel-renewal-risk-calibration`
+
+- 目标:
+  - 演示“续费组合盘”的预测校准,而不是单个客户的续约处理。
+- 与 `parallel-customer-renewal-desk` 的边界:
+  - renewal desk 是单客户保续约战情室
+  - 这里是组合盘 forecast 校准
+- 4 条 lane:
+  - `renewal.usage.signal.review` -> `usage.ready`
+  - `renewal.sponsor.coverage.review` -> `sponsor.ready`
+  - `renewal.commercial.blocker.review` -> `blocker.ready`
+  - `renewal.success.plan.review` -> `success.ready`
+- finalizer:
+  - `renewal_calibration_lead`
+  - `renewal.calibration.packet.request` -> `renewal.calibration.ready`
+- 固定终态字段:
+  - `calibration_status: READY_FOR_FORECAST_COMMIT`
+  - `forecast_window: Q3_RENEWAL_CALIBRATION`
+  - `forecast_owner: retention-ops`
+
+#### 场景3: `parallel-multi-region-pipeline-sync`
+
+- 目标:
+  - 演示跨区域 pipeline 同步,强调同一经营主题在多区域并行收口。
+- 4 条 lane:
+  - `pipeline.amer.review` -> `amer.ready`
+  - `pipeline.emea.review` -> `emea.ready`
+  - `pipeline.apj.review` -> `apj.ready`
+  - `pipeline.latam.review` -> `latam.ready`
+- finalizer:
+  - `global_pipeline_sync_lead`
+  - `pipeline.sync.packet.request` -> `pipeline.sync.ready`
+- 固定终态字段:
+  - `sync_status: READY_FOR_GLOBAL_FORECAST_CALL`
+  - `forecast_week: FY26_W15`
+  - `sync_owner: global-revenue-operations`
+
+### 复用约束
+
+- 继续沿用:
+  - `prompt_file: "PROMPT.md"`
+  - 4 lane fanout
+  - coordinator 未收齐 ready 前保持静默
+  - finalizer 发布 terminal topic
+  - worker / finalizer 不输出 `LOOP_COMPLETE`
+- 对最脆弱的 worker lane:
+  - 优先锁成“单行 JSON event + 精确 `</event>`”
+- scenario 断言:
+  - 继续优先用 `extract_last_parallel_out_payload_for_topic(...)`
+
+## 2026-03-12 13:42:00 +0800 | batch-8 验证与修复闭环摘要
+
+### 最终落地范围
+
+- 新增并接线:
+  - `parallel-regional-operating-review`
+  - `parallel-renewal-risk-calibration`
+  - `parallel-multi-region-pipeline-sync`
+- 共享注册已同步到:
+  - `crates/ralph-e2e/src/scenarios/mod.rs`
+  - `crates/ralph-e2e/src/lib.rs`
+  - `crates/ralph-e2e/src/main.rs`
+  - `crates/ralph-cli/tests/integration_examples.rs`
+- 中文文档入口已同步到:
+  - `README.md`
+  - `crates/ralph-e2e/README.md`
+  - `docs/examples/parallel-real-world-examples.zh-CN.md`
+
+### 这轮出现过的真实问题
+
+#### 问题1: mermaid 校验命令首轮是假失败
+
+- 现象:
+  - 直接执行 `beautiful-mermaid-rs --ascii < specs/parallel-real-world-examples-batch-8.spec.md` 失败
+  - 错误是把 `# Spec: ...` 当成 mermaid header
+- 静态证据:
+  - spec 顶部是 Markdown 正文,不是 mermaid header
+  - 两个 mermaid block 实际都在 fenced code block 里
+- 动态证据:
+  - 用 `sed -n '73,83p'` 和 `sed -n '89,107p'` 单独抽出两个图块后,`beautiful-mermaid-rs --ascii` 都返回 0
+- 结论:
+  - 失败不是图语法错误
+  - 是 CLI 喂法错误: 这个工具要求 stdin 只包含 mermaid 本体
+
+#### 问题2: renewal live E2E 首轮真失败
+
+- 现象:
+  - `parallel-renewal-risk-calibration-example` 首轮 live E2E 超到 `240.1s` 后失败
+  - 缺失:
+    - `success.ready`
+    - `renewal.calibration.packet.request`
+    - `renewal.calibration.ready`
+- 静态证据:
+  - `success_plan_reviewer` 已被要求输出单行 JSON event
+  - 但指令仍然偏“原则约束”,没有提供足够机械化的唯一模板
+- 动态证据:
+  - `.e2e/stdout.txt` 里:
+    - `usage.ready`、`blocker.ready`、`sponsor.ready` 都出现了
+    - `success_plan_reviewer#1` 只跑到 MCP ready,随后直接 `state: failed`
+    - 没有任何 `success.ready` 真正落盘
+  - `.ralph/events.jsonl` 中也只有前三条 ready,没有 `success.ready`
+- 当前主假设:
+  - `success_plan_reviewer` 这条 lane 对真实 backend 来说还不够机械化
+  - 需要从“单行 JSON”进一步收紧成“唯一允许模板 + 固定值”
+- 备选解释:
+  - 也可能是一次性后端波动
+  - 但因为只有这条 lane 稳定缺失,优先先验证 prompt 机械化假设
+- 最小验证:
+  - 把 `success_plan_reviewer` 加固为:
+    - 不要做分析过程
+    - 直接按唯一模板输出
+    - `success_plan` 固定写 `risk_playbooks_assigned`
+  - 同时把静态测试升级为检查:
+    - `唯一允许的输出模板如下`
+    - `risk_playbooks_assigned`
+- 结论:
+  - 二次 live E2E 通过
+  - 说明这次失败不是 coordinator 路由问题
+  - 是 worker lane 还需要更机械化模板约束
+
+### 最终验证结果
+
+- mermaid 校验:
+  - `sed -n '73,83p' specs/parallel-real-world-examples-batch-8.spec.md | beautiful-mermaid-rs --ascii` ✅
+  - `sed -n '89,107p' specs/parallel-real-world-examples-batch-8.spec.md | beautiful-mermaid-rs --ascii` ✅
+- 定向测试:
+  - `cargo test -p ralph-e2e parallel_regional_operating_review_example` ✅
+  - `cargo test -p ralph-e2e parallel_renewal_risk_calibration_example` ✅
+  - `cargo test -p ralph-e2e parallel_multi_region_pipeline_sync_example` ✅
+  - `cargo test -p ralph-cli --test integration_examples` ✅
+- live E2E:
+  - `parallel-regional-operating-review-example` ✅ `130.9s`
+  - `parallel-renewal-risk-calibration-example` 首轮 ❌ `240.1s`
+  - `parallel-renewal-risk-calibration-example` 加固后复跑 ✅ `172.9s`
+  - `parallel-multi-region-pipeline-sync-example` ✅ `216.9s`
+- 仓库级验证:
+  - `cargo fmt --all --check` ✅
+  - `git diff --check -- <batch-8相关文件>` ✅
+  - `cargo test` ✅
+  - `git diff --check` ✅
+
+## 2026-03-12 14:36:00 +0800 | openspec-explore: hat 最终回答是否应回传给创建者
+
+### 已观察到的事实
+
+- OpenSpec 现有 change `event-id-and-reply` 解决的是:
+  - 每条 event 有稳定 `id`
+  - event 可以带单值 `reply`
+  - incoming events prompt 要暴露 `id`
+- 运行时与 prompt 现状:
+  - `supervisor` 已明确要求对人类回复使用 `reply.human.message`,并通过 `reply="EVENT_ID"` 关联原消息。
+  - `routing.rs` 对 `reply.human.message` 的处理是 observer/UI-only,不会再继续参与工作流路由。
+  - `instance.rs` 在 outgoing event 上自动补 `source`、`source_instance`、`id`。
+  - 但 incoming events prompt 只展示 `id`、`topic`、`payload` 和可选 `reply`,没有展示 `source_instance`。
+- 协议结构现状:
+  - `Event` 目前有 `id`、`reply`、`source`、`source_instance`、`target`、`target_instance`。
+  - 没有 requester / creator / return_to / reply_to_creator 这类一等字段。
+
+### 关键区分
+
+- `reply` 现在表达的是:
+  - “这条事件是在回复哪一条旧事件”
+- 用户当前提出的新需求表达的是:
+  - “这条回复应该被自动送回给谁”
+- 这两个不是同一个层次的问题。
+- 前者是关联关系。
+- 后者是投递语义。
+
+### 为什么这个需求真实存在
+
+- explorer / researcher / path-probe 这类 hat 往往不是为了推进下游 workflow,而是为了把结论回给调用者。
+- 如果只有 workflow event,发起方要么自己订阅一堆 topic,要么靠 prompt 约定土协议,这会越来越漂。
+- 如果把“最终答案”做成可选的 request-reply 通道,会更贴近“一个 hat 向另一个 hat 提问”的心理模型。
+
+### 需要避免的误区
+
+- 不应把“所有 hat 的 final answer 都默认返还 creator”当成通用规则。
+- 原因:
+  - 很多 workflow hat 的职责是推进状态,不是对话式答复。
+  - “哪个输出算 final”本身就不总是清楚。
+  - 默认回传会制造双通道:
+    - workflow topic 一份
+    - creator reply 一份
+  - 容易带来噪音、循环与 token 膨胀。
+
+### 候选方案
+
+#### 方案A: 最小改动,让 hat 自己显式写回给 source_instance
+
+- 做法:
+  - incoming events prompt 额外暴露 `source_instance`
+  - 被调用 hat 自己输出类似:
+    - `<event topic="research.answer" target_instance="ralph#1" reply="EVENT_ID">...</event>`
+- 优点:
+  - 改动小
+  - 不需要新 runtime 概念
+- 缺点:
+  - 协议责任压给 LLM
+  - 各 hat 很容易写出不同 topic / 不同回传方式
+  - prompt 漂移时最容易失控
+
+#### 方案B: 新增可选 request-reply 语义,运行时按 reply 自动回送
+
+- 做法:
+  - 保持 `reply="EVENT_ID"`
+  - 当事件被标记为“reply-style answer”时,运行时通过被回复的原 event 找回其 `source_instance`
+  - 自动把答案投递回原请求方实例
+- 优点:
+  - 更像真正的“提问 -> 回答”闭环
+  - 调用方只需要等 answer,不必自己重写路由协议
+  - 更适合 explorer / ask / lookup / research 类 hat
+- 缺点:
+  - 需要新协议定义: 哪些回复属于“回给请求方”,哪些只是普通关联
+  - 需要决定是靠 topic 还是靠字段表达
+
+#### 方案C: 默认所有 hat final answer 都返还 creator
+
+- 不推荐
+- 这是把少数有用场景提升成全局默认。
+- 对 workflow orchestration 来说太重,也太吵。
+
+### 当前倾向
+
+- 推荐方案B。
+- 但它应该被定义成“可选的 request-reply 通道”,而不是全局默认行为。
+- 更具体一点:
+  - workflow event 继续负责推进流程
+  - answer/reply channel 负责把结论回给请求方
+  - 两者可以同时存在,但必须是显式的,不能靠猜
+
+### 一个更清晰的心智模型
+
+```text
+当前模型:
+A --(workflow event)--> B --(workflow event)--> 下一环节
+
+此时 reply 只表示: “我回复了哪条事件”
+但不表示: “系统会自动把我送回 A”
+
+建议模型:
+A --(request event)--> B
+A <--(answer channel)-- B
+B --(workflow event, 可选)--> 下一环节
+
+也就是:
+- 流程推进是一条线
+- 问答回流是另一条线
+```
+
+### 适合 capture 到 OpenSpec 的一句话结论
+
+- `event-id-and-reply` 解决的是事件可引用与关联。
+- 如果系统需要“hat 的回答自动回到请求方”,应该新增一层显式 request-reply / answer-return 协议,而不是把它混进现有 `reply` 的字面解释里。
+
+## 2026-03-12 15:09:00 +0800 | `hat-request-reply-channel` fast-forward artifact 结论
+
+### 已落盘 artifact
+
+- `openspec/changes/hat-request-reply-channel/proposal.md`
+- `openspec/changes/hat-request-reply-channel/design.md`
+- `openspec/changes/hat-request-reply-channel/specs/hat-request-reply-channel/spec.md`
+- `openspec/changes/hat-request-reply-channel/tasks.md`
+
+### 本轮固定下来的设计判断
+
+- 这次 change 作为新增 capability `hat-request-reply-channel`,而不是继续修改 `event-id-and-reply`。
+- 协议显式使用 `reply.hat.message` 表达 hat-to-hat 的答案回流。
+- requester-return 通过 `reply=<request_event_id>` 查原请求事件,再解析其 `source_instance` 作为回送目标。
+- 该能力是可选的,不是“所有 hat 默认回传 final answer”。
+- unresolved reply 采取 fail-closed,防止答案误入普通 workflow。
+
+### 动态验证证据
+
+- `openspec status --change "hat-request-reply-channel"`
+  - 结果: `Progress: 4/4 artifacts complete`
+- `openspec validate hat-request-reply-channel --type change`
+  - 结果: `Change 'hat-request-reply-channel' is valid`
+- mermaid 校验:
+  - `sed -n '26,30p' openspec/changes/hat-request-reply-channel/design.md | beautiful-mermaid-rs --ascii` ✅
+  - `sed -n '36,48p' openspec/changes/hat-request-reply-channel/design.md | beautiful-mermaid-rs --ascii` ✅
+
+### 一个 CLI 小坑
+
+- `openspec validate --change "hat-request-reply-channel"` 会报:
+  - `error: unknown option '--change'`
+- 正确用法是:
+  - `openspec validate hat-request-reply-channel --type change`
+
+## 2026-03-12 15:33:00 +0800 | `hat-request-reply-channel` 实现前的现象 / 假设 / 验证计划
+
+### 现象
+
+- `ParallelSupervisor::route_event()` 已经是并行路由的特殊语义收口点。
+  - 现有已在这里处理:
+    - `reply.human.message` -> observer/UI-only,不再路由
+    - hat-sourced `human.message` -> observer/UI-only,不再路由
+    - `gate.resolve` -> 解析 `requested_by`,改写 `target_instance`
+    - `dispatch.decision` -> 只记录 replay 决策,不参与业务路由
+- 当前运行时没有现成的 `event_id -> source_instance` 索引。
+- 现有最接近的“从 history 恢复语义状态”的模式是:
+  - `queue_decisions: HashMap<String, HatInstanceId>`
+  - `load_queue_decisions_from_history()`
+- 事件日志里已经有足够字段支持恢复:
+  - `EventRecord.id`
+  - `EventRecord.source_instance`
+  - `EventRecord.reply`
+
+### 当前主假设
+
+- 最合适的实现点是在 `ParallelSupervisor` 内新增一个很小的 reply-target 索引。
+- 形式可以是:
+  - `HashMap<String, Option<HatInstanceId>>`
+- 含义:
+  - `contains_key(id) && value=Some(instance)` 表示该请求来自某个 hat instance
+  - `contains_key(id) && value=None` 表示该事件存在,但不是 hat-sourced requester
+  - `!contains_key(id)` 表示事件 id 未知
+- 然后在 `route_event()` 顶部先记账,在 `reply.hat.message` 分支里按 `reply` 解析并改写 `target_instance`。
+
+### 最强备选解释
+
+- 也可以不加内存索引,而是在每次收到 `reply.hat.message` 时直接读取 `EventHistory` 全文件查 `reply` 对应事件。
+- 这样实现更少字段,但会把同步路由路径变成反复读盘,并且每次都线性扫描 history,味道更差。
+
+### 什么证据会推翻当前主假设
+
+- 如果 `route_event()` 并不是所有请求事件都会经过的统一入口,那单点索引就不可靠。
+- 如果现有测试/运行路径已经证明只有 history 才能拿到完整 request 信息,那就要改成 history-first。
+- 如果 resume 场景下内存索引无法平滑恢复,就需要补 history load 或改方案。
+
+### 最小验证计划
+
+1. 在 `ParallelSupervisor` 里增加 reply-target 索引和 history load helper。
+2. 先只在 routing tests 里补 3 个最小用例:
+   - 成功回送到 requester
+   - unknown reply fail-closed
+   - known id 但无 `source_instance` fail-closed
+3. 如果这 3 个用例都能稳定落在 `route_event()` 一层,说明主假设成立。
+4. 再补 prompt / 文档文案与更高层的 scenario。

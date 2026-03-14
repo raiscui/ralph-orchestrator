@@ -1,0 +1,194 @@
+# Parallel Executive Business Review Prep example
+#
+# 目标:
+# - 演示高层业务回顾材料准备时,营收叙事、产品采用、风险展望、管理层诉求四条输入线并行收口
+# - 演示 EBR 的协调者保持静默、finalizer 汇总后再由 coordinator 输出收尾
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Executive Business Review Prep
+
+    你是并行模式下的 `ralph#1` (coordinator)。
+    你的输入来自 `PROMPT.md` 的四个资料包:
+    - `## Revenue Narrative Packet`
+    - `## Product Adoption Packet`
+    - `## Risk Outlook Packet`
+    - `## Executive Asks Packet`
+
+    重要规则:
+    - 你必须先并行派发四条 review topic, 每条都带 lane、packet_name 与 review_packet。
+    - 四条 ready 到齐之前, 你必须保持静默, 不许输出分析、等待提示、`LOOP_COMPLETE` 或其他普通文本。
+    - 只有四条 ready 全部出现后才允许发布 `ebr.packet.request`, 该事件只发一次, payload 最低要有 packet_focus 与 request_context。
+    - 最终 `ebr.packet.ready` payload 必须固定包含:
+      - `ebr_status: READY_FOR_EXEC_REVIEW`
+      - `meeting_tier: Q2_BUSINESS_REVIEW`
+      - `narrative_owner: gm-office`
+      - `next_action_owner: gm-office`
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾的单独一行出现,之后不能再输出任何事件或文本。
+    - 如果某条 lane 只是把事件样例以 `&lt;event ...&gt;` 的转义形式展示,不要当成 ready,继续等实际的 ready topic。
+
+    当你收到 `task.start` 时:
+    1) 立即顺序发布四条 lane:
+       - `ebr.revenue.narrative.review`
+       - `ebr.product.adoption.review`
+       - `ebr.risk.outlook.review`
+       - `ebr.exec.asks.review`
+       每个 event 都要包含 packet_name、lane、review_packet, 且不要把业务字段塞进 opening tag, payload 写在 event 正文里。
+    2) 等待所有 `revenue.ready`、`adoption.ready`、`risk.ready`、`asks.ready` 到齐后再发布 `ebr.packet.request`。
+    3) 发布 `ebr.packet.request` 后, 继续等待 `ebr.packet.ready` 并忽略任何迟到的 ready topic。
+
+    当你收到 `ebr.packet.ready` 之后:
+    1) 输出一段包含 ebr_status、meeting_tier、narrative_owner、packet_summary、next_action_owner 的 EBR summary。
+    2) 最后一行单独输出 `LOOP_COMPLETE`。
+    3) 输出 `LOOP_COMPLETE` 后不要再发表任何事件、topic 或 prose。
+
+    发事件时请用真实尖括号,像这样:
+
+    &lt;event topic="ebr.revenue.narrative.review"&gt;
+    packet_name: Revenue Narrative Packet
+    lane: revenue
+    review_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "ebr.packet.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  revenue_narrative_owner:
+    name: "Revenue Narrative Owner"
+    description: "提供营收叙事的口径与指标"
+    triggers: ["ebr.revenue.narrative.review"]
+    publishes: ["revenue.ready"]
+    instances: 1
+    instructions: |
+      你是 `revenue_narrative_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `revenue.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 事件的 payload 只能写在正文,不要把业务字段塞进 opening tag 属性。
+      - 禁止写前言、分析、后续建议或任何 event 以外的 prose。
+
+      payload 最低要求:
+      - lane: revenue
+      - status: ready
+      - narrative_highlights
+      - key_metrics
+      - summary (保持一句短句,不要写分析过程)
+
+  product_adoption_owner:
+    name: "Product Adoption Owner"
+    description: "确认产品接受度与客户采纳信号"
+    triggers: ["ebr.product.adoption.review"]
+    publishes: ["adoption.ready"]
+    instances: 1
+    instructions: |
+      你是 `product_adoption_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `adoption.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 事件的 payload 只能写在正文,不要把业务字段塞进 opening tag 属性。
+      - 禁止写前言、分析、后续建议或任何 event 以外的 prose。
+
+      payload 最低要求:
+      - lane: adoption
+      - status: ready
+      - adoption_signals
+      - coverage_notes
+      - summary (保持一句短句,不要展开分析)
+
+  risk_outlook_owner:
+    name: "Risk Outlook Owner"
+    description: "看清风险展望和潜在干扰"
+    triggers: ["ebr.risk.outlook.review"]
+    publishes: ["risk.ready"]
+    instances: 1
+    instructions: |
+      你是 `risk_outlook_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `risk.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 事件的 payload 只能写在正文,不要把业务字段塞进 opening tag 属性。
+      - 禁止写前言、分析、后续建议或任何 event 以外的 prose。
+
+      payload 最低要求:
+      - lane: risk
+      - status: ready
+      - risk_signal
+      - risk_mitigation
+      - summary (保持一句短句,不要额外扩写)
+
+  executive_asks_owner:
+    name: "Executive Asks Owner"
+    description: "整理管理层诉求与开放问题"
+    triggers: ["ebr.exec.asks.review"]
+    publishes: ["asks.ready"]
+    instances: 1
+    instructions: |
+      你是 `executive_asks_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `asks.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 事件的 payload 只能写在正文,不要把业务字段塞进 opening tag 属性。
+      - 禁止写前言、分析、后续建议或任何 event 以外的 prose。
+
+      payload 最低要求:
+      - lane: asks
+      - status: ready
+      - ask_topics
+      - executive_requests
+      - summary (保持一句短句,不要进一步解释)
+
+  ebr_chief_of_staff:
+    name: "EBR Chief of Staff"
+    description: "汇总四条线索,发出最终 EBR packet"
+    triggers: ["ebr.packet.request"]
+    publishes: ["ebr.packet.ready"]
+    instances: 1
+    instructions: |
+      你是 `ebr_chief_of_staff`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `ebr.packet.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 事件的 payload 只能写在正文,不要把业务字段塞进 opening tag 属性。
+      - 禁止写前言、分析、后续建议或任何 event 以外的 prose。
+
+      payload 最低要求:
+      - ebr_status: READY_FOR_EXEC_REVIEW
+      - meeting_tier: Q2_BUSINESS_REVIEW
+      - narrative_owner: gm-office
+      - packet_summary
+      - next_action_owner: gm-office

@@ -32,12 +32,14 @@ use ralph_proto::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
 
 /// 并行运行的结果摘要。
 #[derive(Debug, Clone)]
 pub struct ParallelRunResult {
     pub termination: Option<TerminationReason>,
+    /// 并行模式的 iteration 口径: ralph#1 的 job 完成次数(用于 termination 诊断).
+    pub ralph_iterations: u32,
     pub instance_states: HashMap<HatInstanceId, HatInstanceState>,
     pub output_chunks: usize,
 }
@@ -86,6 +88,13 @@ pub struct ParallelSupervisor {
 
     // queue 决策缓存（event_id -> chosen_instance），用于 replay/恢复时不重算
     queue_decisions: HashMap<String, HatInstanceId>,
+
+    // request-reply 原请求索引（event_id -> source_instance）
+    //
+    // 说明：
+    // - `reply.hat.message` 需要根据 `reply=<request_event_id>` 找回原请求方实例；
+    // - 这里只存最薄的一层信息，避免引入完整事件缓存。
+    request_reply_origins: HashMap<String, Option<HatInstanceId>>,
 
     // Human gate 状态机（open gates + timeout）
     gates: gate::GateManager,
@@ -164,6 +173,7 @@ impl ParallelSupervisor {
             output_tx: None,
             instance_tx: None,
             queue_decisions: HashMap::new(),
+            request_reply_origins: HashMap::new(),
             gates: gate::GateManager::new(),
             next_decision_job_id: 1,
             pause_on_completion_promise: false,
@@ -263,7 +273,28 @@ impl ParallelSupervisor {
     }
 
     /// 启动并运行，直到收到完成信号或被打断。
-    pub async fn run(mut self, resume: bool) -> anyhow::Result<ParallelRunResult> {
+    pub async fn run(self, resume: bool) -> anyhow::Result<ParallelRunResult> {
+        // 说明:
+        // - 默认 run() 不接收外部中断信号,因此这里创建一个永不触发的 watch channel 作为占位.
+        // - 这样我们可以在同一份 run_inner 里统一处理“可选中断”逻辑,避免重复实现.
+        let (_interrupt_tx, interrupt_rx) = watch::channel(false);
+        Self::run_inner(self, resume, interrupt_rx).await
+    }
+
+    /// 启动并运行,并监听外部中断信号(例如 Ctrl+C/SIGTERM)。
+    pub async fn run_with_interrupt(
+        self,
+        resume: bool,
+        interrupt_rx: watch::Receiver<bool>,
+    ) -> anyhow::Result<ParallelRunResult> {
+        Self::run_inner(self, resume, interrupt_rx).await
+    }
+
+    async fn run_inner(
+        mut self,
+        resume: bool,
+        mut interrupt_rx: watch::Receiver<bool>,
+    ) -> anyhow::Result<ParallelRunResult> {
         let (output_tx, mut output_rx) = mpsc::channel::<HatJobOutputChunk>(256);
         let (instance_tx, mut instance_rx) = mpsc::channel::<HatInstanceEvent>(256);
 
@@ -283,12 +314,18 @@ impl ParallelSupervisor {
         //
         // 说明：
         // - parallel-cli/CI：从 run 启动开始计时（与串行一致）。
-        // - idle_start：fresh run 时先待机(不自动投递 task.start),因此在看到第一次 Running 前不计时。
+        // - idle_start：这是“无 prompt 的常驻会话”模式。
+        //   在该模式下,Supervisor 级 max_runtime 整个会话都禁用:
+        //   - 等待第一条 external event 之前不计时
+        //   - 第一条 human.message 之后也不重新开始计时
+        //   这样主 `ralph#1` 不会因为长时间对话/待机被 MaxRuntime 收掉。
         // - parallel-tui：当进入 `LOOP_COMPLETE` 暂停态后，计时会重置并暂停；
         //   直到任意实例再次进入 Running（新的 job 启动）才重新开始计时（见 specs）。
+        let max_runtime_disabled = self.idle_start;
         let mut max_runtime_started_at = std::time::Instant::now();
-        let mut max_runtime_waiting_for_running = !resume && self.idle_start;
-        let mut max_runtime_counting = !max_runtime_waiting_for_running;
+        let mut max_runtime_waiting_for_running =
+            !max_runtime_disabled && !resume && self.idle_start;
+        let mut max_runtime_counting = !max_runtime_disabled && !max_runtime_waiting_for_running;
         let mut ralph_iterations: u32 = 0;
         // completion_promise 属于“软退出信号”：
         // - 不应当立刻 break，否则同一轮输出里解析出的事件可能还没来得及路由/触发下游 job。
@@ -317,6 +354,7 @@ impl ParallelSupervisor {
         // replay/恢复：先从 events.jsonl 读入 dispatch.decision，避免重算 queue 决策。
         if resume {
             self.load_queue_decisions_from_history()?;
+            self.load_request_reply_origins_from_history()?;
         }
 
         self.spawn_instances()?;
@@ -354,6 +392,12 @@ impl ParallelSupervisor {
 
         loop {
             tokio::select! {
+                changed = interrupt_rx.changed() => {
+                    if changed.is_ok() && *interrupt_rx.borrow() {
+                        termination = Some(TerminationReason::Interrupted);
+                        break;
+                    }
+                }
                 chunk = output_rx.recv() => {
                     let Some(chunk) = chunk else { break };
                     output_chunks += 1;
@@ -372,7 +416,10 @@ impl ParallelSupervisor {
 
                             // max_runtime：暂停态(例如 idle_start / parallel-tui completion pause)下，
                             // 直到看到任意实例进入 Running 才重新开始计时。
-                            if max_runtime_waiting_for_running && state == HatInstanceState::Running {
+                            if !max_runtime_disabled
+                                && max_runtime_waiting_for_running
+                                && state == HatInstanceState::Running
+                            {
                                 max_runtime_started_at = std::time::Instant::now();
                                 max_runtime_counting = true;
                                 max_runtime_waiting_for_running = false;
@@ -428,9 +475,11 @@ impl ParallelSupervisor {
                                     // 同时重置并暂停 max_runtime 计时：
                                     // - 暂停态期间不计时（允许长时间等待 human 输入）
                                     // - 直到任意实例再次 Running 才恢复计时
-                                    max_runtime_started_at = std::time::Instant::now();
-                                    max_runtime_counting = false;
-                                    max_runtime_waiting_for_running = true;
+                                    if !max_runtime_disabled {
+                                        max_runtime_started_at = std::time::Instant::now();
+                                        max_runtime_counting = false;
+                                        max_runtime_waiting_for_running = true;
+                                    }
                                 } else if completion_promise_seen_at.is_none() {
                                     // CLI/CI：进入收敛退出态。
                                     termination = Some(TerminationReason::CompletionPromise);
@@ -473,7 +522,8 @@ impl ParallelSupervisor {
                 }
                 _ = tick.tick() => {
                     // max_runtime：超时后直接退出（并触发 cancel/shutdown），避免无人值守卡死。
-                    if max_runtime_counting
+                    if !max_runtime_disabled
+                        && max_runtime_counting
                         && max_runtime_started_at.elapsed()
                             >= Duration::from_secs(self.config.event_loop.max_runtime_seconds)
                     {
@@ -521,7 +571,8 @@ impl ParallelSupervisor {
                                 // - 解除暂停态并不意味着“立刻开始计时”：
                                 //   你要求必须等到任意实例进入 Running 才开始重新计时。
                                 // - 但如果此时已经存在 Running（极端竞态/实现差异），我们就直接开始计时，避免永久暂停。
-                                if self.pause_on_completion_promise
+                                if !max_runtime_disabled
+                                    && self.pause_on_completion_promise
                                     && max_runtime_waiting_for_running
                                     && self
                                         .instance_states
@@ -632,6 +683,7 @@ impl ParallelSupervisor {
 
         Ok(ParallelRunResult {
             termination,
+            ralph_iterations,
             instance_states: self.instance_states,
             output_chunks,
         })
@@ -924,6 +976,10 @@ impl ParallelSupervisor {
         out.push_str("  - Example: <event topic=\"reply.human.message\" reply=\"EVENT_ID\">your reply</event>\n");
         out.push_str("- When you observe an external `human.message` event (no `source`/`source_instance`), you MUST reply to the human.\n");
         out.push_str("  - Emit exactly one `reply.human.message` event with `reply=\"<incoming_event.id>\"`.\n");
+        out.push_str("- If you want to return an answer to another hat that asked you something, you MUST publish `reply.hat.message`.\n");
+        out.push_str("  - Example: <event topic=\"reply.hat.message\" reply=\"EVENT_ID\">your answer</event>\n");
+        out.push_str("  - Runtime will route it back to the original requester instance from the referenced event.\n");
+        out.push_str("  - Use `reply.hat.message` only for hat-to-hat answer return, not for normal workflow progression.\n");
         out.push_str("- You MUST NOT use `human.message` as a human-facing reply topic.\n");
         out.push_str("  - Reason: `human.message` is treated as an input topic and can cause self-chat loops in parallel mode.\n\n");
 

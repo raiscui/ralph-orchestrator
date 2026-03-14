@@ -72,6 +72,22 @@ struct ParallelLayoutSnapshot {
     gate_actions_area: ratatui::layout::Rect,
 }
 
+/// 并行主视图的 pane 布局结果。
+///
+/// 说明:
+/// - 这里故意把“上半区的布局切分”提炼成单一 helper。
+/// - 原因不是复用本身,而是避免:
+///   - Output 实际渲染用一套布局
+///   - Markdown 预换行宽度同步又用另一套布局
+/// - 一旦两边哪怕只差 1 列,长 prompt 累积后也会让 `row_count/max_scroll` 少几行,
+///   最终把 reply 顶出当前视口。
+#[derive(Debug, Clone, Copy)]
+struct ParallelPaneAreas {
+    bottom_area: ratatui::layout::Rect,
+    instances_area: ratatui::layout::Rect,
+    output_area: ratatui::layout::Rect,
+}
+
 /// gate 快捷操作（actions chips）的枚举（用于 hit-test 后预填输入框）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GateActionChip {
@@ -138,6 +154,44 @@ fn inner_block(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
         y: area.y.saturating_add(1),
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
+    }
+}
+
+// 并行模式：底部控制面板（chat/gates）的固定高度。
+// 说明：先用固定高度满足“多行输入 + gate 列表可见”的最小需求，后续可再做自适应。
+const PARALLEL_BOTTOM_PANEL_HEIGHT: u16 = 12;
+const PARALLEL_CHAT_INPUT_HEIGHT: u16 = 3;
+// 并行模式：左侧 Instances 面板的固定宽度（保持稳定布局，避免随窗口伸缩导致跳动）。
+const PARALLEL_INSTANCES_PANEL_WIDTH: u16 = 30;
+// 并行模式：Instances 与 Output 之间留一列间隙。
+// 目的：取消“边框贴合/看起来像 collapsing borders”的观感，让两个 pane 更清晰分离。
+const PARALLEL_PANE_GAP_WIDTH: u16 = 1;
+
+fn split_parallel_pane_areas(content_area: ratatui::layout::Rect) -> ParallelPaneAreas {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),                               // main
+            Constraint::Length(PARALLEL_BOTTOM_PANEL_HEIGHT), // bottom panel
+        ])
+        .split(content_area);
+
+    let main_area = vertical[0];
+    let bottom_area = vertical[1];
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(PARALLEL_INSTANCES_PANEL_WIDTH), // instances
+            Constraint::Length(PARALLEL_PANE_GAP_WIDTH),        // gap
+            Constraint::Min(0),                                 // output
+        ])
+        .split(main_area);
+
+    ParallelPaneAreas {
+        bottom_area,
+        instances_area: horizontal[0],
+        output_area: horizontal[2],
     }
 }
 
@@ -822,6 +876,23 @@ fn resolve_human_message_target_instance(
     explicit.or_else(|| selected_instance_id.map(|id| id.to_string()))
 }
 
+fn maybe_select_chat_target_instance(
+    parallel: &mut crate::state::ParallelTuiState,
+    target_instance: Option<&str>,
+) {
+    // 说明:
+    // - 并行 TUI 的 Output 面板按 "selected instance" 展示.
+    // - 当用户在 Chat 输入里显式 `@ralph#1`(或其它实例)发送 human.message 时,
+    //   如果 UI 仍停留在旧的 selected instance,用户会体感为“没有回复/不显示回复”.
+    // - 因此: 发送成功后 best-effort 切换到目标实例,让回复出现的位置与用户预期一致.
+    let Some(target) = target_instance else {
+        return;
+    };
+
+    let id = HatInstanceId::new(target);
+    let _ = parallel.select_instance_by_id(&id);
+}
+
 fn validate_human_message_turn_action_target(
     target_instance: Option<&str>,
     turn_action: Option<&str>,
@@ -1297,16 +1368,6 @@ impl App {
         // Track viewport height for scroll calculations
         let mut viewport_height: usize = 24; // Default, updated on render
 
-        // 并行模式：底部控制面板（chat/gates）的固定高度。
-        // 说明：先用固定高度满足“多行输入 + gate 列表可见”的最小需求，后续可再做自适应。
-        const PARALLEL_BOTTOM_PANEL_HEIGHT: u16 = 12;
-        const PARALLEL_CHAT_INPUT_HEIGHT: u16 = 3;
-        // 并行模式：左侧 Instances 面板的固定宽度（保持稳定布局，避免随窗口伸缩导致跳动）。
-        const PARALLEL_INSTANCES_PANEL_WIDTH: u16 = 30;
-        // 并行模式：Instances 与 Output 之间留一列间隙。
-        // 目的：取消“边框贴合/看起来像 collapsing borders”的观感，让两个 pane 更清晰分离。
-        const PARALLEL_PANE_GAP_WIDTH: u16 = 1;
-
         // 并行模式的 state 更新通道（由 App 消费）
         let mut update_rx = self.update_rx.take();
 
@@ -1339,6 +1400,11 @@ impl App {
         // - 只要 selected_instance_id 变了，就认为需要让 Output “重新打开”
         let mut last_selected_instance_id: Option<HatInstanceId> = None;
 
+        // Ctrl+C 退出策略（与并行 runner 的 termination 信号对齐）：
+        // - 第一次 Ctrl+C: 仅请求中断(main loop),TUI 继续运行,直到收到 terminated_rx=true。
+        // - 第二次 Ctrl+C: 强制退出 TUI（兜底,避免主循环异常卡死时无法退出）。
+        let mut interrupt_requested = false;
+
         loop {
             // Use biased select to prioritize input over render ticks
             tokio::select! {
@@ -1349,16 +1415,35 @@ impl App {
                     match maybe_event {
                         Some(Ok(event)) => {
                             match event {
-                                // Handle Ctrl+C: signal main loop and exit.
-                                // In raw mode, SIGINT is not generated, so we must signal the
-                                // main orchestration loop through interrupt_tx channel.
+                                // Handle Ctrl+C: signal main loop, then keep UI alive until termination.
+                                //
+                                // 说明:
+                                // - raw mode 下 OS 不会生成 SIGINT,因此必须通过 interrupt_tx 通知主循环退出.
+                                // - 为避免“最后几帧输出/回复来不及渲染就退场”,第一次 Ctrl+C 只发出中断请求,
+                                //   TUI 继续运行并等待 terminated_rx=true；第二次 Ctrl+C 才强制退出 UI。
                                 Event::Key(key) if key.kind == KeyEventKind::Press
                                     && key.code == KeyCode::Char('c')
                                     && key.modifiers.contains(KeyModifiers::CONTROL) =>
                                 {
                                     info!("Ctrl+C detected, signaling main loop");
+                                    if interrupt_requested {
+                                        // 第二次 Ctrl+C: 用户明确要“立刻退出 UI”.
+                                        // 说明: 第一次 Ctrl+C 已经请求 main loop 中断,这里不再等待 terminated 信号.
+                                        break;
+                                    }
+
+                                    interrupt_requested = true;
                                     request_interrupt(self.interrupt_tx.as_ref());
-                                    break;
+
+                                    // 在并行模式下把状态提示写到 chat_status,避免用户误以为“按了 Ctrl+C 没反应”.
+                                    let mut state = self.state.lock().unwrap();
+                                    if matches!(state.mode, TuiMode::Parallel) {
+                                        state.parallel.chat_status = Some(
+                                            "interrupt requested: waiting for shutdown... (press Ctrl+C again to force quit)".to_string(),
+                                        );
+                                    }
+
+                                    continue;
                                 }
                                 Event::Mouse(mouse) => {
                                     match mouse.kind {
@@ -1820,10 +1905,26 @@ impl App {
                                                                     }
 
                                                                     let writer = ExternalEventWriter::new();
-                                                                    match writer.append("human.message", payload, resolved_target, session_strategy, turn_action) {
+                                                                    match writer.append(
+                                                                        "human.message",
+                                                                        payload,
+                                                                        resolved_target.clone(),
+                                                                        session_strategy,
+                                                                        turn_action,
+                                                                    ) {
                                                                         Ok(()) => {
+                                                                            // 发送成功后,自动切换到目标实例的 Output,
+                                                                            // 避免用户停留在旧实例时误以为“没有回复/不显示回复”.
+                                                                            maybe_select_chat_target_instance(
+                                                                                &mut state.parallel,
+                                                                                resolved_target.as_deref(),
+                                                                            );
+
+                                                                            let target = resolved_target
+                                                                                .as_deref()
+                                                                                .unwrap_or("(unknown)");
                                                                             state.parallel.chat_status = Some(format!(
-                                                                                "sent human.message -> {}",
+                                                                                "sent human.message @{target} -> {}",
                                                                                 writer.path().display()
                                                                             ));
                                                                         }
@@ -1962,28 +2063,10 @@ impl App {
                             {
                                 let effect = match state.mode {
                                     TuiMode::Parallel => {
-                                        let vertical = Layout::default()
-                                            .direction(Direction::Vertical)
-                                            .constraints([
-                                                Constraint::Min(0), // main
-                                                Constraint::Length(PARALLEL_BOTTOM_PANEL_HEIGHT), // bottom panel
-                                            ])
-                                            .split(content_area);
-
-                                        let main_area = vertical[0];
-                                        let bottom_area = vertical[1];
-
-                                        let horizontal = Layout::default()
-                                            .direction(Direction::Horizontal)
-                                            .constraints([
-                                                Constraint::Length(PARALLEL_INSTANCES_PANEL_WIDTH), // instances
-                                                Constraint::Length(PARALLEL_PANE_GAP_WIDTH),        // gap
-                                                Constraint::Min(0),                                  // output
-                                            ])
-                                            .split(main_area);
-
-                                        let instances_area = horizontal[0];
-                                        let output_area = horizontal[2];
+                                        let panes = split_parallel_pane_areas(content_area);
+                                        let bottom_area = panes.bottom_area;
+                                        let instances_area = panes.instances_area;
+                                        let output_area = panes.output_area;
 
                                         let instances_inner =
                                             panel_block("Instances", false, &theme).inner(instances_area);
@@ -2037,25 +2120,8 @@ impl App {
                                     && animation::should_run_startup_animation(frame_area)
                                     && let Some(manager) = effects.as_mut()
                                 {
-                                    let vertical = Layout::default()
-                                        .direction(Direction::Vertical)
-                                        .constraints([
-                                            Constraint::Min(0), // main
-                                            Constraint::Length(PARALLEL_BOTTOM_PANEL_HEIGHT), // bottom panel
-                                        ])
-                                        .split(content_area);
-
-                                    let main_area = vertical[0];
-                                    let horizontal = Layout::default()
-                                        .direction(Direction::Horizontal)
-                                        .constraints([
-                                            Constraint::Length(PARALLEL_INSTANCES_PANEL_WIDTH), // instances
-                                            Constraint::Length(PARALLEL_PANE_GAP_WIDTH),        // gap
-                                            Constraint::Min(0),                                  // output
-                                        ])
-                                        .split(main_area);
-
-                                    let output_area = horizontal[2];
+                                    let panes = split_parallel_pane_areas(content_area);
+                                    let output_area = panes.output_area;
                                     let output_inner = inner_block(output_area);
                                     // 体验取舍：
                                     // - Warp（bg=Reset）下，为了避免边框 cell 参与插值导致“外圈被带色”，
@@ -2085,51 +2151,29 @@ impl App {
                             }
                         }
 
-                        // Autoscroll（串行/并行）：如果用户没离开底部，就跟随输出
-                        let effective_viewport_height = match state.mode {
-                            TuiMode::Serial => content_area.height as usize,
-                        TuiMode::Parallel => {
-                            // content = main + bottom_panel(PARALLEL_BOTTOM_PANEL_HEIGHT)
-                            // output inner = main - borders(2)
-                            let main_height = content_area
-                                .height
-                                .saturating_sub(PARALLEL_BOTTOM_PANEL_HEIGHT);
-                            main_height.saturating_sub(2) as usize
-                        }
-                    };
-                    if let Some(mut buffer) = state.current_output_buffer_mut()
-                        && buffer.following_bottom()
-                    {
-                        let max_scroll = buffer
-                            .row_count()
-                            .saturating_sub(effective_viewport_height);
-                        buffer.set_scroll_offset_clamped(max_scroll);
-                    }
-
-                    // 并行模式下：把“输出面板可用宽度”同步到 state，用于 Markdown 语义换行。
-                    // 这样 blockquote/list 等结构前缀在换行后仍能保持正确展示。
-                    if state.mode == TuiMode::Parallel {
-                        let vertical = Layout::default()
-                            .direction(Direction::Vertical)
-                            .constraints([
-                                Constraint::Min(0), // main
-                                Constraint::Length(PARALLEL_BOTTOM_PANEL_HEIGHT), // bottom panel
-                            ])
-                            .split(content_area);
-
-                        let main_area = vertical[0];
-                        let horizontal = Layout::default()
-                            .direction(Direction::Horizontal)
-                            .constraints([
-                                Constraint::Length(30), // instances
-                                Constraint::Min(0),     // output
-                            ])
-                            .split(main_area);
-
-                        let output_area = horizontal[1];
-                        let output_inner_width = output_area.width.saturating_sub(2);
-                        state.parallel.set_output_render_width(output_inner_width);
-                    }
+                            // 并行模式下：先用“真实的 Output pane 布局”同步渲染宽度，
+                            // 再按更新后的 row_count 做 autoscroll。
+                            //
+                            // 关键顺序:
+                            // - 如果先 autoscroll，再重算 output_render_width，
+                            //   `row_count/max_scroll` 还是旧宽度口径，容易少滚几行。
+                            let effective_viewport_height = match state.mode {
+                                TuiMode::Serial => content_area.height as usize,
+                                TuiMode::Parallel => {
+                                    let panes = split_parallel_pane_areas(content_area);
+                                    let output_inner = inner_block(panes.output_area);
+                                    state.parallel.set_output_render_width(output_inner.width);
+                                    output_inner.height as usize
+                                }
+                            };
+                            if let Some(mut buffer) = state.current_output_buffer_mut()
+                                && buffer.following_bottom()
+                            {
+                                let max_scroll = buffer
+                                    .row_count()
+                                    .saturating_sub(effective_viewport_height);
+                                buffer.set_scroll_offset_clamped(max_scroll);
+                            }
 
                     // Hat Graph Radar：推进雷达的状态机（纯 UI）。
                     //
@@ -2168,28 +2212,10 @@ impl App {
                             }
                             TuiMode::Parallel => {
                                 // 布局：上（实例列表 + 输出） / 下（chat + gate）
-                                let vertical = Layout::default()
-                                    .direction(Direction::Vertical)
-                                    .constraints([
-                                        Constraint::Min(0),     // main
-                                        Constraint::Length(PARALLEL_BOTTOM_PANEL_HEIGHT),  // bottom panel（后续可做自适应）
-                                    ])
-                                    .split(content_area);
-
-                                let main_area = vertical[0];
-                                let bottom_area = vertical[1];
-
-                                let horizontal = Layout::default()
-                                    .direction(Direction::Horizontal)
-                                    .constraints([
-                                        Constraint::Length(PARALLEL_INSTANCES_PANEL_WIDTH), // instances
-                                        Constraint::Length(PARALLEL_PANE_GAP_WIDTH),        // gap
-                                        Constraint::Min(0),                                  // output
-                                    ])
-                                    .split(main_area);
-
-                                let instances_area = horizontal[0];
-                                let output_area = horizontal[2];
+                                let panes = split_parallel_pane_areas(content_area);
+                                let bottom_area = panes.bottom_area;
+                                let instances_area = panes.instances_area;
+                                let output_area = panes.output_area;
                                 exabind_instances_area = Some(instances_area);
                                 exabind_output_area = Some(output_area);
                                 exabind_bottom_area = Some(bottom_area);
@@ -3345,6 +3371,62 @@ mod tests {
     }
 
     #[test]
+    fn maybe_select_chat_target_instance_switches_selected_instance() {
+        let mut state = TuiState::new_parallel();
+
+        state
+            .parallel
+            .register_instance(HatInstanceId::from("ralph#1"), HatInstanceState::Idle);
+        state
+            .parallel
+            .register_instance(HatInstanceId::from("writer#1"), HatInstanceState::Idle);
+
+        // 先显式选中 writer#1,再模拟发送到 @ralph#1.
+        state
+            .parallel
+            .select_instance_by_id(&HatInstanceId::from("writer#1"));
+        assert_eq!(
+            state.parallel.selected_instance_id().unwrap().as_str(),
+            "writer#1"
+        );
+
+        maybe_select_chat_target_instance(&mut state.parallel, Some("ralph#1"));
+        assert_eq!(
+            state.parallel.selected_instance_id().unwrap().as_str(),
+            "ralph#1"
+        );
+    }
+
+    #[test]
+    fn split_parallel_pane_areas_accounts_for_gap_and_border_in_output_width() {
+        // 回归目标:
+        // - 预换行宽度同步必须和真实 Output pane 使用同一套布局。
+        // - 中间 1 列 gap 不能漏算,否则 output_render_width 会偏大 1,
+        //   长 prompt 累积后会少出几行,把 reply 顶出视口。
+        let content_area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        let panes = split_parallel_pane_areas(content_area);
+        let output_inner = inner_block(panes.output_area);
+
+        assert_eq!(panes.instances_area.width, PARALLEL_INSTANCES_PANEL_WIDTH);
+        assert_eq!(
+            panes.output_area.x,
+            content_area.x + PARALLEL_INSTANCES_PANEL_WIDTH + PARALLEL_PANE_GAP_WIDTH
+        );
+        assert_eq!(
+            panes.output_area.width,
+            content_area
+                .width
+                .saturating_sub(PARALLEL_INSTANCES_PANEL_WIDTH + PARALLEL_PANE_GAP_WIDTH)
+        );
+        assert_eq!(
+            output_inner.width,
+            content_area
+                .width
+                .saturating_sub(PARALLEL_INSTANCES_PANEL_WIDTH + PARALLEL_PANE_GAP_WIDTH + 2)
+        );
+    }
+
+    #[test]
     fn validate_human_message_turn_action_target_rejects_non_ralph_primary() {
         let err = validate_human_message_turn_action_target(Some("writer#1"), Some("steer"))
             .expect_err("non-ralph target must be rejected for control-plane");
@@ -3515,7 +3597,9 @@ mod tests {
     /// Verify Ctrl+C handling exists in production code.
     ///
     /// Since raw mode prevents SIGINT, we must handle Ctrl+C via crossterm events.
-    /// TUI is observation-only, so Ctrl+C breaks out of the event loop.
+    /// Ctrl+C 的语义：
+    /// - 第一次: 请求 main loop 中断,但 TUI 继续运行并等待 terminated 信号（避免丢最后一段输出）。
+    /// - 第二次: 强制退出 TUI（兜底）。
     #[test]
     fn ctrl_c_handling_exists_in_app() {
         let source = include_str!("app.rs");

@@ -1,0 +1,227 @@
+# Parallel Proposal Assembly example
+#
+# 目标:
+# - 演示方案材料准备时多个输入线并行推进
+# - 演示 4 条 lane 收敛后再由 editor 产出最终 proposal.ready
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Proposal Assembly
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `PROPOSAL_PACKET`。
+    其中至少包含:
+    - `## Research Packet`
+    - `## Pricing Packet`
+    - `## Legal Packet`
+    - `## Executive Packet`
+
+    重要规则:
+    - 你必须先 fanout 4 条 proposal lane。
+    - 只有 4 条 lane 都完成后,才允许发布 `proposal.merge.request`。
+    - `proposal.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `proposal.research.task`
+       - `proposal.pricing.task`
+       - `proposal.legal.task`
+       - `proposal.exec.task`
+    2) 每条任务都必须携带:
+       - proposal_id
+       - lane
+       - evidence_packet
+
+    当你观察到:
+    - `research.done`
+    - `pricing.done`
+    - `legal.done`
+    - `exec.done`
+    全部出现后:
+    - 你必须只发布一次 `proposal.merge.request`
+    - 后续即使看到重复或迟到的 `*.done`,也必须忽略
+
+    当你收到 `proposal.ready` 时:
+    1) 输出最终 proposal summary
+       - 至少包含 proposal_id、recommendation、executive_summary
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="proposal.research.task"&gt;
+    proposal_id: ...
+    lane: research
+    evidence_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "proposal.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  research_analyst:
+    name: "🔎 Research Analyst"
+    description: "提炼客户价值与业务证据。"
+    triggers: ["proposal.research.task"]
+    publishes: ["research.done"]
+    instances: 1
+    instructions: |
+      你是 `research_analyst`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: research
+      - status: ready
+      - key_takeaway
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="research.done"&gt;
+      lane: research
+      status: ready
+      key_takeaway: ...
+      summary: ...
+      &lt;/event&gt;
+
+  pricing_analyst:
+    name: "💰 Pricing Analyst"
+    description: "确认报价结构和商业包装。"
+    triggers: ["proposal.pricing.task"]
+    publishes: ["pricing.done"]
+    instances: 1
+    instructions: |
+      你是 `pricing_analyst`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: pricing
+      - status: ready
+      - package
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="pricing.done"&gt;
+      lane: pricing
+      status: ready
+      package: ...
+      summary: ...
+      &lt;/event&gt;
+
+  legal_reviewer:
+    name: "⚖️ Legal Reviewer"
+    description: "确认法务条款和合同边界。"
+    triggers: ["proposal.legal.task"]
+    publishes: ["legal.done"]
+    instances: 1
+    instructions: |
+      你是 `legal_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: legal
+      - status: ready
+      - key_term
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="legal.done"&gt;
+      lane: legal
+      status: ready
+      key_term: ...
+      summary: ...
+      &lt;/event&gt;
+
+  executive_writer:
+    name: "🧾 Executive Writer"
+    description: "把复杂材料压缩成高层可读的 narrative。"
+    triggers: ["proposal.exec.task"]
+    publishes: ["exec.done"]
+    instances: 1
+    instructions: |
+      你是 `executive_writer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: exec
+      - status: ready
+      - executive_summary
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="exec.done"&gt;
+      lane: exec
+      status: ready
+      executive_summary: ...
+      summary: ...
+      &lt;/event&gt;
+
+  proposal_editor:
+    name: "📄 Proposal Editor"
+    description: "汇总 4 条 lane,给出最终 proposal recommendation。"
+    triggers: ["proposal.merge.request"]
+    publishes: ["proposal.ready"]
+    instances: 1
+    instructions: |
+      你是 `proposal_editor`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `proposal.ready`。
+
+      决策规则:
+      - 如果 4 条 lane 都 `status: ready`
+      - 最终 recommendation 必须是 `SUBMIT`
+
+      输出 payload 最低要求:
+      - proposal_id
+      - recommendation
+      - executive_summary
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="proposal.ready"&gt;
+      proposal_id: PROP-208
+      recommendation: SUBMIT
+      executive_summary: ...
+      summary: ...
+      &lt;/event&gt;

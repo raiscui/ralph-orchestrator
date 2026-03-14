@@ -375,3 +375,66 @@ See `.claude/skills/pr-demo/SKILL.md` for full documentation.
 - Prefer replay-based smoke tests over live API calls for CI
 - Run python tests, using a .venv
 - You MUST not commit emphemeral files.
+
+## Evidence Workflow (Record Sessions)
+
+When you say "fixed", it must be backed by **recorded evidence** and **gates**.
+This prevents the common failure mode: *the agent thinks it fixed something, but a human rerun still fails*.
+
+### Use the record-session as the primary evidence stream
+
+- Always run with `--record-session <FILE>` while debugging, validating, or creating fixtures.
+- `.ralph/` is evidence. Prefer keeping it; do not treat it as disposable cache.
+- Ralph writes `.ralph/record-session.latest` at the workspace root so you can `record watch` without passing `FILE`
+  (even when the record file itself lives outside `.ralph/`).
+
+### Real-time probe (agent automation)
+
+`ralph record watch` is intentionally low-abstraction (raw JSONL lines), but it can also act as a scriptable probe:
+
+```bash
+# Exit 0 when a specific topic arrives, exit 2 on timeout.
+ralph record watch --until-topic reply.human.message --timeout-secs 30 --quiet
+
+# Exit 0 when termination is recorded, exit 2 on timeout.
+ralph record watch --until-event _meta.termination --timeout-secs 120 --quiet
+```
+
+### Post-run summary (fact check)
+
+After a run ends, use strict parsing to avoid guessing:
+
+```bash
+ralph record summary /tmp/session.jsonl
+```
+
+Key fields to check:
+
+- `_meta.session_start`: `cwd`, `argv`, `current_exe`, `version` (disambiguates "which ralph did you run?")
+- `Topics`: confirms whether `reply.human.message` actually happened
+- `Termination`: confirms whether the run ended cleanly vs interrupted
+
+### Debug decision tree: "UI looks blank" / "no reply shown"
+
+Separate the problem into two contracts:
+
+1) **Durability/Semantic contract**: the evidence exists in record-session JSONL
+2) **Display contract**: the evidence is visible in the chosen UI/rendering mode
+
+Workflow:
+
+- If the record-session contains `bus.publish(topic=reply.human.message)` (or stdout contains `<event topic="reply.human.message">...`),
+  but the UI shows nothing, treat it as a **display/rendering** bug.
+- If the record-session does not contain reply evidence, treat it as a **semantic/durability** bug:
+  routing, flush policy, interrupt handling, backend output, etc.
+
+### Backpressure rules (how we avoid false "fixed" claims)
+
+- For **display/rendering** fixes: add regression tests covering the 2x2 matrix:
+  - TUI Rendered + TUI Plain
+  - Pretty(stdout) Rendered + Pretty(stdout) Plain
+- For **durability** fixes: add contract tests that exercise Ctrl+C/SIGTERM paths and ensure:
+  - JSONL remains line-parseable
+  - `_meta.termination` is written and flushed
+- Before claiming DONE: run `cargo test` (and replay smoke tests when relevant).
+  If a user runs a release binary, also ensure the tested binary matches what they run (use `current_exe`/`version` in the record).

@@ -882,9 +882,10 @@ impl EventLoop {
         // Check for completion promise - only valid from Ralph (the coordinator)
         // Per spec: Requires dual condition (task state + consecutive confirmation)
         // When memories are enabled, verify tasks instead of scratchpad
-        if hat_id.as_str() == "ralph"
-            && EventParser::contains_promise(output, &self.config.event_loop.completion_promise)
-        {
+        let completion_detected = hat_id.as_str() == "ralph"
+            && EventParser::contains_promise(output, &self.config.event_loop.completion_promise);
+
+        if completion_detected {
             let verification_result = if self.config.memories.enabled {
                 self.verify_tasks_complete()
             } else {
@@ -936,6 +937,11 @@ impl EventLoop {
                     self.state.completion_confirmations = 0;
                 }
             }
+        } else {
+            // 说明:
+            // - "连续确认" 的语义要求中间不能夹任何普通输出。
+            // - 只要当前轮没有形成有效 completion 检测,之前累计的确认就必须失效。
+            self.state.completion_confirmations = 0;
         }
 
         // Parse and publish events from output

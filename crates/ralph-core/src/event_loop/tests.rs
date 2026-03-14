@@ -238,15 +238,59 @@ fn test_completion_promise_detection() {
     let hat_id = HatId::new("ralph");
 
     // First LOOP_COMPLETE - should NOT terminate (needs consecutive confirmation)
-    let reason = event_loop.process_output(&hat_id, "Done! LOOP_COMPLETE", true);
+    let reason = event_loop.process_output(&hat_id, "Done!\nLOOP_COMPLETE", true);
     assert_eq!(reason, None, "First confirmation should not terminate");
 
     // Second consecutive LOOP_COMPLETE - should terminate
-    let reason = event_loop.process_output(&hat_id, "Done! LOOP_COMPLETE", true);
+    let reason = event_loop.process_output(&hat_id, "Done!\nLOOP_COMPLETE", true);
     assert_eq!(
         reason,
         Some(TerminationReason::CompletionPromise),
         "Second consecutive confirmation should terminate"
+    );
+}
+
+#[test]
+fn test_completion_promise_resets_after_non_completion_output() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let agent_dir = temp_dir.path().join(".agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    let scratchpad_path = agent_dir.join("scratchpad.md");
+    fs::write(
+        &scratchpad_path,
+        "## Tasks\n- [x] Task 1 done\n- [x] Task 2 done\n",
+    )
+    .unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.scratchpad = scratchpad_path.to_string_lossy().to_string();
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let hat_id = HatId::new("ralph");
+
+    let reason = event_loop.process_output(&hat_id, "Done!\nLOOP_COMPLETE", true);
+    assert_eq!(reason, None, "First confirmation should not terminate");
+    assert_eq!(event_loop.state.completion_confirmations, 1);
+
+    let reason = event_loop.process_output(&hat_id, "Still working on it", true);
+    assert_eq!(reason, None, "Plain output must not terminate");
+    assert_eq!(
+        event_loop.state.completion_confirmations, 0,
+        "A non-completion iteration must reset consecutive confirmations"
+    );
+
+    let reason = event_loop.process_output(&hat_id, "Done!\nLOOP_COMPLETE", true);
+    assert_eq!(
+        reason, None,
+        "Completion after a reset should behave like the first confirmation"
+    );
+    assert_eq!(
+        event_loop.state.completion_confirmations, 1,
+        "Counter should restart from one after the reset"
     );
 }
 
@@ -259,10 +303,64 @@ fn test_builder_cannot_terminate_loop() {
 
     // Builder hat outputs completion promise - should be IGNORED
     let hat_id = HatId::new("builder");
-    let reason = event_loop.process_output(&hat_id, "Done! LOOP_COMPLETE", true);
+    let reason = event_loop.process_output(&hat_id, "Done!\nLOOP_COMPLETE", true);
 
     // Builder cannot terminate, so no termination reason
     assert_eq!(reason, None);
+}
+
+#[test]
+fn test_process_output_multiline_event_payload_promise_does_not_complete_and_still_routes_event() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let agent_dir = temp_dir.path().join(".agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    let scratchpad_path = agent_dir.join("scratchpad.md");
+    fs::write(&scratchpad_path, "## Tasks\n- [x] Task 1 done\n").unwrap();
+
+    let yaml = r#"
+hats:
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+    publishes: ["build.done"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.scratchpad = scratchpad_path.to_string_lossy().to_string();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test");
+
+    let ralph_id = HatId::new("ralph");
+    let builder_id = HatId::new("builder");
+    let output = r#"<event
+  topic="build.task"
+  target="builder"
+>Implement parser guard for LOOP_COMPLETE inside event payload
+</event>"#;
+
+    let reason = event_loop.process_output(&ralph_id, output, true);
+    assert_eq!(
+        reason, None,
+        "Promise inside multiline event payload must not terminate the loop"
+    );
+    assert_eq!(
+        event_loop.state.completion_confirmations, 0,
+        "Completion confirmations must stay at zero when LOOP_COMPLETE only appears inside event payload"
+    );
+
+    let pending = event_loop
+        .bus
+        .peek_pending(&builder_id)
+        .expect("build.task should still be routed to builder");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].topic.as_str(), "build.task");
+    assert!(
+        pending[0].payload.contains("LOOP_COMPLETE"),
+        "Event payload should be preserved even though completion was ignored"
+    );
 }
 
 #[test]
@@ -801,7 +899,7 @@ hats:
     let ralph_id = HatId::new("ralph");
 
     // Simulate completion with some cancelled tasks
-    let output = "All done! LOOP_COMPLETE";
+    let output = "All done.\nLOOP_COMPLETE";
 
     // First confirmation - should not terminate yet
     let reason = event_loop.process_output(&ralph_id, output, true);

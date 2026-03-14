@@ -77,6 +77,74 @@ ralph run -c ralph.yml --record-session session.jsonl -p "your prompt"
 claude -p "your prompt" 2>&1 | tee output.txt
 ```
 
+### Inspecting Recordings
+
+After recording, you can quickly sanity-check the JSONL:
+
+```bash
+# Human-readable summary (strict parse)
+ralph record summary session.jsonl
+```
+
+If you're recording a long session and want to confirm the file is still growing:
+
+```bash
+# Raw follow (tail -f style)
+ralph record watch session.jsonl
+```
+
+If the session was started with `--record-session`, you can also omit `FILE` and let Ralph resolve it
+via `.ralph/record-session.latest` from the workspace root:
+
+```bash
+ralph record watch
+```
+
+### Agent Workflow: Real-time validation with `record watch`
+
+`ralph record watch` is designed as a low-abstraction, real-time tool for coding agents.
+It helps distinguish "semantic bugs" from "display bugs", and makes progress visible while a run is still active.
+
+Recommended workflow (two terminals):
+
+1. **Terminal A**: run Ralph with recording enabled.
+
+   ```bash
+   ralph run --record-session /tmp/session.jsonl
+   ```
+
+2. **Terminal B**: follow the record file and watch evidence arrive line-by-line.
+
+   ```bash
+   ralph record watch /tmp/session.jsonl --from-start
+   ```
+
+Optional (agent automation probe):
+
+```bash
+# Exit 0 when the reply evidence arrives, exit 2 on timeout.
+ralph record watch /tmp/session.jsonl --until-topic reply.human.message --timeout-secs 30 --quiet
+```
+
+What to look for:
+
+- Early evidence: `_meta.session_start`, `_meta.loop_start`
+- Live activity: `ux.terminal.write` and `bus.publish` lines continue to append
+- User-facing reply: `reply.human.message` shows up in `bus.publish` and/or stdout tail records
+
+When the UI "looks blank":
+
+- If `record watch` shows `reply.human.message` or stdout contains `<event topic="reply.human.message">...`,
+  it is very likely a **rendering/display** issue (not a routing/LLM issue).
+- If `record watch` does not show reply evidence, it is more likely a **semantic/durability** issue:
+  event routing, flush behavior, interrupt handling, or backend output.
+
+As a final sanity check after the run ends:
+
+```bash
+ralph record summary /tmp/session.jsonl
+```
+
 ### Fixture Format
 
 JSONL with one event per line:
@@ -91,6 +159,27 @@ JSONL with one event per line:
 ## E2E Tests
 
 End-to-end tests validate against real AI backends.
+
+### Why E2E can miss record-session durability issues
+
+Most E2E scenarios are run-to-completion and don't frequently exercise Ctrl+C/SIGINT or SIGTERM.
+But record-session durability problems often only show up when you interrupt a run and immediately
+inspect the JSONL (e.g., buffered writes not flushed, or the process exits before writing termination).
+
+To guard this class of issues, prefer dedicated contract tests that:
+
+1. Start `ralph run --idle-start --no-tui --record-session ...`
+2. Send SIGINT/SIGTERM
+3. Assert the JSONL is line-by-line parseable and contains:
+   - `_meta.session_start`
+   - `_meta.loop_start`
+   - `_meta.termination` with `reason=Interrupted`
+
+You can run these contract tests with:
+
+```bash
+cargo test -p ralph-cli --test integration_record_session
+```
 
 ### Test Tiers
 

@@ -3,7 +3,7 @@ use ralph_core::{AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot};
 use ralph_proto::HatInstanceState;
 use std::fs;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[test]
@@ -142,9 +142,12 @@ fn test_agents_command_watch_prints_output_at_least_once() -> Result<()> {
     };
     fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
 
+    let stdout_path = temp_path.join("watch.stdout");
+    let stdout_file = fs::File::create(&stdout_path)?;
+
     // 说明:
-    // - `--watch` 是一个无限循环,因此这里用 spawn + kill 的方式验证它至少能输出一次表格.
-    // - stdout 是 pipe(非 TTY)时,实现不会输出清屏控制序列,更适合测试做字符串断言.
+    // - `--watch` 是一个无限循环,因此这里要先等到首轮输出真正出现,再结束子进程。
+    // - 不能依赖固定 sleep,否则 CI 一抖就会把"还没来得及打印"误报成失败。
     let mut child = Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args([
             "--color",
@@ -155,19 +158,44 @@ fn test_agents_command_watch_prints_output_at_least_once() -> Result<()> {
             "50",
         ])
         .current_dir(temp_path)
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(stdout_file))
         .spawn()?;
 
-    std::thread::sleep(Duration::from_millis(300));
-    let _ = child.kill();
-    let output = child.wait_with_output()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Watching"), "should print watch header");
-    assert!(stdout.contains("writer#1"), "should print instance row");
+    while Instant::now() < deadline {
+        let captured_stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
+        let saw_expected_output = captured_stdout.contains("Watching")
+            && captured_stdout.contains("writer#1")
+            && captured_stdout.contains("build.task");
+        if saw_expected_output {
+            break;
+        }
+
+        if let Some(status) = child.try_wait()? {
+            panic!(
+                "watch process exited before producing expected output: status={status}, stdout={captured_stdout}"
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = child.kill();
+    let _status = child.wait()?;
+
+    let captured_stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
     assert!(
-        stdout.contains("build.task"),
-        "should print last input topic"
+        captured_stdout.contains("Watching"),
+        "should print watch header, got: {captured_stdout}"
+    );
+    assert!(
+        captured_stdout.contains("writer#1"),
+        "should print instance row, got: {captured_stdout}"
+    );
+    assert!(
+        captured_stdout.contains("build.task"),
+        "should print last input topic, got: {captured_stdout}"
     );
 
     Ok(())

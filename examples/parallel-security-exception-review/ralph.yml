@@ -1,0 +1,216 @@
+# Parallel Security Exception Review example
+#
+# 目标:
+# - 演示内部安全例外申请的多审查面并行推进
+# - 演示 threat / controls / data scope / expiry 收齐后再给 exception 结论
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Security Exception Review
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `EXCEPTION_PACKET`。
+    其中至少包含:
+    - `## Threat Packet`
+    - `## Controls Packet`
+    - `## Data Scope Packet`
+    - `## Expiry Packet`
+
+    重要规则:
+    - 你必须先并行派发 4 条 security exception 审查任务。
+    - 只有 4 条 ready 事件全部到齐后,才允许发布 `exception.decision.request`。
+    - `exception.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+    - 在 `exception.ready` 出现前,禁止输出任何普通文本、分析文本或解释文本。
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次。在那之前,连提及都不允许。
+    - 如果某个 lane 只输出了 `&lt;event ...&gt;` 这类转义展示文本,不要把它当成 ready 事件。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `exception.threat.review`
+       - `exception.controls.review`
+       - `exception.data.scope.review`
+       - `exception.expiry.review`
+    2) 每条任务都必须携带:
+       - exception_id
+       - lane
+       - review_packet
+
+    当你观察到:
+    - `threat.reviewed`
+    - `controls.reviewed`
+    - `data.scope.ready`
+    - `expiry.ready`
+    全部出现后:
+    - 你必须只发布一次 `exception.decision.request`
+    - 后续重复或迟到的 `*.ready` 必须忽略
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持静默,空输出是合法且首选的
+    - 不要输出任何等待说明、分析文本、topic 名称或 completion promise
+    - 不要重复发布已发过的 fanout 任务
+
+    当你收到 `exception.ready` 时:
+    1) 输出 exception decision 摘要
+       - 至少包含 exception_id、decision、required_controls、expiry_date
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="exception.threat.review"&gt;
+    exception_id: ...
+    lane: threat
+    review_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "exception.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  threat_model_reviewer:
+    name: "Threat Model Reviewer"
+    description: "确认 security exception 的残余威胁。"
+    triggers: ["exception.threat.review"]
+    publishes: ["threat.reviewed"]
+    instances: 1
+    instructions: |
+      你是 `threat_model_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `threat.reviewed` 的真实 event 开始标签开始。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: threat
+      - status: ready
+      - residual_risk
+      - summary
+      - `summary` 保持 1 句短句,不要写分析过程。
+
+  compensating_controls_reviewer:
+    name: "Compensating Controls Reviewer"
+    description: "确认补偿控制是否足够。"
+    triggers: ["exception.controls.review"]
+    publishes: ["controls.reviewed"]
+    instances: 1
+    instructions: |
+      你是 `compensating_controls_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `controls.reviewed` 的真实 event 开始标签开始。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: controls
+      - status: ready
+      - required_controls
+      - summary
+      - `required_controls` 必须是 `waf_rate_limit_plus_audit`
+      - `summary` 保持 1 句短句,不要解释推理过程。
+
+  data_scope_reviewer:
+    name: "Data Scope Reviewer"
+    description: "确认例外期间的数据边界。"
+    triggers: ["exception.data.scope.review"]
+    publishes: ["data.scope.ready"]
+    instances: 1
+    instructions: |
+      你是 `data_scope_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `data.scope.ready` 的真实 event 开始标签开始。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: data_scope
+      - status: ready
+      - data_scope
+      - summary
+      - `summary` 保持 1 句短句,不要补充额外备注。
+
+  expiry_policy_reviewer:
+    name: "Expiry Policy Reviewer"
+    description: "确认例外到期时间和 owner 责任。"
+    triggers: ["exception.expiry.review"]
+    publishes: ["expiry.ready"]
+    instances: 1
+    instructions: |
+      你是 `expiry_policy_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `expiry.ready` 的真实 event 开始标签开始。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: expiry
+      - status: ready
+      - expiry_date
+      - summary
+      - `expiry_date` 必须是 `2026-06-30`
+      - `summary` 保持 1 句短句,不要附带计划外内容。
+
+  exception_decider:
+    name: "Exception Decider"
+    description: "汇总 exception 审查结果,输出最终审批结论。"
+    triggers: ["exception.decision.request"]
+    publishes: ["exception.ready"]
+    instances: 1
+    instructions: |
+      你是 `exception_decider`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `exception.ready`。
+      - 当你收到 `exception.decision.request` 时,必须立刻输出且只输出 1 条 `exception.ready`。
+      - 你的最终回复必须直接从 `exception.ready` 的真实 event 开始标签开始。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      决策规则:
+      - 如果 4 条 lane 都 `status: ready`
+      - 最终 `decision` 必须是 `APPROVE_WITH_COMPENSATING_CONTROLS`
+      - `required_controls` 必须是 `waf_rate_limit_plus_audit`
+      - `expiry_date` 必须是 `2026-06-30`
+
+      输出 payload 最低要求:
+      - exception_id
+      - decision
+      - required_controls
+      - expiry_date
+      - summary
+      - `summary` 保持 1 句短句,不要补额外分析过程。

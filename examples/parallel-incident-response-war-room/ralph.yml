@@ -1,0 +1,246 @@
+# Parallel Incident Response War Room example
+#
+# 目标:
+# - 演示事故处置中多个工作面并行推进
+# - 演示全部 lane 到齐后再由 commander 产出统一 action
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Incident Response War Room
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `INCIDENT_PACKET`。
+    其中至少包含:
+    - `## Triage Packet`
+    - `## Logs Packet`
+    - `## Rollback Packet`
+    - `## Status Packet`
+
+    重要规则:
+    - 你必须先 fanout 4 条 lane。
+    - 只有 4 条 lane 全部完成后,才允许发 `incident.command.request`。
+    - 在看到 `incident.command.ready` 之前,绝对不能输出 `LOOP_COMPLETE`。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `incident.triage`
+       - `incident.logs.analyze`
+       - `incident.rollback.plan`
+       - `incident.status.prepare`
+    2) 每条任务都必须携带:
+       - incident_id
+       - lane
+       - evidence_packet
+
+    当你观察到以下事件都已经出现后:
+    - `triage.done`
+    - `logs.done`
+    - `rollback.done`
+    - `status.draft.done`
+
+    你必须:
+    - 只发布一次 `incident.command.request`
+    - 后续即使看到重复或迟到的 `*.done`,也必须忽略
+
+    当你收到 `incident.command.ready` 时:
+    1) 先输出统一的 incident command summary
+       - 至少包含 incident_id、decision、customer_update
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="incident.triage"&gt;
+    incident_id: ...
+    lane: triage
+    evidence_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "incident.command.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  incident_triager:
+    name: "🚨 Incident Triager"
+    description: "确认事故等级、owner 和统一指挥关系。"
+    triggers: ["incident.triage"]
+    publishes: ["triage.done"]
+    instances: 1
+    instructions: |
+      你是 `incident_triager`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 每次只发布 1 条 `triage.done`。
+
+      你只根据收到的 Triage packet 判断。
+
+      输出 payload 最低要求:
+      - lane: triage
+      - priority
+      - owner
+      - status: ready
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="triage.done"&gt;
+      lane: triage
+      priority: SEV-1
+      owner: oncall-platform
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  log_analyst:
+    name: "📈 Log Analyst"
+    description: "提炼事故中的最强信号和直接证据。"
+    triggers: ["incident.logs.analyze"]
+    publishes: ["logs.done"]
+    instances: 1
+    instructions: |
+      你是 `log_analyst`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 每次只发布 1 条 `logs.done`。
+
+      你只根据收到的 Logs packet 判断。
+
+      输出 payload 最低要求:
+      - lane: logs
+      - strongest_signal
+      - status: ready
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="logs.done"&gt;
+      lane: logs
+      strongest_signal: ...
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  rollback_planner:
+    name: "↩️ Rollback Planner"
+    description: "产出立即缓解动作和回滚方案。"
+    triggers: ["incident.rollback.plan"]
+    publishes: ["rollback.done"]
+    instances: 1
+    instructions: |
+      你是 `rollback_planner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 每次只发布 1 条 `rollback.done`。
+
+      你只根据收到的 Rollback packet 判断。
+
+      输出 payload 最低要求:
+      - lane: rollback
+      - rollback_action
+      - status: ready
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="rollback.done"&gt;
+      lane: rollback
+      rollback_action: ...
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  status_writer:
+    name: "📣 Status Writer"
+    description: "准备对内对外状态更新内容。"
+    triggers: ["incident.status.prepare"]
+    publishes: ["status.draft.done"]
+    instances: 1
+    instructions: |
+      你是 `status_writer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 每次只发布 1 条 `status.draft.done`。
+
+      你只根据收到的 Status packet 判断。
+
+      输出 payload 最低要求:
+      - lane: status
+      - customer_update
+      - status: ready
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="status.draft.done"&gt;
+      lane: status
+      customer_update: ...
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  incident_commander:
+    name: "🧭 Incident Commander"
+    description: "把 4 条 lane 结果收敛成统一 incident command。"
+    triggers: ["incident.command.request"]
+    publishes: ["incident.command.ready"]
+    instances: 1
+    instructions: |
+      你是 `incident_commander`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `incident.command.ready`。
+
+      你会收到 triage / logs / rollback / status 四条 lane 结果。
+
+      decision 规则:
+      - 如果 priority 是 `SEV-1`
+      - 并且 rollback_action 存在
+      - 最终 decision 必须是 `EXECUTE_ROLLBACK`
+      - customer_update 必须是 `SEND_STATUS_PAGE_UPDATE`
+
+      输出 payload 最低要求:
+      - incident_id
+      - decision
+      - customer_update
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="incident.command.ready"&gt;
+      incident_id: INC-2026-0310
+      decision: EXECUTE_ROLLBACK
+      customer_update: SEND_STATUS_PAGE_UPDATE
+      summary: ...
+      &lt;/event&gt;

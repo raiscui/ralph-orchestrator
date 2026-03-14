@@ -256,11 +256,13 @@ PY
    - workflow 不应因为“有实验不理想”而卡住
 5. 只要存在至少一个 `verdict=approved` 的候选实验结果：
    - `ralph#1` 就可以发布 `integration.task`
+   - 但前提是该候选已经在 `experiment.reviewed` 里带出明确的顶层 `commit`
    - 不需要等待所有实验都变成 “OK”
 6. `experiment_integrator` 必须对 `integration.task` 产出：
    - 成功：`integration.applied`（并额外发布 `experiment.complete`）
    - 失败：`integration.rejected`（此时不得收敛）
    - 阻塞：`integration.blocked`（此时不得收敛）
+   - `integration.task.commit` 应直接来自被采纳候选的 `experiment.reviewed.commit`
 7. 只有当收到 `experiment.complete` 后：
    - `ralph#1` 必须先输出完成总结（run_id、被采纳实验、证据摘要、剩余风险）
    - 然后才在最后单独一行输出 `LOOP_COMPLETE`

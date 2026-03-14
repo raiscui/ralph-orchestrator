@@ -3,9 +3,9 @@
 //! Executes prompts via CLI tools with real-time streaming output.
 //! Supports optional execution timeout (stall watchdog) with graceful SIGTERM termination.
 
-use crate::cli_backend::CliBackend;
 #[cfg(test)]
-use crate::cli_backend::{OutputFormat, PromptMode};
+use crate::cli_backend::PromptMode;
+use crate::cli_backend::{CliBackend, OutputFormat};
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
@@ -110,9 +110,11 @@ impl CliExecutor {
             drop(stdin); // Close stdin to signal EOF
         }
 
-        let mut output = String::new();
+        let mut stdout_output = String::new();
+        let mut stderr_output = String::new();
         let mut timed_out = false;
         let mut last_output_changed_at = Instant::now();
+        let suppress_live_stdout = self.backend.output_format == OutputFormat::Json;
 
         // 并发读取 stdout/stderr，避免 pipe buffer deadlock，并提供“检测超时”所需的进展信号。
         let stdout_handle = child.stdout.take();
@@ -212,17 +214,18 @@ impl CliExecutor {
 
                             match stream {
                                 StreamKind::Stdout => {
-                                    writeln!(output_writer, "{line}")?;
-                                    output.push_str(&line);
-                                    output.push('\n');
+                                    if !suppress_live_stdout {
+                                        writeln!(output_writer, "{line}")?;
+                                    }
+                                    stdout_output.push_str(&line);
+                                    stdout_output.push('\n');
                                 }
                                 StreamKind::Stderr => {
                                     if verbose {
                                         writeln!(output_writer, "[stderr] {line}")?;
                                     }
-                                    output.push_str("[stderr] ");
-                                    output.push_str(&line);
-                                    output.push('\n');
+                                    stderr_output.push_str(&line);
+                                    stderr_output.push('\n');
                                 }
                             }
 
@@ -235,17 +238,18 @@ impl CliExecutor {
                 while let Some((stream, line)) = line_rx.recv().await {
                     match stream {
                         StreamKind::Stdout => {
-                            writeln!(output_writer, "{line}")?;
-                            output.push_str(&line);
-                            output.push('\n');
+                            if !suppress_live_stdout {
+                                writeln!(output_writer, "{line}")?;
+                            }
+                            stdout_output.push_str(&line);
+                            stdout_output.push('\n');
                         }
                         StreamKind::Stderr => {
                             if verbose {
                                 writeln!(output_writer, "[stderr] {line}")?;
                             }
-                            output.push_str("[stderr] ");
-                            output.push_str(&line);
-                            output.push('\n');
+                            stderr_output.push_str(&line);
+                            stderr_output.push('\n');
                         }
                     }
 
@@ -259,6 +263,10 @@ impl CliExecutor {
         // 等待读取 task 收尾（best-effort）
         let _ = stdout_task.await;
         let _ = stderr_task.await;
+
+        let output = self
+            .backend
+            .finalize_headless_output(&stdout_output, &stderr_output);
 
         Ok(ExecutionResult {
             output,
@@ -461,5 +469,26 @@ mod tests {
         assert!(!result.timed_out, "Fast command should not time out");
         assert!(result.success);
         assert!(result.output.contains("fast"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_json_backend_extracts_response_from_stdout() {
+        let backend = CliBackend {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '{\"response\":\"Gemini final answer\"}\\n'; printf 'YOLO mode is enabled.\\n' >&2"
+                    .to_string(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
+            output_format: OutputFormat::Json,
+        };
+
+        let executor = CliExecutor::new(backend);
+        let result = executor.execute_capture("").await.unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.output, "Gemini final answer");
     }
 }

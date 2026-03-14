@@ -10,10 +10,10 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ralph_core::{CliConfig, RalphConfig, SessionPlayer};
-use ralph_proto::{Event, TerminalWrite};
+use ralph_core::{CliConfig, EventParser, RalphConfig};
+use ralph_proto::Event;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -847,13 +847,11 @@ async fn tee_stream<R: tokio::io::AsyncRead + Unpin>(
 
 fn parse_record_session(path: &Path) -> Result<RecordSessionSummary> {
     // 说明:
-    // - 复用 ralph-core 的 SessionPlayer/Record 模型做 JSONL 解析,避免另写一套解析器.
-    // - 这里不做 replay,只把 records 当作结构化证据流.
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open record-session file: {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let player = SessionPlayer::from_reader(reader)
-        .with_context(|| format!("Invalid JSONL: {}", path.display()))?;
+    // - strict parse: 这份 JSONL 是 autopilot 的主证据源,必须 fail-closed.
+    // - 解析/聚合口径由共享模块维护,避免 autopilot 与其他 record 工具漂移.
+    let player = crate::record_session::load_session_player_strict(path)?;
+    let agg = crate::record_session::aggregate_record_session(&player)
+        .with_context(|| format!("Failed to aggregate record-session: {}", path.display()))?;
 
     let required_topics: [&str; 6] = [
         "experiment.task",
@@ -887,18 +885,20 @@ fn parse_record_session(path: &Path) -> Result<RecordSessionSummary> {
     let mut experiment_reviewed_bad_evidence_ok: Vec<EvidenceRef> = Vec::new();
     let mut commits: Vec<String> = Vec::new();
 
-    // 统计与时间线(用于 evidence pack).
-    let mut topic_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut topic_timeline: Vec<String> = Vec::new();
     let mut banned_topics_hit: BTreeSet<String> = BTreeSet::new();
 
     // 终止原因(来自 _meta.termination.reason).
-    let mut termination_reason: Option<String> = None;
+    let termination_reason = agg.termination.as_ref().and_then(|t| t.reason.clone());
     let mut termination_evidence: Vec<EvidenceRef> = Vec::new();
-
-    // terminal tail: 只保留最后 N 段,再拼接.
-    let mut tail_chunks: VecDeque<String> = VecDeque::new();
-    const MAX_TAIL_CHUNKS: usize = 200;
+    if termination_reason.is_some()
+        && let Some(idx) = agg.termination_record_index
+    {
+        termination_evidence.push(EvidenceRef {
+            record_index: idx,
+            record_event: "_meta.termination".to_string(),
+            topic: None,
+        });
+    }
 
     for (idx, rec) in player.records().iter().enumerate() {
         let event_type = rec.record.event.as_str();
@@ -910,11 +910,6 @@ fn parse_record_session(path: &Path) -> Result<RecordSessionSummary> {
                     format!("Failed to parse bus.publish data as Event at record[{idx}]")
                 })?;
             let topic = evt.topic.as_str().to_string();
-
-            *topic_counts.entry(topic.clone()).or_insert(0) += 1;
-            if topic_timeline.len() < 2000 {
-                topic_timeline.push(topic.clone());
-            }
 
             // required topics: 记录命中.
             if let Some(hit_list) = required_hits.get_mut(topic.as_str()) {
@@ -961,47 +956,10 @@ fn parse_record_session(path: &Path) -> Result<RecordSessionSummary> {
 
             continue;
         }
-
-        // 2) _meta.termination: 取 reason.
-        if event_type == "_meta.termination" {
-            if let Some(reason) = rec.record.data.get("reason").and_then(|v| v.as_str()) {
-                termination_reason = Some(reason.to_string());
-                termination_evidence.push(EvidenceRef {
-                    record_index: idx,
-                    record_event: "_meta.termination".to_string(),
-                    topic: None,
-                });
-            }
-            continue;
-        }
-
-        // 3) ux.terminal.write: 采集 tail window.
-        if event_type == "ux.terminal.write" {
-            let write: TerminalWrite = serde_json::from_value(rec.record.data.clone())
-                .with_context(|| {
-                    format!("Failed to parse ux.terminal.write as TerminalWrite at record[{idx}]")
-                })?;
-            let text = if let Some(text) = write.text.clone() {
-                text
-            } else {
-                // 旧 cassette 可能缺 `text`,这里回退用 bytes decode 的 lossy 视图.
-                match write.decode_bytes() {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                    Err(_) => String::new(),
-                }
-            };
-
-            if !text.is_empty() {
-                tail_chunks.push_back(text);
-                while tail_chunks.len() > MAX_TAIL_CHUNKS {
-                    tail_chunks.pop_front();
-                }
-            }
-            continue;
-        }
     }
-
-    let terminal_tail = tail_chunks.into_iter().collect::<Vec<_>>().join("");
+    let terminal_tail = agg.stdout_tail;
+    let topic_counts = agg.topic_counts;
+    let topic_timeline = agg.topic_timeline;
 
     // 硬断言组装.
     let mut assertions: Vec<HardAssertion> = Vec::new();
@@ -1218,7 +1176,8 @@ async fn run_agent_analysis(
 ) -> Result<AgentAnalysisOutput> {
     // 说明:
     // - agent 分析使用子进程 `ralph run --no-tui` 执行,保证与真实 CLI 行为一致.
-    // - 我们会在 out_dir 生成一个最小的 analysis_ralph.yml 与 analysis_prompt.md,便于复盘.
+    // - 子进程必须运行在隔离 workspace 中,否则会把 repo 根 `.agent` 当成自己的状态目录.
+    let analysis_workspace = prepare_agent_analysis_workspace(out_dir).await?;
     let analysis_config_path = out_dir.join("analysis_ralph.yml");
     let analysis_prompt_path = out_dir.join("analysis_prompt.md");
 
@@ -1268,15 +1227,17 @@ async fn run_agent_analysis(
 
     // 执行子进程分析.
     let exe = std::env::current_exe().with_context(|| "Failed to resolve current_exe")?;
+    let invocation = build_agent_analysis_invocation(&analysis_workspace, &analysis_config_path);
     let mut cmd = Command::new(exe);
-    cmd.args(build_agent_analysis_run_args(&analysis_config_path))
-        .current_dir(repo_dir)
+    cmd.args(&invocation.args)
+        .current_dir(&invocation.cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
     info!(
-        "Autopilot spawning agent analysis: backend={} cwd={}",
+        "Autopilot spawning agent analysis: backend={} cwd={} repo_dir={}",
         analysis_cli.backend,
+        invocation.cwd.display(),
         repo_dir.display()
     );
 
@@ -1287,12 +1248,7 @@ async fn run_agent_analysis(
 
     // 从 stdout 中解析 `<event topic="analyze.complete">...</event>`.
     let stdout_text = String::from_utf8_lossy(&output.stdout);
-    let json = extract_event_payload(&stdout_text, "analyze.complete").with_context(
-        || "Failed to find `<event topic=\"analyze.complete\">...` in analysis stdout",
-    )?;
-
-    let parsed: AgentAnalysisOutput = serde_json::from_str(&json)
-        .with_context(|| format!("Invalid JSON in analyze.complete payload: {json}"))?;
+    let parsed = parse_agent_analysis_output_from_stdout(&stdout_text)?;
 
     // 说明:
     // - agent analysis 的“核心产物”是 analyze.complete 的结构化 JSON.
@@ -1317,6 +1273,48 @@ async fn run_agent_analysis(
     }
 
     Ok(parsed)
+}
+
+fn parse_agent_analysis_output_from_stdout(stdout_text: &str) -> Result<AgentAnalysisOutput> {
+    let json = EventParser::extract_last_payload_for_topic(stdout_text, "analyze.complete")
+        .with_context(
+            || "Failed to find `<event topic=\"analyze.complete\">...` in analysis stdout",
+        )?;
+
+    serde_json::from_str(&json)
+        .with_context(|| format!("Invalid JSON in analyze.complete payload: {json}"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentAnalysisInvocation {
+    cwd: PathBuf,
+    args: Vec<OsString>,
+}
+
+async fn prepare_agent_analysis_workspace(out_dir: &Path) -> Result<PathBuf> {
+    // 说明:
+    // - analysis 子进程不能在 repo 根运行,否则 `ralph run` 会把 repo 根当成 workspace_root。
+    // - 这里每次都重建独立目录,顺便清掉旧 `.agent` / scratchpad / 其他分析残留。
+    let workspace = out_dir.join("analysis-workspace");
+    if workspace.exists() {
+        tokio::fs::remove_dir_all(&workspace)
+            .await
+            .with_context(|| format!("Failed to clean {}", workspace.display()))?;
+    }
+    tokio::fs::create_dir_all(workspace.join(".agent"))
+        .await
+        .with_context(|| format!("Failed to create {}", workspace.display()))?;
+    Ok(workspace)
+}
+
+fn build_agent_analysis_invocation(
+    workspace: &Path,
+    analysis_config_path: &Path,
+) -> AgentAnalysisInvocation {
+    AgentAnalysisInvocation {
+        cwd: workspace.to_path_buf(),
+        args: build_agent_analysis_run_args(analysis_config_path),
+    }
 }
 
 fn build_agent_analysis_run_args(analysis_config_path: &Path) -> Vec<OsString> {
@@ -1413,6 +1411,12 @@ cli:
 parallel:
   enabled: false
 
+memories:
+  enabled: false
+
+tasks:
+  enabled: false
+
 hats:
   analyzer:
     name: "Analyzer"
@@ -1473,26 +1477,6 @@ fn yaml_escape_double_quoted(value: &str) -> String {
         }
     }
     out
-}
-
-fn extract_event_payload(stdout: &str, topic: &str) -> Result<String> {
-    // 说明:
-    // - 我们只从 stdout 解析(避免把 stderr 的示例/回显误判为真实事件).
-    // - 这里用非贪婪匹配,取最后一次命中(避免多次输出时抓到旧的).
-    let pattern = format!(
-        r#"(?s)<event[^>]*\btopic="{}"[^>]*>(.*?)</event>"#,
-        regex::escape(topic)
-    );
-    let re = regex::Regex::new(&pattern)?;
-
-    let mut last: Option<String> = None;
-    for cap in re.captures_iter(stdout) {
-        if let Some(m) = cap.get(1) {
-            last = Some(m.as_str().trim().to_string());
-        }
-    }
-
-    last.ok_or_else(|| anyhow::anyhow!("event not found: {topic}"))
 }
 
 fn map_agent_output_to_exit_code(output: &AgentAnalysisOutput) -> (AutopilotExitCode, String) {
@@ -1863,6 +1847,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_agent_analysis_output_from_stdout_uses_last_matching_event() -> Result<()> {
+        let stdout = r#"
+noise
+<event topic="analyze.complete">
+{"verdict":"pass","quality_score":"good","requirements_met":[],"risks":[],"suggested_fixes":["old"]}
+</event>
+more noise
+<event id="latest" topic="analyze.complete">
+{"verdict":"pass","quality_score":"optimal","requirements_met":[],"risks":[],"suggested_fixes":["new"]}
+</event>
+"#;
+
+        let parsed = parse_agent_analysis_output_from_stdout(stdout)?;
+        assert_eq!(parsed.verdict, AgentVerdict::Pass);
+        assert_eq!(parsed.quality_score, QualityScore::Optimal);
+        assert_eq!(parsed.suggested_fixes, vec!["new".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_agent_analysis_output_from_stdout_errors_when_event_missing() {
+        let err = parse_agent_analysis_output_from_stdout("no analysis event here").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to find `<event topic=\"analyze.complete\">"),
+            "expected missing-event guidance, got: {msg}"
+        );
+    }
+
+    #[test]
     fn agent_analysis_args_do_not_conflict() {
         let args = build_agent_analysis_run_args(Path::new("analysis.yml"));
         let args = args
@@ -1912,6 +1926,67 @@ mod tests {
                 "--sandbox".to_string(),
                 "danger-full-access".to_string(),
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn analysis_config_disables_memories_and_tasks() -> Result<()> {
+        let cli = CliConfig {
+            backend: "claude".to_string(),
+            command: None,
+            prompt_mode: "arg".to_string(),
+            default_mode: "autonomous".to_string(),
+            idle_timeout_secs: 30,
+            args: vec![],
+            prompt_flag: None,
+        };
+
+        let yaml = build_min_analysis_config_yaml(&cli, "/tmp/analysis_prompt.md");
+        let cfg: RalphConfig = serde_yaml::from_str(&yaml)?;
+        cfg.validate()?;
+
+        assert!(!cfg.memories.enabled, "analysis must disable memories");
+        assert!(!cfg.tasks.enabled, "analysis must disable tasks");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_analysis_workspace_is_recreated_under_out_dir() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let repo_dir = temp.path().join("repo");
+        let out_dir = temp.path().join("out");
+        std::fs::create_dir_all(repo_dir.join(".agent"))?;
+        std::fs::create_dir_all(out_dir.join("analysis-workspace/.agent"))?;
+        std::fs::write(repo_dir.join(".agent/memories.md"), "# repo memory")?;
+        std::fs::write(
+            out_dir.join("analysis-workspace/.agent/tasks.jsonl"),
+            "{\"id\":\"stale\"}\n",
+        )?;
+        std::fs::write(out_dir.join("analysis-workspace/stale.txt"), "stale")?;
+
+        let workspace = prepare_agent_analysis_workspace(&out_dir).await?;
+        let invocation =
+            build_agent_analysis_invocation(&workspace, &out_dir.join("analysis_ralph.yml"));
+
+        assert_eq!(workspace, out_dir.join("analysis-workspace"));
+        assert_eq!(invocation.cwd, workspace);
+        assert_ne!(invocation.cwd, repo_dir);
+        assert!(
+            workspace.join(".agent").exists(),
+            "isolated workspace should recreate .agent directory"
+        );
+        assert!(
+            !workspace.join(".agent/tasks.jsonl").exists(),
+            "stale task state must be removed"
+        );
+        assert!(
+            !workspace.join("stale.txt").exists(),
+            "stale analysis artifacts must be removed"
+        );
+        assert!(
+            repo_dir.join(".agent/memories.md").exists(),
+            "repo root state should remain untouched because analysis no longer runs there"
         );
         Ok(())
     }

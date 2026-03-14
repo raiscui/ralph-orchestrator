@@ -1,0 +1,236 @@
+# Parallel Migration Rehearsal example
+#
+# 目标:
+# - 演示迁移 rehearsal 的多检查面并行推进
+# - 演示 4 条 readiness lane 收敛后再给 go / no-go 结论
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Migration Rehearsal
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `MIGRATION_REHEARSAL_PACKET`。
+    其中至少包含:
+    - `## Schema Packet`
+    - `## Backup Packet`
+    - `## Smoke Packet`
+    - `## Rollback Packet`
+
+    重要规则:
+    - 你必须先并行派发 4 条 rehearsal 任务。
+    - 只有 4 条 ready 事件全部到齐后,才允许发布 `migration.go_no_go.request`。
+    - `migration.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+    - 在 `migration.ready` 出现前,禁止输出任何普通文本、分析文本或解释文本。
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次。在那之前,连提及都不允许。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `migration.schema.review`
+       - `migration.backup.verify`
+       - `migration.smoke.run`
+       - `migration.rollback.audit`
+    2) 每条任务都必须携带:
+       - migration_id
+       - lane
+       - evidence_packet
+
+    当你观察到:
+    - `schema.ready`
+    - `backup.ready`
+    - `smoke.ready`
+    - `rollback.ready`
+    全部出现后:
+    - 你必须只发布一次 `migration.go_no_go.request`
+    - 后续重复或迟到的 `*.ready` 必须忽略
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持静默,空输出是合法且首选的
+    - 不要输出任何等待说明、分析文本、topic 名称或 completion promise
+    - 不要重复发布已发过的 fanout 任务
+
+    当你收到 `migration.ready` 时:
+    1) 输出 go / no-go 摘要
+       - 至少包含 migration_id、decision、rollout_plan
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="migration.schema.review"&gt;
+    migration_id: ...
+    lane: schema
+    evidence_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "migration.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  schema_reviewer:
+    name: "🧩 Schema Reviewer"
+    description: "确认 schema diff 和兼容性策略是否就绪。"
+    triggers: ["migration.schema.review"]
+    publishes: ["schema.ready"]
+    instances: 1
+    instructions: |
+      你是 `schema_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: schema
+      - status: ready
+      - key_change
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="schema.ready"&gt;
+      lane: schema
+      status: ready
+      key_change: ...
+      summary: ...
+      &lt;/event&gt;
+
+  backup_verifier:
+    name: "💾 Backup Verifier"
+    description: "确认备份快照与恢复点是否齐全。"
+    triggers: ["migration.backup.verify"]
+    publishes: ["backup.ready"]
+    instances: 1
+    instructions: |
+      你是 `backup_verifier`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: backup
+      - status: ready
+      - snapshot
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="backup.ready"&gt;
+      lane: backup
+      status: ready
+      snapshot: ...
+      summary: ...
+      &lt;/event&gt;
+
+  smoke_runner:
+    name: "🧪 Smoke Runner"
+    description: "确认 rehearsal 环境的 smoke 验证结果。"
+    triggers: ["migration.smoke.run"]
+    publishes: ["smoke.ready"]
+    instances: 1
+    instructions: |
+      你是 `smoke_runner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: smoke
+      - status: ready
+      - verification
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="smoke.ready"&gt;
+      lane: smoke
+      status: ready
+      verification: ...
+      summary: ...
+      &lt;/event&gt;
+
+  rollback_auditor:
+    name: "🛟 Rollback Auditor"
+    description: "确认迁移失败时的回退路径是否可执行。"
+    triggers: ["migration.rollback.audit"]
+    publishes: ["rollback.ready"]
+    instances: 1
+    instructions: |
+      你是 `rollback_auditor`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: rollback
+      - status: ready
+      - reversal_plan
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="rollback.ready"&gt;
+      lane: rollback
+      status: ready
+      reversal_plan: ...
+      summary: ...
+      &lt;/event&gt;
+
+  migration_conductor:
+    name: "🛫 Migration Conductor"
+    description: "汇总 rehearsal 结果,产出 go / no-go 结论。"
+    triggers: ["migration.go_no_go.request"]
+    publishes: ["migration.ready"]
+    instances: 1
+    instructions: |
+      你是 `migration_conductor`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `migration.ready`。
+      - 当你收到 `migration.go_no_go.request` 时,必须立刻输出且只输出 1 条 `migration.ready`。
+
+      决策规则:
+      - 如果 4 条 lane 都 `status: ready`
+      - 最终 `decision` 必须是 `GO`
+      - `rollout_plan` 必须是 `15m_canary_then_full`
+
+      输出 payload 最低要求:
+      - migration_id
+      - decision
+      - rollout_plan
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="migration.ready"&gt;
+      migration_id: MIG-2026-0415
+      decision: GO
+      rollout_plan: 15m_canary_then_full
+      summary: ...
+      &lt;/event&gt;

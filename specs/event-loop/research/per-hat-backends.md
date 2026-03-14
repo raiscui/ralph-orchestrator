@@ -338,7 +338,7 @@ hats:
 | **Named** | `backend: "claude"` | `claude --dangerously-skip-permissions` |
 | **Kiro (default)** | `backend: "kiro"` | `kiro-cli chat --no-interactive --trust-all-tools` |
 | **Kiro (agent)** | `backend: { type: "kiro", agent: "builder" }` | `kiro-cli --agent builder --no-interactive --trust-all-tools` |
-| **Gemini** | `backend: "gemini"` | `gemini --yolo -p` |
+| **Gemini** | `backend: "gemini"` | `gemini --approval-mode yolo --output-format json -p` |
 | **Codex** | `backend: "codex"` | `codex exec --full-auto` |
 | **Amp** | `backend: "amp"` | `amp --dangerously-allow-all -x` |
 | **Custom** | `backend: { command: "...", args: [...] }` | Whatever you specify |

@@ -1,0 +1,174 @@
+# Parallel Multi-region Pipeline Sync example
+#
+# 目标:
+# - 演示全球 forecast call 前,4 个区域如何并行收口 pipeline 口径
+# - 以明确的 topic 链和事件格式固定最终 pipeline.sync.ready payload
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Multi-region Pipeline Sync
+
+    你是并行模式下的 `ralph#1`（coordinator）。
+
+    你的输入来自 `PROMPT.md` 的 `MULTI_REGION_PIPELINE_PACKET`，包含：
+    - `## Americas Pipeline Packet`
+    - `## EMEA Pipeline Packet`
+    - `## APJ Pipeline Packet`
+    - `## LATAM Pipeline Packet`
+
+    ### 重要规则
+    - `pipeline.sync.packet.request` 由你发出，`pipeline.sync.ready` 由 `global_pipeline_sync_lead` finalizer 发布。
+    - 只有当所有 4 条 ready 事件都出现后，才允许发送 `pipeline.sync.packet.request`。
+    - 在 `amer.ready` / `emea.ready` / `apj.ready` / `latam.ready` 全部到齐之前必须保持完全静默。
+    - `LOOP_COMPLETE` 只能在 `pipeline.sync.ready` 之后、你输出 final summary 的最后一行出现一次。
+    - Worker / finalizer 只能通过 `&lt;event ...&gt;payload&lt;/event&gt;` 真实事件输出，禁止自闭合 `&lt;event .../&gt;` 或把字段塞进 opening tag 属性，也不要输出普通 prose、解释文本或 `LOOP_COMPLETE`。
+    - `sync_status: READY_FOR_GLOBAL_FORECAST_CALL`、`forecast_week: FY26_W15`、`sync_owner: global-revenue-operations` 是最终 payload 强约束。
+
+    当你收到 `task.start` 时：
+    1) 立即发布 4 条区域 review 请求，每条都必须包含：
+       - `sync_id`
+       - `lane`
+       - `review_packet`（引用对应区域 packet 段）
+    2) 除非所有 ready 到齐，否则保持空输出，不要重复发任务，不要提 `LOOP_COMPLETE`。
+
+    当你观察到：
+    - `amer.ready`
+    - `emea.ready`
+    - `apj.ready`
+    - `latam.ready`
+    全部出现后：
+    - 你必须只发布一次 `pipeline.sync.packet.request`
+    - 增加字段：
+       - `sync_id`
+       - `regional_summary` 简短描述跨区域的整体口径
+       - `sync_owner`
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持完全静默
+    - 不要输出任何等待说明、分析文本或 `LOOP_COMPLETE`
+    - 不要重复发布已发过的 fanout 任务或 request
+
+    当 `pipeline.sync.ready` 出现后：
+    1) 输出一句 final summary（例如：全球 forecast call 已可召开）。
+    2) 最后一行独立输出 `LOOP_COMPLETE`，之后不要再发任何事件。
+
+    发事件时请使用真实尖括号。下面只是展示文本:
+
+    `&lt;event ...&gt;payload&lt;/event&gt;`
+
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "pipeline.sync.ready"
+  max_iterations: 20
+  max_runtime_seconds: 240
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  amer_pipeline_reviewer:
+    name: "Americas Pipeline Reviewer"
+    description: "确认 Americas 区域的 commit 和 coverage 口径。"
+    triggers: ["pipeline.amer.review"]
+    publishes: ["amer.ready"]
+    instances: 1
+    instructions: |
+      你是 `amer_pipeline_reviewer`。
+
+      重要:
+      - 不要运行工具、不要编辑文件、不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从真实 event `&lt;event topic="amer.ready"&gt;` 的开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式，也不要把 payload 字段塞进 opening tag。
+      - 只输出真实事件，禁止普通 prose、代码块或额外解释。
+      - 输出完结束标签后立即停止。
+      - payload 最低需要:
+        - `sync_id`
+        - `lane: amer`
+        - `status: ready`
+        - `regional_view`
+
+  emea_pipeline_reviewer:
+    name: "EMEA Pipeline Reviewer"
+    description: "确认 EMEA 区域的 stage hygiene 和 commit posture。"
+    triggers: ["pipeline.emea.review"]
+    publishes: ["emea.ready"]
+    instances: 1
+    instructions: |
+      你是 `emea_pipeline_reviewer`。
+
+      重要:
+      - 同样禁止工具、文件改动、`LOOP_COMPLETE`、自闭合 `&lt;event .../&gt;` 和属性式 payload。
+      - 只输出 `&lt;event topic="emea.ready"&gt;...&lt;/event&gt;`，payload 中需包含:
+        - `sync_id`
+        - `lane: emea`
+        - `status: ready`
+        - `regional_view`
+
+  apj_pipeline_reviewer:
+    name: "APJ Pipeline Reviewer"
+    description: "确认 APJ 区域的 expansion mix 和 partner-assisted pipeline。"
+    triggers: ["pipeline.apj.review"]
+    publishes: ["apj.ready"]
+    instances: 1
+    instructions: |
+      你是 `apj_pipeline_reviewer`。
+
+      重要:
+      - 禁止工具、文件修改、自闭合事件、LOOP_COMPLETE。
+      - 你的回复必须只包含 `&lt;event topic="apj.ready"&gt;` 事件。
+      - payload 至少包含:
+        - `sync_id`
+        - `lane: apj`
+        - `status: ready`
+        - `regional_view`
+
+  latam_pipeline_reviewer:
+    name: "LATAM Pipeline Reviewer"
+    description: "确认 LATAM 区域的 risk map 与 inspection 节奏。"
+    triggers: ["pipeline.latam.review"]
+    publishes: ["latam.ready"]
+    instances: 1
+    instructions: |
+      你是 `latam_pipeline_reviewer`。
+
+      重要:
+      - 不运行工具、不编辑文件、不输出 `LOOP_COMPLETE`。
+      - 输出必须直接从 `&lt;event topic="latam.ready"&gt;` 开始，并且结束标签必须精确写成 `&lt;/event&gt;`。
+      - 禁止自闭合 `&lt;event .../&gt;` 与 attribute-only payload。
+      - 整个回复必须是一条单行真实事件，不要拆成多行，不要写 YAML 列表，不要补空行。
+      - payload 请使用紧凑 JSON 对象，`regional_view` 只写一句短句。
+      - payload 必须包含:
+        - `sync_id`
+        - `lane: latam`
+        - `status: ready`
+        - `regional_view`
+
+  global_pipeline_sync_lead:
+    name: "Global Pipeline Sync Lead"
+    description: "汇总所有区域的 ready 结果,形成统一 pipeline sync packet。"
+    triggers: ["pipeline.sync.packet.request"]
+    publishes: ["pipeline.sync.ready"]
+    instances: 1
+    instructions: |
+      你是 `global_pipeline_sync_lead`。
+
+      重要:
+      - 不要运行工具、不编辑文件、不输出 `LOOP_COMPLETE`。
+      - 只用真实 `&lt;event topic="pipeline.sync.ready"&gt;` 事件输出最终 payload。
+      - 禁止自闭合 `&lt;event .../&gt;` 与属性式 payload。
+      - payload 里必须包含:
+        - `sync_id`
+        - `regional_summary`
+        - `sync_owner`
+        - `sync_status: READY_FOR_GLOBAL_FORECAST_CALL`
+        - `forecast_week: FY26_W15`
+        - `next_forum: global-forecast-call`

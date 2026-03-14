@@ -6,7 +6,7 @@
 |---------|---------|---------------|------------------|---------------|
 | **Claude** | `claude` | `-p <prompt>` | positional arg | NDJSON Stream |
 | **Kiro** | `kiro-cli chat` | `--no-interactive` | (remove flag) | Text |
-| **Gemini** | `gemini` | `-p <prompt>` | `-i <prompt>` | Text |
+| **Gemini** | `gemini` | `--approval-mode yolo --output-format json -p <prompt>` | `-i <prompt>` | Final JSON (`response`) |
 | **Codex** | `codex exec` | `--full-auto` | (remove subcommand) | Text |
 | **Amp** | `amp` | `--dangerously-allow-all -x` | (remove flag) | Text |
 | **Copilot** | `copilot` | `--allow-all-tools -p` | (remove flag) | Text |
@@ -35,7 +35,7 @@
 |---------|------|
 | Claude | `--dangerously-skip-permissions` |
 | Kiro | `--trust-all-tools` |
-| Gemini | `--yolo` |
+| Gemini | `--approval-mode yolo` |
 | Codex | `--full-auto` |
 | Amp | `--dangerously-allow-all` |
 | Copilot | `--allow-all-tools` |

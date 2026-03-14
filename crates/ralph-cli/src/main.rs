@@ -23,6 +23,8 @@ mod loop_runner;
 mod memory;
 mod parallel_runner;
 mod presets;
+mod record_cli;
+mod record_session;
 mod sop_runner;
 mod task_cli;
 mod tools;
@@ -295,6 +297,9 @@ enum Commands {
     /// Headless automation: run in a Git repo, record session, then judge JSONL
     Autopilot(autopilot::AutopilotArgs),
 
+    /// Inspect record-session JSONL files (summary, watch)
+    Record(record_cli::RecordArgs),
+
     /// Diagnose common startup issues and provide safe fixes
     Doctor(doctor::DoctorArgs),
 }
@@ -362,6 +367,8 @@ struct RunArgs {
     /// 说明:
     /// - 用于 headless/CI/E2E: 在没有 `PROMPT.md` 且未传 `-p/-P` 时,仍允许启动并行 Supervisor 并待机。
     /// - 该模式下不会自动投递 `task.start`,因此可以做到 0 token 真待机。
+    /// - 该模式下会关闭并行 Supervisor 的 `max_runtime_seconds` 护栏,适合常驻会话。
+    /// - 仍保留其他护栏,例如 `job_timeout_secs` / `max_iterations` / 人工中断。
     /// - 仅当 prompt 缺失/为空时生效；若 prompt 存在则保持原有启动行为。
     /// - 与 `--continue` 冲突,避免与 resume 语义混淆。
     #[arg(long, conflicts_with = "continue_mode")]
@@ -824,6 +831,7 @@ async fn main() -> Result<()> {
             hats::execute(&cli.config, args, cli.color.should_use_colors())
         }
         Some(Commands::Autopilot(args)) => autopilot::execute(cli.config, args).await,
+        Some(Commands::Record(args)) => record_cli::execute(args).await,
         Some(Commands::Doctor(args)) => {
             doctor::execute(cli.config, args, cli.color.should_use_colors()).await
         }

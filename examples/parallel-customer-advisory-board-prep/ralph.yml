@@ -1,0 +1,220 @@
+# Parallel Customer Advisory Board Prep example
+#
+# 目标:
+# - 演示客户顾问委员会筹备中多条工作线并行收敛的过程
+# - 演示 cohort / agenda / host / logistics 收齐后由 cab_program_lead 打包确认
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Customer Advisory Board Prep
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `CAB_PACKET`。
+    其中至少包含:
+    - `## Customer Cohort Packet`
+    - `## Agenda Shaping Packet`
+    - `## Executive Host Prep Packet`
+    - `## Logistics Readiness Packet`
+
+    重要规则:
+    - 你必须先并行派发 4 条 CAB 任务。
+    - 只有 4 条 `*.ready` 事件全部到齐后,才允许发布 `cab.packet.request`。
+    - `cab.packet.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+    - 在 `cab.packet.ready` 出现前,禁止输出任何普通文本、分析说明或 topic 名称。
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次,在那之前连提及都不允许。
+    - 如果某个 lane 只输出了 `&lt;event ...&gt;` 这类转义展示文本,不要把它当作 ready 事件。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `cab.customer.cohort.review`
+       - `cab.agenda.shaping.review`
+       - `cab.exec.host.prep.review`
+       - `cab.logistics.readiness.review`
+    2) 每条任务都必须携带:
+       - packet_id
+       - lane
+       - review_packet
+
+    当你观察到:
+    - `cohort.ready`
+    - `agenda.ready`
+    - `host.ready`
+    - `logistics.ready`
+    全部出现后:
+    - 你必须只发布一次 `cab.packet.request`
+    - 后续重复或迟到的 `*.ready` 必须忽略
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持静默,空输出是合法也是首选
+    - 不要输出任何等待说明、分析文本或 completion promise
+    - 不要重复发布已发过的 fanout 任务或 request
+
+    当你收到 `cab.packet.ready` 时:
+    1) 输出 CAB 摘要
+       - 至少包含 packet_id、cab_status、event_region、next_owner、packet_focus
+       - cab_status 必须是 READY_TO_CONFIRM
+       - event_region 必须是 APJ
+       - next_owner 必须是 customer-marketing
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件或 topic
+
+    发事件时请使用真实尖括号。下面只是展示文本:
+
+    &lt;event topic="cab.customer.cohort.review"&gt;
+    packet_id: ...
+    lane: customer_cohort
+    review_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "cab.packet.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  customer_cohort_owner:
+    name: "Customer Cohort Owner"
+    description: "核实 CAB 的客户群体是否准备就绪。"
+    triggers: ["cab.customer.cohort.review"]
+    publishes: ["cohort.ready"]
+    instances: 1
+    instructions: |
+      你是 `customer_cohort_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `cohort.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: customer_cohort
+      - status: ready
+      - cohort_summary
+      - cohort_size
+      - engagement_signals
+      - `cohort_summary` 只写一句,不要展开分析过程。
+
+  agenda_shaping_owner:
+    name: "Agenda Shaping Owner"
+    description: "设定 CAB 会议议程是否清晰。"
+    triggers: ["cab.agenda.shaping.review"]
+    publishes: ["agenda.ready"]
+    instances: 1
+    instructions: |
+      你是 `agenda_shaping_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `agenda.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: agenda_shaping
+      - status: ready
+      - agenda_sequence
+      - clarity_rating
+      - focus_notes
+      - `clarity_rating` 取 `ready` 或 `aligned`。
+
+  executive_host_owner:
+    name: "Executive Host Owner"
+    description: "确认主持高层客户会议的准备程度。"
+    triggers: ["cab.exec.host.prep.review"]
+    publishes: ["host.ready"]
+    instances: 1
+    instructions: |
+      你是 `executive_host_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `host.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: executive_host
+      - status: ready
+      - host_availability
+      - prep_notes
+      - attendee_alignment
+
+  logistics_readiness_owner:
+    name: "Logistics Readiness Owner"
+    description: "确认 CAB 现场与后端支持是否已就绪。"
+    triggers: ["cab.logistics.readiness.review"]
+    publishes: ["logistics.ready"]
+    instances: 1
+    instructions: |
+      你是 `logistics_readiness_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `logistics.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: logistics
+      - status: ready
+      - venue_status
+      - tech_checks
+      - logistics_owner
+
+  cab_program_lead:
+    name: "CAB Program Lead"
+    description: "汇总四条输入线成 CAB 确认包。"
+    triggers: ["cab.packet.request"]
+    publishes: ["cab.packet.ready"]
+    instances: 1
+    instructions: |
+      你是 `cab_program_lead`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `cab.packet.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - packet_id
+      - cab_status: READY_TO_CONFIRM
+      - event_region: APJ
+      - next_owner: customer-marketing
+      - packet_focus
+      - summary

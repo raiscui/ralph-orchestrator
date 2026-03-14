@@ -307,9 +307,34 @@ Ralph also supports an **experimental** parallel runtime that can run multiple h
 
 Parallel runtime supports an **experimental supervisor TUI** when running in a real TTY (enabled by default). If TUI is disabled (or stdout is not a TTY), it falls back to **log-only mode**. Output is attributed per instance (e.g. `[writer#1:out] ...`).
 
-Runnable examples:
-- `examples/parallel-trigger-routing/` — trigger-driven routing semantics (fanout + instance queue)
-- `examples/parallel-experimental-dev-engine/` — parallel experimentation workflow (runner/auditor/integrator, windowed dispatch, integration gate)
+可直接运行的并行范例:
+- 中文总览见 `docs/examples/parallel-real-world-examples.zh-CN.md`
+- `examples/parallel-trigger-routing/` — 触发驱动路由语义示例,演示扇出和实例队列
+- `examples/parallel-experimental-dev-engine/` — 并行实验开发流程,演示执行、审计、集成三类角色的窗口化派发与集成闸口
+- `examples/parallel-pr-review/` — 并行代码评审,多名评审角色扇出后汇总统一结论
+- `examples/parallel-release-checklist/` — 并行发布检查,测试、文档、运维检查收敛到 `release.ready`
+- `examples/parallel-human-approval-gate/` — 并行自动化准备完成后,通过 `ralph emit` 等待显式人工批准
+- `examples/parallel-incident-response-war-room/` — 事故指挥台流程,分诊、日志、回滚、状态同步收敛到 `incident.command.ready`
+- `examples/parallel-security-exception-review/` — 安全例外审查,威胁、控制、数据范围、到期策略收敛到 `exception.ready`
+- `examples/parallel-customer-renewal-desk/` — 客户续约收口,采用、支持、商业、赞助人信息收敛到 `renewal.plan.ready`
+- `examples/parallel-audit-evidence-pack/` — 审计证据包,访问、变更日志、备份、事故历史收敛到 `audit.packet.ready`
+- `examples/parallel-finance-close-control-room/` — 财务关账流程,收入、费用、现金、异常核对收敛到 `close.packet.ready`
+- `examples/parallel-hiring-debrief-panel/` — 招聘复盘面板,编码、系统设计、协作、背调反馈收敛到 `hiring.packet.ready`
+- `examples/parallel-customer-onboarding-activation/` — 客户激活准备,集成、安全交接、赋能、成功计划收敛到 `onboarding.activation.ready`
+- `examples/parallel-support-escalation-desk/` — 支持升级处理台,案例分诊、产品判断、客户经营、沟通方案收敛到 `escalation.plan.ready`
+- `examples/parallel-partner-launch-coordination/` — 合作伙伴联合发布协调,方案使能、法务、市场、销售交接收敛到 `partner.launch.ready`
+- `examples/parallel-field-enablement-rollout/` — 一线赋能推广,课程、演示环境、经理同步、认证计划收敛到 `enablement.rollout.ready`
+- `examples/parallel-revops-quote-desk/` — 营收运营报价台,结构、定价、账单、条款四条 review lane 收敛到 `quote.packet.ready`
+- `examples/parallel-executive-business-review-prep/` — 高层业务回顾材料准备,营收叙事、产品采纳、风险展望、管理层诉求收敛到 `ebr.packet.ready`
+- `examples/parallel-customer-advisory-board-prep/` — 客户顾问委员会筹备,客户群体、议程、高层主持、物流准备收敛到 `cab.packet.ready`
+- `examples/parallel-regional-operating-review/` — 区域经营周会收口,销售、交付、支持、人才 4 条输入线收敛到 `regional.review.ready`
+- `examples/parallel-renewal-risk-calibration/` — 续费组合盘预测校准,使用、赞助覆盖、商业阻塞、成功计划收敛到 `renewal.calibration.ready`
+- `examples/parallel-multi-region-pipeline-sync/` — 多区域 pipeline 同步,Americas、EMEA、APJ、LATAM 四条区域 lane 收敛到 `pipeline.sync.ready`
+- `examples/parallel-launch-readiness-command/` — 上线指挥台,测试、观测、回滚、沟通计划收敛到 `launch.command.ready`
+- `examples/parallel-migration-rehearsal/` — 迁移演练,模式变更、备份、烟测、回滚计划收敛到 `migration.ready`
+- `examples/parallel-postmortem-action-board/` — 复盘行动板,时间线、根因、行动项、客户回顾收敛到 `postmortem.board.ready`
+- `examples/parallel-proposal-assembly/` — 方案组装流程,研究、定价、法务、管理层材料收敛到 `proposal.ready`
+- `examples/parallel-vendor-security-procurement/` — 供应商引入流程,安全、隐私、采购、法务审查收敛到 `vendor.ready`
 
 Minimal example:
 

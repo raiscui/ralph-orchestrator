@@ -389,10 +389,15 @@ impl IncrementalState {
 /// Truncates a string for report display.
 fn truncate_for_report(s: &str, max_len: usize) -> String {
     let s = s.replace('\n', " ").replace('\r', "");
-    if s.len() <= max_len {
-        s
+    truncate_to_char_boundary(&s, max_len)
+}
+
+/// 按字符边界安全截断字符串,避免中文等多字节字符触发 UTF-8 panic。
+fn truncate_to_char_boundary(s: &str, max_len: usize) -> String {
+    if let Some((byte_idx, _)) = s.char_indices().nth(max_len) {
+        format!("{}...", &s[..byte_idx])
     } else {
-        format!("{}...", &s[..max_len])
+        s.to_string()
     }
 }
 
@@ -545,6 +550,22 @@ mod tests {
             scenario_id: "test-1".to_string(),
             tier: "Tier 1".to_string(),
         });
+    }
+
+    #[test]
+    fn test_truncate_for_report_handles_multibyte_utf8() {
+        let input = "READY_FOR_REVIEW 建议添加 completion promise 护栏";
+        let truncated = truncate_for_report(input, 20);
+
+        assert!(truncated.ends_with("..."));
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+        assert!(truncated.contains("建"));
+    }
+
+    #[test]
+    fn test_truncate_to_char_boundary_preserves_full_string_when_short() {
+        let input = "短文本";
+        assert_eq!(truncate_to_char_boundary(input, 20), input);
     }
 
     #[test]
@@ -1222,8 +1243,8 @@ impl MarkdownReporter {
                     .map(|t| t.join(", "))
                     .unwrap_or_else(|| "-".to_string());
                 // Truncate if too long
-                let tests_display = if tests.len() > 50 {
-                    format!("{}...", &tests[..47])
+                let tests_display = if tests.chars().count() > 50 {
+                    truncate_to_char_boundary(&tests, 47)
                 } else {
                     tests
                 };

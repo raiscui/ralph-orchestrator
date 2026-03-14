@@ -15,6 +15,20 @@ use serde::{Deserialize, Serialize};
 /// - 建议 payload 为 `QueueDecisionRecord` 的 JSON 字符串。
 pub const TOPIC_DISPATCH_DECISION: &str = "dispatch.decision";
 
+/// 系统事件：hat -> hat 的显式答案回流 topic。
+///
+/// 说明：
+/// - 这不是普通 workflow event。
+/// - 该 topic 需要结合 `reply="<request_event_id>"` 使用，运行时会把它回送给原请求方实例。
+pub const TOPIC_REPLY_HAT_MESSAGE: &str = "reply.hat.message";
+
+/// 系统事件：记录 requester-return 解析结果（成功目标 / 未解析原因）。
+///
+/// 说明：
+/// - 这是 observer / diagnostics 用的“纯记录事件”，不会参与业务路由。
+/// - payload 建议为紧凑 JSON，便于 grep / 回放 / 排障。
+pub const TOPIC_REQUESTER_RETURN: &str = "routing.requester_return";
+
 /// Delivery semantics for a topic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

@@ -1,0 +1,224 @@
+# Parallel Hiring Debrief Panel example
+#
+# 目标:
+# - 演示招聘 debrief 前的多评估面并行推进
+# - 演示 coding / system / collaboration / reference 收齐后再给 hiring 结论
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Hiring Debrief Panel
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `HIRING_PACKET`。
+    其中至少包含:
+    - `## Coding Packet`
+    - `## System Design Packet`
+    - `## Collaboration Packet`
+    - `## Reference Packet`
+
+    重要规则:
+    - 你必须先并行派发 4 条 hiring debrief 任务。
+    - 只有 4 条 ready 事件全部到齐后,才允许发布 `hiring.packet.request`。
+    - `hiring.packet.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+    - 在 `hiring.packet.ready` 出现前,禁止输出任何普通文本、分析文本或解释文本。
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次。在那之前,连提及都不允许。
+    - 如果某个 lane 只输出了 `&lt;event ...&gt;` 这类转义展示文本,不要把它当成 ready 事件。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `hiring.coding.debrief`
+       - `hiring.system.debrief`
+       - `hiring.collaboration.debrief`
+       - `hiring.reference.debrief`
+    2) 每条任务都必须携带:
+       - candidate_id
+       - lane
+       - review_packet
+
+    当你观察到:
+    - `coding.ready`
+    - `system.ready`
+    - `collaboration.ready`
+    - `reference.ready`
+    全部出现后:
+    - 你必须只发布一次 `hiring.packet.request`
+    - 后续重复或迟到的 `*.ready` 必须忽略
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持静默,空输出是合法且首选的
+    - 不要输出任何等待说明、分析文本、topic 名称或 completion promise
+    - 不要重复发布已发过的 fanout 任务
+
+    当你收到 `hiring.packet.ready` 时:
+    1) 输出 hiring summary
+       - 至少包含 candidate_id、hiring_recommendation、level、next_step
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="hiring.coding.debrief"&gt;
+    candidate_id: ...
+    lane: coding
+    review_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "hiring.packet.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  coding_interviewer:
+    name: "Coding Interviewer"
+    description: "确认 coding signal。"
+    triggers: ["hiring.coding.debrief"]
+    publishes: ["coding.ready"]
+    instances: 1
+    instructions: |
+      你是 `coding_interviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `coding.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: coding
+      - status: ready
+      - coding_signal
+      - summary
+      - `summary` 保持 1 句短句,不要写分析过程。
+
+  system_design_interviewer:
+    name: "System Design Interviewer"
+    description: "确认 system design signal。"
+    triggers: ["hiring.system.debrief"]
+    publishes: ["system.ready"]
+    instances: 1
+    instructions: |
+      你是 `system_design_interviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `system.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: system
+      - status: ready
+      - system_signal
+      - summary
+      - `summary` 保持 1 句短句,不要补额外细节。
+
+  collaboration_interviewer:
+    name: "Collaboration Interviewer"
+    description: "确认沟通与合作 signal。"
+    triggers: ["hiring.collaboration.debrief"]
+    publishes: ["collaboration.ready"]
+    instances: 1
+    instructions: |
+      你是 `collaboration_interviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `collaboration.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: collaboration
+      - status: ready
+      - collaboration_signal
+      - summary
+      - `summary` 保持 1 句短句,不要扩展成多段总结。
+
+  reference_reviewer:
+    name: "Reference Reviewer"
+    description: "确认 reference signal。"
+    triggers: ["hiring.reference.debrief"]
+    publishes: ["reference.ready"]
+    instances: 1
+    instructions: |
+      你是 `reference_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从 `reference.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      输出 payload 最低要求:
+      - lane: reference
+      - status: ready
+      - reference_signal
+      - summary
+      - `summary` 保持 1 句短句,不要加额外 disclaimer。
+
+  hiring_facilitator:
+    name: "Hiring Facilitator"
+    description: "汇总 panel 输入,形成最终 hiring packet。"
+    triggers: ["hiring.packet.request"]
+    publishes: ["hiring.packet.ready"]
+    instances: 1
+    instructions: |
+      你是 `hiring_facilitator`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `hiring.packet.ready`。
+      - 当你收到 `hiring.packet.request` 时,必须立刻输出且只输出 1 条 `hiring.packet.ready`。
+      - 你的最终回复必须直接从 `hiring.packet.ready` 的真实 event 开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式。
+      - 必须写出开始标签、payload 正文、结束标签这 3 部分,不要把业务字段塞进 opening tag 属性。
+      - 禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。
+      - 输出完真实 event 结束标签后立刻停止,不要再补充任何文字。
+
+      决策规则:
+      - 如果 4 条 lane 都 `status: ready`
+      - 最终 `hiring_recommendation` 必须是 `STRONG_HIRE`
+      - `level` 必须是 `SENIOR`
+      - `next_step` 必须是 `prepare_offer`
+
+      输出 payload 最低要求:
+      - candidate_id
+      - hiring_recommendation
+      - level
+      - next_step
+      - summary
+      - `summary` 保持 1 句短句,不要补额外分析过程。

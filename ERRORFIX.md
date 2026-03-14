@@ -1,543 +1,318 @@
-# ERRORFIX
+## 2026-03-09 11:54:58 +0800 | ERRORFIX 续档说明
 
-> 说明: 历史 ERRORFIX 已归档到 `archive/ERRORFIX_2026-02-18_102134.md`(文件超过 1000 行自动轮转).
+### 背景
 
+- `ERRORFIX.md` 已超过 1000 行。
+- 当前正在处理的是 example 覆盖型 E2E 收敛问题,后续若形成新的 bug fix 结论,将在本新档继续追加。
 
-## 2026-02-18 10:21 +0800 | Fix: autopilot agent analysis 在 custom backend 下默认失败
+### 本轮先行结论
 
-### 现象
+- 旧档中的错误修复记录已保留在 `ERRORFIX_20260309-115458.md`。
+- 新档先建立边界,等待这轮 example 单场景与 full example 的最终动态结果。
 
-- 运行 `ralph autopilot analyze` 时:
-  - hard verdict PASS.
-  - agent analysis 失败,report.json/analysis_output.json 出现类似错误:
-    - "Custom backend requires a command - set 'cli.command' in config".
+## 2026-03-09 12:34:05 +0800 | 修复: `parallel-trigger-routing-example` completion 后假失败
 
-### 根因
+### 问题现象
 
-- `run_agent_analysis()` 之前只从主配置读取 `cli.backend` 字符串.
-- 当 `cli.backend=custom` 时,生成的 `analysis_ralph.yml` 丢失 `cli.command/cli.args`.
-- 子进程 `ralph run --config analysis_ralph.yml` 在 config validate 阶段直接退出.
-
-### 修复
-
-- `crates/ralph-cli/src/autopilot.rs`:
-  - agent analysis 默认继承主配置的完整 `cli`(custom 时包含 command/args/prompt_mode/prompt_flag).
-  - `--analysis-backend` 仅覆盖 backend 字段.
-  - 在 analysis config 注入严格 `event_loop.ralph_prompt`,并收紧护栏:
-    - `max_iterations=3`
-    - `max_runtime_seconds=300`
-  - 子进程若因护栏退出(exit code=2),但 stdout 已产出可解析的 `analyze.complete` JSON,则继续判定为分析成功.
-
-### 验证
-
-- `cargo fmt` ✅
-- `cargo test -p ralph-cli` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test` ✅
-
-## 2026-02-18 14:07 +0800 | Fix: 并行模式动态 ralph#2 prompt 缺失导致 topic 漂移,进而触发 autopilot hard fail
-
-### 现象
-
-- 执行 `$parallel-engine-autopilot` 的并行 example 时,autopilot hard verdict 失败:
-  - report.json 里 `required_topic:integration.applied` 缺失.
-  - record-session JSONL 里出现了 `integration.done`(非协议 topic).
-
-### 根因
-
-- 并行 Supervisor 会在 `ralph#1` 忙时按需创建 `ralph#2` 作为备用协调实例.
-- 之前 `ralph#2` 没有拿到与 `ralph#1` 等价的 coordinator instructions:
-  - 缺少官方语义段落与 `event_loop.ralph_prompt` 注入.
-  - 因此更容易 prompt 漂移,发布不在协议内的 topic(例如 `integration.done`),导致 autopilot/CI 硬断言失败.
-
-### 修复
-
-- 让所有 ralph 实例(包括动态创建的 `ralph#2`)都使用同一套 coordinator instructions 生成逻辑.
-- 把 config 的 `event_loop.ralph_prompt` 同等注入到 `ralph#2`.
-- 增加单元测试锁死行为:
-  - `busy_ralph_secondary_includes_coordinator_instructions_and_config_prompt`
-
-### 验证
-
-- 实跑 autopilot 通过:
-  - out_dir: `/tmp/ralph-autopilot-out-parallel-20260218-133409`
-  - record-session: `/tmp/ralph-autopilot-out-parallel-20260218-133409/session.jsonl`
-  - exit_code: 0
-- `cargo fmt` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-- `cargo test` ✅
-
-## 2026-02-23 18:28 +0800 | Fix: mock-cli allowlist 被空 `RALPH_MOCK_ALLOW` 意外覆盖
-
-### 现象
-
-- 运行 mock-mode 时,terminal 里能看到 `[E2E_CMD] ...`，但 allowlist 命令未执行:
-  - `ralph emit ...` 没有被执行,因此 `spawn_instance` 不会发生.
-  - 场景会卡到 `max_runtime_seconds`，最终 exit code=2 或直接失败断言.
-
-### 根因
-
-- `ralph-e2e` 的 mock-cli 子命令 allowlist 解析逻辑:
-  - 环境变量 `RALPH_MOCK_ALLOW` 优先于 CLI `--allow`。
-  - 但当该环境变量存在且为空字符串时,会把 allowlist 覆盖为空.
-- allowlist 为空会导致 `execute_whitelisted_commands()` 直接 early return,命令完全不执行.
-
-### 修复
-
-- `crates/ralph-e2e/src/main.rs`:
-  - 对 `RALPH_MOCK_ALLOW` 做 `trim()` 并过滤空字符串.
-  - 空字符串视为“未提供”,不再覆盖 CLI allowlist.
-
-### 验证
-
-- `cargo test -p ralph-e2e` ✅
-- `cargo run -p ralph-e2e -- --mock --filter parallel-emit-spawn-instance` ✅
-- `cargo test` ✅
-
-## 2026-02-23 21:12 +0800 | Fix: busy ralph 改投破坏 turn/steer 与 turn/interrupt
-
-### 现象
-
-- 并行模式下,当 `ralph#1` 处于 Running 时,外部显式投递到 `ralph#1` 的 in-flight 控制信号有概率被改投到 `ralph#2`:
-  - `ralph emit ... --turn-action steer --target-instance ralph#1`
-  - `ralph emit ... --turn-action interrupt --target-instance ralph#1`
-- 结果:
-  - `ralph#1` 的 in-flight turn 收不到 steer/interrupt,导致 turn 无法按预期被影响(例如 E2E 稳定卡死到 MaxRuntime)。
-
-### 根因
-
-- `crates/ralph-core/src/parallel/supervisor/routing.rs` 的 `rewrite_target_for_busy_ralph()` 会在 `ralph#1` Running 时把显式 `target_instance=ralph#1` 的事件改投到 `ralph#2`。
-- 该策略对“普通协调面事件”有价值,但对 `turn_action=Steer|Interrupt` 属于语义破坏:
-  - 这类事件必须直达正在运行的目标实例,否则无法影响 in-flight turn。
-
-### 修复
-
-- 对 `event.turn_action == Steer|Interrupt` 直接跳过改投逻辑,保持直达目标实例(例如 `ralph#1`)。
-- 增加单元测试锁死:
-  - `busy_ralph_primary_explicit_target_is_not_redirected_for_turn_steer`
-  - `busy_ralph_primary_explicit_target_is_not_redirected_for_turn_interrupt`
-
-### 验证
-
-- `cargo test -p ralph-e2e` ✅
-- `cargo run -p ralph-e2e -- codex --filter parallel-app-server-steer-multi-turn` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
-## 2026-02-23 23:12 +0800 | Codex app-server steer 回执缺失/过早 steer 失败,导致 live E2E 不可信
-
-### 问题
-
-- `parallel-app-server-steer-multi-turn-live`(真实 codex app-server)中:
-  - human-log 看不到 `turn/steer` 的 response 回执.
-  - 即使有回执,也可能是 error response,但 trace 不显示.
-  - 部分 run 中 `turn/started` 后立刻发 steer,会收到 error: "no active turn to steer".
-  - 部分 real 版本不稳定出现 `turn/completed`,导致 job 完成判定不可靠.
+- `.ralph/session-20260309-1201.jsonl` 已经记录:
+  - `spec.start -> spec.ready -> spec.rejected -> spec.ready -> spec.approved`
+  - `LOOP_COMPLETE`
+  - `_meta.termination(reason=\"CompletionPromise\")`
+- 但 E2E 正式报告仍失败:
+  - `Exit code (success or limit)` = `130`
+  - `No timeout` 失败
+  - `Hat job run counts (example)` 只看到 `ralph#1=1`
+  - `No new jobs after LOOP_COMPLETE (example)` 显示 `completion_seen=false`
 
 ### 原因
 
-- `CodexAppServerSession::trace_recv` 只记录 `{id,result}` response,忽略 `{id,error}` response.
-  - 导致 e2e/human-log 里看不到“runner 回复了错误回执”,误以为没回复.
-- `turn/started` 并不等价于“turn 已进入可 steer 的 active 状态”.
-  - real codex 更可靠的门槛是 `codex/event/task_started`.
-- completion 判定只等 `turn/completed`,在部分 real 版本下不稳定.
+- 原因不是单一根因,而是两个放大器叠加:
+  1. `parallel_runner` 的 log-mode stdout 写入没有显式 `flush()`
+     - 在 pipe/E2E 场景下会发生块缓冲
+     - 一旦 run 在 cleanup 阶段卡住并最终被 timeout 杀掉,尾部实例输出会丢失
+  2. `parallel_runner` 在 `_meta.termination` 写出之后,仍无界等待:
+     - `codex_mcp_runtime.shutdown_all().await`
+     - `codex_app_server_runtime.shutdown_all().await`
+     - 导致“语义已完成,但进程不退出”
 
 ### 修复
 
-- `crates/ralph-cli/src/codex_app_server_session.rs`
-  - trace: 增加对 error response 的日志输出(包含 error_code/message 截断).
-  - steer: 等 `codex/event/task_started` 后再 flush `pending_steers`,并提供 2s 兜底.
-  - completion: 兼容 `codex/event/task_complete|task_completed` 作为完成信号.
-  - 可观测性: 增大 stderr broadcast buffer,降低 trace 丢失概率.
-
-- `crates/ralph-e2e/src/scenarios/parallel/app_server_steer_multi_turn_live.rs`
-  - 断言: 要求 steer 成功 response>=2(排除 error_code),确保“能力可用”而非“只是收到了错误”.
-  - human-log: 增加精选握手/回执证据段落.
-
-### 验证
-
-- `cargo run -p ralph-e2e -- codex --filter parallel-app-server-steer-multi-turn-live` PASS(看到 steer send+成功 response).
-
-## 2026-02-24 09:56 +0800 | Fix: fake steer 计算结果为 <unknown> + steer 不触发(缺 task_started)
-
-### 现象
-
-- 场景: `parallel-app-server-steer-multi-turn`(fake codex app-server)
-- 失败表现(两个阶段):
-  1) fake app-server 不触发 `turn/steer`:
-     - stdout 只看到 `WAITING_FOR_STEER`,随后卡到 `max_runtime_seconds`。
-  2) 修复 flush 后,仍出现:
-     - `TASK_FEEDBACK[*]: answer: <unknown>`
-     - 断言找不到 `answer: 164`/`answer: 15`。
-
-### 根因
-
-1) steer flush 门槛升级后,fake app-server 与真实协议不一致:
-- `CodexAppServerRuntime` 会优先等 `codex/event/task_started` 再认为“可安全 steer”。
-- fake app-server 如果在 `turn/started` 后进入静默(不再推送 notify),
-  并且 steer 发生在前 2s 内,会导致 pending steer 长时间无法被触发 flush。
-
-2) Python regex 在 Rust raw string 中误用双反斜杠:
-- 把 `\d` 写成 `\\d` 会让 regex 实际匹配字面量 `\d`,导致永远匹配不到数字。
-
-### 修复
-
-- `crates/ralph-e2e/src/scenarios/parallel/app_server_steer_multi_turn.rs`
-  - fake app-server 在 `turn/started` 后补发 `codex/event/task_started`,
-    对齐真实 app-server 的语义门槛。
-  - 修正加法 regex: `r"(\d+)\s*\+\s*(\d+)\s*=\?"`(单反斜杠)。
-  - human-log 摘录补齐 `TASK_FEEDBACK`/`answer:` 行,覆盖“任务反馈”证据。
+- 文件: `crates/ralph-cli/src/parallel_runner.rs`
+- 修复动作:
+  - 新增 `write_parallel_cli_line()` 统一执行“写入 + flush”
+  - 把 log-mode 相关 stdout 写入点全部切到该 helper
+  - 新增 `shutdown_parallel_runtime_with_timeout()` 与 `shutdown_parallel_runtimes()`
+  - 给 runtime cleanup 增加 `15s` 有界超时与 warning
+- 新增回归测试:
+  - `write_parallel_cli_line_flushes_immediately`
+  - `shutdown_parallel_runtime_with_timeout_reports_timeout`
+  - `shutdown_parallel_runtime_with_timeout_reports_success`
 
 ### 验证
 
-- `cargo test -p ralph-e2e` ✅
-- `cargo run -p ralph-e2e -- codex --filter "multiple steers"` ✅
+- `cargo test -p ralph-cli guardrail_tests -- --nocapture` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-trigger-routing-example --keep-workspace --verbose` ✅
+  - `86.2s`
+- `cargo run -p ralph-e2e -- codex --filter example --keep-workspace --verbose` ✅
+  - `463.7s`
+- `cargo test -p ralph-core smoke_runner` ✅
+- `cargo test` ✅
 
-## 2026-02-24 20:02 +0800 | Fix: live-reply 场景“有 steer ACK 但看起来无回复”(补齐可见 answer 闭环)
+### 以后避免再犯
 
-### 问题
+- 对并行 CLI/log-mode 输出,不能默认相信 stdout 在 pipe 下会及时可见。
+- 只要 stdout 会被 E2E/外部父进程当成证据面消费,就要明确考虑 flush/耐久性。
+- 对 cleanup 阶段,要区分:
+  - 业务语义是否完成
+  - cleanup 是否只是 best-effort
+  - 是否值得无界等待
 
-- 场景: `parallel-app-server-steer-live-reply-multi-turn`(真实 codex app-server)
-- 失败表现(旧版本):
-  - `turn/steer` 已 send/recv,但 stdout 里看不到 `TASK_FEEDBACK`/`answer`/`LOOP_COMPLETE`。
-  - human-log 只有 RPC trace,难以判断“到底是模型没回复,还是输出没进我们可见通道”。
+## 2026-03-09 23:19:50 +0800 | 修复: `parallel-migration-rehearsal-example` 因普通文本误触发 completion promise
+
+### 问题现象
+
+- live E2E 第一轮失败:
+  - `parallel-migration-rehearsal-example` ❌ `123.3s`
+- 失败断言:
+  - `migration.ready` 缺失
+  - 最终 payload 缺失
+  - `LOOP_COMPLETE` 未观察到
+- 但动态证据显示业务并不是完全没推进:
+  - `schema.ready`
+  - `backup.ready`
+  - `smoke.ready`
+  - `rollback.ready`
+  都已经落盘
+  - `ralph#1` 也已经发出 `migration.go_no_go.request`
 
 ### 原因
 
-- 真实 app-server 下,steer 输入进入 thread 历史,但不保证能在同一轮 in-flight turn 里立刻产生“可见回复”。
-- 如果 prompt 让模型“等 steer 才输出”,模型可能长时间停留在 reasoning/summary 的输出节奏里,导致从 stdout 观测像“无回复”。
+- 这次根因不是 finalizer hat 没订阅,也不是 runtime 没派发 fanout。
+- 真正原因是:
+  1. `ralph#1` 在中途 continuation 的普通文本里提到了 `LOOP_COMPLETE`
+  2. `crates/ralph-core/src/event_parser.rs` 的 `contains_promise()` 会把事件标签外的该字符串当成 completion promise
+  3. `crates/ralph-core/src/parallel/supervisor.rs` 因此提前进入 completion drain,后续事件只记录不再派生新 job
+  4. `migration_conductor#1` 最终只在 shutdown 时从 `idle` 进入 `done`,没有真正启动 job
 
 ### 修复
 
-- 新增/强化 live-reply 场景,改为“两轮 turn/iteration”闭环:
-  1) 第 1 轮(`[task.start]`): 输出 30 行 `STEER_WINDOW_OPEN`,只负责开 steer 窗口,不结束 loop。
-  2) 外部注入 2 次 `turn/steer`(含具体任务 payload)。
-  3) 第 2 轮(emit `e2e.reply.step2`): 明确要求从 thread 历史读取两条输入并输出:
-     - `TASK_REQUEST[n]`
-     - `TASK_FEEDBACK[n]: answer: ...`
-     - 最后 `LOOP_COMPLETE`
-- human-log 补齐 hat runner stdout/state 摘录:
-  - 直接摘录 `answer: 164/15` 与 `LOOP_COMPLETE`,让“是否真的有回复”一眼可读。
-
-### 额外踩坑(已规避)
-
-- 真实 codex app-server 不支持 `type=inputText`:
-  - error: `-32600 unknown variant inputText, expected text/image/localImage/skill/mention`
-  - 因此继续使用 `type=text`。
+- 文件:
+  - `examples/parallel-migration-rehearsal/ralph.yml`
+  - `crates/ralph-e2e/src/scenarios/parallel_migration_rehearsal_example.rs`
+- 修复动作:
+  - 明确要求 coordinator 在 4 条 ready 未齐前必须保持静默
+  - 禁止输出任何等待说明、分析文本、topic 名称或 completion promise
+  - 明确 `migration_conductor` 收到 `migration.go_no_go.request` 后必须立即输出且只输出 1 条 `migration.ready`
+  - 新增 guard 测试:
+    - `example_config_requires_silent_wait_before_all_ready_lanes`
 
 ### 验证
 
-- `cargo test -p ralph-e2e` ✅
-- `cargo run -p ralph-e2e -- codex --filter parallel-app-server-steer-live-reply-multi-turn` ✅
+- `cargo test --package ralph-e2e --lib scenarios::parallel_migration_rehearsal_example::tests::example_config_requires_silent_wait_before_all_ready_lanes -- --exact` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-migration-rehearsal-example --keep-workspace --verbose` ✅
+  - `88.5s`
+- `cargo test` ✅
 
-### 证据
+### 以后避免再犯
 
-- `.e2e-tests/artifacts/parallel-app-server-steer-live-reply-multi-turn/human-log.md`
-- `.e2e-tests/artifacts/parallel-app-server-steer-live-reply-multi-turn/stdout.txt`
+- 在并行 example 里,completion promise 不是普通说明文字,而是控制面 token。
+- 只要等待态允许自由 prose,模型就可能在“解释自己为什么还没结束”时把该 token 说出来,直接改变 runtime 语义。
+- 对 coordinator 的等待态要尽量机械化:
+  - 未满足条件时保持静默
+  - 只在真正完成时输出 completion promise
 
-## 2026-02-25 19:22 +0800 | 修复: ralph-e2e 误选旧 release ralph 导致 `--idle-start` 报 "unexpected argument"
+## 2026-03-10 20:55:00 +0800 | postmortem example 未收敛 + reporter UTF-8 panic
 
 ### 问题
+- `parallel-postmortem-action-board-example` live E2E 首轮失败,缺少:
+  - `actions.ready`
+  - `pm.board.request`
+  - `postmortem.board.ready`
+- 修完 example prompt 后,业务 topic 已走通,但 `ralph-e2e` reporter 又在生成报告时 panic:
+  - `byte index 200 is not a char boundary`
+
+### 原因
+- 第一层原因:
+  - `action_owner_mapper` 在真实 Codex run 里输出了 `&lt;event topic="actions.ready" ...&gt;` 展示文本,而不是真实事件。
+  - `ralph#1` 因此一直合法地等待 `actions.ready`,没有 fan-in 到 `pm.board.request`。
+- 第二层原因:
+  - `crates/ralph-e2e/src/reporter.rs` 使用 `&s[..max_len]` 和 `&tests[..47]` 对字符串按字节截断。
+  - 遇到中文 UTF-8 payload 时切在字符中间,直接 panic。
+- 第三层原因:
+  - scenario 的 `final_payload_expected` 只接受 `key: value` 文本,没有兼容模型合法输出的 JSON payload。
+
+### 修复
+- `examples/parallel-postmortem-action-board/ralph.yml`
+  - 对 4 个 lane hat 和 `board_facilitator` 增加硬约束:
+    - 必须直接从真实 event 开始标签输出
+    - 禁止 `&lt;event`、代码块、前后 prose、后续建议
+    - 输出完真实 event 结束标签立即停止
+- `examples/parallel-postmortem-action-board/README.md`
+  - 明确写出“转义的 `&lt;event ...&gt;` 不算真实事件”。
+- `crates/ralph-e2e/src/scenarios/parallel_postmortem_action_board_example.rs`
+  - 新增 config 自包含测试
+  - `LOOP_COMPLETE` 断言改成剥离并行 stdout 前缀后的精确匹配
+  - 最终 payload 断言改成兼容 JSON / `key: value` 双形态
+- `crates/ralph-e2e/src/reporter.rs`
+  - 新增按字符边界安全截断 helper
+  - 替换所有按字节切片的报告截断逻辑
+  - 补中文多字节回归测试
+
+### 验证
+- `cargo test -p ralph-e2e reporter` ✅
+- `cargo test -p ralph-e2e parallel_postmortem_action_board_example` ✅
+- `cargo test -p ralph-cli --test integration_examples` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-postmortem-action-board-example --skip-analysis --keep-workspace --verbose` ✅ `121.1s`
+- `cargo test` ✅
+
+### 以后避免再犯
+- live example 的 worker prompt 不能只写“最低字段要求”,还要写死“真实 event-only 输出”护栏。
+- 任何报告层 / TUI / CLI 的字符串截断都不能直接按字节切片,必须统一走 UTF-8 安全 helper。
+- scenario 断言尽量验证“语义”,不要把模型允许变化的 payload 编码格式误当协议本身。
+
+## 2026-03-10 22:08:00 +0800 | batch-4 renewal example 因 self-closing event 导致 fan-in 永远不触发
+
+### 问题
+- `parallel-customer-renewal-desk-example` live E2E 首轮失败,300s timeout。
+- 缺失:
+  - `commercial.ready`
+  - `sponsor.ready`
+  - `renewal.plan.request`
+  - `renewal.plan.ready`
+
+### 原因
+- worker 不是没有输出,而是输出了自闭合事件:
+  - `commercial_owner#1` / `sponsor_mapper#1` 使用了 `<event ... />`
+  - 还把业务字段直接塞进 opening tag 属性
+- `crates/ralph-core/src/event_parser.rs` 当前稳定路径按成对标签解析:
+  - `<event ...>payload</event>`
+  - 对普通业务 topic,不会把自闭合 `<event .../>` 记成事件
+- 所以真正失败点不是 runtime 派发,而是 example prompt 对 event 形态约束不足。
+
+### 修复
+- `examples/parallel-customer-renewal-desk/ralph.yml`
+- `examples/parallel-audit-evidence-pack/ralph.yml`
+- `crates/ralph-e2e/src/scenarios/parallel_customer_renewal_desk_example.rs`
+- `crates/ralph-e2e/src/scenarios/parallel_audit_evidence_pack_example.rs`
+
+修复动作:
+- 对 worker / finalizer 明确新增 2 条硬约束:
+  - 禁止自闭合 `&lt;event .../&gt;`
+  - 禁止把业务字段塞进 opening tag 属性
+- 强制完整事件三段式:
+  - 开始标签
+  - payload 正文
+  - 结束标签
+- 新增自包含 guard 测试锁死该规则。
+
+### 验证
+- `cargo test -p ralph-e2e parallel_customer_renewal_desk_example` ✅
+- `cargo test -p ralph-e2e parallel_audit_evidence_pack_example` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-customer-renewal-desk-example --skip-analysis --keep-workspace --verbose` ✅ `131.1s`
+- `cargo run -p ralph-e2e -- codex --filter parallel-audit-evidence-pack-example --skip-analysis --keep-workspace --verbose` ✅ `113.2s`
+
+### 以后避免再犯
+- “直接从 event 开始”不等于“parser 一定能吃到”。
+- 对 live backend example,要把 event 形态也写成协议的一部分:
+  - 禁止 self-closing
+  - 禁止 attribute-only payload
+  - 强制 `<event ...>payload</event>`
+
+## 2026-03-12 00:52:00 +0800 | batch-7 quote live E2E 两段式修复
+
+### 问题
+- `parallel-revops-quote-desk-example` 在 batch-7 验收时连续暴露了两类不同问题:
+  1. 首轮: `quote.packet.ready` 已经产出,但 `Final payload matches requirements` 失败
+  2. 第二轮: `billing.ready` 缺失,导致 `revops.quote.packet.request` 和 `quote.packet.ready` 都没发生,最终 timeout
+
+### 原因
+- 第一层原因:
+  - scenario 断言直接依赖 `.ralph/events.jsonl` / 普通 stdout 提取
+  - quote 的 final payload 含长 `quote_summary`
+  - 截断证据把 `pricing_owner`、`pricing_approval` 挤到了截断点后面,造成假失败
+- 第二层原因:
+  - `billing_setup_reviewer` 在真实 backend 下输出了多行 line-style event
+  - closing tag 实际写成了 `</event`
+  - parser 因标签不完整而拒绝把它记成 `billing.ready`
+
+### 修复
+- `crates/ralph-e2e/src/scenarios/parallel/mod.rs`
+  - 新增 `extract_last_parallel_out_payload_for_topic()`
+  - 先剥掉 `[hat#n:out:job=m] ` 前缀,再用共享 parser 从并行 stdout 提取完整 payload
+- batch-7 三个 scenario:
+  - `parallel_revops_quote_desk_example.rs`
+  - `parallel_executive_business_review_prep_example.rs`
+  - `parallel_customer_advisory_board_prep_example.rs`
+  - final payload 断言统一改为优先走新的并行 stdout helper
+- `examples/parallel-revops-quote-desk/ralph.yml`
+  - billing lane 改成:
+    - 单行真实事件
+    - 紧凑 JSON payload
+    - closing tag 必须精确 `&lt;/event&gt;`
+- `crates/ralph-e2e/src/scenarios/parallel_revops_quote_desk_example.rs`
+  - 新增静态 guard test,锁住 billing lane 的单行 JSON event 约束
+
+### 验证
+- `cargo test -p ralph-e2e parallel_revops_quote_desk_example` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-revops-quote-desk-example --skip-analysis --keep-workspace --verbose` ✅ `184.5s`
+- 相关 batch-7 live E2E:
+  - `parallel-executive-business-review-prep-example` ✅ `146.6s`
+  - `parallel-customer-advisory-board-prep-example` ✅ `102.4s`
+- `cargo test` ✅
+
+### 以后避免再犯
+- 并行 scenario 的最终 payload,优先从“剥前缀后的 out 行”提取,不要盲信截断版 `events.jsonl`。
+- 对 live backend example,只要 payload 不需要多行结构,优先要求 worker 输出单行 JSON event。
+- 如果某条 lane 真需要多行 event,就必须把 closing tag 精确性写成硬约束,并尽量加静态 guard test。
+## 2026-03-12 13:45:00 +0800 | batch-8: renewal risk calibration 的 success lane 在真实 Codex live E2E 首轮失效
+
+### 问题
+
+- `parallel-renewal-risk-calibration-example` 首轮 live E2E 失败。
+- 缺失 topic:
+  - `success.ready`
+  - `renewal.calibration.packet.request`
+  - `renewal.calibration.ready`
+- 退出码:
+  - `Exit code 2`
+
+### 原因
 
 - 现象:
-  - 运行新场景 `parallel-app-server-idle-start` 时,stderr 报:
-    - `error: unexpected argument '--idle-start' found`
-  - 导致 E2E stdout 为空,injector 等不到 `.ralph/agents.json`，最终以超时/无回复失败。
-
-### 原因
-
-- `crates/ralph-e2e/src/executor.rs` 的 `resolve_ralph_binary()` 之前无脑优先 `target/release/ralph`。
-- 在开发期常见状态是:
-  - 旧的 `target/release/ralph` 仍存在
-  - 新的改动只编译到了 `target/debug/ralph`(例如你刚跑了 `cargo test`)
-- 结果: E2E 实际跑的是旧 release,因此缺少新 flag(例如 `--idle-start`)。
-
-### 修复
-
-- `resolve_ralph_binary()` 调整为:
-  - release/debug 都存在时,按文件 mtime 选择更新的那个。
-  - 避免 E2E 被旧二进制污染,减少“假失败”。
-
-### 验证
-
-- `cargo test -p ralph-e2e` ✅
-- `cargo run -p ralph-e2e -- codex --filter "fake codex shim"` ✅
-
-## 2026-02-25 23:53 +0800 | Fix: example 子目录运行时报 "Prompt file ... not found"
-
-### 现象
-
-- 在 `examples/parallel-experimental-dev-engine/` 目录执行 `ralph run`(或 `cargo run --bin ralph -- run`)时,报错:
-  - `Prompt file 'examples/parallel-experimental-dev-engine/PROMPT.md' not found...`
-
-### 原因
-
-- `examples/parallel-experimental-dev-engine/ralph.yml` 的 `event_loop.prompt_file` 使用了仓库根目录相对路径.
-- 当用户在 example 子目录内直接运行时,该路径不再成立,导致找不到 prompt 文件.
+  - `usage.ready`、`blocker.ready`、`sponsor.ready` 都正常出现
+  - 只有 `success_plan_reviewer#1` 最终进入 `failed`
+- 静态证据:
+  - `success_plan_reviewer` 虽然已经被要求“单行 JSON event”,但仍然只有原则性约束
+  - 没有给到“唯一允许输出模板”
+- 动态证据:
+  - `.e2e/stdout.txt` 中 `success_plan_reviewer#1` 没有任何 `success.ready` 输出
+  - `.ralph/events.jsonl` 也没有 `success.ready`
+- 已验证结论:
+  - 首轮失败不是 coordinator 路由问题
+  - 是 success lane 对真实 backend 来说还不够机械化
 
 ### 修复
 
-- 让 example 目录自包含:
-  - `examples/parallel-experimental-dev-engine/ralph.yml`: `prompt_file` 改为 `PROMPT.md`(同目录).
-  - `examples/parallel-experimental-dev-engine/README.md`: 同步更新运行方式说明.
-- 增加回归测试:
-  - `crates/ralph-cli/tests/integration_examples.rs`: 断言 example config 包含 `prompt_file: "PROMPT.md"` 且不再写死仓库根路径.
+- 在 `examples/parallel-renewal-risk-calibration/ralph.yml` 中把 `success_plan_reviewer` 加固为:
+  - 不做分析过程
+  - 直接读取输入后输出最终事件
+  - 明确 `review_packet.expected_success_plan` 要直接原样填入 `success_plan`
+  - 本例固定值写死为 `risk_playbooks_assigned`
+  - 提供唯一允许的单行 JSON event 模板
+- 在 `crates/ralph-e2e/src/scenarios/parallel_renewal_risk_calibration_example.rs` 中升级静态测试:
+  - 额外要求配置里出现 `唯一允许的输出模板如下`
+  - 额外要求出现 `risk_playbooks_assigned`
 
 ### 验证
 
-- 在 example 目录 `--dry-run` 显示 `Prompt file: PROMPT.md`.
-- `cargo test -p ralph-cli` ✅
-
-## 2026-02-26 10:08 +0800 | Fix: 并行 TUI idle chat 下 ralph#1 自己回复自己(human.message loop)
-
-### 现象
-
-- 在并行 TUI 的 chat idle 模式下,给 `ralph#1` 发一条 `human.message` 后:
-  - ralph#1 会发布 `human.message` 作为“回复”。
-  - 该回复又会被 Supervisor 再次路由回 ralph,触发 ralph#1 继续回复自己的 `human.message`,形成循环。
-- 复现证据:
-  - `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-talk-example.jsonl`
-
-### 原因
-
-- `human.message` 的协议语义是“外部输入”(human -> hats)。
-- 但 parallel Supervisor 的默认路由会把 hat 产出的任何事件(包括 `human.message`)继续参与路由。
-- 当 ralph#1(兜底协调者,订阅 "*")反向发布 `human.message` 时,该事件会被再次投递给 ralph,从而形成自我对话回路。
-
-### 修复
-
-- 在 `ParallelSupervisor::route_event()` 增加护栏:
-  - 若 `topic=="human.message"` 且事件带 `source` 或 `source_instance`:
-    - 仍推送给 TUI event_observer 做展示。
-    - 但不再参与后续 routing/delivery(直接返回),从机制上打断回路。
-- 对应文件:
-  - `crates/ralph-core/src/parallel/supervisor/routing.rs`
-
-### 验证
-
-- 回归测试:
-  - `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`:
-    - `parallel_does_not_route_hat_sourced_human_message_to_prevent_self_chat_loop`
-- `cargo test -p ralph-core` ✅
-
-## 2026-02-26 12:21 +0800 | Fix: ralph 回复 topic 改为 reply.human.message + 忽略该 topic 防循环; app-server trace 打印 turn/start prompt
-
-### 现象
-
-1) 回复 topic 不够干净:
-- ralph#1 在回复 human 时会输出:
-  - `<event topic="human.message" reply="...">...`
-- 这会让 `human.message` 同时像“输入”和“输出”,理解成本高,也更容易再次引入自问自答回路。
-
-2) app-server trace 看不到启动注入的 prompt:
-- 即使设置:
-  - `RALPH_CODEX_APP_SERVER_TRACE=1`
-  - `RALPH_CODEX_APP_SERVER_TRACE_STEER_INPUT=1`
-- 仍然看不到 `turn/start` 注入的 prompt(你反馈以前 `codex exec` 能从 stderr 看到)。
-
-### 原因
-
-- `human.message` 没有区分输入/回复输出语义。
-- app-server trace 之前只对 `turn/steer` 打印 input 预览,`turn/start` 只打印 method/id,所以看不到启动 prompt。
-
-### 修复
-
-1) 语义拆分:
-- 引入 `reply.human.message` 作为“回复输出 topic”。
-- `ParallelSupervisor::route_event()` 对 `reply.human.message` 做 UI-only early-return:
-  - 允许 TUI 展示/录制。
-  - 但不参与路由,避免 ralph(订阅 "*")再次收到导致循环。
-- ralph#1 内置协调器指令明确:
-  - human-facing reply 必须用 `reply.human.message`。
-
-2) turn/start trace:
-- 在 `turn/start` 的 send trace 中输出:
-  - `input_len`
-  - 开启 `RALPH_CODEX_APP_SERVER_TRACE_STEER_INPUT=1` 时输出 `input_preview`(截断)。
-
-### 验证
-
-- 回归测试:
-  - `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`:
-    - `parallel_does_not_route_reply_human_message_topic`
-- `cargo test -p ralph-core -p ralph-cli -p ralph-tui` ✅
-
-## 2026-02-26 10:57 +0800 | Fix: app-server 默认显示注入 prompt(像 codex exec stderr) + 保留 ANSI 色彩
-
-### 现象
-
-- Codex app-server(session_strategy=app_server)下,默认看不到 "turn/start 注入了什么".
-  - 你期望像以前 `codex exec` 一样,stderr 会显示 ralph prompt / sys / user 等转录.
-- 并行输出展示里 stderr 会被弱化:
-  - TUI 的 stderr-muted 会覆盖 fg,导致 ANSI 色彩信息被吞掉.
-  - log mode 对 stderr 外层包 GRAY,也会破坏原始色彩语义.
-
-### 原因
-
-- `codex app-server` 通道本身不负责 echo prompt.
-- 之前的 ralph 仅在 trace env 下输出 turn/start 的截断预览,默认不可观测.
-- TUI/log-mode 的 stderr 弱化策略是 "无条件覆盖",未考虑 "stderr 自带 ANSI" 的情况.
-
-### 修复
-
-1) 默认 prompt transcript
-- 在 `CodexAppServerRuntime::execute_job()` 每次 `turn/start` 前,把完整 prompt 以多行 transcript 写入 stderr 流.
-- transcript 支持 ANSI 色彩,并受 `--color` 控制.
-- 对应文件:
-  - `crates/ralph-cli/src/codex_app_server_session.rs`
-
-2) ANSI 保真
-- TUI: 当 stderr chunk 含 ANSI 时,不再强制 muted 覆盖 fg.
-  - `crates/ralph-tui/src/state/parallel.rs`
-- log mode: 当 stderr 行含 ANSI 时,不再外层包 GRAY.
-  - `crates/ralph-cli/src/parallel_runner.rs`
-
-### 验证
-
-- 新增回归测试:
-  - `crates/ralph-cli/src/codex_app_server_session.rs`: transcript 生成包含 ANSI,并保留尾部空行.
-  - `crates/ralph-tui/src/state/parallel.rs`: stderr 含 ANSI 时不被 force muted.
-- `cargo test -p ralph-core -p ralph-cli -p ralph-tui` ✅
-
-### 额外验证
-
-- `cargo test` ✅
-
-## 2026-02-26 14:50 +0800 | 修复: reply.human.message 偶发缺 `</event>` 导致 chat 看起来“没回复”; app-server thinking 不可见
-
-### 现象
-
-- 并行 TUI chat 里,有时能看到 stdout 里输出了 `<event topic="reply.human.message" ...>` 的开头与正文,
-  但缺少 `</event>`。
-- Supervisor 的 `EventParser` 需要看到闭合标签才能发布 `bus.publish`,
-  因此 UI 侧会像“问了但没回复”(或回复不进入事件链)。
-- 同时在 `session_strategy=app_server` 路径下,你看不到像 `codex exec` 那样的 thinking 文本
-  (真实 app-server 会推送 `item/reasoning/summaryTextDelta`)。
-
-### 根因
-
-- 协议层: `<event ...>` 是严格闭合标签; 模型偶发未按协议输出,会导致事件丢失。
-- 运行时: app-server runtime 之前在切到 `item/agentMessage/delta` 后,会忽略后续 summary delta,
-  导致 thinking 不可见。
-- 解析器: 遇到“未闭合但后面又出现新 `<event ...>`”的输出时,
-  简单的 `find("</event>")` 会把后续 event 的 closing tag 误当成当前 event 的 closing,
-  进而吞掉后续事件(不稳健)。
-
-### 修复
-
-1) prompt 硬约束(减少模型违约概率)
-- `crates/ralph-core/src/parallel/supervisor.rs`
-  - 明确要求每个 `<event ...>` 必须闭合 `</event>`。
-  - 推荐单行 event,降低跨行/截断导致的解析失败。
-
-2) app-server thinking 回显(不影响事件解析)
-- `crates/ralph-cli/src/codex_app_server_session.rs`
-  - 当输出源为 `AgentMessageDelta` 时:
-    - `item/reasoning/summaryTextDelta` 持续回显到 stderr(更像 `codex exec` 的体验)。
-    - 但不进入 `HatJobResult.output`(仍坚持 stdout-only 事件解析边界)。
-
-3) parser 最小容错(只针对 UI-only 回复 topic)
-- `crates/ralph-core/src/event_parser.rs`
-  - `reply.human.message` 若在 EOF 缺失 `</event>`,允许把 EOF 当作隐式闭合,避免 chat 看起来“没回复”。
-  - 若 payload 内出现新的 `<event `,则认为当前 event 未闭合,跳过并继续扫描后续事件,避免吞事件。
-
-### 验证
-
-- `cargo fmt --check` ✅
-- `cargo test -p ralph-core -p ralph-cli -p ralph-tui` ✅
-
-## 2026-02-26 21:29 +0800 | 修复: 并行模式中断退出导致 record-session JSONL 尾部丢失(误判“没回复就 end”)
-
-### 现象
-
-- `--record-session` 生成的 JSONL 里:
-  - 只有 `_meta.loop_start` + prompt transcript 等早期输出。
-  - 缺少 `reply.human.message` 与 `_meta.termination`。
-- 但 `.ralph/events.jsonl` 里能找到同一条 `human.message` 的真实回复,说明“系统确实回复了”。
-
-### 根因
-
-- `crates/ralph-cli/src/parallel_runner.rs` 的 interrupt 分支会早退:
-  - 退出前没有写 `_meta.termination`,也没有 `SessionRecorder.flush()`。
-- main 对非 0 exit code 可能调用 `std::process::exit(...)`,
-  `BufWriter<File>` 的尾部缓冲区无法保证落盘。
-
-### 修复
-
-- 在 parallel runner 的两条早退路径补齐:
-  - 写 `_meta.termination`
-  - `recorder.flush()`
-  - 适用路径:
-    1) Ctrl+C/SIGTERM/SIGHUP interrupt
-    2) supervisor.run 返回 Err(e)
-- 对应文件:
-  - `crates/ralph-cli/src/parallel_runner.rs`
-
-### 验证
-
-- `cargo test -p ralph-cli` ✅
-
-## 2026-02-27 12:38 +0800 | 修复: 子目录执行 `ralph emit` 可能写错 events 文件; coordinator prompt 误导“只能发 `<event>`”
-
-### 现象
-
-- 在并行 idle/chat 场景里,你希望:
-  - 随时用 `ralph emit ... --target-instance <hat#n>` 向任意 instance 注入消息/steer。
-  - 且不必被 prompt 误导为"只能输出 `<event ...>...</event>` 才能发消息"。
-- 但当你在子目录(尤其是 `.ralph/worktrees/...`)执行 `ralph emit` 时:
-  - 可能读不到 `.ralph/current-events` marker,从而写入错误的 fallback `.ralph/events.jsonl`。
-  - 结果表现为"注入了但 run 没反应"或"events 路径不对"。
-
-### 根因
-
-- `ralph emit` 与 `ralph events` 之前只在当前工作目录读取 `.ralph/current-events`:
-  - 在子目录执行时,无法命中 workspace root 的 marker。
-- marker 内容通常是相对路径(例如 `.ralph/events-<run_id>.jsonl`):
-  - 若按当前 cwd 解析,也可能拼出错误路径。
-
-### 修复
-
-1) coordinator prompt 明确双通道 + 单轮多事件
-- `crates/ralph-core/src/parallel/supervisor.rs`
-  - 允许单轮输出多条 `<event ...>...</event>`。
-  - 明确: 当 backend 支持 tool/shell 时,也可以 out-of-band 执行 `ralph emit ...` 注入事件。
-
-2) `ralph emit`/`ralph events` 子目录自动定位 marker
-- `crates/ralph-cli/src/main.rs`
-  - 向上遍历父目录寻找最近的 `.ralph/current-events`。
-  - 解析 marker 相对路径时,以 workspace root(包含 `.ralph/` 的目录)为基准。
-  - 并复用到 `ralph events` 保持一致行为。
-
-### 验证
-
-- `cargo fmt --check` ✅
-- `cargo test -p ralph-core -p ralph-cli -p ralph-tui` ✅
-- `cargo test -p ralph-core smoke_runner` ✅
-
-## 2026-02-28 15:26 +0800 | 修复: macOS `cargo test` 报 "You have not agreed to the Xcode license"(exit 69)
-
-### 现象
-
-- 运行 `cargo test`(或某些会触发编译/链接的命令)时,报错:
-  - `You have not agreed to the Xcode license agreements...`
-  - 并以 exit code 69 退出。
-
-### 根因
-
-- `cargo test` 会触发编译/链接,间接调用 Apple toolchain(例如 clang/ld)。
-- 本机 `xcode-select -p` 指向 `/Applications/Xcode.app/Contents/Developer`。
-- 当 Xcode.app license 未接受时,`xcrun` 会拒绝执行 clang/ld,从而让 cargo 的构建/链接失败。
-
-### 修复
-
-- 无需 sudo 的修复(推荐本仓库开发/CI 语境): 跑 cargo 时显式指定 Command Line Tools:
-  - `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test ...`
-- 全局修复(需要管理员权限,不适合在受限环境里做):
-  - `sudo xcodebuild -license accept`
-  - 或 `sudo xcode-select --switch /Library/Developer/CommandLineTools`
-
-### 验证
-
-- `DEVELOPER_DIR=/Library/Developer/CommandLineTools xcrun --find clang` ✅
-- `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test -p ralph-cli` ✅
-- `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test -p ralph-core smoke_runner` ✅
-- `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test` ✅
+- `cargo test -p ralph-e2e parallel_renewal_risk_calibration_example` ✅
+- `cargo fmt --all --check` ✅
+- `cargo run -p ralph-e2e -- codex --filter parallel-renewal-risk-calibration-example --skip-analysis --keep-workspace --verbose` ✅ `172.9s`
+
+### 经验
+
+- “单行 JSON event” 还不够时,要继续收紧到“唯一允许模板”。
+- 对真实 backend 漂移更明显的 lane:
+  - 不要只写原则
+  - 要给 literal 输出模板
+  - 必要时把关键字段固定到示例值

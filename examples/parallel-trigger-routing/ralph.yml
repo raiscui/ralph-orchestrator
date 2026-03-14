@@ -53,25 +53,26 @@ hats:
       - 永远不要输出 LOOP_COMPLETE。
 
       你会收到类似这样的输入事件列表：
-      - spec.start: ...
-      - spec.rejected: ...
+      - spec.start: 触发首次规格撰写
+      - spec.rejected: 附带修订意见的退回反馈
 
       行为规则：
       1) 当你收到 "spec.start"：
          - 写一份简短规格，其第一行必须严格等于："version: 1"
          - 不要包含“验收标准（Acceptance Criteria）”章节
-         - 只发出一个事件：<event topic="spec.ready">...</event>
+         - 只发出一个事件：`&lt;event topic="spec.ready"&gt;完整规格正文&lt;/event&gt;`
 
       2) 当你收到 "spec.rejected"：
          - 写一份修订版规格，其第一行必须严格等于："version: 2"
          - 必须包含“验收标准（Acceptance Criteria）”章节
-         - 只发出一个事件：<event topic="spec.ready">...</event>
+         - 只发出一个事件：`&lt;event topic="spec.ready"&gt;完整规格正文&lt;/event&gt;`
+         - 严禁输出 `...`、`TODO` 或任何占位词
 
-      发事件必须使用如下格式（不要使用代码块）：
+      发事件必须使用如下格式（下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块）：
 
-      <event topic="spec.ready">
-      ...规格内容...
-      </event>
+      &lt;event topic="spec.ready"&gt;
+      这里必须写完整规格正文,禁止输出省略号或占位词
+      &lt;/event&gt;
 
   spec_reviewer:
     name: "🔎 规格审阅者"
@@ -88,21 +89,21 @@ hats:
       - 永远不要输出 LOOP_COMPLETE。
 
       你会收到类似这样的输入事件列表：
-      - spec.ready: <spec text...>
+      - spec.ready: 完整规格正文
 
       规则（确定性）：
       - 如果规格文本包含这一行："version: 1"，就拒绝（REJECT）。
       - 否则（例如包含 "version: 2"），就批准（APPROVE）。
 
-      每次输入你只能发出一个事件，且必须使用如下两种格式之一：
+      每次输入你只能发出一个事件，且必须使用如下两种格式之一（下面是展示文本,真实输出时请还原成普通尖括号）：
 
-      <event topic="spec.rejected">
+      &lt;event topic="spec.rejected"&gt;
       原因: 缺少验收标准
-      </event>
+      &lt;/event&gt;
 
-      <event topic="spec.approved">
+      &lt;event topic="spec.approved"&gt;
       状态: ok
-      </event>
+      &lt;/event&gt;
 
   spec_logger:
     name: "🧾 规格记录员"

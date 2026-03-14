@@ -64,6 +64,7 @@ struct CodexAppServerOptions {
     cwd: Option<String>,
     sandbox: Option<String>,
     approval_policy: Option<String>,
+    config_overrides: Vec<String>,
 }
 
 fn parse_codex_app_server_options(
@@ -102,6 +103,11 @@ fn parse_codex_app_server_options(
                     options.approval_policy = Some(policy.clone());
                 }
             }
+            "--config" | "-c" => {
+                if let Some(config) = iter.next() {
+                    options.config_overrides.push(config.clone());
+                }
+            }
             "--profile" | "-p" => {
                 if let Some(profile) = iter.next() {
                     options.profile = Some(profile.clone());
@@ -126,6 +132,28 @@ fn parse_codex_app_server_options(
     options
 }
 
+fn build_codex_app_server_process_args(options: &CodexAppServerOptions) -> Vec<String> {
+    let mut args = vec![
+        "app-server".to_string(),
+        "--listen".to_string(),
+        "stdio://".to_string(),
+    ];
+
+    if let Some(profile) = &options.profile {
+        args.push("--profile".to_string());
+        args.push(profile.clone());
+    }
+
+    // 让 app-server 进程本身也继承 `codex exec -c ...` 的配置覆写。
+    // 否则 turn/thread 请求里即使改了 model,仍可能继续吃到全局 config 的旧推理参数。
+    for config in &options.config_overrides {
+        args.push("--config".to_string());
+        args.push(config.clone());
+    }
+
+    args
+}
+
 #[derive(Debug)]
 struct CodexAppServerSession {
     instance_id: String,
@@ -144,6 +172,12 @@ struct CodexAppServerSession {
     pending_request_methods: HashMap<u64, String>,
     initialized: bool,
     thread_id: Option<String>,
+    /// 当前 thread 是否已经收到过“首 turn 的完整 prompt”。
+    ///
+    /// 说明:
+    /// - 同一个 thread 的后续 turn 可以只发送增量输入。
+    /// - 一旦 session/thread 重建,该标记会自然回到 false。
+    seeded_first_turn_prompt: bool,
     active_turn_id: Option<String>,
     /// RPC trace 开关(可选): 把 send/recv 事件写入 stderr_tx,便于人类审计 turn/steer 是否真的发生.
     trace_rpc: bool,
@@ -154,11 +188,13 @@ struct CodexAppServerSession {
 }
 
 impl CodexAppServerSession {
-    fn spawn(instance_id: &str, codex_command: &str) -> Result<Self> {
+    fn spawn(
+        instance_id: &str,
+        codex_command: &str,
+        options: &CodexAppServerOptions,
+    ) -> Result<Self> {
         let mut command = Command::new(codex_command);
-        command.arg("app-server");
-        command.arg("--listen");
-        command.arg("stdio://");
+        command.args(build_codex_app_server_process_args(options));
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -217,6 +253,7 @@ impl CodexAppServerSession {
             pending_request_methods: HashMap::new(),
             initialized: false,
             thread_id: None,
+            seeded_first_turn_prompt: false,
             active_turn_id: None,
             trace_rpc: env_flag_is_true("RALPH_CODEX_APP_SERVER_TRACE"),
             trace_steer_input: env_flag_is_true("RALPH_CODEX_APP_SERVER_TRACE_STEER_INPUT"),
@@ -252,6 +289,26 @@ impl CodexAppServerSession {
         }
     }
 
+    fn record_pending_request_method(&mut self, value: &Value) {
+        // ------------------------------------------------------------------
+        // 说明:
+        // - 真实 codex app-server 的 response 只有 `{id, result}` / `{id, error}`，
+        //   不包含 `method` 字段。
+        // - 因此我们需要在发送 request 时记录 `id -> method`，
+        //   以便在收到 error response 时能给出可读的错误信息,
+        //   并决定是否需要 fail-fast / restart session。
+        // - 这条映射不依赖 trace 开关: 即使不 trace，也必须能定位错误方法。
+        // ------------------------------------------------------------------
+        let Some(method) = value.get("method").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(id) = value.get("id").and_then(Value::as_u64) else {
+            return;
+        };
+
+        self.pending_request_methods.insert(id, method.to_string());
+    }
+
     fn trace_send(&mut self, value: &Value) {
         if !self.trace_rpc {
             return;
@@ -266,11 +323,6 @@ impl CodexAppServerSession {
             if id.is_none() {
                 self.trace_line(format!("[app-server-rpc] send notify method={method}"));
                 return;
-            }
-
-            // 记录 request id -> method,用于后续 response 归因.
-            if let Some(id) = id {
-                self.pending_request_methods.insert(id, method.to_string());
             }
 
             if method == "turn/steer" {
@@ -405,7 +457,8 @@ impl CodexAppServerSession {
             if value.get("result").is_some() {
                 let method = self
                     .pending_request_methods
-                    .remove(&id)
+                    .get(&id)
+                    .cloned()
                     .unwrap_or_else(|| "<unknown>".to_string());
                 self.trace_line(format!(
                     "[app-server-rpc] recv response id={id} method={method}"
@@ -413,7 +466,8 @@ impl CodexAppServerSession {
             } else if value.get("error").is_some() {
                 let method = self
                     .pending_request_methods
-                    .remove(&id)
+                    .get(&id)
+                    .cloned()
                     .unwrap_or_else(|| "<unknown>".to_string());
                 let code = value.pointer("/error/code").and_then(Value::as_i64);
                 let message = value
@@ -436,6 +490,7 @@ impl CodexAppServerSession {
     }
 
     async fn write_json(&mut self, value: &Value) -> Result<()> {
+        self.record_pending_request_method(value);
         self.trace_send(value);
         let line = serde_json::to_string(value).context("Failed to serialize app-server json")?;
         self.stdin
@@ -497,8 +552,24 @@ impl CodexAppServerSession {
             let Some(msg) = self.read_json_line().await? else {
                 anyhow::bail!("codex app-server exited before initialize completed");
             };
-            if msg.get("id") == Some(&json!(id)) && msg.get("result").is_some() {
-                break;
+
+            if msg.get("id").and_then(Value::as_u64) == Some(id) {
+                // initialize response: {id, result} / {id, error}
+                let _ = self.pending_request_methods.remove(&id);
+
+                if msg.get("result").is_some() {
+                    break;
+                }
+                if msg.get("error").is_some() {
+                    let code = msg.pointer("/error/code").and_then(Value::as_i64);
+                    let message = msg
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>");
+                    anyhow::bail!(
+                        "codex app-server initialize failed: error_code={code:?} error_message={message}"
+                    );
+                }
             }
             // initialize 阶段可能也会收到通知/请求,统一走 handler,避免卡死。
             self.handle_server_message_for_lifecycle(&msg).await?;
@@ -546,6 +617,35 @@ impl CodexAppServerSession {
             let Some(msg) = self.read_json_line().await? else {
                 anyhow::bail!("codex app-server exited before thread started");
             };
+
+            if msg.get("id").and_then(Value::as_u64) == Some(id) {
+                // thread/start response: {id, result} / {id, error}
+                let _ = self.pending_request_methods.remove(&id);
+
+                if msg.get("error").is_some() {
+                    let code = msg.pointer("/error/code").and_then(Value::as_i64);
+                    let message = msg
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>");
+                    anyhow::bail!(
+                        "codex app-server thread/start failed: error_code={code:?} error_message={message}"
+                    );
+                }
+
+                // 兼容: 某些实现可能只在 response.result 里返回 thread id，不发 thread/started。
+                if self.thread_id.is_none() {
+                    let tid = msg
+                        .pointer("/result/thread/id")
+                        .and_then(Value::as_str)
+                        .or_else(|| msg.pointer("/result/threadId").and_then(Value::as_str))
+                        .or_else(|| msg.pointer("/result/thread_id").and_then(Value::as_str));
+                    if let Some(tid) = tid {
+                        self.thread_id = Some(tid.to_string());
+                    }
+                }
+            }
+
             self.handle_server_message_for_lifecycle(&msg).await?;
             if self.thread_id.is_some() {
                 break;
@@ -604,6 +704,16 @@ impl CodexAppServerSession {
         self.write_json(&req).await?;
 
         Ok(())
+    }
+
+    fn turn_input_for_job<'a>(&self, job: &'a HatJob) -> (&'a str, &'static str) {
+        if self.seeded_first_turn_prompt
+            && let Some(continuation_prompt) = job.continuation_prompt.as_deref()
+        {
+            return (continuation_prompt, "turn/start continuation input");
+        }
+
+        (&job.prompt, "turn/start input")
     }
 
     async fn steer_turn(&mut self, input: &str) -> Result<()> {
@@ -879,35 +989,41 @@ impl CodexAppServerRuntime {
         mut control_rx: mpsc::Receiver<HatJobControl>,
     ) -> Result<HatJobResult> {
         let timed_out_restart = {
-            let session = self.get_or_spawn_session(&job.instance_id).await?;
+            let options = parse_codex_app_server_options(backend, job.workdir.as_deref());
+            let session = self
+                .get_or_spawn_session(&job.instance_id, &options)
+                .await?;
             let mut guard = session.lock().await;
             let mut stderr_rx = guard.subscribe_stderr();
 
             guard.ensure_initialized().await?;
-            let options = parse_codex_app_server_options(backend, job.workdir.as_deref());
             guard.ensure_thread_started(&options).await?;
 
-            // 默认回显 turn/start 的完整 prompt,对齐 `codex exec` 的 stderr 可观测性。
-            // 重要: 这不依赖 trace env 开关,因为你希望默认就能看到“注入了什么”.
+            let (turn_input, transcript_label) = guard.turn_input_for_job(job);
+
+            // 默认回显 turn/start 的实际输入,对齐 `codex exec` 的 stderr 可观测性。
+            // 重要: 这不依赖 trace env 开关,因为你希望默认就能看到“这次 turn 真正注入了什么”.
             emit_prompt_transcript(
                 &output_tx,
                 job.job_id,
                 &job.instance_id,
-                "turn/start input",
-                &job.prompt,
+                transcript_label,
+                turn_input,
                 self.use_colors,
             )
             .await;
 
             guard
-                .start_turn(&job.prompt, &options, job.workdir.as_deref())
+                .start_turn(turn_input, &options, job.workdir.as_deref())
                 .await?;
+            guard.seeded_first_turn_prompt = true;
 
             let mut output = String::new();
             let mut stream_pending = String::new();
             let mut canceled = false;
             let mut timed_out = false;
             let mut completed = false;
+            let mut restart_session = false;
             let mut pending_steers: Vec<String> = Vec::new();
             let mut task_started = false;
             let mut turn_started_at: Option<Instant> = None;
@@ -940,6 +1056,7 @@ impl CodexAppServerRuntime {
                             Some(stale_timeout) => {
                                 if last_output_changed_at.elapsed() >= stale_timeout {
                                     timed_out = true;
+                                    restart_session = true;
                                     // best-effort: interrupt turn,但不依赖它来完成收敛(超时应立即返回)。
                                     if let Err(e) = guard.interrupt_turn().await {
                                         warn!(instance = %job.instance_id, error = %e, "turn/interrupt failed after timeout");
@@ -950,7 +1067,10 @@ impl CodexAppServerRuntime {
                                         .send(HatJobOutputChunk {
                                             job_id: job.job_id,
                                             instance_id: job.instance_id.clone(),
-                                            stream: OutputStream::Stderr,
+                                            // 说明:
+                                            // - 这是关键可见性信号(超时原因),不应该被 `--hide-stderr` 隐藏。
+                                            // - 因此用 stdout 输出,但不进入 `output_for_parsing`。
+                                            stream: OutputStream::Stdout,
                                             line: format!(
                                                 "[codex-app-server] job timed out: output stale for {:?} (instance={} job={})",
                                                 stale_timeout,
@@ -971,6 +1091,7 @@ impl CodexAppServerRuntime {
                             None => {
                                 // 兼容兜底: 若未提供 stale 阈值,则退化为“硬超时”语义。
                                 timed_out = true;
+                                restart_session = true;
                                 if let Err(e) = guard.interrupt_turn().await {
                                     warn!(instance = %job.instance_id, error = %e, "turn/interrupt failed after hard timeout");
                                 }
@@ -979,7 +1100,8 @@ impl CodexAppServerRuntime {
                                     .send(HatJobOutputChunk {
                                         job_id: job.job_id,
                                         instance_id: job.instance_id.clone(),
-                                        stream: OutputStream::Stderr,
+                                        // 同上: 超时原因是关键可见性信号,用 stdout 避免被 hide-stderr 吞掉。
+                                        stream: OutputStream::Stdout,
                                         line: format!(
                                             "[codex-app-server] job timed out: hard timeout fired (instance={} job={})",
                                             job.instance_id.as_str(),
@@ -1029,6 +1151,20 @@ impl CodexAppServerRuntime {
                                     if let Err(e) = guard.interrupt_turn().await {
                                         warn!(instance = %job.instance_id, error = %e, "turn/interrupt failed");
                                     }
+
+                                    // 可见性: 取消原因同样应可见(避免 UI 看起来“啥也没发生”)。
+                                    let _ = output_tx
+                                        .send(HatJobOutputChunk {
+                                            job_id: job.job_id,
+                                            instance_id: job.instance_id.clone(),
+                                            stream: OutputStream::Stdout,
+                                            line: format!(
+                                                "[codex-app-server] job canceled (instance={} job={})",
+                                                job.instance_id.as_str(),
+                                                job.job_id
+                                            ),
+                                        })
+                                        .await;
                                     break;
                                 }
                             }
@@ -1078,9 +1214,53 @@ impl CodexAppServerRuntime {
                         };
 
                         // responses: ignore (best-effort)
-                        if msg.get("id").is_some()
+                        if let Some(id) = msg.get("id").and_then(Value::as_u64)
                             && (msg.get("result").is_some() || msg.get("error").is_some())
                         {
+                            // 对所有 response 做一次 id->method 清理,避免 map 无限增长.
+                            let method = guard
+                                .pending_request_methods
+                                .remove(&id)
+                                .unwrap_or_else(|| "<unknown>".to_string());
+
+                            // error response: 必须可见,且对关键方法 fail-fast，避免“无输出卡死”.
+                            if msg.get("error").is_some() {
+                                last_output_changed_at = Instant::now();
+                                let code = msg.pointer("/error/code").and_then(Value::as_i64);
+                                let message = msg
+                                    .pointer("/error/message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("<missing>");
+
+                                let mut preview: String = message.chars().take(400).collect();
+                                if message.chars().count() > 400 {
+                                    preview.push_str("...(truncated)");
+                                }
+
+                                // 重要:
+                                // - 这里用 stdout 发送,确保 `--hide-stderr` 时仍可见(否则用户会看到“空白”).
+                                // - 但我们不会把它拼进 `output_for_parsing`,避免污染事件解析。
+                                let _ = output_tx
+                                    .send(HatJobOutputChunk {
+                                        job_id: job.job_id,
+                                        instance_id: job.instance_id.clone(),
+                                        stream: OutputStream::Stdout,
+                                        line: format!(
+                                            "[codex-app-server] ERROR: request failed (instance={} job={} method={} id={} code={code:?} message={preview})",
+                                            job.instance_id.as_str(),
+                                            job.job_id,
+                                            method,
+                                            id,
+                                        ),
+                                    })
+                                    .await;
+
+                                let is_fatal = matches!(method.as_str(), "initialize" | "thread/start" | "turn/start" | "<unknown>");
+                                if is_fatal {
+                                    restart_session = true;
+                                    break;
+                                }
+                            }
                             continue;
                         }
 
@@ -1291,6 +1471,22 @@ impl CodexAppServerRuntime {
                                 }
                                 "error" => {
                                     warn!(instance = %job.instance_id, msg = %msg, "codex app-server error notification");
+                                    last_output_changed_at = Instant::now();
+
+                                    // best-effort: 把 error 通知也回显给人类(同样走 stdout,避免 hide-stderr 下完全不可见)。
+                                    let preview = CodexAppServerSession::json_preview(&msg, 400);
+                                    let _ = output_tx
+                                        .send(HatJobOutputChunk {
+                                            job_id: job.job_id,
+                                            instance_id: job.instance_id.clone(),
+                                            stream: OutputStream::Stdout,
+                                            line: format!(
+                                                "[codex-app-server] ERROR: notification received (instance={} job={} json={preview})",
+                                                job.instance_id.as_str(),
+                                                job.job_id
+                                            ),
+                                        })
+                                        .await;
                                 }
                                 _ => {
                                     // 其他通知不影响 job 收敛
@@ -1348,12 +1544,14 @@ impl CodexAppServerRuntime {
                 output_for_parsing: output,
                 observed_stderr: String::new(),
                 success: completed && !canceled && !timed_out,
-                exit_code: completed.then_some(0),
+                exit_code: completed
+                    .then_some(0)
+                    .or(Some(1).filter(|_| !canceled && !timed_out && !completed)),
                 timed_out,
                 canceled,
             };
 
-            (result, timed_out)
+            (result, restart_session)
         };
 
         let (result, should_restart_session) = timed_out_restart;
@@ -1382,13 +1580,14 @@ impl CodexAppServerRuntime {
     async fn get_or_spawn_session(
         &self,
         instance_id: &HatInstanceId,
+        options: &CodexAppServerOptions,
     ) -> Result<Arc<Mutex<CodexAppServerSession>>> {
         let key = instance_id.to_string();
         if let Some(existing) = self.sessions.lock().await.get(&key).cloned() {
             return Ok(existing);
         }
 
-        let session = CodexAppServerSession::spawn(&key, &self.codex_command)?;
+        let session = CodexAppServerSession::spawn(&key, &self.codex_command, options)?;
         let session = Arc::new(Mutex::new(session));
         let mut guard = self.sessions.lock().await;
         let entry = guard.entry(key).or_insert_with(|| Arc::clone(&session));
@@ -1431,6 +1630,8 @@ mod tests {
                 "--full-auto".to_string(),
                 "--model".to_string(),
                 "gpt-5.2-codex".to_string(),
+                "--config".to_string(),
+                "model_reasoning_effort=\"low\"".to_string(),
             ],
             prompt_mode: ralph_adapters::PromptMode::Arg,
             prompt_flag: None,
@@ -1441,6 +1642,38 @@ mod tests {
         assert_eq!(opts.sandbox.as_deref(), Some("workspace-write"));
         assert_eq!(opts.approval_policy.as_deref(), Some("on-request"));
         assert_eq!(opts.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(
+            opts.config_overrides,
+            vec!["model_reasoning_effort=\"low\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_codex_app_server_process_args_forwards_profile_and_config_overrides() {
+        let options = CodexAppServerOptions {
+            profile: Some("e2e".to_string()),
+            config_overrides: vec![
+                "model_reasoning_effort=\"low\"".to_string(),
+                "model_reasoning_summary=\"none\"".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let args = build_codex_app_server_process_args(&options);
+        assert_eq!(
+            args,
+            vec![
+                "app-server".to_string(),
+                "--listen".to_string(),
+                "stdio://".to_string(),
+                "--profile".to_string(),
+                "e2e".to_string(),
+                "--config".to_string(),
+                "model_reasoning_effort=\"low\"".to_string(),
+                "--config".to_string(),
+                "model_reasoning_summary=\"none\"".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1587,6 +1820,7 @@ if __name__ == "__main__":
             instance_id: HatInstanceId::from("writer#1"),
             hat_id: HatId::new("writer"),
             prompt: "hello".to_string(),
+            continuation_prompt: Some("continue".to_string()),
             backend: ralph_core::JobBackend::Default,
             session_strategy: SessionStrategy::AppServer,
             timeout: Some(Duration::from_millis(200)),
@@ -1620,6 +1854,362 @@ if __name__ == "__main__":
         assert!(
             !result.success,
             "Expected success=false when timed_out=true: {result:?}"
+        );
+
+        runtime.shutdown_all().await;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn app_server_turn_start_error_is_visible_and_fails_fast() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        // ------------------------------------------------------------------
+        // 目标:
+        // - 锁死: 当 app-server 对关键 request(turn/start)返回 `{id, error}` 时:
+        //   1) 必须把错误写到 streaming output(且默认可见,不再“静默卡死”).
+        //   2) job 必须 fail-fast 返回(success=false, timed_out=false).
+        // ------------------------------------------------------------------
+
+        let dir = tempdir().context("Failed to create tempdir")?;
+        let fake_codex = dir.path().join("codex");
+
+        let script = r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+
+def send(obj) -> None:
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+def run_app_server() -> int:
+    thread_id = "thread-1"
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+
+        method = msg.get("method")
+        msg_id = msg.get("id")
+
+        if msg_id is None or method is None:
+            continue
+
+        if method == "initialize":
+            send({"id": msg_id, "result": {}})
+            continue
+
+        if method == "thread/start":
+            send({"id": msg_id, "result": {}})
+            send({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
+            continue
+
+        if method == "turn/start":
+            send({"id": msg_id, "error": {"code": 400, "message": "bad request: turn/start failed (test)"}})
+            while True:
+                time.sleep(1)
+
+        if method in ("turn/interrupt", "turn/steer"):
+            send({"id": msg_id, "result": {}})
+            continue
+
+        send({"id": msg_id, "result": {}})
+
+    return 0
+
+def main() -> int:
+    argv = sys.argv
+    if len(argv) >= 2 and argv[1] == "app-server":
+        return run_app_server()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#;
+
+        std::fs::write(&fake_codex, script).context("Failed to write fake codex script")?;
+        let mut perms = std::fs::metadata(&fake_codex)
+            .context("Failed to stat fake codex script")?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_codex, perms)
+            .context("Failed to chmod fake codex script")?;
+
+        let runtime =
+            CodexAppServerRuntime::new_with_command(false, fake_codex.display().to_string());
+
+        let job = HatJob {
+            job_id: 1,
+            instance_id: HatInstanceId::from("writer#1"),
+            hat_id: HatId::new("writer"),
+            prompt: "hello".to_string(),
+            continuation_prompt: Some("continue".to_string()),
+            backend: ralph_core::JobBackend::Default,
+            session_strategy: SessionStrategy::AppServer,
+            timeout: Some(Duration::from_secs(2)),
+            output_stale_timeout: Some(Duration::from_secs(2)),
+            workdir: None,
+        };
+
+        let backend = CliBackend {
+            command: "codex".to_string(),
+            args: vec![],
+            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_flag: None,
+            output_format: ralph_adapters::OutputFormat::Text,
+        };
+
+        let (output_tx, mut output_rx) = mpsc::channel::<HatJobOutputChunk>(128);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (_control_tx, control_rx) = mpsc::channel::<HatJobControl>(1);
+
+        let collector = tokio::spawn(async move {
+            let mut lines = Vec::<HatJobOutputChunk>::new();
+            while let Some(chunk) = output_rx.recv().await {
+                lines.push(chunk);
+            }
+            lines
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.execute_job(&job, &backend, output_tx, cancel_rx, control_rx),
+        )
+        .await
+        .expect("execute_job should not hang")?;
+
+        let chunks = collector.await.expect("collector task should not panic");
+
+        assert!(
+            chunks.iter().any(|c| {
+                c.stream == OutputStream::Stdout
+                    && c.line.contains("ERROR: request failed")
+                    && c.line.contains("method=turn/start")
+            }),
+            "Expected visible turn/start error on stdout: chunks={chunks:?}"
+        );
+
+        assert!(!result.timed_out, "Expected timed_out=false: {result:?}");
+        assert!(!result.canceled, "Expected canceled=false: {result:?}");
+        assert!(!result.success, "Expected success=false: {result:?}");
+        assert_eq!(
+            result.exit_code,
+            Some(1),
+            "Expected exit_code=1 for fatal error: {result:?}"
+        );
+
+        runtime.shutdown_all().await;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn app_server_reuses_session_but_switches_to_continuation_input_after_first_turn()
+    -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        let dir = tempdir().context("Failed to create tempdir")?;
+        let fake_codex = dir.path().join("codex");
+        let transcript_file = dir.path().join("turn-inputs.jsonl");
+
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+TRANSCRIPT = Path({transcript_path:?})
+
+def send(obj) -> None:
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+def append_turn_input(text: str) -> None:
+    with TRANSCRIPT.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({{"text": text}}, ensure_ascii=False) + "\n")
+
+def extract_all_text(value) -> str:
+    parts = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == "text" and isinstance(v, str):
+                parts.append(v)
+            else:
+                parts.append(extract_all_text(v))
+    elif isinstance(value, list):
+        for item in value:
+            parts.append(extract_all_text(item))
+    return "".join(parts)
+
+def run_app_server() -> int:
+    thread_id = "thread-1"
+    turn_counter = 0
+
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+
+        method = msg.get("method")
+        msg_id = msg.get("id")
+        if msg_id is None or method is None:
+            continue
+
+        if method == "initialize":
+            send({{"id": msg_id, "result": {{}}}})
+            continue
+
+        if method == "thread/start":
+            send({{"id": msg_id, "result": {{}}}})
+            send({{"method": "thread/started", "params": {{"thread": {{"id": thread_id}}}}}})
+            continue
+
+        if method == "turn/start":
+            turn_counter += 1
+            send({{"id": msg_id, "result": {{}}}})
+            params = msg.get("params", {{}})
+            append_turn_input(extract_all_text(params.get("input", [])))
+            turn_id = f"turn-{{turn_counter}}"
+            send({{"method": "turn/started", "params": {{"turn": {{"id": turn_id}}}}}})
+            send({{"method": "codex/event/task_started", "params": {{"msg": {{"turn_id": turn_id}}}}}})
+            send({{"method": "item/agentMessage/delta", "params": {{"delta": f"done-{{turn_counter}}\\n"}}}})
+            send({{"method": "turn/completed", "params": {{"turn": {{"id": turn_id}}}}}})
+            continue
+
+        if method in ("turn/interrupt", "turn/steer"):
+            send({{"id": msg_id, "result": {{}}}})
+            continue
+
+        send({{"id": msg_id, "result": {{}}}})
+
+    return 0
+
+def main() -> int:
+    argv = sys.argv
+    if len(argv) >= 2 and argv[1] == "app-server":
+        return run_app_server()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#,
+            transcript_path = transcript_file.display().to_string()
+        );
+
+        std::fs::write(&fake_codex, script).context("Failed to write fake codex script")?;
+        let mut perms = std::fs::metadata(&fake_codex)
+            .context("Failed to stat fake codex script")?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_codex, perms)
+            .context("Failed to chmod fake codex script")?;
+
+        let runtime =
+            CodexAppServerRuntime::new_with_command(false, fake_codex.display().to_string());
+
+        let backend = CliBackend {
+            command: "codex".to_string(),
+            args: vec![],
+            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_flag: None,
+            output_format: ralph_adapters::OutputFormat::Text,
+        };
+
+        let make_job = |job_id: u64, prompt: &str, continuation_prompt: &str| HatJob {
+            job_id,
+            instance_id: HatInstanceId::from("ralph#1"),
+            hat_id: HatId::new("ralph"),
+            prompt: prompt.to_string(),
+            continuation_prompt: Some(continuation_prompt.to_string()),
+            backend: ralph_core::JobBackend::Default,
+            session_strategy: SessionStrategy::AppServer,
+            timeout: Some(Duration::from_secs(2)),
+            output_stale_timeout: Some(Duration::from_secs(2)),
+            workdir: None,
+        };
+
+        for (job_id, prompt, continuation_prompt) in [
+            (
+                1,
+                "FULL PROMPT 1\n## ALL HAT PROMPT\n### Incoming Events\n- id=E1 topic=human.message payload=first",
+                "CONTINUE 1\n### Incoming Events\n- id=E1 topic=human.message payload=first",
+            ),
+            (
+                2,
+                "FULL PROMPT 2\n## ALL HAT PROMPT\n### Incoming Events\n- id=E2 topic=human.message payload=second",
+                "CONTINUE 2\n### Incoming Events\n- id=E2 topic=human.message payload=second",
+            ),
+        ] {
+            let (output_tx, output_rx) = mpsc::channel::<HatJobOutputChunk>(64);
+            drop(output_rx);
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            let (_control_tx, control_rx) = mpsc::channel::<HatJobControl>(1);
+            let job = make_job(job_id, prompt, continuation_prompt);
+            let result = runtime
+                .execute_job(&job, &backend, output_tx, cancel_rx, control_rx)
+                .await?;
+            assert!(
+                result.success,
+                "Expected successful fake app-server job: {result:?}"
+            );
+        }
+
+        let transcript = std::fs::read_to_string(&transcript_file)
+            .context("Failed to read fake app-server transcript")?;
+        let turn_inputs = transcript
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to parse recorded turn inputs")?;
+
+        assert_eq!(
+            turn_inputs.len(),
+            2,
+            "Expected exactly two turn/start inputs"
+        );
+
+        let first_input = turn_inputs[0]
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        let second_input = turn_inputs[1]
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+
+        assert!(
+            first_input.contains("FULL PROMPT 1"),
+            "First turn should receive the full prompt: {first_input:?}"
+        );
+        assert!(
+            first_input.contains("## ALL HAT PROMPT"),
+            "First turn should still include the large base prompt context: {first_input:?}"
+        );
+        assert!(
+            second_input.contains("CONTINUE 2"),
+            "Second turn should use continuation input: {second_input:?}"
+        );
+        assert!(
+            !second_input.contains("FULL PROMPT 2"),
+            "Second turn must not resend the full prompt: {second_input:?}"
+        );
+        assert!(
+            !second_input.contains("## ALL HAT PROMPT"),
+            "Second turn must not resend all-hat prompt overlay: {second_input:?}"
         );
 
         runtime.shutdown_all().await;

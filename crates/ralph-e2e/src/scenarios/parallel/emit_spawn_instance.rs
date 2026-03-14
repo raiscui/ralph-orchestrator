@@ -54,6 +54,8 @@ impl ParallelEmitSpawnInstanceScenario {
   command: codex
   args:
     - exec
+    - -m
+    - gpt-5-codex
     - --full-auto
     - --sandbox
     - danger-full-access

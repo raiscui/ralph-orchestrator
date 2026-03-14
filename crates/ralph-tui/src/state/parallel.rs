@@ -9,6 +9,7 @@
 pub(crate) mod output;
 
 use crate::theme::MUTED_FG;
+use output::wrap_lines_to_width;
 use ralph_adapters::{MarkdownRenderMode, render_text_to_lines};
 use ralph_core::{HatJobOutputChunk, OutputStream};
 use ralph_proto::{
@@ -674,7 +675,12 @@ impl ParallelOutputRenderer {
                 .collect();
         }
 
-        rendered
+        // 关键修复:
+        // - Output buffer 的滚动单位必须尽量贴近“屏幕上的可见行”.
+        // - 如果这里保留未换行的逻辑行,后续 widget 再 soft-wrap,
+        //   `row_count()/scroll_offset` 就会低估真实高度,导致 reply 虽然已经到了 buffer 尾部,
+        //   视口却还停在上面的 prompt 包裹行里。
+        wrap_lines_to_width(rendered, self.width)
     }
 }
 
@@ -835,6 +841,56 @@ impl ParallelTuiState {
     /// - 解析失败时 best-effort 忽略，并打日志；避免 UI 因外部输入格式问题崩溃。
     pub fn apply_event(&mut self, event: &Event) {
         match event.topic.as_str() {
+            "human.message" => {
+                // 说明:
+                // - external `human.message` 表示“人类刚刚提交了一条输入”.
+                // - 在并行模式下,Supervisor 可能会把发往 busy `ralph#1` 的消息改投到 `ralph#2`.
+                // - 如果 UI 直到 `reply.human.message` 才更新,用户会体感为“第二条没反应”.
+                // - 因此这里在消息被系统接收后,就先提示它实际排队到了哪个实例,
+                //   并 best-effort 切过去,让后续输出从一开始就可见.
+                if event.source.is_none() && event.source_instance.is_none() {
+                    if let Some(target_instance) = event.target_instance.as_ref() {
+                        self.chat_status = Some(format!("queued @{target_instance}"));
+
+                        if self.select_instance_by_id(target_instance)
+                            && let Some(view) = self.instances.get_mut(target_instance)
+                            && let Some(buf) = view.current_job_buffer_mut()
+                        {
+                            // 对“刚提交的人类消息”,也尽量跟随到底部,
+                            // 避免用户停留在旧位置时看不到新一轮输出.
+                            buf.following_bottom = true;
+                        }
+                    } else {
+                        self.chat_status = Some("queued human.message".to_string());
+                    }
+                }
+            }
+            "reply.human.message" => {
+                // 说明:
+                // - `reply.human.message` 是“给人看的回复消息”.
+                // - 如果用户当前没选中该实例(或 Output 在别的实例上),很容易误以为“没有回复”.
+                // - 因此这里把它做成一个可见的 status 提示(仅提示来源,不在 Chat 区域展示正文),
+                //   并 best-effort 切换到来源实例,
+                //   让 reply 在 Output 面板里“肉眼可见”(尤其是用户通过外部 `ralph emit` 注入时)。
+                let source = event
+                    .source_instance
+                    .as_ref()
+                    .map(|id| id.as_str())
+                    .unwrap_or("unknown");
+                self.chat_status = Some(format!("reply @{source} (见 Output)"));
+
+                // best-effort: 自动切换到来源实例,避免用户停留在旧实例时体感为“没有回复”。
+                if let Some(source_instance) = event.source_instance.as_ref()
+                    && self.select_instance_by_id(source_instance)
+                    && let Some(view) = self.instances.get_mut(source_instance)
+                    && let Some(buf) = view.current_job_buffer_mut()
+                {
+                    // 关键点:
+                    // - 用户可能曾经滚动离开底部(following_bottom=false)。
+                    // - 对 reply 这种“强语义可见性”内容,我们把它拉回到底部,减少误判。
+                    buf.following_bottom = true;
+                }
+            }
             TOPIC_GATE_REQUEST => match serde_json::from_str::<GateRequest>(&event.payload) {
                 Ok(req) => self.upsert_gate_request(req),
                 Err(e) => warn!(error = %e, "Failed to parse gate.request payload"),
@@ -1076,8 +1132,10 @@ impl ParallelTuiState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ralph_proto::{GateKind, GateResolvedBy};
+    use crate::widgets::parallel_output::ParallelOutputPane;
+    use ralph_proto::{GateKind, GateResolvedBy, HatId};
     use ratatui::style::Color;
+    use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
     use std::time::Duration;
 
     fn make_request(id: &str, timeout_seconds: Option<u64>) -> GateRequest {
@@ -1158,6 +1216,138 @@ mod tests {
         let resolve_payload = serde_json::to_string(&resolve).unwrap();
         state.apply_event(&Event::new(TOPIC_GATE_RESOLVE, resolve_payload));
         assert!(state.gates.get("g1").unwrap().resolved.is_some());
+    }
+
+    #[test]
+    fn apply_event_reply_human_message_sets_chat_status_preview() {
+        let mut state = ParallelTuiState::default();
+
+        // 先注册两个实例,并确保当前选中的是非 ralph#1。
+        let other = HatInstanceId::from("builder#1");
+        let ralph = HatInstanceId::from("ralph#1");
+        state.register_instance(other.clone(), HatInstanceState::Created);
+        state.register_instance(ralph.clone(), HatInstanceState::Created);
+        assert_eq!(
+            state.selected_instance_id(),
+            Some(&other),
+            "precondition: selected instance should be non-ralph"
+        );
+
+        // 给 ralph#1 预置一点输出,并模拟用户滚动离开底部。
+        state.append_output(&HatJobOutputChunk {
+            job_id: 1,
+            instance_id: ralph.clone(),
+            stream: OutputStream::Stdout,
+            line: "prelude".to_string(),
+        });
+        {
+            let view = state.instances.get_mut(&ralph).expect("ralph exists");
+            let buf = view.current_job_buffer_mut().expect("job buffer exists");
+            buf.scroll_top(); // sets following_bottom=false
+            assert!(
+                !buf.following_bottom,
+                "precondition: should not follow bottom"
+            );
+        }
+
+        let event = Event::new("reply.human.message", "hello").with_source_instance("ralph#1");
+        state.apply_event(&event);
+
+        let got = state
+            .chat_status
+            .as_deref()
+            .expect("chat_status should be set for reply");
+        assert!(
+            got.contains("reply @ralph#1"),
+            "expected status to include source instance, got: {got}"
+        );
+        assert!(
+            !got.contains("hello"),
+            "reply 正文不应出现在 Chat status,应该只在 Output 面板可见, got: {got}"
+        );
+
+        assert_eq!(
+            state.selected_instance_id(),
+            Some(&ralph),
+            "reply 到达时应 best-effort 切换到来源实例,避免 reply 不可见"
+        );
+
+        let view = state.instances.get(&ralph).expect("ralph exists");
+        let buf = view.current_job_buffer().expect("job buffer exists");
+        assert!(
+            buf.following_bottom,
+            "reply 到达时应把 output 拉回到底部,避免用户误判为“没有回复”"
+        );
+    }
+
+    #[test]
+    fn apply_event_external_human_message_shows_queued_target_and_switches_instance() {
+        let mut state = ParallelTuiState::default();
+
+        let other = HatInstanceId::from("builder#1");
+        let target = HatInstanceId::from("ralph#2");
+        state.register_instance(other.clone(), HatInstanceState::Created);
+        state.register_instance(target.clone(), HatInstanceState::Created);
+        assert_eq!(
+            state.selected_instance_id(),
+            Some(&other),
+            "precondition: selected instance should start on non-target"
+        );
+
+        state.append_output(&HatJobOutputChunk {
+            job_id: 1,
+            instance_id: target.clone(),
+            stream: OutputStream::Stdout,
+            line: "queued output".to_string(),
+        });
+        {
+            let view = state.instances.get_mut(&target).expect("target exists");
+            let buf = view.current_job_buffer_mut().expect("job buffer exists");
+            buf.scroll_top();
+            assert!(
+                !buf.following_bottom,
+                "precondition: should not follow bottom"
+            );
+        }
+
+        let event = Event::new("human.message", "你能做什么").with_target_instance("ralph#2");
+        state.apply_event(&event);
+
+        assert_eq!(
+            state.chat_status.as_deref(),
+            Some("queued @ralph#2"),
+            "external human.message 应该立刻告诉用户实际排队到了哪个实例"
+        );
+        assert_eq!(
+            state.selected_instance_id(),
+            Some(&target),
+            "external human.message 到达时应 best-effort 切到实际 target_instance"
+        );
+
+        let view = state.instances.get(&target).expect("target exists");
+        let buf = view.current_job_buffer().expect("job buffer exists");
+        assert!(
+            buf.following_bottom,
+            "external human.message 到达后应把 Output 拉回到底部,便于看后续输出"
+        );
+    }
+
+    #[test]
+    fn apply_event_hat_sourced_human_message_does_not_override_chat_status() {
+        let mut state = ParallelTuiState::default();
+        state.chat_status = Some("existing".to_string());
+
+        let event = Event::new("human.message", "internal")
+            .with_source(HatId::new("ralph"))
+            .with_source_instance("ralph#1")
+            .with_target_instance("ralph#2");
+        state.apply_event(&event);
+
+        assert_eq!(
+            state.chat_status.as_deref(),
+            Some("existing"),
+            "hat-sourced human.message 只是观测噪音,不应伪装成用户输入已排队"
+        );
     }
 
     // =========================================================================
@@ -1347,6 +1537,106 @@ mod tests {
         assert!(
             !text.contains("```"),
             "Rendered should hide fence markers: {text}"
+        );
+    }
+
+    #[test]
+    fn parallel_output_rendered_shows_reply_human_message_payload_instead_of_event_wrapper() {
+        // 关键回归:
+        // - Rendered 模式下,`termimad` 会把 `<event ...>` 当作 HTML 吞掉.
+        // - 对 `reply.human.message` 我们必须显示 payload,否则用户体感为“无回复”.
+        let mut state = ParallelTuiState::default();
+        state.output_render_mode = MarkdownRenderMode::Rendered;
+
+        let instance_id = HatInstanceId::from("ralph#1");
+        let job_id = 1;
+
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "<event topic=\"reply.human.message\" reply=\"E1\">hello</event>".to_string(),
+        });
+
+        let text = collect_latest_job_text(&state, &instance_id);
+        assert!(
+            text.contains("hello"),
+            "Rendered should show payload: {text}"
+        );
+        assert!(
+            !text.contains("<event"),
+            "Rendered should hide event wrapper: {text}"
+        );
+    }
+
+    #[test]
+    fn reply_remains_visible_when_previous_output_lines_wrap_heavily() {
+        // 回归目标:
+        // - 复现用户截图里的真实模式:
+        //   前面有大量 prompt/transcript 长行,reply 已经到达,chat_status 也更新了,
+        //   但 Output 因为"逻辑行数"与"屏幕显示行数"不一致,仍卡在上面的包裹行里。
+        // - 这里用一个很窄的 output 宽度复现该条件,锁死"到底后必须看见 reply"。
+        let mut state = ParallelTuiState::default();
+        state.output_render_mode = MarkdownRenderMode::Rendered;
+        state.set_output_render_width(10);
+
+        let instance_id = HatInstanceId::from("ralph#1");
+        let job_id = 1;
+
+        for line in ["ABCDEFGHIJKLMNO", "PQRSTUVWXYZABCD", "EFGHIJKLMNOPQRS"] {
+            state.append_output(&HatJobOutputChunk {
+                job_id,
+                instance_id: instance_id.clone(),
+                stream: OutputStream::Stderr,
+                line: line.to_string(),
+            });
+        }
+
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "<event topic=\"reply.human.message\" reply=\"E1\">hello</event>".to_string(),
+        });
+
+        state.apply_event(
+            &Event::new("reply.human.message", "hello").with_source_instance("ralph#1"),
+        );
+
+        let viewport_height = 4usize;
+        {
+            let view = state
+                .instances
+                .get_mut(&instance_id)
+                .expect("instance exists");
+            let buffer = view.current_job_buffer_mut().expect("job buffer exists");
+            assert!(
+                buffer.following_bottom,
+                "reply event should force follow-bottom"
+            );
+            let max_scroll = buffer.row_count().saturating_sub(viewport_height);
+            buffer.set_scroll_offset_clamped(max_scroll);
+        }
+
+        let view = state.instances.get(&instance_id).expect("instance exists");
+        let buffer = view.current_job_buffer().expect("job buffer exists");
+
+        let area = Rect::new(0, 0, 10, viewport_height as u16);
+        let mut surface = Buffer::empty(area);
+        ParallelOutputPane::new(buffer).render(area, &mut surface);
+
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| surface[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("hello"),
+            "bottom-followed output should contain the final reply, got:\n{rendered}"
         );
     }
 

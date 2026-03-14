@@ -1,0 +1,239 @@
+# Parallel Vendor Security Procurement example
+#
+# 目标:
+# - 演示供应商引入前的多审查面并行推进
+# - 演示 security / privacy / procurement / legal 收齐后再给 onboarding 结论
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Vendor Security Procurement
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `VENDOR_PACKET`。
+    其中至少包含:
+    - `## Security Packet`
+    - `## Privacy Packet`
+    - `## Procurement Packet`
+    - `## Legal Packet`
+
+    重要规则:
+    - 你必须先并行派发 4 条 vendor 审查任务。
+    - 只有 4 条 ready 事件全部到齐后,才允许发布 `vendor.decision.request`。
+    - `vendor.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+    - 在 `vendor.ready` 出现前,禁止输出任何普通文本、分析文本或解释文本。
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次。在那之前,连提及都不允许。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `vendor.security.assess`
+       - `vendor.privacy.review`
+       - `vendor.procurement.check`
+       - `vendor.legal.review`
+    2) 每条任务都必须携带:
+       - vendor_id
+       - lane
+       - review_packet
+
+    当你观察到:
+    - `security.assessed`
+    - `privacy.ready`
+    - `procurement.ready`
+    - `legal.ready`
+    全部出现后:
+    - 你必须只发布一次 `vendor.decision.request`
+    - 后续重复或迟到的 `*.ready` 必须忽略
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持静默,空输出是合法且首选的
+    - 不要输出任何等待说明、分析文本、topic 名称或 completion promise
+    - 不要重复发布已发过的 fanout 任务
+
+    当你收到 `vendor.ready` 时:
+    1) 输出 vendor decision 摘要
+       - 至少包含 vendor_id、decision、required_controls、procurement_path
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="vendor.security.assess"&gt;
+    vendor_id: ...
+    lane: security
+    review_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "vendor.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  security_assessor:
+    name: "Security Assessor"
+    description: "确认供应商控制面与安全基线。"
+    triggers: ["vendor.security.assess"]
+    publishes: ["security.assessed"]
+    instances: 1
+    instructions: |
+      你是 `security_assessor`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: security
+      - status: ready
+      - required_controls
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="security.assessed"&gt;
+      lane: security
+      status: ready
+      required_controls: sso_scim_audit_logs
+      summary: ...
+      &lt;/event&gt;
+
+  privacy_reviewer:
+    name: "Privacy Reviewer"
+    description: "确认隐私边界和数据使用限制。"
+    triggers: ["vendor.privacy.review"]
+    publishes: ["privacy.ready"]
+    instances: 1
+    instructions: |
+      你是 `privacy_reviewer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: privacy
+      - status: ready
+      - privacy_scope
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="privacy.ready"&gt;
+      lane: privacy
+      status: ready
+      privacy_scope: no_training_on_customer_pii
+      summary: ...
+      &lt;/event&gt;
+
+  procurement_owner:
+    name: "Procurement Owner"
+    description: "确认采购路径和商业条款入口。"
+    triggers: ["vendor.procurement.check"]
+    publishes: ["procurement.ready"]
+    instances: 1
+    instructions: |
+      你是 `procurement_owner`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: procurement
+      - status: ready
+      - procurement_path
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="procurement.ready"&gt;
+      lane: procurement
+      status: ready
+      procurement_path: msa_plus_security_addendum
+      summary: ...
+      &lt;/event&gt;
+
+  legal_counsel:
+    name: "Legal Counsel"
+    description: "确认法务条款和签署阻断项。"
+    triggers: ["vendor.legal.review"]
+    publishes: ["legal.ready"]
+    instances: 1
+    instructions: |
+      你是 `legal_counsel`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: legal
+      - status: ready
+      - term_path
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="legal.ready"&gt;
+      lane: legal
+      status: ready
+      term_path: standard_dpa_plus_security_addendum
+      summary: ...
+      &lt;/event&gt;
+
+  vendor_decider:
+    name: "Vendor Decider"
+    description: "汇总 vendor 审查结果,输出 onboarding 决策。"
+    triggers: ["vendor.decision.request"]
+    publishes: ["vendor.ready"]
+    instances: 1
+    instructions: |
+      你是 `vendor_decider`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `vendor.ready`。
+      - 当你收到 `vendor.decision.request` 时,必须立刻输出且只输出 1 条 `vendor.ready`。
+
+      决策规则:
+      - 如果 4 条 lane 都 `status: ready`
+      - 最终 `decision` 必须是 `APPROVE_PILOT`
+      - `required_controls` 必须是 `sso_scim_audit_logs`
+      - `procurement_path` 必须是 `msa_plus_security_addendum`
+
+      输出 payload 最低要求:
+      - vendor_id
+      - decision
+      - required_controls
+      - procurement_path
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="vendor.ready"&gt;
+      vendor_id: VND-77
+      decision: APPROVE_PILOT
+      required_controls: sso_scim_audit_logs
+      procurement_path: msa_plus_security_addendum
+      summary: ...
+      &lt;/event&gt;

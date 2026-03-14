@@ -28,6 +28,7 @@
 //! }
 //! ```
 
+use ralph_core::EventParser;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -612,7 +613,8 @@ impl RalphExecutor {
 
     /// Detects the termination reason from output.
     fn detect_termination_reason(&self, output: &str) -> Option<String> {
-        if output.contains("LOOP_COMPLETE") {
+        // 与 runtime 共用同一套 completion 语义,避免报告和真实运行口径分裂。
+        if EventParser::contains_promise(output, "LOOP_COMPLETE") {
             return Some("LOOP_COMPLETE".to_string());
         }
         if output.contains("max iterations") || output.contains("max-iterations") {
@@ -773,8 +775,15 @@ mod tests {
     #[test]
     fn test_detect_termination_loop_complete() {
         let executor = RalphExecutor::new(PathBuf::from("/tmp"));
-        let reason = executor.detect_termination_reason("Task done. LOOP_COMPLETE");
+        let reason = executor.detect_termination_reason("Task done.\nLOOP_COMPLETE");
         assert_eq!(reason, Some("LOOP_COMPLETE".to_string()));
+    }
+
+    #[test]
+    fn test_detect_termination_ignores_loop_complete_in_prose() {
+        let executor = RalphExecutor::new(PathBuf::from("/tmp"));
+        let reason = executor.detect_termination_reason("Task done. LOOP_COMPLETE later");
+        assert!(reason.is_none());
     }
 
     #[test]

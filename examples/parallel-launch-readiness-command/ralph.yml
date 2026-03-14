@@ -1,0 +1,239 @@
+# Parallel Launch Readiness Command example
+#
+# 目标:
+# - 演示正式发布前的多 readiness lane 并行推进
+# - 演示 QA / observability / rollback / comms 收齐后再发布 launch command
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Launch Readiness Command
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 `LAUNCH_PACKET`。
+    其中至少包含:
+    - `## QA Packet`
+    - `## Observability Packet`
+    - `## Rollback Packet`
+    - `## Comms Packet`
+
+    重要规则:
+    - 你必须先并行派发 4 条 launch readiness 任务。
+    - 只有 4 条 ready 事件全部到齐后,才允许发布 `launch.command.request`。
+    - `launch.command.ready` 出现前,禁止输出 `LOOP_COMPLETE`。
+    - 在 `launch.command.ready` 出现前,禁止输出任何普通文本、分析文本或解释文本。
+    - `LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次。在那之前,连提及都不允许。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `launch.qa.readiness`
+       - `launch.observability.review`
+       - `launch.rollback.review`
+       - `launch.comms.review`
+    2) 每条任务都必须携带:
+       - launch_id
+       - lane
+       - readiness_packet
+
+    当你观察到:
+    - `launch.qa.ready`
+    - `launch.observability.ready`
+    - `launch.rollback.ready`
+    - `launch.comms.ready`
+    全部出现后:
+    - 你必须只发布一次 `launch.command.request`
+    - 后续重复或迟到的 `*.ready` 必须忽略
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持静默,空输出是合法且首选的
+    - 不要输出任何等待说明、分析文本、topic 名称或 completion promise
+    - 不要重复发布已发过的 fanout 任务
+
+    当你收到 `launch.command.ready` 时:
+    1) 输出 launch summary
+       - 至少包含 launch_id、decision、command、launch_window
+    2) 最后一行单独输出 `LOOP_COMPLETE`
+    3) 输出 `LOOP_COMPLETE` 之后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="launch.qa.readiness"&gt;
+    launch_id: ...
+    lane: qa
+    readiness_packet: |
+      ...
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "launch.command.ready"
+  max_iterations: 18
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  qa_readiness_lead:
+    name: "QA Readiness Lead"
+    description: "确认 QA 结论与发布阻断项。"
+    triggers: ["launch.qa.readiness"]
+    publishes: ["launch.qa.ready"]
+    instances: 1
+    instructions: |
+      你是 `qa_readiness_lead`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: qa
+      - status: ready
+      - blocker_status
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="launch.qa.ready"&gt;
+      lane: qa
+      status: ready
+      blocker_status: none
+      summary: ...
+      &lt;/event&gt;
+
+  observability_guard:
+    name: "Observability Guard"
+    description: "确认仪表盘、告警和 SLO 观测面。"
+    triggers: ["launch.observability.review"]
+    publishes: ["launch.observability.ready"]
+    instances: 1
+    instructions: |
+      你是 `observability_guard`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: observability
+      - status: ready
+      - dashboard_state
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="launch.observability.ready"&gt;
+      lane: observability
+      status: ready
+      dashboard_state: green
+      summary: ...
+      &lt;/event&gt;
+
+  rollback_commander:
+    name: "Rollback Commander"
+    description: "确认回滚路径和恢复时长。"
+    triggers: ["launch.rollback.review"]
+    publishes: ["launch.rollback.ready"]
+    instances: 1
+    instructions: |
+      你是 `rollback_commander`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: rollback
+      - status: ready
+      - rollback_plan
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="launch.rollback.ready"&gt;
+      lane: rollback
+      status: ready
+      rollback_plan: revert_in_10m
+      summary: ...
+      &lt;/event&gt;
+
+  comms_coordinator:
+    name: "Comms Coordinator"
+    description: "确认内外部沟通准备。"
+    triggers: ["launch.comms.review"]
+    publishes: ["launch.comms.ready"]
+    instances: 1
+    instructions: |
+      你是 `comms_coordinator`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      输出 payload 最低要求:
+      - lane: comms
+      - status: ready
+      - channel_status
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="launch.comms.ready"&gt;
+      lane: comms
+      status: ready
+      channel_status: status_page_and_slack_ready
+      summary: ...
+      &lt;/event&gt;
+
+  launch_commander:
+    name: "Launch Commander"
+    description: "汇总 readiness 信号,输出最终 launch command。"
+    triggers: ["launch.command.request"]
+    publishes: ["launch.command.ready"]
+    instances: 1
+    instructions: |
+      你是 `launch_commander`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `launch.command.ready`。
+      - 当你收到 `launch.command.request` 时,必须立刻输出且只输出 1 条 `launch.command.ready`。
+
+      决策规则:
+      - 如果 4 条 lane 都 `status: ready`
+      - 最终 `decision` 必须是 `GO`
+      - `command` 必须是 `PROCEED_LAUNCH`
+      - `launch_window` 必须是 `2026-05-01T09:00Z`
+
+      输出 payload 最低要求:
+      - launch_id
+      - decision
+      - command
+      - launch_window
+      - summary
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="launch.command.ready"&gt;
+      launch_id: LR-2026-0501
+      decision: GO
+      command: PROCEED_LAUNCH
+      launch_window: 2026-05-01T09:00Z
+      summary: ...
+      &lt;/event&gt;

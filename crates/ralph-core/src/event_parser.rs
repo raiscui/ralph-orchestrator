@@ -10,6 +10,9 @@ use ralph_proto::{
     AudienceOverride, Event, HatId, HatInstanceId, SessionStrategy, TurnAction, WorkspaceStrategy,
 };
 
+const EVENT_OPEN_TAG: &str = "<event";
+const EVENT_CLOSE_TAG: &str = "</event>";
+
 /// Strips ANSI escape sequences from a string.
 ///
 /// Handles CSI sequences (\x1b[...m), OSC sequences (\x1b]...\x07),
@@ -108,12 +111,12 @@ impl EventParser {
         let mut events = Vec::new();
         let mut remaining = output;
 
-        while let Some(start_idx) = remaining.find("<event ") {
+        while let Some(start_idx) = Self::find_event_start(remaining) {
             let after_start = &remaining[start_idx..];
 
             // Find the end of the opening tag
             let Some(tag_end) = after_start.find('>') else {
-                remaining = &remaining[start_idx + 7..];
+                remaining = &remaining[start_idx + EVENT_OPEN_TAG.len()..];
                 continue;
             };
 
@@ -139,14 +142,14 @@ impl EventParser {
 
             // Find the closing tag
             let content_start = &after_start[tag_end + 1..];
-            let nested_event_idx = content_start.find("<event ");
-            let close_idx = content_start.find("</event>");
+            let nested_event_idx = Self::find_event_start(content_start);
+            let close_idx = content_start.find(EVENT_CLOSE_TAG);
 
             let (payload, total_consumed) = if let Some(close_idx) = close_idx
                 && nested_event_idx.is_none_or(|nested| nested > close_idx)
             {
                 let payload = content_start[..close_idx].trim().to_string();
-                let total_consumed = start_idx + tag_end + 1 + close_idx + 8; // 8 = "</event>".len()
+                let total_consumed = start_idx + tag_end + 1 + close_idx + EVENT_CLOSE_TAG.len();
                 (payload, Some(total_consumed))
             } else {
                 // ------------------------------------------------------------------
@@ -159,7 +162,7 @@ impl EventParser {
                 // - 这样可以最大化避免误把普通日志/示例文本解析成事件.
                 // ------------------------------------------------------------------
                 let prefix_is_blank = remaining[..start_idx].trim().is_empty();
-                let is_last_event = !content_start.contains("<event ");
+                let is_last_event = Self::find_event_start(content_start).is_none();
                 if topic == "reply.human.message" && prefix_is_blank && is_last_event {
                     (content_start.trim().to_string(), None)
                 } else {
@@ -259,6 +262,36 @@ impl EventParser {
         Some(rest[..end].to_string())
     }
 
+    /// 查找真正的 `<event ...>` / `<event>` opening tag 起点。
+    ///
+    /// 兼容:
+    /// - `<event topic="...">`
+    /// - `<event\n  topic="...">`
+    /// - `<event>`
+    ///
+    /// 同时显式排除:
+    /// - `<eventual>`
+    /// - `<event-handler>`
+    fn find_event_start(output: &str) -> Option<usize> {
+        let mut search_from = 0;
+
+        while let Some(relative_idx) = output[search_from..].find(EVENT_OPEN_TAG) {
+            let start_idx = search_from + relative_idx;
+            let next_byte = output
+                .as_bytes()
+                .get(start_idx + EVENT_OPEN_TAG.len())
+                .copied();
+
+            if next_byte.is_none_or(|byte| byte == b'>' || byte.is_ascii_whitespace()) {
+                return Some(start_idx);
+            }
+
+            search_from = start_idx + 1;
+        }
+
+        None
+    }
+
     /// Parses backpressure evidence from build.done event payload.
     ///
     /// Expected format:
@@ -293,40 +326,55 @@ impl EventParser {
         }
     }
 
+    /// Extracts the payload of the last event matching the given topic.
+    ///
+    /// 说明:
+    /// - 复用 `EventParser::parse()` 的 opening tag / 属性顺序 / 多行兼容逻辑。
+    /// - 返回最后一次命中,避免旧事件盖掉最新事件。
+    pub fn extract_last_payload_for_topic(output: &str, topic: &str) -> Option<String> {
+        Self::new()
+            .parse(output)
+            .into_iter()
+            .rev()
+            .find(|event| event.topic.as_str() == topic)
+            .map(|event| event.payload)
+    }
+
     /// Checks if output contains the completion promise.
     ///
     /// Per spec: The promise must appear in the agent's final output,
     /// not inside an `<event>` tag payload. This function:
     /// 1. Returns false if the promise appears inside ANY event tag
     ///    (prevents accidental completion when agents discuss the promise)
-    /// 2. Otherwise, checks for the promise in the stripped output
+    /// 2. Otherwise, only accepts the promise when it occupies its own line
     pub fn contains_promise(output: &str, promise: &str) -> bool {
         // Safety check: if promise appears inside any event tag, never complete
         if Self::promise_in_event_tags(output, promise) {
             return false;
         }
         let stripped = Self::strip_event_tags(output);
-        stripped.contains(promise)
+        // 把 completion promise 维持成控制面 token:
+        // - 必须是事件外文本
+        // - 还必须独占某一行
+        stripped.lines().any(|line| line.trim() == promise)
     }
 
     /// Checks if the promise appears inside any event tag payload.
     pub fn promise_in_event_tags(output: &str, promise: &str) -> bool {
         let mut remaining = output;
 
-        while let Some(start_idx) = remaining.find("<event ") {
+        while let Some(start_idx) = Self::find_event_start(remaining) {
             let after_start = &remaining[start_idx..];
 
             // Find the end of the opening tag
             let Some(tag_end) = after_start.find('>') else {
-                remaining = &remaining[start_idx + 7..];
-                continue;
+                return after_start.contains(promise);
             };
 
             // Find the closing tag
             let content_start = &after_start[tag_end + 1..];
-            let Some(close_idx) = content_start.find("</event>") else {
-                remaining = &remaining[start_idx + tag_end + 1..];
-                continue;
+            let Some(close_idx) = content_start.find(EVENT_CLOSE_TAG) else {
+                return content_start.contains(promise);
             };
 
             let payload = &content_start[..close_idx];
@@ -335,7 +383,7 @@ impl EventParser {
             }
 
             // Move past this event
-            let total_consumed = start_idx + tag_end + 1 + close_idx + 8;
+            let total_consumed = start_idx + tag_end + 1 + close_idx + EVENT_CLOSE_TAG.len();
             remaining = &remaining[total_consumed..];
         }
 
@@ -350,19 +398,20 @@ impl EventParser {
         let mut result = String::with_capacity(output.len());
         let mut remaining = output;
 
-        while let Some(start_idx) = remaining.find("<event ") {
+        while let Some(start_idx) = Self::find_event_start(remaining) {
             // Add everything before this event tag
             result.push_str(&remaining[..start_idx]);
 
             let after_start = &remaining[start_idx..];
 
             // Find the closing tag
-            if let Some(close_idx) = after_start.find("</event>") {
+            if let Some(close_idx) = after_start.find(EVENT_CLOSE_TAG) {
                 // Skip past the entire event block
-                remaining = &after_start[close_idx + 8..]; // 8 = "</event>".len()
+                remaining = &after_start[close_idx + EVENT_CLOSE_TAG.len()..];
             } else {
-                // Malformed: no closing tag, keep the rest and stop
-                result.push_str(after_start);
+                // 安全优先:
+                // - 未闭合的 opening tag 之后都视为“仍在 event 内”.
+                // - 这样 completion 检测不会把残缺 event 的 payload 误当成最终正文.
                 remaining = "";
                 break;
             }
@@ -472,6 +521,22 @@ Some trailing text.
     }
 
     #[test]
+    fn test_parse_event_with_multiline_opening_tag() {
+        let output = r#"<event
+  topic="reply.human.message"
+  reply="E1"
+>hello
+</event>"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].topic.as_str(), "reply.human.message");
+        assert_eq!(events[0].reply.as_deref(), Some("E1"));
+        assert_eq!(events[0].payload, "hello");
+    }
+
+    #[test]
     fn test_parse_incomplete_reply_human_message_event_is_salvaged_at_eof() {
         let output = r#"<event topic="reply.human.message" reply="E1">hello"#;
         let parser = EventParser::new();
@@ -555,6 +620,10 @@ Working on implementation...
             "LOOP_COMPLETE"
         ));
         assert!(EventParser::contains_promise(
+            "Done.\nLOOP_COMPLETE\n",
+            "LOOP_COMPLETE"
+        ));
+        assert!(!EventParser::contains_promise(
             "prefix LOOP_COMPLETE suffix",
             "LOOP_COMPLETE"
         ));
@@ -580,13 +649,63 @@ Working on implementation...
     }
 
     #[test]
+    fn test_contains_promise_ignores_multiline_event_payloads() {
+        let output = r#"<event
+  topic="build.task"
+  target="writer"
+>Fix LOOP_COMPLETE detection
+</event>"#;
+        assert!(EventParser::promise_in_event_tags(output, "LOOP_COMPLETE"));
+        assert!(!EventParser::contains_promise(output, "LOOP_COMPLETE"));
+    }
+
+    #[test]
+    fn test_contains_promise_ignores_incomplete_event_payloads() {
+        let output = r#"<event topic="reply.human.message">hello LOOP_COMPLETE"#;
+        assert!(EventParser::promise_in_event_tags(output, "LOOP_COMPLETE"));
+        assert!(!EventParser::contains_promise(output, "LOOP_COMPLETE"));
+    }
+
+    #[test]
+    fn test_extract_last_payload_for_topic_accepts_multiline_and_attribute_reordering() {
+        let output = r#"
+prefix
+<event
+  id="first"
+  source="ralph"
+  topic="analyze.complete"
+>
+{"verdict":"old"}
+</event>
+<event
+  source="ralph"
+  id="second"
+  topic="analyze.complete"
+>
+{"verdict":"new"}
+</event>
+"#;
+
+        let payload = EventParser::extract_last_payload_for_topic(output, "analyze.complete")
+            .expect("expected analyze.complete payload");
+        assert_eq!(payload, r#"{"verdict":"new"}"#);
+    }
+
+    #[test]
+    fn test_extract_last_payload_for_topic_returns_none_when_topic_missing() {
+        let output = r#"<event topic="build.done">done</event>"#;
+        let payload = EventParser::extract_last_payload_for_topic(output, "analyze.complete");
+        assert_eq!(payload, None);
+    }
+
+    #[test]
     fn test_contains_promise_detects_outside_events() {
-        // Promise outside event tags should be detected
+        // Promise in prose should NOT be treated as completion
         let output = r#"<event topic="build.done">Task complete</event>
 All done! LOOP_COMPLETE"#;
-        assert!(EventParser::contains_promise(output, "LOOP_COMPLETE"));
+        assert!(!EventParser::contains_promise(output, "LOOP_COMPLETE"));
 
-        // Promise before event tags
+        // Promise on its own line outside event tags should still work
         let output = r#"LOOP_COMPLETE
 <event topic="summary">Final summary</event>"#;
         assert!(EventParser::contains_promise(output, "LOOP_COMPLETE"));
@@ -605,6 +724,12 @@ Still working..."#;
         let output = r#"All tasks done. LOOP_COMPLETE
 <event topic="summary">Completed LOOP_COMPLETE task</event>"#;
         assert!(!EventParser::contains_promise(output, "LOOP_COMPLETE"));
+
+        // Promise on its own line in mixed content should complete
+        let output = r#"All tasks done.
+LOOP_COMPLETE
+<event topic="summary">Completed task</event>"#;
+        assert!(EventParser::contains_promise(output, "LOOP_COMPLETE"));
     }
 
     #[test]
@@ -628,6 +753,13 @@ Still working..."#;
     }
 
     #[test]
+    fn test_promise_in_event_tags_does_not_match_eventual() {
+        let output = r#"<eventual>LOOP_COMPLETE</eventual>"#;
+        assert!(!EventParser::promise_in_event_tags(output, "LOOP_COMPLETE"));
+        assert!(!EventParser::contains_promise(output, "LOOP_COMPLETE"));
+    }
+
+    #[test]
     fn test_strip_event_tags() {
         // Single event
         let output = r#"before <event topic="test">payload</event> after"#;
@@ -645,6 +777,13 @@ Still working..."#;
         let output = "just plain text";
         let stripped = EventParser::strip_event_tags(output);
         assert_eq!(stripped, "just plain text");
+    }
+
+    #[test]
+    fn test_strip_event_tags_drops_incomplete_event_tail() {
+        let output = r#"before <event topic="reply.human.message">payload LOOP_COMPLETE"#;
+        let stripped = EventParser::strip_event_tags(output);
+        assert_eq!(stripped, "before ");
     }
 
     #[test]

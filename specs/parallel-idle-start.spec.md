@@ -19,8 +19,9 @@ Ralph 的并行运行时(Parallel Supervisor + HatInstance)是事件驱动的。
 - 0 token 真待机:
   - 待机期间不启动任何 hat job(不 spawn codex app-server,不消耗 token)。
   - 不通过“先让模型输出 `LOOP_COMPLETE`”来进入暂停态。
-- 待机期间 `max_runtime_seconds` 不计时。
-  - 直到看到任意实例首次进入 `Running`,才开始计时。
+- 无 `PROMPT.md` 的 idle_start 会话不受 Supervisor 级 `max_runtime_seconds` 限制。
+  - 这包括“等待第一条外部消息之前”以及“第一条消息之后的持续对话阶段”。
+  - 该模式仍保留其他收尾/护栏,例如 `job_timeout_secs`、`max_iterations`、人工中断。
 - headless/CI/E2E 必须显式开关:
   - 新增 `ralph run --idle-start`。
   - 默认 headless 仍保持“缺 prompt 就报错”,避免脚本静默挂住。
@@ -68,11 +69,11 @@ Ralph 的并行运行时(Parallel Supervisor + HatInstance)是事件驱动的。
 
 ### max_runtime 计时
 
-- idle_start 期间:
-  - `max_runtime` 计时暂停(不触发 `MaxRuntime`)。
-  - 直到看到任意实例 `StateChanged -> Running` 才开始计时。
-- 一旦计时开始:
-  - 行为与现有并行模式一致: 超过 `max_runtime_seconds` 则以 `MaxRuntime` 终止并 cancel/shutdown。
+- idle_start / 无 `PROMPT.md` 会话:
+  - Supervisor 级 `max_runtime` MUST 保持禁用。
+  - 不论 `ralph#1` 是否已经开始处理第一条 `human.message`,都 MUST NOT 因 `max_runtime_seconds` 触发 `MaxRuntime`。
+- 非 idle_start 的普通并行 run:
+  - 行为保持现有语义: 超过 `max_runtime_seconds` 则以 `MaxRuntime` 终止并 cancel/shutdown。
 
 ## 验收标准
 
@@ -81,7 +82,8 @@ Ralph 的并行运行时(Parallel Supervisor + HatInstance)是事件驱动的。
 - `idle_start` 模式下:
   - Supervisor 启动后在一段 wall time 内不触发任何 job。
   - 超过 `max_runtime_seconds` 的 wall time 也不应退出(证明 idle 不计时)。
-  - 注入一条 `human.message` 后,应触发一次 ralph#1 job 并正常收敛。
+  - 注入一条 `human.message` 后,即使继续等待超过 `max_runtime_seconds`,也不应因 `MaxRuntime` 退出。
+  - 注入一条 `human.message` 后,仍应能触发 ralph#1 job 并按其他退出条件正常收敛。
 
 ### E2E: fake codex(确定性)
 
@@ -100,4 +102,3 @@ Ralph 的并行运行时(Parallel Supervisor + HatInstance)是事件驱动的。
 - `parallel-app-server-idle-start-live`:
   - 同样不提供 prompt,以 `--idle-start` 启动并行 ralph。
   - 注入 `human.message` 后,应在 stdout 中看到 `answer: 164`/`answer: 15` 与 `LOOP_COMPLETE`。
-

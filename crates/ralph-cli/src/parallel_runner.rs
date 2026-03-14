@@ -18,6 +18,7 @@ use ralph_core::{
 use ralph_proto::{HatInstanceId, HatInstanceState, SessionStrategy, TerminalWrite, UxEvent};
 use ralph_tui::{Tui, TuiUpdate};
 use std::fs::File;
+use std::future::Future;
 use std::io::{IsTerminal, Write, stdin, stdout};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -33,6 +34,8 @@ use crate::display::colors;
 use crate::process_management;
 use crate::{ColorMode, Verbosity};
 
+const PARALLEL_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn should_forward_event_to_tui(event: &ralph_proto::Event) -> bool {
     // 事件转发策略（并行模式）：
     // - gate.* / human.message / reply.human.message：用于控制面 UI（Gate 面板/提示等）；
@@ -43,6 +46,67 @@ fn should_forward_event_to_tui(event: &ralph_proto::Event) -> bool {
         || topic == "reply.human.message"
         || event.source_instance.is_some()
         || event.source.is_some()
+}
+
+fn write_parallel_cli_line<W: Write>(out: &mut W, line: &str) {
+    // ------------------------------------------------------------------
+    // 说明:
+    // - 并行 CLI/log-mode 的 stdout 常被 E2E 父进程、`tee`、shell pipe 直接消费。
+    // - 这类场景下 stdout 往往不是 TTY,标准库会做块缓冲。
+    // - 如果 run 在 cleanup 阶段卡住并最终被外层 SIGTERM 杀掉,未 flush 的尾部日志会丢失:
+    //   - job 计数断言失真
+    //   - LOOP_COMPLETE 看起来“没有输出”
+    // - 因此这里把“写一行”定义为“写入 + 立即 flush”的耐久性操作。
+    // ------------------------------------------------------------------
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
+}
+
+async fn shutdown_parallel_runtime_with_timeout<F>(
+    runtime_name: &'static str,
+    timeout: Duration,
+    future: F,
+) -> bool
+where
+    F: Future<Output = ()>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(()) => true,
+        Err(_) => {
+            warn!(
+                runtime = runtime_name,
+                timeout_secs = timeout.as_secs_f64(),
+                "Parallel runtime shutdown timed out; continuing with process exit"
+            );
+            false
+        }
+    }
+}
+
+async fn shutdown_parallel_runtimes(
+    codex_mcp_runtime: &CodexMcpRuntime,
+    codex_app_server_runtime: &CodexAppServerRuntime,
+) {
+    // ------------------------------------------------------------------
+    // 说明:
+    // - `_meta.termination` 已经写出后,cleanup 就只剩 best-effort 语义。
+    // - 如果这里无界等待,会出现“语义已完成,但 CLI 进程迟迟不退出”的假失败。
+    // - 因此对 runtime shutdown 加有界超时:
+    //   - 能正常收尾时,仍然完整收尾
+    //   - 收尾异常卡住时,优先保证主进程退出与证据保留
+    // ------------------------------------------------------------------
+    let _ = shutdown_parallel_runtime_with_timeout(
+        "codex_mcp_runtime",
+        PARALLEL_RUNTIME_SHUTDOWN_TIMEOUT,
+        codex_mcp_runtime.shutdown_all(),
+    )
+    .await;
+    let _ = shutdown_parallel_runtime_with_timeout(
+        "codex_app_server_runtime",
+        PARALLEL_RUNTIME_SHUTDOWN_TIMEOUT,
+        codex_app_server_runtime.shutdown_all(),
+    )
+    .await;
 }
 
 /// ralph-cli 的 HatJobExecutor：使用外部 CLI 后端执行 prompt（headless）。
@@ -105,6 +169,15 @@ impl HatJobExecutor for CliHatJobExecutor {
         command.args(&args);
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+
+        // Unix: 让每个 job 成为一个新的进程组 leader。
+        //
+        // 为什么:
+        // - 后端进程可能会再 spawn 子进程.
+        // - cancel/timeout/中断时,我们需要“一刀切”杀掉整组,避免残留污染下一次 run/test.
+        // - 同时避免“kill 自己所在进程组”导致 orchestrator 自杀,从而来不及写 `_meta.termination`.
+        #[cfg(unix)]
+        command.process_group(0);
 
         // 并行模式回放/诊断：把实例信息传给后端（custom backend 可用来做输出分流）
         command.env("RALPH_HAT_INSTANCE_ID", job.instance_id.as_str());
@@ -185,7 +258,8 @@ impl HatJobExecutor for CliHatJobExecutor {
         // 释放主 sender，让 rx 能在两个 task 结束后自然关闭
         drop(line_tx);
 
-        let mut output = String::new();
+        let mut stdout_output = String::new();
+        let mut stderr_output = String::new();
         let mut timed_out = false;
         let mut canceled = false;
         let mut last_output_changed_at = std::time::Instant::now();
@@ -240,7 +314,17 @@ impl HatJobExecutor for CliHatJobExecutor {
                             };
 
                             last_output_changed_at = std::time::Instant::now();
-                            Self::handle_output_line(job.job_id, &job.instance_id, &output_tx, &mut output, stream, line).await;
+                            Self::handle_output_line(
+                                job.job_id,
+                                &job.instance_id,
+                                &output_tx,
+                                &backend,
+                                &mut stdout_output,
+                                &mut stderr_output,
+                                stream,
+                                line,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -259,7 +343,17 @@ impl HatJobExecutor for CliHatJobExecutor {
                         let Some((stream, line)) = line else {
                             break;
                         };
-                        Self::handle_output_line(job.job_id, &job.instance_id, &output_tx, &mut output, stream, line).await;
+                        Self::handle_output_line(
+                            job.job_id,
+                            &job.instance_id,
+                            &output_tx,
+                            &backend,
+                            &mut stdout_output,
+                            &mut stderr_output,
+                            stream,
+                            line,
+                        )
+                        .await;
                     }
                 }
             },
@@ -272,9 +366,24 @@ impl HatJobExecutor for CliHatJobExecutor {
         let _ = stdout_task.await;
         let _ = stderr_task.await;
 
+        let output_for_parsing = Self::finalize_output_for_parsing(&backend, &stdout_output);
+
+        if backend.emits_structured_response()
+            && let Some(display_output) =
+                backend.finalize_structured_stdout_for_display(&stdout_output)
+        {
+            Self::emit_final_structured_output(
+                job.job_id,
+                &job.instance_id,
+                &output_tx,
+                &display_output,
+            )
+            .await;
+        }
+
         Ok(HatJobResult {
-            output_for_parsing: output,
-            observed_stderr: String::new(),
+            output_for_parsing,
+            observed_stderr: stderr_output,
             success: status.success() && !timed_out && !canceled,
             exit_code: status.code(),
             timed_out,
@@ -284,6 +393,23 @@ impl HatJobExecutor for CliHatJobExecutor {
 }
 
 impl CliHatJobExecutor {
+    fn finalize_output_for_parsing(backend: &CliBackend, stdout_output: &str) -> String {
+        // -----------------------------------------------------------------
+        // 说明：
+        // - 并行模式下，事件解析只能消费 stdout-only 的稳定正文。
+        // - stderr 经常带 prompt transcript、后端日志、warning，甚至会出现 `<event ...>` 示例。
+        // - 一旦把 stderr 混回解析输入，就会制造伪事件、重复路由和假 completion。
+        // - 对结构化 backend，仍然要先从 stdout 中提取最终 response，再交给 EventParser。
+        // -----------------------------------------------------------------
+        if backend.emits_structured_response()
+            && let Some(response) = backend.finalize_structured_stdout_for_display(stdout_output)
+        {
+            return response;
+        }
+
+        stdout_output.to_string()
+    }
+
     fn should_use_codex_mcp(job: &HatJob, backend: &CliBackend) -> bool {
         // ------------------------------------------------------------------
         // 说明:
@@ -315,10 +441,29 @@ impl CliHatJobExecutor {
         job_id: u64,
         instance_id: &HatInstanceId,
         output_tx: &tokio::sync::mpsc::Sender<HatJobOutputChunk>,
-        output: &mut String,
+        backend: &CliBackend,
+        stdout_output: &mut String,
+        stderr_output: &mut String,
         stream: OutputStream,
         line: String,
     ) {
+        match stream {
+            OutputStream::Stdout => {
+                stdout_output.push_str(&line);
+                stdout_output.push('\n');
+            }
+            OutputStream::Stderr => {
+                stderr_output.push_str(&line);
+                stderr_output.push('\n');
+            }
+        }
+
+        // JSON backend 的 stdout 是结构化负载, 不适合逐行原样透传.
+        // 我们先缓存,等进程结束后再提取稳定正文并一次性发给上层.
+        if backend.emits_structured_response() && stream == OutputStream::Stdout {
+            return;
+        }
+
         // 1) 流式输出给 Supervisor（带 instance_id 归因）
         let _ = output_tx
             .send(HatJobOutputChunk {
@@ -332,8 +477,7 @@ impl CliHatJobExecutor {
         // 2) 组装完整 output（用于 event parser）
         match stream {
             OutputStream::Stdout => {
-                output.push_str(&line);
-                output.push('\n');
+                // 普通文本 backend: stdout 已在上面缓存,这里无需重复拼接。
             }
             OutputStream::Stderr => {
                 // 重要：并行模式下，stderr 往往包含“后端自身的日志”（例如 Codex 会回显 user prompt、
@@ -348,6 +492,24 @@ impl CliHatJobExecutor {
         }
     }
 
+    async fn emit_final_structured_output(
+        job_id: u64,
+        instance_id: &HatInstanceId,
+        output_tx: &tokio::sync::mpsc::Sender<HatJobOutputChunk>,
+        display_output: &str,
+    ) {
+        for line in display_output.lines() {
+            let _ = output_tx
+                .send(HatJobOutputChunk {
+                    job_id,
+                    instance_id: instance_id.clone(),
+                    stream: OutputStream::Stdout,
+                    line: line.to_string(),
+                })
+                .await;
+        }
+    }
+
     /// 尽最大努力终止子进程：
     /// 1) SIGTERM
     /// 2) 5s grace
@@ -358,13 +520,15 @@ impl CliHatJobExecutor {
     ) -> std::io::Result<()> {
         #[cfg(unix)]
         {
-            use nix::sys::signal::{Signal, kill};
+            use nix::sys::signal::{Signal, killpg};
             use nix::unistd::Pid;
 
             if let Some(pid) = child.id() {
                 #[allow(clippy::cast_possible_wrap)]
                 let pid = Pid::from_raw(pid as i32);
-                let _ = kill(pid, Signal::SIGTERM);
+                // 注意: 我们在 spawn 时已通过 `process_group(0)` 让该 pid 成为进程组 leader.
+                // 因此这里用 killpg 终止整组(包含后端派生的子进程).
+                let _ = killpg(pid, Signal::SIGTERM);
             }
         }
 
@@ -380,7 +544,20 @@ impl CliHatJobExecutor {
             Ok(Err(e)) => Err(e),
             Err(_) => {
                 warn!(%reason, "Job did not exit after SIGTERM, forcing kill");
-                let _ = child.start_kill();
+                #[cfg(unix)]
+                {
+                    use nix::sys::signal::{Signal, killpg};
+                    use nix::unistd::Pid;
+                    if let Some(pid) = child.id() {
+                        #[allow(clippy::cast_possible_wrap)]
+                        let pid = Pid::from_raw(pid as i32);
+                        let _ = killpg(pid, Signal::SIGKILL);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = child.start_kill();
+                }
                 let _ = child.wait().await;
                 Ok(())
             }
@@ -391,6 +568,73 @@ impl CliHatJobExecutor {
 #[cfg(test)]
 mod guardrail_tests {
     use super::*;
+    use std::io;
+
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_parallel_cli_line_flushes_immediately() {
+        let mut writer = CountingWriter::default();
+
+        write_parallel_cli_line(&mut writer, "[writer#1:out:job=7] hello");
+
+        assert_eq!(
+            String::from_utf8(writer.bytes).expect("writer bytes should be utf8"),
+            "[writer#1:out:job=7] hello\n"
+        );
+        assert_eq!(
+            writer.flushes, 1,
+            "parallel cli line writes must flush immediately in pipe/E2E mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_parallel_runtime_with_timeout_reports_timeout() {
+        let completed = shutdown_parallel_runtime_with_timeout(
+            "test_runtime",
+            Duration::from_millis(1),
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            },
+        )
+        .await;
+
+        assert!(
+            !completed,
+            "shutdown helper should report timeout for hanging runtime cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_parallel_runtime_with_timeout_reports_success() {
+        let completed = shutdown_parallel_runtime_with_timeout(
+            "test_runtime",
+            Duration::from_millis(20),
+            async {},
+        )
+        .await;
+
+        assert!(
+            completed,
+            "shutdown helper should report success when cleanup finishes in time"
+        );
+    }
 
     #[tokio::test]
     async fn parallel_output_for_event_parsing_is_stdout_only() {
@@ -404,20 +648,24 @@ mod guardrail_tests {
         let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<HatJobOutputChunk>(8);
         let instance_id = HatInstanceId::from("writer#1");
         let job_id = 42_u64;
-        let mut output = String::new();
+        let backend = CliBackend::kiro();
+        let mut stdout_output = String::new();
+        let mut stderr_output = String::new();
 
         // 1) stdout: 必须进入 output(用于事件解析).
         CliHatJobExecutor::handle_output_line(
             job_id,
             &instance_id,
             &output_tx,
-            &mut output,
+            &backend,
+            &mut stdout_output,
+            &mut stderr_output,
             OutputStream::Stdout,
             "hello".to_string(),
         )
         .await;
 
-        assert_eq!(output, "hello\n");
+        assert_eq!(stdout_output, "hello\n");
         let chunk = output_rx.recv().await.expect("should receive stdout chunk");
         assert_eq!(chunk.job_id, job_id);
         assert_eq!(chunk.instance_id, instance_id);
@@ -430,16 +678,19 @@ mod guardrail_tests {
             job_id,
             &instance_id,
             &output_tx,
-            &mut output,
+            &backend,
+            &mut stdout_output,
+            &mut stderr_output,
             OutputStream::Stderr,
             stderr_line.clone(),
         )
         .await;
 
         assert_eq!(
-            output, "hello\n",
+            stdout_output, "hello\n",
             "REGRESSION: stderr must NOT be appended to output used for event parsing"
         );
+        assert_eq!(stderr_output, format!("{stderr_line}\n"));
         let chunk = output_rx.recv().await.expect("should receive stderr chunk");
         assert_eq!(chunk.job_id, job_id);
         assert_eq!(chunk.instance_id, instance_id);
@@ -491,6 +742,35 @@ pub async fn run_parallel_loop_impl(
             })?;
             let recorder = Arc::new(SessionRecorder::new(std::io::BufWriter::new(file)));
 
+            // 写入“最近一次录制路径”指针,用于 `ralph record watch` 无参自动定位.
+            crate::record_session::write_record_session_latest_pointer(
+                &config.core.workspace_root,
+                &record_path,
+            )?;
+
+            // 录制 session 基本元信息(目录/命令),用于离线排障与证据对齐.
+            //
+            // 注意:
+            // - 只记录低敏感度信息,不记录 env(避免 token 泄露到 cassette).
+            let argv = std::env::args_os()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let cwd = std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
+            let current_exe = std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
+            let workspace_root = config.core.workspace_root.display().to_string();
+            recorder.record_meta(Record::meta_session_start(
+                cwd.as_deref(),
+                Some(workspace_root.as_str()),
+                &argv,
+                std::process::id(),
+                current_exe.as_deref(),
+                Some(env!("CARGO_PKG_VERSION")),
+            ));
+
             // 录制元信息：parallel 模式用更明确的 ux_mode，便于诊断
             recorder.record_meta(Record::meta_loop_start(
                 &config.event_loop.prompt_file,
@@ -517,6 +797,9 @@ pub async fn run_parallel_loop_impl(
     // - 但为了支持“并行 TUI 启动后待机(0 token)”体验,我们允许在特定条件下进入 idle_start:
     //   - headless/CI/E2E: 显式 `--idle-start`
     //   - 交互式 TUI: 默认 `PROMPT.md` 缺失/为空 + 无 CLI prompt 覆盖时自动待机
+    // - idle_start 属于“无 prompt 的常驻会话”语义:
+    //   - 不自动投递 `task.start`
+    //   - 不受 Supervisor 级 `max_runtime_seconds` 限制
     //
     // 重要：
     // - idle_start 只在 fresh run 生效；resume/continue 不支持该语义。
@@ -580,7 +863,7 @@ pub async fn run_parallel_loop_impl(
 
     // Create termination + interrupt signals for TUI lifecycle
     let (terminated_tx, terminated_rx) = watch::channel(false);
-    let (interrupt_tx, mut interrupt_rx) = watch::channel(false);
+    let (interrupt_tx, interrupt_rx) = watch::channel(false);
 
     // Fresh run：创建本轮的 current-events marker，供 `ralph emit` 追加事件
     if !resume {
@@ -601,9 +884,9 @@ pub async fn run_parallel_loop_impl(
     // 注意：这是本地输出,不触发任何后端调用,不消耗 token。
     if idle_start && !enable_tui && !matches!(verbosity, Verbosity::Quiet) {
         let mut out = std::io::stdout().lock();
-        let _ = writeln!(
-            out,
-            "[supervisor] idle_start 已启用: 正在等待外部事件. 例如: ralph emit human.message \"你的任务\" --target-instance ralph#1"
+        write_parallel_cli_line(
+            &mut out,
+            "[supervisor] idle_start 已启用: 正在等待外部事件,且不受 max_runtime 限制. 例如: ralph emit human.message \"你的任务\" --target-instance ralph#1",
         );
     }
 
@@ -747,9 +1030,9 @@ pub async fn run_parallel_loop_impl(
         // 6.1：实例列表（日志模式下的最小可用展示）
         if !matches!(verbosity, Verbosity::Quiet) {
             let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "[supervisor] instances (initial=created):");
+            write_parallel_cli_line(&mut out, "[supervisor] instances (initial=created):");
             for id in &initial_instances {
-                let _ = writeln!(out, "  - {id}");
+                write_parallel_cli_line(&mut out, &format!("  - {id}"));
             }
         }
 
@@ -784,9 +1067,9 @@ pub async fn run_parallel_loop_impl(
                 // 仅在第一次“确实出现 stderr”时提醒一次，避免用户困惑但又不刷屏。
                 if !stderr_hidden_hint_printed.swap(true, Ordering::Relaxed) {
                     let mut out = std::io::stdout().lock();
-                    let _ = writeln!(
-                        out,
-                        "[supervisor] stderr streaming lines are hidden (via `--hide-stderr`); omit it to show them."
+                    write_parallel_cli_line(
+                        &mut out,
+                        "[supervisor] stderr streaming lines are hidden (via `--hide-stderr`); omit it to show them.",
                     );
                 }
                 return;
@@ -813,9 +1096,12 @@ pub async fn run_parallel_loop_impl(
             let is_stderr = matches!(chunk.stream, OutputStream::Stderr);
             let line_has_ansi = chunk.line.contains("\x1b[");
             if use_colors && is_stderr && !line_has_ansi {
-                let _ = writeln!(out, "{}{}{}", colors::GRAY, line, colors::RESET);
+                write_parallel_cli_line(
+                    &mut out,
+                    &format!("{}{}{}", colors::GRAY, line, colors::RESET),
+                );
             } else {
-                let _ = writeln!(out, "{line}");
+                write_parallel_cli_line(&mut out, &line);
             }
         });
 
@@ -825,7 +1111,7 @@ pub async fn run_parallel_loop_impl(
                 return;
             }
             let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "[{}:state] {}", instance_id, state);
+            write_parallel_cli_line(&mut out, &format!("[{}:state] {}", instance_id, state));
         });
 
         // 日志模式默认不展示事件；但若开启了 session recording，则仍记录 bus.publish
@@ -884,49 +1170,29 @@ pub async fn run_parallel_loop_impl(
         supervisor = supervisor.with_event_observer(event_observer);
     }
 
-    // Supervisor 与 interrupt 竞态：确保 Ctrl+C 能硬退出并清理子进程组
-    let supervisor_future = supervisor.run(resume);
-    tokio::pin!(supervisor_future);
-
-    let result = loop {
-        tokio::select! {
-            res = &mut supervisor_future => break res,
-            changed = interrupt_rx.changed() => {
-                if changed.is_ok() && *interrupt_rx.borrow() {
-                    #[cfg(unix)]
-                    {
-                        use nix::sys::signal::{killpg, Signal};
-                        use nix::unistd::getpgrp;
-                        let pgid = getpgrp();
-                        let _ = killpg(pgid, Signal::SIGTERM);
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                        let _ = killpg(pgid, Signal::SIGKILL);
-                    }
-
-                    // 让 TUI 立即退出（如果还在跑）
-                    let _ = terminated_tx.send(true);
-
-                    // best-effort：即使被 Ctrl+C/SIGTERM/SIGHUP 打断,也要把 cassette 尾部刷盘,
-                    // 否则用户会看到 record-session JSONL “没有回答就结束”。
-                    if let Some(recorder) = &session_recorder {
-                        let reason = TerminationReason::Interrupted;
-                        let reason_str = format!("{reason:?}");
-                        recorder.record_meta(Record::meta_termination(
-                            &reason_str,
-                            0, // 并行模式的 iteration 语义与串行不同，这里先写 0 做占位
-                            recorder.elapsed().as_secs_f64(),
-                            recorder.ux_write_count(),
-                        ));
-                        let _ = recorder.flush();
-                    }
-
-                    codex_mcp_runtime.shutdown_all().await;
-                    codex_app_server_runtime.shutdown_all().await;
-                    return Ok(TerminationReason::Interrupted);
-                }
+    // Ctrl+C/SIGTERM/SIGHUP: 让 TUI 立即退出(如果还在跑)。
+    //
+    // 说明:
+    // - 真实的 runner 收尾(取消 job + shutdown instances)由 core::ParallelSupervisor 执行。
+    // - 这里仅做 UI 退出信号,避免用户看到“已中断但 TUI 还挂着”的黑盒体验。
+    let terminated_tx_for_interrupt = terminated_tx.clone();
+    let mut interrupt_rx_for_termination = interrupt_rx.clone();
+    tokio::spawn(async move {
+        loop {
+            let changed = interrupt_rx_for_termination.changed().await;
+            if changed.is_err() {
+                break;
+            }
+            if *interrupt_rx_for_termination.borrow() {
+                let _ = terminated_tx_for_interrupt.send(true);
+                break;
             }
         }
-    };
+    });
+
+    let result = supervisor
+        .run_with_interrupt(resume, interrupt_rx.clone())
+        .await;
     let result = match result {
         Ok(result) => result,
         Err(e) => {
@@ -941,29 +1207,40 @@ pub async fn run_parallel_loop_impl(
                 ));
                 let _ = recorder.flush();
             }
-            codex_mcp_runtime.shutdown_all().await;
-            codex_app_server_runtime.shutdown_all().await;
+            shutdown_parallel_runtimes(&codex_mcp_runtime, &codex_app_server_runtime).await;
             return Err(e);
         }
     };
 
+    let ralph_core::ParallelRunResult {
+        termination,
+        ralph_iterations,
+        instance_states,
+        ..
+    } = result;
+
     // 6.1：结束时打印最终状态快照
     if !enable_tui && !matches!(verbosity, Verbosity::Quiet) {
-        let mut pairs = result.instance_states.into_iter().collect::<Vec<_>>();
+        let mut pairs = instance_states.into_iter().collect::<Vec<_>>();
         pairs.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
         let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "[supervisor] final states:");
+        write_parallel_cli_line(&mut out, "[supervisor] final states:");
         for (id, state) in pairs {
-            let _ = writeln!(out, "  - {id}: {state}");
+            write_parallel_cli_line(&mut out, &format!("  - {id}: {state}"));
         }
     }
 
-    let reason = result.termination.unwrap_or(TerminationReason::Stopped);
+    let reason = termination.unwrap_or(TerminationReason::Stopped);
 
-    // 自然结束：如果 TUI 开着，让用户按 q 退出（与串行模式对齐）
-    if let Some(handle) = tui_handle.take() {
-        let _ = handle.await;
+    // 自然结束：如果 TUI 开着，让用户按 q 退出（与串行模式对齐）。
+    // Ctrl+C/SIGTERM: 不等待,直接退出(证据完整优先,避免收尾卡住)。
+    if reason != TerminationReason::Interrupted {
+        if let Some(handle) = tui_handle.take() {
+            let _ = handle.await;
+        }
+    } else {
+        let _ = terminated_tx.send(true);
     }
 
     // best-effort：写入 termination 元信息，便于 cassette 诊断/回放
@@ -971,15 +1248,14 @@ pub async fn run_parallel_loop_impl(
         let reason_str = format!("{reason:?}");
         recorder.record_meta(Record::meta_termination(
             &reason_str,
-            0, // 并行模式的 iteration 语义与串行不同，这里先写 0 做占位
+            ralph_iterations,
             recorder.elapsed().as_secs_f64(),
             recorder.ux_write_count(),
         ));
         let _ = recorder.flush();
     }
 
-    codex_mcp_runtime.shutdown_all().await;
-    codex_app_server_runtime.shutdown_all().await;
+    shutdown_parallel_runtimes(&codex_mcp_runtime, &codex_app_server_runtime).await;
 
     Ok(reason)
 }
@@ -1022,5 +1298,25 @@ mod tests {
         // 既没有 source，也没有 source_instance，且不是 gate.* / human.message：认为是 UI 噪音，不转发。
         let event = Event::new("build.task", "");
         assert!(!should_forward_event_to_tui(&event));
+    }
+
+    #[test]
+    fn finalize_output_for_parsing_keeps_text_backend_stdout_only() {
+        let backend = CliBackend::codex();
+        let stdout = "<event topic=\"spec.ready\">ok</event>\n";
+
+        let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
+
+        assert_eq!(output, stdout);
+    }
+
+    #[test]
+    fn finalize_output_for_parsing_extracts_structured_stdout_only() {
+        let backend = CliBackend::gemini();
+        let stdout = r#"{"response":"<event topic=\"spec.ready\">ok</event>"}"#;
+
+        let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
+
+        assert_eq!(output, r#"<event topic="spec.ready">ok</event>"#);
     }
 }

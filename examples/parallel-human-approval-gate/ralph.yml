@@ -1,0 +1,173 @@
+# Parallel Human Approval Gate example
+#
+# 目标:
+# - 演示自动化准备阶段并行完成
+# - 演示最终动作必须等外部审批事件到达
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Human Approval Gate
+
+    你是并行模式下的 `ralph#1`(coordinator)。
+
+    你的输入来自 `PROMPT.md` 的 rollout packet。
+    其中至少包含:
+    - `## Deployment Packet`
+    - `## Rollback Packet`
+    - `## Comms Packet`
+
+    重要规则:
+    - 你必须先并行完成自动化准备。
+    - 自动化准备完成后,你必须显式等待外部审批。
+    - 在看到 `approval.granted` 之前,绝对不能输出 `LOOP_COMPLETE`。
+
+    当你收到 `task.start` 时:
+    1) 在同一条输出里连续发布:
+       - `deployment.plan.check`
+       - `rollback.plan.check`
+       - `comms.plan.check`
+
+    当你观察到:
+    - `deployment.checked`
+    - `rollback.checked`
+    - `comms.checked`
+    都已经出现后:
+    1) 发布 `approval.requested`
+    2) 用普通文本明确提示 operator:
+       `ralph emit approval.granted ... --target-instance ralph#1`
+    3) `approval.requested` 只允许发布一次
+    4) 如果后续又看到了重复或迟到的 `*.checked`,也必须继续等待,不能重新发起审批
+
+    当你收到 `approval.granted` 时:
+    1) 发布 `deployment.finalize`
+    2) 等待 `deployment.ready`
+    3) 在看到 `deployment.ready` 后输出最终上线摘要
+    4) 最后一行单独输出 `LOOP_COMPLETE`
+    5) 输出 `LOOP_COMPLETE` 后,不要再发布任何新事件
+
+    发事件时请使用真实尖括号。
+    下面只是展示文本:
+
+    &lt;event topic="approval.requested"&gt;
+    rollout_id: ...
+    next_action: emit approval.granted to ralph#1
+    &lt;/event&gt;
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "deployment.ready"
+  max_iterations: 20
+  max_runtime_seconds: 300
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  deploy_checker:
+    name: "🚀 Deploy Checker"
+    description: "并行确认发布计划和窗口信息是否齐全。"
+    triggers: ["deployment.plan.check"]
+    publishes: ["deployment.checked"]
+    instances: 1
+    instructions: |
+      你是 `deploy_checker`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      你只根据收到的 Deployment packet 判断。
+      若 packet 标明 `expected_status: ready`,就输出 `status: ready`。
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="deployment.checked"&gt;
+      checklist_lane: deployment
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  rollback_checker:
+    name: "↩️ Rollback Checker"
+    description: "并行确认回滚 owner、脚本和验证窗口是否就绪。"
+    triggers: ["rollback.plan.check"]
+    publishes: ["rollback.checked"]
+    instances: 1
+    instructions: |
+      你是 `rollback_checker`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      你只根据收到的 Rollback packet 判断。
+      若 packet 标明 `expected_status: ready`,就输出 `status: ready`。
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="rollback.checked"&gt;
+      checklist_lane: rollback
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  comms_checker:
+    name: "📣 Comms Checker"
+    description: "并行确认公告、值班和沟通窗口是否准备好。"
+    triggers: ["comms.plan.check"]
+    publishes: ["comms.checked"]
+    instances: 1
+    instructions: |
+      你是 `comms_checker`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+
+      你只根据收到的 Comms packet 判断。
+      若 packet 标明 `expected_status: ready`,就输出 `status: ready`。
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="comms.checked"&gt;
+      checklist_lane: comms
+      status: ready
+      summary: ...
+      &lt;/event&gt;
+
+  deployment_finalizer:
+    name: "✅ Deployment Finalizer"
+    description: "把外部审批转成最终 completion candidate。"
+    triggers: ["deployment.finalize"]
+    publishes: ["deployment.ready"]
+    instances: 1
+    instructions: |
+      你是 `deployment_finalizer`。
+
+      重要:
+      - 不要运行任何工具或 shell 命令。
+      - 不要编辑任何文件。
+      - 不要输出 `LOOP_COMPLETE`。
+      - 只发布 1 条 `deployment.ready`。
+
+      你会收到 rollout 已获批准的 finalize 请求。
+      你的任务是把它转成最终 completion candidate。
+
+      事件格式展示如下,真实输出时请使用普通尖括号:
+
+      &lt;event topic="deployment.ready"&gt;
+      rollout_id: rollout-2026-03-10-01
+      status: ready
+      summary: approval received and rollout can proceed
+      &lt;/event&gt;

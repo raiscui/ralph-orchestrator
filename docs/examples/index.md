@@ -1,120 +1,123 @@
-# Examples
+# 示例
 
-Practical examples showing Ralph in action.
+这里收录 Ralph 的实际用法示例。
+如果你想快速挑一个合适的例子开始看,先看下面这张索引表。
 
-## In This Section
+## 本节内容
 
-| Example | Description |
+| 示例 | 说明 |
 |---------|-------------|
-| [Simple Task](simple-task.md) | Basic traditional mode usage |
-| [TDD Workflow](tdd-workflow.md) | Test-driven development with hats |
-| [Spec-Driven Development](spec-driven.md) | Specification-first approach |
-| [Multi-Hat Workflow](multi-hat.md) | Complex coordination between hats |
-| [Debugging](debugging.md) | Using Ralph to investigate bugs |
+| [简单任务](simple-task.md) | 传统模式的基础用法 |
+| [TDD 工作流](tdd-workflow.md) | 使用 hats 做测试驱动开发 |
+| [规格驱动开发](spec-driven.md) | 先写规格,再进入实现 |
+| [多角色工作流](multi-hat.md) | 多角色协作的复杂编排 |
+| [问题排查](debugging.md) | 用 Ralph 排查问题 |
+| [真实并行范例中文总览](parallel-real-world-examples.zh-CN.md) | 中文版真实并行范例选型、矩阵与扩批建议 |
 
-## Quick Examples
+## 快速示例
 
-### Traditional Mode
+### 传统模式
 
-Simple loop until completion:
+一个最简单的循环直到完成:
 
 ```bash
 ralph init --backend claude
 
 cat > PROMPT.md << 'EOF'
-Write a function that calculates factorial.
-Include tests.
+写一个计算阶乘的函数。
+补上测试。
 EOF
 
 ralph run
 ```
 
-### Hat-Based Mode
+### Hat 模式
 
-Using the TDD preset:
+使用 TDD 预设:
 
 ```bash
 ralph init --preset tdd-red-green
 
 cat > PROMPT.md << 'EOF'
-Implement a URL validator function.
-Must handle:
-- HTTP and HTTPS protocols
-- IPv4 addresses
-- Domain names
-- Port numbers
+实现一个 URL 校验函数。
+必须处理:
+- HTTP 和 HTTPS 协议
+- IPv4 地址
+- 域名
+- 端口号
 EOF
 
 ralph run
 ```
 
-### Inline Prompts
+### 内联提示词
 
-Skip the prompt file:
+如果你不想单独放 `PROMPT.md`,可以直接这样跑:
 
 ```bash
-ralph run -p "Add input validation to the signup form"
+ralph run -p "给注册表单补输入校验"
 ```
 
-### Custom Configuration
+### 自定义配置
 
-Override defaults:
+覆盖默认值:
 
 ```bash
-ralph run --max-iterations 50 -p "Refactor the authentication module"
+ralph run --max-iterations 50 -p "重构认证模块"
 ```
 
-## Example Workflows
+## 工作流示例
 
-### Feature Development
+### 功能开发
 
 ```bash
-# Initialize with feature preset
+# 用 feature 预设初始化
 ralph init --preset feature
 
-# Create detailed prompt
+# 写一个更详细的提示词
 cat > PROMPT.md << 'EOF'
-# Feature: User Dashboard
+# 功能: 用户仪表盘
 
-Add a user dashboard with:
-- Profile summary widget
-- Recent activity feed
-- Quick action buttons
+新增一个用户仪表盘,包含:
+- 个人资料摘要卡片
+- 最近活动流
+- 快捷操作按钮
 
-Use React components.
-Follow existing UI patterns.
+使用 React 组件。
+遵循现有 UI 风格。
 EOF
 
-# Run Ralph
+# 运行 Ralph
 ralph run
 ```
 
-### Bug Investigation
+### 问题排查
 
 ```bash
-# Initialize with debug preset
+# 用 debug 预设初始化
 ralph init --preset debug
 
-# Describe the bug
-ralph run -p "Users report login fails on Safari. Error: 'Invalid token'. Investigate and fix."
+# 描述问题
+ralph run -p "用户反馈 Safari 登录失败,报错: 'Invalid token'。请排查并修复。"
 ```
 
-### Code Review
+### 代码评审
 
 ```bash
-# Initialize with review preset
+# 用 review 预设初始化
 ralph init --preset review
 
-# Review specific files
-ralph run -p "Review the changes in src/api/auth.rs for security issues"
+# 评审指定文件
+ralph run -p "审查 src/api/auth.rs 的改动,重点看安全问题"
 ```
 
-## Full Examples
+## 完整示例
 
-Detailed walkthroughs are available:
+更详细的说明在这些页面里:
 
-- [Simple Task](simple-task.md) — Step-by-step traditional mode
-- [TDD Workflow](tdd-workflow.md) — Red-green-refactor with hats
-- [Spec-Driven](spec-driven.md) — Specification to implementation
-- [Multi-Hat](multi-hat.md) — Complex hat coordination
-- [Debugging](debugging.md) — Bug investigation workflow
+- [简单任务](simple-task.md) — 传统模式的逐步示例
+- [TDD 工作流](tdd-workflow.md) — 使用 hats 做红-绿-重构
+- [规格驱动开发](spec-driven.md) — 从规格走到实现
+- [多角色工作流](multi-hat.md) — 多角色协同编排
+- [问题排查](debugging.md) — 问题排查工作流
+- [真实并行范例中文总览](parallel-real-world-examples.zh-CN.md) — 面向中文读者的并行范例选型与总览

@@ -62,11 +62,35 @@ use ralph_e2e::{
     ParallelAppServerSteerLiveReplyMultiTurnScenario,
     ParallelAppServerSteerMultiTurnLiveScenario,
     ParallelAppServerSteerMultiTurnScenario,
+    ParallelAuditEvidencePackExampleScenario,
+    ParallelCustomerAdvisoryBoardPrepExampleScenario,
+    ParallelCustomerOnboardingActivationExampleScenario,
+    ParallelCustomerRenewalDeskExampleScenario,
     ParallelEmitSpawnInstanceScenario,
+    ParallelExecutiveBusinessReviewPrepExampleScenario,
     ParallelExperimentalDevEngineExampleScenario,
+    ParallelFieldEnablementRolloutExampleScenario,
+    ParallelFinanceCloseControlRoomExampleScenario,
     ParallelHatInstancesScenario,
+    ParallelHiringDebriefPanelExampleScenario,
+    ParallelHumanApprovalGateExampleScenario,
+    ParallelIncidentResponseWarRoomExampleScenario,
+    ParallelLaunchReadinessCommandExampleScenario,
+    ParallelMigrationRehearsalExampleScenario,
+    ParallelMultiRegionPipelineSyncExampleScenario,
+    ParallelPartnerLaunchCoordinationExampleScenario,
+    ParallelPostmortemActionBoardExampleScenario,
+    ParallelPrReviewExampleScenario,
+    ParallelProposalAssemblyExampleScenario,
+    ParallelRegionalOperatingReviewExampleScenario,
+    ParallelReleaseChecklistExampleScenario,
+    ParallelRenewalRiskCalibrationExampleScenario,
+    ParallelRevopsQuoteDeskExampleScenario,
+    ParallelSecurityExceptionReviewExampleScenario,
     ParallelStartingEventInferenceScenario,
+    ParallelSupportEscalationDeskExampleScenario,
     ParallelTriggerRoutingExampleScenario,
+    ParallelVendorSecurityProcurementExampleScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
     RunConfig,
@@ -293,6 +317,30 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(ParallelAppServerSteerLiveReplyMultiTurnScenario::new()),
         Box::new(ParallelTriggerRoutingExampleScenario::new()),
         Box::new(ParallelExperimentalDevEngineExampleScenario::new()),
+        Box::new(ParallelPrReviewExampleScenario::new()),
+        Box::new(ParallelReleaseChecklistExampleScenario::new()),
+        Box::new(ParallelHumanApprovalGateExampleScenario::new()),
+        Box::new(ParallelIncidentResponseWarRoomExampleScenario::new()),
+        Box::new(ParallelSecurityExceptionReviewExampleScenario::new()),
+        Box::new(ParallelCustomerRenewalDeskExampleScenario::new()),
+        Box::new(ParallelAuditEvidencePackExampleScenario::new()),
+        Box::new(ParallelFinanceCloseControlRoomExampleScenario::new()),
+        Box::new(ParallelHiringDebriefPanelExampleScenario::new()),
+        Box::new(ParallelCustomerOnboardingActivationExampleScenario::new()),
+        Box::new(ParallelSupportEscalationDeskExampleScenario::new()),
+        Box::new(ParallelPartnerLaunchCoordinationExampleScenario::new()),
+        Box::new(ParallelFieldEnablementRolloutExampleScenario::new()),
+        Box::new(ParallelRevopsQuoteDeskExampleScenario::new()),
+        Box::new(ParallelExecutiveBusinessReviewPrepExampleScenario::new()),
+        Box::new(ParallelCustomerAdvisoryBoardPrepExampleScenario::new()),
+        Box::new(ParallelRegionalOperatingReviewExampleScenario::new()),
+        Box::new(ParallelRenewalRiskCalibrationExampleScenario::new()),
+        Box::new(ParallelMultiRegionPipelineSyncExampleScenario::new()),
+        Box::new(ParallelLaunchReadinessCommandExampleScenario::new()),
+        Box::new(ParallelMigrationRehearsalExampleScenario::new()),
+        Box::new(ParallelPostmortemActionBoardExampleScenario::new()),
+        Box::new(ParallelProposalAssemblyExampleScenario::new()),
+        Box::new(ParallelVendorSecurityProcurementExampleScenario::new()),
     ]
 }
 
@@ -582,7 +630,10 @@ mod tests {
 
     #[test]
     fn markdown_mode_also_writes_json_snapshot() {
-        assert_eq!(ReportFormat::Markdown.to_lib_format(), LibReportFormat::Both);
+        assert_eq!(
+            ReportFormat::Markdown.to_lib_format(),
+            LibReportFormat::Both
+        );
     }
 
     #[test]

@@ -75,6 +75,41 @@ impl Record {
         )
     }
 
+    /// Creates a metadata record for session start.
+    ///
+    /// 说明:
+    /// - 该记录用于把"运行环境信息"写进 cassette,便于离线排障与回放证据对齐.
+    /// - 只记录低敏感度信息:
+    ///   - cwd / workspace_root / argv / pid
+    /// - 不记录环境变量(避免 token/密钥被意外落盘).
+    pub fn meta_session_start(
+        cwd: Option<&str>,
+        workspace_root: Option<&str>,
+        argv: &[String],
+        pid: u32,
+        current_exe: Option<&str>,
+        version: Option<&str>,
+    ) -> Self {
+        let argv_joined = if argv.is_empty() {
+            None
+        } else {
+            Some(argv.join(" "))
+        };
+
+        Self::new(
+            "_meta.session_start",
+            serde_json::json!({
+                "cwd": cwd,
+                "workspace_root": workspace_root,
+                "argv": argv,
+                "argv_joined": argv_joined,
+                "pid": pid,
+                "current_exe": current_exe,
+                "version": version,
+            }),
+        )
+    }
+
     /// Creates a metadata record for an iteration.
     pub fn meta_iteration(iteration: u32, elapsed_ms: u64, hat: &str) -> Self {
         Self::new(
@@ -195,6 +230,24 @@ impl<W: Write> SessionRecorder<W> {
             // Ignore write errors - recording should not interrupt execution
             if let Ok(json) = serde_json::to_string(record) {
                 let _ = writeln!(writer, "{}", json);
+                // ------------------------------------------------------------------
+                // 说明:
+                // - record-session 的目标是"可回放/可审计证据流".
+                // - 真实使用里,用户经常会在中断(Ctrl+C/终端关闭)或崩溃后第一时间查看 JSONL.
+                // - 如果只依赖 BufWriter 的 drop/flush,尾部证据很容易丢失,表现为:
+                //   - "只看到 human.message,看不到 reply"
+                //   - "看起来没有回复就结束了"
+                //
+                // 策略:
+                // - 仅对关键记录做 flush,降低 I/O 开销:
+                //   1) `_meta.*`(元信息)
+                //   2) `bus.publish`(结构化事件)
+                //   3) `ux.terminal.write` 的 stdout(用于事件解析的输出)
+                // - stderr transcript 体积大且不参与解析,默认不强制 flush.
+                // ------------------------------------------------------------------
+                if should_flush_record(record) {
+                    let _ = writer.flush();
+                }
             }
         }
     }
@@ -228,9 +281,56 @@ impl<W: Write + Send + 'static> SessionRecorder<W> {
     }
 }
 
+fn should_flush_record(record: &Record) -> bool {
+    // `_meta.*`: 元信息必须尽快落盘(便于定位"在哪个目录/用什么命令跑的").
+    if record.event.starts_with("_meta.") {
+        return true;
+    }
+
+    // `bus.publish`: 关键结构化证据流.
+    if record.event == "bus.publish" {
+        return true;
+    }
+
+    // `ux.terminal.write`:
+    // - stdout 参与事件解析,应尽快落盘,避免中断时丢尾部 `<event ...>`.
+    // - stderr(提示/日志/回显 prompt)体积大且不参与解析,默认不强制 flush.
+    if record.event == "ux.terminal.write" {
+        return record
+            .data
+            .get("stdout")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct FlushCountingWriter {
+        bytes: Vec<u8>,
+        flush_counter: Arc<AtomicUsize>,
+    }
+
+    impl Write for FlushCountingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flush_counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_record_bus_event() {
@@ -280,6 +380,88 @@ mod tests {
         assert!(output_str.contains("_meta.termination"));
         assert!(output_str.contains("PROMPT.md"));
         assert!(output_str.contains("CompletionPromise"));
+    }
+
+    #[test]
+    fn test_record_meta_session_start() {
+        let mut output = Vec::new();
+        {
+            let recorder = SessionRecorder::new(&mut output);
+            let argv = vec!["ralph".to_string(), "run".to_string(), "--help".to_string()];
+            recorder.record_meta(Record::meta_session_start(
+                Some("/tmp/project"),
+                Some("/tmp/project"),
+                &argv,
+                123,
+                Some("/tmp/bin/ralph"),
+                Some("0.0.0-test"),
+            ));
+        }
+
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(output_str.contains("_meta.session_start"));
+        assert!(output_str.contains("/tmp/project"));
+        assert!(output_str.contains("\"pid\":123"));
+        assert!(output_str.contains("argv_joined"));
+        assert!(output_str.contains("/tmp/bin/ralph"));
+        assert!(output_str.contains("0.0.0-test"));
+    }
+
+    #[test]
+    fn test_flush_policy_meta_and_bus_publish_flush() {
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let writer = FlushCountingWriter {
+            bytes: Vec::new(),
+            flush_counter: Arc::clone(&flushes),
+        };
+        let recorder = SessionRecorder::new(writer);
+
+        recorder.record_meta(Record::meta_loop_start("PROMPT.md", 1, Some("cli")));
+        assert!(
+            flushes.load(Ordering::SeqCst) >= 1,
+            "meta record should trigger flush"
+        );
+
+        recorder.record_bus_event(&Event::new("human.message", "hi"));
+        assert!(
+            flushes.load(Ordering::SeqCst) >= 2,
+            "bus.publish should trigger flush"
+        );
+    }
+
+    #[test]
+    fn test_flush_policy_terminal_write_stdout_only() {
+        use ralph_proto::TerminalWrite;
+
+        // 1) stderr: should NOT flush
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let writer = FlushCountingWriter {
+            bytes: Vec::new(),
+            flush_counter: Arc::clone(&flushes),
+        };
+        let recorder = SessionRecorder::new(writer);
+        recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(
+            b"err", false, 0,
+        )));
+        assert_eq!(
+            flushes.load(Ordering::SeqCst),
+            0,
+            "stderr terminal.write should not flush by default"
+        );
+
+        // 2) stdout: should flush
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let writer = FlushCountingWriter {
+            bytes: Vec::new(),
+            flush_counter: Arc::clone(&flushes),
+        };
+        let recorder = SessionRecorder::new(writer);
+        recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(b"out", true, 0)));
+        assert_eq!(
+            flushes.load(Ordering::SeqCst),
+            1,
+            "stdout terminal.write should flush"
+        );
     }
 
     #[test]

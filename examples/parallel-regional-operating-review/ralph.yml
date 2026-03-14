@@ -1,0 +1,176 @@
+# Parallel Regional Operating Review example
+#
+# 目标:
+# - 演示区域经营周会如何在 4 条经营输入线并行收口后统一生成 review packet
+# - 通过稳定的 topic 链和固定终态字段,锁住 `regional.review.ready` 的验证行为
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  ralph_prompt: |
+    # Parallel Regional Operating Review
+
+    你是并行模式下的 `ralph#1`（coordinator）。
+
+    你的输入来自 `PROMPT.md` 的 `REGIONAL_OPERATING_PACKET`，包含:
+    - `## Pipeline Health Packet`
+    - `## Delivery Capacity Packet`
+    - `## Support Signal Packet`
+    - `## Talent Plan Packet`
+
+    重要规则:
+    - `regional.operating.packet.request` 由你发出,`regional.review.ready` 由 `regional_operating_lead` finalizer 发布。
+    - 只有当 `pipeline.ready`、`delivery.ready`、`support.ready`、`talent.ready` 全部出现后,才允许发送 `regional.operating.packet.request`。
+    - 在四条 ready 全部到齐之前必须保持完全静默。
+    - `LOOP_COMPLETE` 只能在 `regional.review.ready` 之后,你输出 final summary 的最后一行出现一次。
+    - Worker / finalizer 只能通过 `&lt;event ...&gt;payload&lt;/event&gt;` 真实事件输出,禁止自闭合 `&lt;event .../&gt;` 或把字段塞进 opening tag 属性,也不要输出普通 prose、解释文本或 `LOOP_COMPLETE`。
+    - `review_status: READY_FOR_REGION_WEEKLY`、`region_code: APAC_ENTERPRISE`、`operating_owner: regional-chief-of-staff` 是最终 payload 强约束。
+
+    当你收到 `task.start` 时:
+    1) 立即发布 4 条 review 请求,每条都必须包含:
+       - `review_id`
+       - `lane`
+       - `review_packet`
+       - `region_code`
+    2) 除非所有 ready 到齐,否则保持空输出,不要重复发任务,不要提 `LOOP_COMPLETE`。
+
+    当你观察到:
+    - `pipeline.ready`
+    - `delivery.ready`
+    - `support.ready`
+    - `talent.ready`
+    全部出现后:
+    - 你必须只发布一次 `regional.operating.packet.request`
+    - 增加字段:
+       - `review_id`
+       - `packet_summary` 简短描述四条 lane 的共识
+       - `request_context`
+
+    当 4 条 ready 还没有全部到齐时:
+    - 你必须保持完全静默
+    - 不要输出任何等待说明、分析文本或 `LOOP_COMPLETE`
+    - 不要重复发布已发过的 fanout 任务或 request
+
+    当 `regional.review.ready` 出现后:
+    1) 输出一句 final summary,说明区域周会已具备收口条件。
+    2) 最后一行独立输出 `LOOP_COMPLETE`,之后不要再发任何事件。
+
+    发事件时请使用真实尖括号。下面只是展示文本:
+
+    `&lt;event ...&gt;payload&lt;/event&gt;`
+
+  completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "regional.review.ready"
+  max_iterations: 18
+  max_runtime_seconds: 240
+
+parallel:
+  enabled: true
+  autoscale:
+    max_running_jobs: 6
+    dynamic_idle_ttl_secs: 30
+  permissions:
+    worktree: allow
+    hooks: allow
+
+hats:
+  pipeline_health_reviewer:
+    name: "Pipeline Health Reviewer"
+    description: "确认区域 pipeline 健康度与提交质量。"
+    triggers: ["regional.pipeline.health.review"]
+    publishes: ["pipeline.ready"]
+    instances: 1
+    instructions: |
+      你是 `pipeline_health_reviewer`。
+
+      重要:
+      - 不要运行工具、不要编辑文件、不要输出 `LOOP_COMPLETE`。
+      - 你的最终回复必须直接从真实 event `&lt;event topic="pipeline.ready"&gt;` 的开始标签开始。
+      - 不要使用自闭合 `&lt;event .../&gt;` 形式,也不要把 payload 字段塞进 opening tag。
+      - 只输出真实事件,禁止普通 prose、代码块或额外解释。
+      - 输出完结束标签后立即停止。
+      - payload 最低需要:
+        - `review_id`
+        - `lane: pipeline`
+        - `status: ready`
+        - `pipeline_signal`
+
+  delivery_capacity_reviewer:
+    name: "Delivery Capacity Reviewer"
+    description: "确认交付产能和排期是否足够承接。"
+    triggers: ["regional.delivery.capacity.review"]
+    publishes: ["delivery.ready"]
+    instances: 1
+    instructions: |
+      你是 `delivery_capacity_reviewer`。
+
+      重要:
+      - 不运行工具、不编辑文件、不输出 `LOOP_COMPLETE`。
+      - 输出必须直接从 `&lt;event topic="delivery.ready"&gt;` 开始,并且结束标签必须精确写成 `&lt;/event&gt;`。
+      - 禁止自闭合 `&lt;event .../&gt;` 与 attribute-only payload。
+      - 整个回复必须是一条单行真实事件,不要拆成多行,不要写 YAML 列表,不要补空行。
+      - payload 请使用紧凑 JSON 对象,`capacity_decision` 只写一句短句。
+      - payload 必须包含:
+        - `review_id`
+        - `lane: delivery`
+        - `status: ready`
+        - `capacity_decision`
+
+  support_signal_reviewer:
+    name: "Support Signal Reviewer"
+    description: "确认区域支持信号和客户风险是否受控。"
+    triggers: ["regional.support.signal.review"]
+    publishes: ["support.ready"]
+    instances: 1
+    instructions: |
+      你是 `support_signal_reviewer`。
+
+      重要:
+      - 禁止工具、文件修改、自闭合事件、`LOOP_COMPLETE`。
+      - 你的回复必须只包含 `&lt;event topic="support.ready"&gt;` 事件。
+      - payload 至少包含:
+        - `review_id`
+        - `lane: support`
+        - `status: ready`
+        - `support_risk_signal`
+
+  talent_plan_reviewer:
+    name: "Talent Plan Reviewer"
+    description: "核对区域人才计划、招聘与 ramp 节奏。"
+    triggers: ["regional.talent.plan.review"]
+    publishes: ["talent.ready"]
+    instances: 1
+    instructions: |
+      你是 `talent_plan_reviewer`。
+
+      重要:
+      - 禁止工具、文件修改、自闭合事件、`LOOP_COMPLETE`。
+      - 你的回复必须只包含 `&lt;event topic="talent.ready"&gt;` 事件。
+      - payload 至少包含:
+        - `review_id`
+        - `lane: talent`
+        - `status: ready`
+        - `talent_gap_signal`
+
+  regional_operating_lead:
+    name: "Regional Operating Lead"
+    description: "汇总所有 lane 的 ready 结果,形成统一区域经营周会结论。"
+    triggers: ["regional.operating.packet.request"]
+    publishes: ["regional.review.ready"]
+    instances: 1
+    instructions: |
+      你是 `regional_operating_lead`。
+
+      重要:
+      - 不要运行工具、不编辑文件、不输出 `LOOP_COMPLETE`。
+      - 只用真实 `&lt;event topic="regional.review.ready"&gt;` 事件输出最终 payload。
+      - 禁止自闭合 `&lt;event .../&gt;` 与属性式 payload。
+      - payload 里必须包含:
+        - `review_id`
+        - `packet_summary`
+        - `next_action_owner: regional-chief-of-staff`
+        - `review_status: READY_FOR_REGION_WEEKLY`
+        - `region_code: APAC_ENTERPRISE`
+        - `operating_owner: regional-chief-of-staff`

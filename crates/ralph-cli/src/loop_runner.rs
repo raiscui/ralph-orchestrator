@@ -188,7 +188,36 @@ pub async fn run_loop_impl(
             })?;
             let recorder = Arc::new(SessionRecorder::new(BufWriter::new(file)));
 
+            // 写入“最近一次录制路径”指针,用于 `ralph record watch` 无参自动定位.
+            crate::record_session::write_record_session_latest_pointer(
+                &config.core.workspace_root,
+                &record_path,
+            )?;
+
             // Record metadata for the session
+            //
+            // 说明:
+            // - `_meta.session_start` 用于记录"在哪个目录,以什么命令启动"的基本信息.
+            // - 这对离线排障很关键,尤其是用户只提供一份 JSONL 时.
+            let argv = std::env::args_os()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let cwd = std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
+            let current_exe = std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
+            let workspace_root = config.core.workspace_root.display().to_string();
+            recorder.record_meta(Record::meta_session_start(
+                cwd.as_deref(),
+                Some(workspace_root.as_str()),
+                &argv,
+                std::process::id(),
+                current_exe.as_deref(),
+                Some(env!("CARGO_PKG_VERSION")),
+            ));
+
             recorder.record_meta(Record::meta_loop_start(
                 &config.event_loop.prompt_file,
                 config.event_loop.max_iterations,
@@ -395,19 +424,6 @@ pub async fn run_loop_impl(
         // Check for interrupt signal at start of each iteration
         // This catches TUI Ctrl+C (via interrupt_tx) before printing iteration separator
         if *interrupt_rx.borrow() {
-            #[cfg(unix)]
-            {
-                use nix::sys::signal::{Signal, killpg};
-                use nix::unistd::getpgrp;
-                let pgid = getpgrp();
-                debug!(
-                    "Interrupt detected at loop start, sending SIGTERM to process group {}",
-                    pgid
-                );
-                let _ = killpg(pgid, Signal::SIGTERM);
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                let _ = killpg(pgid, Signal::SIGKILL);
-            }
             let reason = TerminationReason::Interrupted;
             let terminate_event = event_loop.publish_terminate_event(&reason);
             log_terminate_event(
@@ -628,11 +644,19 @@ pub async fn run_loop_impl(
             };
 
         // Race execution against interrupt signal for immediate termination on Ctrl+C
-        let mut interrupt_rx_clone = interrupt_rx.clone();
         let interrupt_rx_for_pty = interrupt_rx.clone();
         let tui_lines_for_pty = tui_lines.clone();
         let execute_future = async {
-            if use_pty {
+            // Gemini 这类“最终只产出一个结构化 JSON 响应”的 headless backend，
+            // 在自动化路径下更适合走 `CliExecutor`：
+            // - stdout/stderr 可天然分离
+            // - 可以在执行器里提取最终 `response`
+            // - 避免 PTY 把 stderr 日志和 stdout JSON 混在一起
+            let should_force_buffered_headless = effective_backend.emits_structured_response()
+                && !user_interactive
+                && tui_lines_for_pty.is_none();
+
+            if use_pty && !should_force_buffered_headless {
                 execute_pty(
                     pty_executor.as_mut(),
                     &effective_backend,
@@ -664,32 +688,10 @@ pub async fn run_loop_impl(
             }
         };
 
-        let outcome = tokio::select! {
-            result = execute_future => result?,
-            _ = interrupt_rx_clone.changed() => {
-                // Immediately terminate children via process group signal
-                #[cfg(unix)]
-                {
-                    use nix::sys::signal::{killpg, Signal};
-                    use nix::unistd::getpgrp;
-                    let pgid = getpgrp();
-                    debug!("Sending SIGTERM to process group {}", pgid);
-                    let _ = killpg(pgid, Signal::SIGTERM);
-
-                    // Wait briefly for graceful exit, then SIGKILL
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    let _ = killpg(pgid, Signal::SIGKILL);
-                }
-
-                let reason = TerminationReason::Interrupted;
-                let terminate_event = event_loop.publish_terminate_event(&reason);
-                log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
-                handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-                // Signal TUI to exit immediately on interrupt
-                let _ = terminated_tx.send(true);
-                return Ok(reason);
-            }
-        };
+        // 说明:
+        // - PTY executor 已经会监听同一个 interrupt_rx,并在收到中断时负责终止子进程。
+        // - 这里不要再用“kill 自己所在进程组”的方式强杀,否则会导致 `_meta.termination` 来不及落盘.
+        let outcome = execute_future.await?;
 
         if let Some(reason) = outcome.termination {
             let terminate_event = event_loop.publish_terminate_event(&reason);
@@ -699,6 +701,11 @@ pub async fn run_loop_impl(
                 &terminate_event,
             );
             handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
+            if reason == TerminationReason::Interrupted {
+                // Ctrl+C/SIGTERM: 立即退出 TUI,避免卡在“按 q 退出”的自然完成语义.
+                let _ = terminated_tx.send(true);
+                return Ok(reason);
+            }
             // Wait for user to exit TUI (press 'q') on natural completion
             if let Some(handle) = tui_handle.take() {
                 let _ = handle.await;

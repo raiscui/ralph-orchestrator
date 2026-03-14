@@ -7,7 +7,7 @@
 use super::ParallelSupervisor;
 use crate::TerminationReason;
 use crate::config::{HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig};
-use crate::event_logger::EventLogger;
+use crate::event_logger::{EventHistory, EventLogger};
 use crate::parallel::{
     HatInstanceCommand, HatInstanceHandle, HatJob, HatJobControl, HatJobExecutor,
     HatJobOutputChunk, HatJobResult,
@@ -15,7 +15,8 @@ use crate::parallel::{
 use anyhow::Context;
 use ralph_proto::{
     AudienceOverride, AudienceSelector, Delivery, Event, HatId, HatInstanceId, HatInstanceState,
-    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TopicContract, TurnAction,
+    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TOPIC_REPLY_HAT_MESSAGE,
+    TOPIC_REQUESTER_RETURN, TopicContract, TurnAction,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -217,6 +218,12 @@ struct IdleStartCompletionExecutor {
 }
 
 #[derive(Debug, Clone)]
+struct IdleStartPersistentExecutor {
+    started: Arc<AtomicUsize>,
+    started_notify: Arc<Notify>,
+}
+
+#[derive(Debug, Clone)]
 struct CompletionStopsRoutingExecutor {
     /// 记录每个 instance 实际启动了多少次（用于断言“收敛后不再派生新 job”）。
     starts: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
@@ -288,6 +295,51 @@ impl HatJobExecutor for IdleStartCompletionExecutor {
             exit_code: Some(0),
             timed_out: false,
             canceled: false,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for IdleStartPersistentExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
+    ) -> anyhow::Result<HatJobResult> {
+        if job.instance_id.as_str() != "ralph#1" {
+            return Ok(HatJobResult {
+                output_for_parsing: String::new(),
+                observed_stderr: String::new(),
+                success: true,
+                exit_code: Some(0),
+                timed_out: false,
+                canceled: false,
+            });
+        }
+
+        self.started.fetch_add(1, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+
+        loop {
+            tokio::select! {
+                changed = cancel_rx.changed() => {
+                    if changed.is_ok() && *cancel_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(3600)) => {}
+            }
+        }
+
+        Ok(HatJobResult {
+            output_for_parsing: String::new(),
+            observed_stderr: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: true,
         })
     }
 }
@@ -559,6 +611,94 @@ async fn supervisor_idle_start_waits_for_external_event_and_pauses_max_runtime()
         result.termination,
         Some(TerminationReason::CompletionPromise)
     );
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn supervisor_idle_start_disables_max_runtime_even_after_first_running() {
+    // =====================================================================
+    // 目的：
+    // - 用户要求: 主 `ralph#1` 在无 PROMPT.md 的 idle_start 模式下,整个会话都不受 MaxRuntime 限制。
+    // - 因此这里不仅验证“等待第一条消息前不超时”,还要验证:
+    //   第一条 human.message 触发 ralph#1 进入 Running 后,等待超过 max_runtime_seconds 也不能被收掉。
+    // =====================================================================
+
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let external_dir = temp_dir.path().join(".ralph");
+    fs::create_dir_all(&external_dir).unwrap();
+    let external_events_path = external_dir.join("events.jsonl");
+    fs::write(&external_events_path, "").unwrap();
+
+    let internal_events_path = temp_dir.path().join("internal-events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.max_runtime_seconds = 1;
+    config.core = config.core.with_workspace_root(temp_dir.path());
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let started_notify = Arc::new(Notify::new());
+    let executor = IdleStartPersistentExecutor {
+        started: Arc::clone(&started),
+        started_notify: Arc::clone(&started_notify),
+    };
+
+    let mut supervisor = ParallelSupervisor::new(config, String::new(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed")
+        .with_idle_start(true)
+        .with_disable_dynamic_instance_reap(true);
+
+    supervisor.event_logger = EventLogger::new(internal_events_path);
+
+    let (interrupt_tx, interrupt_rx) = tokio::sync::watch::channel(false);
+    let handle =
+        tokio::spawn(async move { supervisor.run_with_interrupt(false, interrupt_rx).await });
+
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !handle.is_finished(),
+        "Supervisor should remain alive while idle_start is waiting for external events"
+    );
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        0,
+        "idle_start must NOT start any job before external events"
+    );
+
+    let line = serde_json::json!({
+        "topic": "human.message",
+        "payload": "marker: E2E_IDLE_START_PERSIST; question: 1+1=?",
+        "ts": "2026-02-01T00:00:00Z",
+    });
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(&external_events_path)
+        .unwrap();
+    writeln!(f, "{}", serde_json::to_string(&line).unwrap()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), started_notify.notified())
+        .await
+        .expect("Timed out waiting for first job after external event");
+
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !handle.is_finished(),
+        "idle_start session should stay alive even after first Running exceeds max_runtime"
+    );
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+
+    interrupt_tx
+        .send(true)
+        .expect("interrupt send should succeed");
+
+    let result = tokio::time::timeout(Duration::from_secs(6), handle)
+        .await
+        .expect("Timed out waiting for supervisor.run_with_interrupt() to return")
+        .expect("JoinHandle should succeed")
+        .expect("supervisor run should succeed");
+
+    assert_eq!(result.termination, Some(TerminationReason::Interrupted));
     assert_eq!(started.load(Ordering::SeqCst), 1);
 }
 
@@ -1367,12 +1507,64 @@ async fn busy_ralph_secondary_includes_coordinator_instructions_and_config_promp
         "ralph#2 prompt should allow multiple events in a single response"
     );
     assert!(
+        prompt.contains("reply.hat.message"),
+        "ralph#2 prompt should describe hat-to-hat answer-return topic"
+    );
+    assert!(
         prompt.contains("## RALPH PROMPT (CONFIG)"),
         "ralph#2 should include config ralph_prompt section"
     );
     assert!(
         prompt.contains("RALPH_PROMPT_ANCHOR_FOR_TEST"),
         "ralph#2 should include config.event_loop.ralph_prompt content"
+    );
+}
+
+#[tokio::test]
+async fn busy_ralph_internal_hat_event_keeps_primary_queue_and_does_not_spawn_secondary() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+
+    // 说明：
+    // - 模拟主协调实例正在处理上一条 orphan/workflow 事件。
+    // - 新来的内部 hat 事件（带 source/source_instance）应该继续排到 ralph#1，
+    //   而不是按需拉起 ralph#2 造成聚合状态分裂。
+    supervisor
+        .instance_states
+        .insert(HatInstanceId::new("ralph#1"), HatInstanceState::Running);
+
+    let event = Event::new("experiment.reviewed", "approved")
+        .with_id("e-ralph-busy-internal-no-secondary")
+        .with_source(HatId::new("experiment_auditor"))
+        .with_source_instance(HatInstanceId::new("experiment_auditor#1"));
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seen = executor.seen.lock().await.clone();
+    assert_eq!(
+        seen,
+        vec!["ralph#1".to_string()],
+        "internal hat events should remain on ralph#1 instead of spawning ralph#2"
+    );
+    assert!(
+        !supervisor
+            .instances
+            .contains_key(&HatInstanceId::new("ralph#2")),
+        "internal hat events should stay on ralph#1 and must not spawn ralph#2"
     );
 }
 
@@ -1651,6 +1843,225 @@ async fn parallel_does_not_route_reply_human_message_topic() {
         recv.is_err(),
         "Expected no delivery for reply.human.message, but got: {recv:?}"
     );
+}
+
+#[tokio::test]
+async fn parallel_routes_reply_hat_message_back_to_requester_and_logs_resolution() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config
+        .hats
+        .insert("planner".to_string(), hat_config("Planner", vec![], 1));
+    config.hats.insert(
+        "researcher".to_string(),
+        hat_config("Researcher", vec![], 1),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(4);
+    let executor = Arc::new(test_executors::TestExecutor::new(tx));
+    let mut supervisor = make_supervisor(config, executor, events_path.clone());
+
+    supervisor
+        .request_reply_origins
+        .insert("req-1".to_string(), Some(HatInstanceId::new("planner#1")));
+
+    let event = Event::new(TOPIC_REPLY_HAT_MESSAGE, "market summary")
+        .with_id("ans-1")
+        .with_reply("req-1")
+        .with_source(HatId::new("researcher"))
+        .with_source_instance(HatInstanceId::new("researcher#1"));
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let got = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("should receive requester delivery")
+        .expect("channel closed");
+    assert_eq!(got, "planner#1");
+
+    let history = EventHistory::new(&events_path);
+    let records = history
+        .filter_by_topic(TOPIC_REQUESTER_RETURN)
+        .expect("should read requester-return records");
+    let payload: serde_json::Value = serde_json::from_str(
+        &records
+            .last()
+            .expect("should have requester-return record")
+            .payload,
+    )
+    .expect("requester-return payload should be valid JSON");
+    assert_eq!(payload["status"], "delivered");
+    assert_eq!(payload["requester_instance"], "planner#1");
+}
+
+#[tokio::test]
+async fn parallel_reply_hat_message_unknown_reply_id_fails_closed() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config
+        .hats
+        .insert("planner".to_string(), hat_config("Planner", vec![], 1));
+    config.hats.insert(
+        "researcher".to_string(),
+        hat_config("Researcher", vec![], 1),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(4);
+    let executor = Arc::new(test_executors::TestExecutor::new(tx));
+    let mut supervisor = make_supervisor(config, executor, events_path.clone());
+
+    let event = Event::new(TOPIC_REPLY_HAT_MESSAGE, "market summary")
+        .with_id("ans-missing")
+        .with_reply("missing-id")
+        .with_source(HatId::new("researcher"))
+        .with_source_instance(HatInstanceId::new("researcher#1"));
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let recv = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(
+        recv.is_err(),
+        "Expected fail-closed with no delivery, but got: {recv:?}"
+    );
+
+    let history = EventHistory::new(&events_path);
+    let records = history
+        .filter_by_topic(TOPIC_REQUESTER_RETURN)
+        .expect("should read requester-return records");
+    let payload: serde_json::Value = serde_json::from_str(
+        &records
+            .last()
+            .expect("should have requester-return record")
+            .payload,
+    )
+    .expect("requester-return payload should be valid JSON");
+    assert_eq!(payload["status"], "unresolved");
+    assert_eq!(payload["reason"], "reply target event id was not found");
+}
+
+#[tokio::test]
+async fn parallel_reply_hat_message_without_requester_source_instance_fails_closed() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config
+        .hats
+        .insert("planner".to_string(), hat_config("Planner", vec![], 1));
+    config.hats.insert(
+        "researcher".to_string(),
+        hat_config("Researcher", vec![], 1),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(4);
+    let executor = Arc::new(test_executors::TestExecutor::new(tx));
+    let mut supervisor = make_supervisor(config, executor, events_path.clone());
+
+    supervisor
+        .request_reply_origins
+        .insert("external-1".to_string(), None);
+
+    let event = Event::new(TOPIC_REPLY_HAT_MESSAGE, "answer")
+        .with_id("ans-external")
+        .with_reply("external-1")
+        .with_source(HatId::new("researcher"))
+        .with_source_instance(HatInstanceId::new("researcher#1"));
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let recv = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(
+        recv.is_err(),
+        "Expected fail-closed with no delivery, but got: {recv:?}"
+    );
+
+    let history = EventHistory::new(&events_path);
+    let records = history
+        .filter_by_topic(TOPIC_REQUESTER_RETURN)
+        .expect("should read requester-return records");
+    let payload: serde_json::Value = serde_json::from_str(
+        &records
+            .last()
+            .expect("should have requester-return record")
+            .payload,
+    )
+    .expect("requester-return payload should be valid JSON");
+    assert_eq!(
+        payload["reason"],
+        "referenced request event has no source_instance"
+    );
+}
+
+#[tokio::test]
+async fn parallel_reply_hat_message_can_coexist_with_workflow_event_in_same_batch() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config
+        .hats
+        .insert("planner".to_string(), hat_config("Planner", vec![], 1));
+    config.hats.insert(
+        "researcher".to_string(),
+        hat_config("Researcher", vec![], 1),
+    );
+    config.hats.insert(
+        "manager".to_string(),
+        hat_config("Manager", vec!["research.ready"], 1),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(8);
+    let executor = Arc::new(test_executors::TestExecutor::new(tx));
+    let mut supervisor = make_supervisor(config, executor, events_path);
+
+    supervisor
+        .request_reply_origins
+        .insert("req-2".to_string(), Some(HatInstanceId::new("planner#1")));
+
+    let answer = Event::new(TOPIC_REPLY_HAT_MESSAGE, "market summary")
+        .with_id("ans-2")
+        .with_reply("req-2")
+        .with_source(HatId::new("researcher"))
+        .with_source_instance(HatInstanceId::new("researcher#1"));
+    let workflow = Event::new("research.ready", "done")
+        .with_id("ready-1")
+        .with_source(HatId::new("researcher"))
+        .with_source_instance(HatInstanceId::new("researcher#1"));
+
+    supervisor
+        .route_events_batch(vec![answer, workflow])
+        .await
+        .expect("route_events_batch should succeed");
+
+    let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("should receive first delivery")
+        .expect("channel closed");
+    let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("should receive second delivery")
+        .expect("channel closed");
+
+    let mut got = vec![first, second];
+    got.sort();
+    assert_eq!(got, vec!["manager#1".to_string(), "planner#1".to_string()]);
 }
 
 #[tokio::test]

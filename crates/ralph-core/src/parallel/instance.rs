@@ -412,8 +412,14 @@ impl HatInstanceActor {
                     self.running_session_strategy = None;
 
                     let Some(res) = res else { continue };
-                    let job_result = res.context("JoinHandle await failed")??;
-                    self.on_job_completed(job_result).await?;
+                    match res.context("JoinHandle await failed")? {
+                        Ok(job_result) => {
+                            self.on_job_completed(job_result).await?;
+                        }
+                        Err(error) => {
+                            self.on_job_execution_error(error).await?;
+                        }
+                    }
 
                     // draining: job 已结束,可以退出(避免 pending 再起).
                     if self.shutdown_requested {
@@ -738,6 +744,7 @@ impl HatInstanceActor {
 
         let events = std::mem::take(&mut self.pending);
         let prompt = self.build_prompt(&events);
+        let continuation_prompt = self.build_continuation_prompt(&events);
 
         let backend = self
             .hat_config
@@ -758,6 +765,7 @@ impl HatInstanceActor {
             instance_id: self.instance_id.clone(),
             hat_id: self.hat.id.clone(),
             prompt,
+            continuation_prompt: Some(continuation_prompt),
             backend,
             session_strategy,
             timeout,
@@ -1377,7 +1385,7 @@ impl HatInstanceActor {
         Ok(())
     }
 
-    fn build_prompt(&self, events: &[Event]) -> String {
+    fn build_events_context(&self, events: &[Event]) -> String {
         let mut events_context = String::new();
         for event in events {
             // 说明：这里尽量保持“可读 + 可解析”，同时避免把输入渲染成 `<event ...>` 原样文本。
@@ -1404,7 +1412,27 @@ impl HatInstanceActor {
                 ));
             }
         }
+        events_context
+    }
 
+    fn build_continuation_prompt(&self, events: &[Event]) -> String {
+        let events_context = self.build_events_context(events);
+
+        // ------------------------------------------------------------------
+        // 说明:
+        // - 该输入只用于 app_server 这类“同一 thread 多轮 turn”场景。
+        // - 首 turn 已经注入过完整 prelude / instructions / all-hat prompt。
+        // - 后续 turn 只补“当前新增事件 + 极短续聊提示”，避免重复发送超长 prompt。
+        // ------------------------------------------------------------------
+        format!(
+            "ralph_hat_instance_id:\"{hat_instance_id}\"\n\nContinue in the same session and keep the role/instruction context from the first turn.\nProcess only the new incoming events below.\n\n### Incoming Events\nWhen replying to a specific incoming event, include `reply=\"<event id>\"` on your emitted `<event>` tag.\n{events}\n",
+            hat_instance_id = self.instance_id,
+            events = events_context
+        )
+    }
+
+    fn build_prompt(&self, events: &[Event]) -> String {
+        let events_context = self.build_events_context(events);
         let is_ralph = self.hat.id.as_str() == "ralph";
 
         // =====================================================================
@@ -1519,6 +1547,49 @@ impl HatInstanceActor {
             })
             .await
             .context("Failed to send JobCompleted to supervisor")?;
+
+        Ok(())
+    }
+
+    async fn on_job_execution_error(&mut self, error: anyhow::Error) -> anyhow::Result<()> {
+        // ------------------------------------------------------------------
+        // 说明:
+        // - `HatJobExecutor::execute()` 直接返回 Err 时,过去会打穿 actor 主循环,
+        //   导致已 acquire 的 worktree/workdir 没走收尾,也不会上报 `JobCompleted`.
+        // - 但这条路径与“正常 job 完成”仍有一个关键差异:
+        //   clone backend 的正常收尾会尝试把 clone HEAD 引回主仓库。
+        // - 对 executor 直接 Err 来说,这通常意味着 job 还没真正跑起来,
+        //   更重要的是先 best-effort 清理目录,而不是坚持做 clone-import.
+        // ------------------------------------------------------------------
+        let error_text = format!("{error:#}");
+        tracing::warn!(
+            instance = %self.instance_id,
+            hat = %self.hat.id,
+            error = %error_text,
+            "Hat job executor returned error; converting to failed job result"
+        );
+
+        self.release_workspace_on_shutdown_best_effort().await;
+
+        let result = HatJobResult {
+            output_for_parsing: String::new(),
+            observed_stderr: error_text,
+            success: false,
+            exit_code: None,
+            timed_out: false,
+            canceled: false,
+        };
+
+        self.set_state(HatInstanceState::Failed).await?;
+        self.supervisor_tx
+            .send(HatInstanceEvent::JobCompleted {
+                instance_id: self.instance_id.clone(),
+                hat_id: self.hat.id.clone(),
+                result,
+                events: Vec::new(),
+            })
+            .await
+            .context("Failed to send JobCompleted to supervisor after executor error")?;
 
         Ok(())
     }
@@ -2042,6 +2113,115 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn executor_error_releases_worktree_and_reports_failed_job() {
+        let temp = TempDir::new().expect("temp dir");
+        let workdir = temp.path().join("clone-workdir");
+        tokio::fs::create_dir_all(&workdir)
+            .await
+            .expect("create workdir");
+        tokio::fs::write(workdir.join("dummy.txt"), "x")
+            .await
+            .expect("write dummy file");
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, mut supervisor_rx) = mpsc::channel(8);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let mut workspace_runtime = WorkspaceRuntimeConfig::default();
+        workspace_runtime.worktree_backend = WorktreeBackend::Clone;
+
+        let mut actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("writer#1"),
+            hat: Hat::new("writer", "Writer").subscribe("build.task"),
+            hat_config: None,
+            workspace_runtime,
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: String::new(),
+            all_hat_prompt: None,
+            instruction_builder,
+            executor: Arc::new(NoopExecutor),
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Running,
+            pending: Vec::new(),
+            next_job_id: 8,
+            dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: Some(RunningWorkspace {
+                job_id: 7,
+                strategy: WorkspaceStrategy::Worktree,
+                workdir: Some(workdir.clone()),
+                hooks_allowed: false,
+                on_release_hook: None,
+            }),
+            running: None,
+            running_session_strategy: None,
+            cancel_tx: None,
+            control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
+        };
+
+        actor
+            .on_job_execution_error(anyhow::anyhow!("spawn failed"))
+            .await
+            .expect("convert executor error");
+
+        assert!(
+            !workdir.exists(),
+            "executor error should still release acquired workdir"
+        );
+
+        let mut saw_failed_state = false;
+        let mut failed_result = None;
+        while let Ok(event) = supervisor_rx.try_recv() {
+            match event {
+                HatInstanceEvent::StateChanged { state, .. }
+                    if state == HatInstanceState::Failed =>
+                {
+                    saw_failed_state = true;
+                }
+                HatInstanceEvent::JobCompleted { result, events, .. } => {
+                    assert!(
+                        events.is_empty(),
+                        "executor error should not fabricate parsed events"
+                    );
+                    failed_result = Some(result);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_failed_state, "expected failed state to be reported");
+
+        let result = failed_result.expect("expected JobCompleted for executor error");
+        assert!(!result.success, "executor error must report failed job");
+        assert_eq!(result.exit_code, None);
+        assert!(
+            result.observed_stderr.contains("spawn failed"),
+            "error text should be observable via observed_stderr"
+        );
+    }
+
     #[test]
     fn decorate_outgoing_event_sets_source_instance_and_id_and_source_hat() {
         let (cmd_tx, cmd_rx) = mpsc::channel(1);
@@ -2186,6 +2366,98 @@ mod tests {
         assert!(
             prompt.contains("topic=build.task"),
             "Prompt should include topic for incoming events"
+        );
+    }
+
+    #[test]
+    fn build_continuation_prompt_keeps_only_incremental_context() {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, _supervisor_rx) = mpsc::channel(1);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("ralph#1"),
+            hat: Hat::new("ralph", "Ralph")
+                .subscribe("*")
+                .with_instructions("Ralph instructions."),
+            hat_config: None,
+            workspace_runtime: WorkspaceRuntimeConfig::default(),
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: "GLOBAL PRELUDE".to_string(),
+            all_hat_prompt: Some("## ALL HAT PROMPT\nShared rules".to_string()),
+            instruction_builder,
+            executor: Arc::new(NoopExecutor),
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Idle,
+            pending: Vec::new(),
+            next_job_id: 1,
+            dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: None,
+            running: None,
+            running_session_strategy: None,
+            cancel_tx: None,
+            control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
+        };
+
+        let task = Event::new("human.message", "hello").with_id("ralph#1:7");
+
+        let full_prompt = actor.build_prompt(std::slice::from_ref(&task));
+        let continuation_prompt = actor.build_continuation_prompt(std::slice::from_ref(&task));
+
+        assert!(
+            full_prompt.contains("GLOBAL PRELUDE"),
+            "Full prompt should keep the top-level prelude"
+        );
+        assert!(
+            full_prompt.contains("Ralph instructions."),
+            "Full prompt should keep hat instructions"
+        );
+        assert!(
+            full_prompt.contains("## ALL HAT PROMPT"),
+            "Full prompt should keep all-hat prompt overlay"
+        );
+
+        assert!(
+            continuation_prompt.contains("Continue in the same session"),
+            "Continuation prompt should include a short incremental reminder"
+        );
+        assert!(
+            continuation_prompt.contains("topic=human.message"),
+            "Continuation prompt should keep incoming events"
+        );
+        assert!(
+            !continuation_prompt.contains("GLOBAL PRELUDE"),
+            "Continuation prompt must not repeat the full prelude"
+        );
+        assert!(
+            !continuation_prompt.contains("Ralph instructions."),
+            "Continuation prompt must not repeat full hat instructions"
+        );
+        assert!(
+            !continuation_prompt.contains("## ALL HAT PROMPT"),
+            "Continuation prompt must not repeat all-hat overlay"
         );
     }
 }

@@ -176,5 +176,91 @@ When the coordinator (`ralph#1`) observes an event whose topic matches `event_lo
 - **WHEN** `event_loop.complete_publishes: "fix.applied"` and an event with topic `fix.applied` is delivered to `ralph#1`
 - **THEN** `ralph#1` MUST either (a) output `event_loop.completion_promise` to end the run, or (b) publish follow-up events and continue the workflow
 
+### Requirement: Supervisor shutdown terminates all worker CLI processes
+When the parallel supervisor is stopping (due to user quit, interrupt, or cancellation), the system MUST terminate all headless worker CLI processes started for HatJobs, and MUST ensure no orphan processes remain.
+
+#### Scenario: User quits TUI while workers are running
+- **WHEN** the user presses `q` in the Supervisor TUI while at least one HatJob process is still running
+- **THEN** the runtime terminates those CLI processes (graceful first, then force-kill after a timeout)
+- **THEN** the Ralph process exits without leaving orphan worker processes
+
+#### Scenario: Supervisor shutdown does not leak processes
+- **WHEN** the supervisor transitions to a terminal shutdown state
+- **THEN** all child HatJob processes are terminated and reaped before the supervisor returns
+
+---
+
+### Requirement: 并行模式下所有 hats 默认订阅 human.message
+When `parallel.enabled: true`, the system MUST ensure every configured hat subscribes to topic `human.message`, even if it is not explicitly listed in `hats.<id>.triggers`.
+
+说明：
+- 目的：保证 Supervisor 的 strict target 校验下，`human.message(target_instance=writer#2)` 这种“实例直达”不会因为“hat 未订阅该 topic”而被拒绝。
+- 该规则只要求“订阅存在”，并不要求 `human.message` 必须 broadcast；事件是否 fanout 仍由 `target_instance` / contracts / triggers 决定。
+
+#### Scenario: 并行模式自动补齐 human.message 订阅
+- **GIVEN** 配置启用了 `parallel.enabled: true`
+- **AND** 某个 hat（例如 `writer`）未显式配置 `triggers: ["human.message"]`
+- **WHEN** 系统启动并行 Supervisor
+- **THEN** `writer` 在运行时视为已订阅 `human.message`
+
+### Requirement: Parallel runtime supports session_strategy=app_server
+在并行模式下,事件 MUST 支持显式声明 `session_strategy="app_server"`.
+当某次 job 合并的 pending events 中存在任意 `app_server` 请求时,该 job MUST 以 `app_server` 会话形态执行.
+
+同时系统 MUST 保持 sticky(只升级不降级)规则,按强弱排序:
+
+`exec < mcp < app_server`.
+
+#### Scenario: Event requests app_server session
+- **WHEN** 某个 hat instance 输出 `<event topic="build.task" session_strategy="app_server">...</event>`
+- **THEN** 并行运行时 MUST 将该事件解析为 `Event.session_strategy=app_server`
+- **THEN** 该事件被路由到的实例在执行对应 job 时 MUST 选择 `app_server` 会话形态
+
+---
+
+### Requirement: App Server turn control supports steer and interrupt
+在 `session_strategy=app_server` 下,系统 MUST 支持 turn 级控制语义:
+
+- `turn_action="start"`: 新开 turn(默认行为).
+- `turn_action="steer"`: 对 in-flight turn 追加输入,使用 App Server 的 `turn/steer`.
+- `turn_action="interrupt"`: 中断当前 turn,使用 App Server 的 `turn/interrupt`.
+
+#### Scenario: In-flight steer appends input to the same turn
+- **GIVEN** 某个实例正在以 `session_strategy=app_server` 执行 job,并存在 in-flight turn
+- **WHEN** 系统投递一条带 `turn_action="steer"` 的事件到该实例
+- **THEN** 运行时 MUST 对该实例执行 `turn/steer`(而不是等本轮结束再新开 turn)
+
+#### Scenario: Interrupt cancels only the active turn
+- **GIVEN** 某个实例正在以 `session_strategy=app_server` 执行 job,并存在 in-flight turn
+- **WHEN** 系统投递一条带 `turn_action="interrupt"` 的事件到该实例
+- **THEN** 运行时 MUST 执行 `turn/interrupt` 来中断当前 turn
+
+---
+
+### Requirement: Steer degrades safely when no in-flight turn exists
+当 `turn_action="steer"` 被投递到一个没有 in-flight turn 的实例时(例如实例空闲,或当前 job 非 app_server),系统 MUST 采取安全降级策略:
+
+- 不丢消息.
+- 允许该输入在后续 turn 被处理(例如作为下一次 job 的普通 pending event).
+
+#### Scenario: Steer is queued when no active turn exists
+- **GIVEN** 目标实例当前不存在 in-flight turn
+- **WHEN** 系统投递一条带 `turn_action="steer"` 的事件到该实例
+- **THEN** 系统 MUST 不丢弃该事件,并保证其仍会在后续执行中被处理(以 best-effort 方式)
+
+### Requirement: External turn_action steer/interrupt are reserved for ExternalInput to ralph#1
+For out-of-band external events (JSONL ingest via `ralph emit` or Supervisor TUI), the system MUST treat `turn_action=steer|interrupt` as a control-plane signal reserved for ExternalInput and deliverable only to `ralph#1`.
+
+#### Scenario: Hat job cannot emit steer/interrupt via ralph emit
+- **GIVEN** a headless hat job environment where `RALPH_HAT_INSTANCE_ID` is set
+- **WHEN** the job runs `ralph emit human.message "..." --turn-action steer --target-instance ralph#1`
+- **THEN** the `ralph emit` command MUST exit non-zero
+- **THEN** the external events file MUST NOT contain a new event line with `turn_action="steer"`
+
+#### Scenario: Valid control-plane event is delivered only to ralph#1
+- **WHEN** the Supervisor ingests an external JSONL event with `turn_action="steer"` and `target_instance="ralph#1"`
+- **THEN** the system MUST deliver the event to `ralph#1`
+- **THEN** the system MUST NOT deliver the event to any non-`ralph#1` instance
+
 ## Change History
 - 2026-01-28: Synced from `openspec/changes/parallel-hat-instances/specs/parallel-hat-instances/spec.md`.

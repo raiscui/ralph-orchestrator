@@ -30,7 +30,7 @@ event_loop:
       - 本 example 默认是 `PROMPT.md`(与本 `ralph.yml` 同目录).
     - 你必须把它当作可变输入:
       - 可能包含 run_id, objective, selection_criteria, final_verification, constraints.
-      - 也可能包含用户显式写出的实验条目(例如 `### exp-001: ...`).
+      - 也可能包含用户显式写出的实验条目(例如 `### exp-001: 基线方案`).
       - 字段缺失时,你必须按 best-effort 推断,不要因为格式不完美而停摆.
 
     ## 入口(task.start)
@@ -64,9 +64,11 @@ event_loop:
     - runner 必须产出 `experiment.result`(含 `verification_evidence` + `commit`).
       - 不要在 payload 里粘贴超长 `git diff`.
       - 以 `commit` 作为可搬运产物,必要时附文件列表与关键摘要.
+      - `commit` 必须是独立的顶层字段,并且必须放在 `verification_evidence` 之前.
     - auditor 必须产出 `experiment.reviewed`.
       - 证据不足必须 `verdict=needs_more_evidence`(不释放 slot).
       - 证据齐全但失败/阻塞允许 `verdict=rejected`(释放 slot).
+      - 对于 `approved` 候选,必须把通过审计的 `commit` 回写成顶层字段.
     - 只有 integrator 可以在主工作区采纳/合并,并做最终验收.
 
     ## 并行窗口(in-flight window)
@@ -94,10 +96,13 @@ event_loop:
     满足下列条件时,你可以进入集成,不需要等待所有实验都成功:
 
     - 至少存在 1 个 `experiment.reviewed` 满足 `evidence_ok=true` 且 `verdict=approved`.
+    - 该 `experiment.reviewed` 必须带有明确的顶层 `commit` 字段(可直接用于 `git cherry-pick`).
     - 你已按 `selection_criteria` 选定要采纳的 `experiment_id`.
 
     进入集成时:
     - 发布 `integration.task`(驱动 integrator 在主工作区 `git cherry-pick <commit>` 并执行 `final_verification`).
+      - `integration.task.commit` 必须直接复制自被采纳候选的 `experiment.reviewed.commit`.
+      - 如果首选候选缺少可直接使用的顶层 `commit`,你必须回到实验阶段补证据,或改选另一个已批准且 commit 明确的候选.
     - 在收到 `integration.applied` 之前:
       - 你不得发布 `experiment.complete`
       - 你不得输出 `LOOP_COMPLETE`
@@ -125,11 +130,13 @@ event_loop:
     ## 发事件格式
 
     - 1 个 `experiment.task` = 1 个实验(1 个 experiment_id).
-    - 同一条输出里允许连续写多个 `<event ...>` block,Supervisor 会逐条解析并路由.
+    - 同一条输出里允许连续写多个 `&lt;event ...&gt;` block,Supervisor 会逐条解析并路由.
+    - 下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块.
+    - 严禁输出省略号式占位内容或 `TODO`；必须写完整字段。
 
-    <event topic="experiment.task">
-    ...payload...
-    </event>
+    &lt;event topic="experiment.task"&gt;
+    此处写完整的 experiment.task payload
+    &lt;/event&gt;
 
   prompt_file: "PROMPT.md"
 
@@ -201,13 +208,17 @@ hats:
       - run_id
       - experiment_id
       - status: "success" | "failed" | "blocked"
-      - verification_evidence: |
-          你跑了哪些命令、关键输出是什么、为何判定 success/failed
       - commit（必须）：该实验最终改动对应的 git commit hash
+        - 必须是独立的顶层字段
+        - 必须放在 `verification_evidence` 之前
+        - 必须来自你真实执行的 `git rev-parse HEAD`
         - 建议：把实验改动压成 1 个 commit（更容易 cherry-pick/审计/回滚）
         - 注意：避免环境缺少 git 身份导致 commit 失败，可用命令级配置（不依赖全局 git config）：
-          `git -c user.name="ralph" -c user.email="ralph@local" commit -m "..."`
-        - 重要：不要在 payload 里粘贴 `git diff` 的 diff 文本（可能非常长、容易截断）；最低可搬运产物以 commit 为准。
+          `git -c user.name="ralph" -c user.email="ralph@local" commit -m "exp-001: short summary"`
+      - verification_evidence: |
+          你跑了哪些命令、关键输出是什么、为何判定 success/failed
+        - 证据要尽量简洁,只保留关键命令、关键输出与判定依据
+        - 重要：不要在 payload 里粘贴 `git diff` 的 diff 文本、长 transcript 或整段原始日志（可能非常长、容易截断）；最低可搬运产物以 commit 为准。
 
       重要规则：
       - 不要输出 LOOP_COMPLETE（只有 ralph#1 能结束整个 run）
@@ -215,11 +226,11 @@ hats:
         - status 用 "blocked"
         - 在 verification_evidence 里写清楚“缺什么”和“如何恢复”
 
-      发事件必须使用如下格式（不要使用代码块）：
+      发事件必须使用如下格式（下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块）：
 
-      <event topic="experiment.result">
-      ...payload...
-      </event>
+      &lt;event topic="experiment.result"&gt;
+      此处写完整的 experiment.result payload
+      &lt;/event&gt;
 
   experiment_auditor:
     name: "🧾 结果审计员"
@@ -239,19 +250,21 @@ hats:
       - run_id
       - experiment_id
       - status（success/failed/blocked）
+      - commit（必须是顶层字段,且看起来像 git hash；不要只埋在 verification_evidence 或 notes 里）
       - verification_evidence（必须包含：执行过的命令 + 关键输出/结论）
-      - commit（必须）
 
       你的输出必须是 experiment.reviewed，且必须包含：
       - run_id
       - experiment_id
       - evidence_ok: true/false
       - verdict: "approved" | "rejected" | "needs_more_evidence"
+      - commit: |（当 evidence_ok=true 且 runner 已提供 commit 时必须回写）
       - missing: |（如果 verdict=needs_more_evidence，列出缺失项）
       - notes: |（可选：你发现的可疑点/建议；以及 rejected 的原因摘要）
 
       判定建议（你必须遵守）：
       - 如果缺少最低字段/证据：evidence_ok=false，verdict=needs_more_evidence
+      - 如果缺少明确的顶层 `commit` 字段,或 `commit` 看起来不像 git hash：evidence_ok=false，verdict=needs_more_evidence
       - 如果证据齐全但 status=failed/blocked：evidence_ok=true，verdict=rejected
       - 如果证据齐全且 status=success：evidence_ok=true，verdict=approved
 
@@ -259,11 +272,11 @@ hats:
       - 不要输出 LOOP_COMPLETE
       - 不要发除 experiment.reviewed 以外的任何事件
 
-      发事件必须使用如下格式（不要使用代码块）：
+      发事件必须使用如下格式（下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块）：
 
-      <event topic="experiment.reviewed">
-      ...payload...
-      </event>
+      &lt;event topic="experiment.reviewed"&gt;
+      此处写完整的 experiment.reviewed payload
+      &lt;/event&gt;
 
   experiment_integrator:
     name: "🧩 集成验收员"
@@ -296,7 +309,7 @@ hats:
       - run_id
       - objective
       - experiment_id（被选中的候选）
-      - commit（git hash，来自该候选的 experiment.result）
+      - commit（git hash，来自该候选的 experiment.reviewed.commit）
       - final_verification（在主工作区集成后要跑的验收命令）
 
       integration.applied 的 payload 必须包含（最低要求）：
@@ -323,20 +336,20 @@ hats:
       - status: "blocked"
       - reason: |（缺依赖/权限/gate/环境问题）
 
-      发事件必须使用如下格式（不要使用代码块）：
+      发事件必须使用如下格式（下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块）：
 
-      <event topic="integration.applied">
-      ...payload...
-      </event>
+      &lt;event topic="integration.applied"&gt;
+      此处写完整的 integration.applied payload
+      &lt;/event&gt;
 
-      <event topic="experiment.complete">
-      ...payload...
-      </event>
+      &lt;event topic="experiment.complete"&gt;
+      此处写完整的 experiment.complete payload
+      &lt;/event&gt;
 
-      <event topic="integration.rejected">
-      ...payload...
-      </event>
+      &lt;event topic="integration.rejected"&gt;
+      此处写完整的 integration.rejected payload
+      &lt;/event&gt;
 
-      <event topic="integration.blocked">
-      ...payload...
-      </event>
+      &lt;event topic="integration.blocked"&gt;
+      此处写完整的 integration.blocked payload
+      &lt;/event&gt;

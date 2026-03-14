@@ -8,21 +8,22 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 // =============================================================================
-// ParallelAppServerIdleStartScenario - Idle start + first human.message (fake)
+// ParallelAppServerIdleStartScenario - Idle start + two human.messages (fake)
 // =============================================================================
 
 /// E2E(fake,0 token):
 /// - 以 `--idle-start` 启动并行 Ralph,确保启动后不触发任何 job(真正待机).
 /// - 确认 `ralph#1` 长时间保持 Idle(超过 max_runtime_seconds 也不退出).
-/// - 再通过外部 `ralph emit human.message ... --session-strategy app_server` 注入第一条 human 指令,
-///   触发首次 job,并输出可核对的 `answer: 164/15` 与 `LOOP_COMPLETE`.
+/// - 第一次外部 `human.message` 只触发 warmup turn,输出 ack,但**不** `LOOP_COMPLETE`.
+/// - 然后再次等待超过 `max_runtime_seconds`,确认“首条消息后”也不会被 `MaxRuntime` 收掉。
+/// - 第二次 `human.message` 再触发 finish turn,输出可核对的 `answer: 164/15` 与 `LOOP_COMPLETE`.
 ///
 /// 设计目标:
 /// - 覆盖真实 `CodexAppServerRuntime` 代码路径,但不依赖真实 codex / 不消耗 token:
 ///   - 在 workspace 内生成 fake `codex` shim,实现 `codex app-server --listen stdio://`。
 /// - human-log.md 必须可审计:
-///   - 注入命令 + emit stdout/stderr 摘录
-///   - runner 的 stdout 摘录(含 answers/LOOP_COMPLETE)
+///   - 两次注入命令 + emit stdout/stderr 摘录
+///   - runner 的 stdout 摘录(含 warmup ack / answers / LOOP_COMPLETE)
 ///   - idle 期间的 agents.json 证据(ralph#1=Idle)
 pub struct ParallelAppServerIdleStartScenario {
     id: String,
@@ -35,6 +36,10 @@ const FAKE_APP_SERVER_READY: &str = "FAKE_CODEX_APP_SERVER_IDLE_READY";
 
 /// 用于确保“注入 payload 里包含具体任务内容”的 marker.
 const IDLE_START_MARKER: &str = "E2E_IDLE_START_MARKER_42";
+const WARMUP_PHASE: &str = "warmup";
+const FINISH_PHASE: &str = "finish";
+const WARMUP_ACK: &str = "IDLE_START_WARMUP_ACK";
+const WAITING_FOR_SECOND_MESSAGE: &str = "WAITING_FOR_SECOND_MESSAGE";
 
 /// 任务内容(可核对).
 const QUESTION_1: &str = "121+43=?";
@@ -46,7 +51,7 @@ impl ParallelAppServerIdleStartScenario {
     pub fn new() -> Self {
         Self {
             id: "parallel-app-server-idle-start".to_string(),
-            description: "Validates parallel --idle-start waits for first human.message and then runs via app-server (fake codex shim)".to_string(),
+            description: "Validates parallel --idle-start survives pre/post-first-message max_runtime windows and completes on second human.message via app-server (fake codex shim)".to_string(),
             tier: "Tier 8: Parallel Runtime".to_string(),
         }
     }
@@ -62,10 +67,9 @@ impl ParallelAppServerIdleStartScenario {
         // 说明:
         // - 该 fake shim 只实现本场景需要的最小协议:
         //   - initialize / thread/start / turn/start
-        // - turn/start 收到 input 后:
-        //   - 解析 marker 与所有形如 "<int>+<int>=?" 的表达式
-        //   - 输出 TASK_* 行 + answer
-        //   - 最后输出 LOOP_COMPLETE 并 completed turn
+        // - turn/start 收到 input 后按 `phase` 分两轮:
+        //   - `warmup`: 只输出 ack,不输出 `LOOP_COMPLETE`
+        //   - `finish`: 输出 TASK_* + answer + `LOOP_COMPLETE`
         let script = r#"#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
@@ -73,7 +77,7 @@ impl ParallelAppServerIdleStartScenario {
 #
 # 目标:
 # - 覆盖 `codex app-server` 的真实调用路径,但不依赖真实 codex
-# - 在收到 turn/start 的 input 后输出可核对的 answer 与 LOOP_COMPLETE
+# - 在收到 turn/start 的 input 后按 warmup / finish 两轮返回
 
 import json
 import re
@@ -114,7 +118,7 @@ def run_app_server(argv) -> int:
     eprint(FAKE_READY)
 
     thread_id = "thread-1"
-    turn_id = "turn-1"
+    turn_counter = 0
 
     for raw in sys.stdin:
         line = raw.strip()
@@ -153,6 +157,8 @@ def run_app_server(argv) -> int:
             continue
 
         if method == "turn/start":
+            turn_counter += 1
+            turn_id = f"turn-{turn_counter}"
             send({"id": msg_id, "result": {}})
             eprint(f"[fake-codex] send response id={msg_id} result=ok")
 
@@ -175,9 +181,28 @@ def run_app_server(argv) -> int:
 
             m = re.search(r"marker:\s*([A-Za-z0-9_-]+)", combined)
             marker = m.group(1) if m else "<missing>"
+            phase_match = re.search(r"phase:\s*([A-Za-z0-9_-]+)", combined)
+            phase = phase_match.group(1) if phase_match else "finish"
 
             # 输出 marker,用于强审计
             send({"method": "item/agentMessage/delta", "params": {"delta": f"MARKER: {marker}\n"}})
+            eprint(f"[fake-codex] parsed marker={marker} phase={phase}")
+
+            # ---------------------------------------------------------
+            # warmup turn:
+            # - 只输出 ack,不输出 LOOP_COMPLETE
+            # - 这样 Ralph 会继续留在 idle-start 会话里等待第二条 human.message
+            # ---------------------------------------------------------
+            if phase == "warmup":
+                send({"method": "item/agentMessage/delta", "params": {"delta": "IDLE_START_WARMUP_ACK\n"}})
+                send({"method": "item/agentMessage/delta", "params": {"delta": "WAITING_FOR_SECOND_MESSAGE\n"}})
+                eprint("[fake-codex] send warmup ack without LOOP_COMPLETE")
+                time.sleep(0.8)
+                send({"method": "turn/completed", "params": {"turn": {"id": turn_id}}})
+                eprint("[fake-codex] send notify method=turn/completed")
+                send({"method": "codex/event/task_complete", "params": {"msg": {"turn_id": turn_id}}})
+                eprint("[fake-codex] send notify method=codex/event/task_complete")
+                continue
 
             # 找出所有加法表达式并计算
             exprs = []
@@ -287,6 +312,20 @@ if __name__ == "__main__":
         }
     }
 
+    fn warmup_ack_observed(&self, result: &ExecutionResult) -> crate::models::Assertion {
+        let ack = result.stdout.contains(WARMUP_ACK);
+        let waiting = result.stdout.contains(WAITING_FOR_SECOND_MESSAGE);
+        let ok = ack && waiting;
+        let builder = AssertionBuilder::new("Warmup ack observed")
+            .expected("stdout contains warmup ack and waiting-for-second-message markers")
+            .actual(format!("warmup_ack={ack}, waiting_for_second={waiting}"));
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
     fn marker_observed(&self, result: &ExecutionResult) -> crate::models::Assertion {
         let ok = result.stdout.contains(IDLE_START_MARKER);
         let builder = AssertionBuilder::new("Marker observed")
@@ -318,22 +357,46 @@ if __name__ == "__main__":
         }
     }
 
+    fn survived_two_runtime_windows(
+        &self,
+        result: &ExecutionResult,
+        pre_wait: Duration,
+        post_warmup_wait: Duration,
+    ) -> crate::models::Assertion {
+        let minimum = pre_wait + post_warmup_wait;
+        let ok = result.duration >= minimum;
+        let builder = AssertionBuilder::new("Session survived pre/post max_runtime windows")
+            .expected(format!(
+                "execution duration >= {:?} (pre_wait + post_warmup_wait)",
+                minimum
+            ))
+            .actual(format!("duration={:?}", result.duration));
+        if ok {
+            builder.passed().build()
+        } else {
+            builder.failed().build()
+        }
+    }
+
     fn human_log_written(&self, executor: &RalphExecutor) -> crate::models::Assertion {
         let path = executor.workspace().join(".e2e/human-log.md");
         let content = std::fs::read_to_string(&path).ok();
         let ok = content.as_deref().is_some_and(|s| {
             !s.trim().is_empty()
                 && s.contains(IDLE_START_MARKER)
+                && s.contains(WARMUP_ACK)
+                && s.contains(WAITING_FOR_SECOND_MESSAGE)
                 && s.contains(QUESTION_1)
                 && s.contains(QUESTION_2)
                 && s.contains(ANSWER_1)
                 && s.contains(ANSWER_2)
                 && s.contains("LOOP_COMPLETE")
+                && s.contains("emit-2 stdout")
                 && s.contains("[ralph#1:out:job=")
         });
 
         let builder = AssertionBuilder::new("Human log written")
-            .expected(".e2e/human-log.md exists and contains marker+questions+answers+LOOP_COMPLETE + at least one [ralph#1:out:job=...] line")
+            .expected(".e2e/human-log.md exists and contains warmup ack + final answers + LOOP_COMPLETE + emit-2 evidence + at least one [ralph#1:out:job=...] line")
             .actual(match content {
                 Some(s) => format!("bytes={}", s.len()),
                 None => format!("missing: {}", path.display()),
@@ -350,11 +413,10 @@ if __name__ == "__main__":
         &self,
         executor: &RalphExecutor,
         execution: &ExecutionResult,
-        emit_cmd: &str,
-        idle_wait: Duration,
+        emit_cmds: &[String],
+        pre_wait: Duration,
+        post_warmup_wait: Duration,
         agents_before: Option<String>,
-        emit_out: Option<String>,
-        emit_err: Option<String>,
     ) -> Result<(), std::io::Error> {
         let dir = executor.workspace().join(".e2e");
         std::fs::create_dir_all(&dir)?;
@@ -369,6 +431,8 @@ if __name__ == "__main__":
                     || l.contains("[ralph#1:state]")
                     || l.contains("[ralph#1:out:job=")
                     || l.contains(IDLE_START_MARKER)
+                    || l.contains(WARMUP_ACK)
+                    || l.contains(WAITING_FOR_SECOND_MESSAGE)
                     || l.contains("TASK_REQUEST")
                     || l.contains("TASK_EXECUTE")
                     || l.contains("TASK_FEEDBACK")
@@ -379,6 +443,11 @@ if __name__ == "__main__":
             .map(|l| format!("- `{}`", l.trim_end()))
             .collect::<Vec<_>>()
             .join("\n");
+
+        let emit_1_out = std::fs::read_to_string(dir.join("emit-1.stdout.txt")).ok();
+        let emit_1_err = std::fs::read_to_string(dir.join("emit-1.stderr.txt")).ok();
+        let emit_2_out = std::fs::read_to_string(dir.join("emit-2.stdout.txt")).ok();
+        let emit_2_err = std::fs::read_to_string(dir.join("emit-2.stderr.txt")).ok();
 
         fn summarize(io: Option<String>) -> String {
             let Some(text) = io else {
@@ -407,18 +476,22 @@ if __name__ == "__main__":
 ## 目标
 
 - 启动并行 Ralph(`--idle-start`)后保持待机(不触发 job)。
-- 超过 max_runtime_seconds 的等待时间也不应退出(证明 idle_start 期间不计时)。
-- 注入第一条 `human.message` 后,才启动首次 app-server job 并输出可核对 answer。
+- 第一次超时级等待后,emit warmup `human.message`,只输出 ack,不 `LOOP_COMPLETE`。
+- 首次 turn 结束后再次等待超过 max_runtime_seconds,证明“首条消息后”也不计时。
+- 第二次 emit finish `human.message`,输出最终 answer 与 `LOOP_COMPLETE`。
 
 ## Marker & Questions
 
 - marker: `{marker}`
+- warmup phase: `{warmup_phase}` -> expect `{warmup_ack}` / `{waiting_for_second}`
+- finish phase: `{finish_phase}`
 - q1: `{q1}` -> expect `{a1}`
 - q2: `{q2}` -> expect `{a2}`
 
-## Idle wait
+## Wait windows
 
-- waited: `{idle_wait_ms}ms` (should be > max_runtime_seconds)
+- pre-first-message wait: `{pre_wait_ms}ms` (should be > max_runtime_seconds)
+- post-warmup wait: `{post_wait_ms}ms` (should be > max_runtime_seconds)
 
 ## Agents snapshot (before emit)
 
@@ -426,16 +499,18 @@ if __name__ == "__main__":
 {agents_before}
 ```
 
-## Inject command
+## Inject commands
 
 ```bash
-{emit_cmd}
+{emit_cmds}
 ```
 
-## Inject output (excerpt)
+## Inject outputs (excerpt)
 
-- emit stdout: `{emit_out}`
-- emit stderr: `{emit_err}`
+- emit-1 stdout: `{emit_1_out}`
+- emit-1 stderr: `{emit_1_err}`
+- emit-2 stdout: `{emit_2_out}`
+- emit-2 stderr: `{emit_2_err}`
 
 ## Runner evidence (excerpt)
 
@@ -443,6 +518,7 @@ if __name__ == "__main__":
 
 ## Conclusion
 
+- duration: `{duration:?}`
 - termination_reason: `{term:?}`
 - exit_code: `{exit_code:?}`
 
@@ -450,26 +526,36 @@ if __name__ == "__main__":
 
 - stdout: `.e2e/stdout.txt`
 - stderr: `.e2e/stderr.txt`
-- emit stdout: `.e2e/emit-1.stdout.txt`
-- emit stderr: `.e2e/emit-1.stderr.txt`
+- emit-1 stdout: `.e2e/emit-1.stdout.txt`
+- emit-1 stderr: `.e2e/emit-1.stderr.txt`
+- emit-2 stdout: `.e2e/emit-2.stdout.txt`
+- emit-2 stderr: `.e2e/emit-2.stderr.txt`
 - this file: `.e2e/human-log.md`
 "#,
             id = self.id,
             marker = IDLE_START_MARKER,
+            warmup_phase = WARMUP_PHASE,
+            warmup_ack = WARMUP_ACK,
+            waiting_for_second = WAITING_FOR_SECOND_MESSAGE,
+            finish_phase = FINISH_PHASE,
             q1 = QUESTION_1,
             a1 = ANSWER_1,
             q2 = QUESTION_2,
             a2 = ANSWER_2,
-            idle_wait_ms = idle_wait.as_millis(),
+            pre_wait_ms = pre_wait.as_millis(),
+            post_wait_ms = post_warmup_wait.as_millis(),
             agents_before = agents_before_summary,
-            emit_cmd = emit_cmd,
-            emit_out = summarize(emit_out),
-            emit_err = summarize(emit_err),
+            emit_cmds = emit_cmds.join("\n"),
+            emit_1_out = summarize(emit_1_out),
+            emit_1_err = summarize(emit_1_err),
+            emit_2_out = summarize(emit_2_out),
+            emit_2_err = summarize(emit_2_err),
             evidence = if evidence_lines.trim().is_empty() {
                 "(missing)".to_string()
             } else {
                 evidence_lines
             },
+            duration = execution.duration,
             term = execution.termination_reason,
             exit_code = execution.exit_code,
         );
@@ -495,6 +581,34 @@ if __name__ == "__main__":
         }
 
         Err("timeout: ralph#1 did not reach Idle state in agents.json".to_string())
+    }
+
+    async fn wait_for_ralph_running_then_idle(workspace: &Path) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen_running = false;
+
+        while Instant::now() < deadline {
+            let snapshot = super::read_agents_snapshot(workspace)?;
+            let Some(ralph) = snapshot
+                .instances
+                .iter()
+                .find(|i| i.instance_id == "ralph#1")
+            else {
+                return Err("missing ralph#1 in agents.json".to_string());
+            };
+
+            if ralph.state == HatInstanceState::Running {
+                seen_running = true;
+            }
+
+            if seen_running && ralph.state == HatInstanceState::Idle {
+                return Ok(());
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Err("timeout: ralph#1 did not complete warmup cycle (Running -> Idle)".to_string())
     }
 
     async fn assert_still_idle(workspace: &Path) -> Result<(), String> {
@@ -580,7 +694,7 @@ impl TestScenario for ParallelAppServerIdleStartScenario {
 
         // 注意:
         // - 不提供 event_loop.prompt(也不提供 PROMPT.md),用于验证 `--idle-start` 可以“真待机”启动。
-        // - 任务语义由注入的 human.message + app-server fake 输出共同决定。
+        // - 任务语义由两次注入的 human.message + app-server fake 输出共同决定。
         let config_content = r#"cli:
   backend: "codex"
 
@@ -588,15 +702,17 @@ event_loop:
   ralph_prompt: |
     # E2E: parallel-app-server-idle-start (fake codex shim)
 
-    你会在稍后收到一条 human.message,其中包含:
+    你会在稍后收到两条 human.message,其中可能包含:
     - marker: E2E_IDLE_START_MARKER_42
+    - phase: warmup
+    - phase: finish
     - question: 121+43=?
     - question: 10+5=?
 
     重要:
-    - 你不需要做任何事,直到收到那条 human.message。
+    - 你不需要做任何事,直到收到那些 human.message。
   completion_promise: "LOOP_COMPLETE"
-  max_iterations: 4
+  max_iterations: 6
   max_runtime_seconds: 3
 
 parallel:
@@ -636,24 +752,46 @@ hats: {}
 
         let ralph_bin = executor.ralph_binary();
         let inject_workspace = workspace.clone();
-        let idle_wait = Duration::from_secs(4);
+        let pre_wait = Duration::from_secs(4);
+        let post_warmup_wait = Duration::from_secs(6);
         let inject = tokio::spawn(async move {
             let agents_before = Self::wait_for_ralph_idle(&inject_workspace).await?;
 
             // 等待超过 max_runtime_seconds,验证 idle_start 期间不计时.
-            tokio::time::sleep(idle_wait).await;
+            tokio::time::sleep(pre_wait).await;
             Self::assert_still_idle(&inject_workspace).await?;
 
-            let payload = format!(
-                "marker: {IDLE_START_MARKER}; question: {QUESTION_1}; question: {QUESTION_2}"
+            let warmup_payload = format!("marker: {IDLE_START_MARKER}; phase: {WARMUP_PHASE}");
+            let warmup_cmd = format!(
+                "ralph emit human.message \"{warmup_payload}\" --target-instance ralph#1 --session-strategy app_server"
             );
-            let cmd = format!(
-                "ralph emit human.message \"{payload}\" --target-instance ralph#1 --session-strategy app_server"
-            );
-            let (out, err) =
-                Self::emit_human_message(&ralph_bin, &inject_workspace, &payload).await?;
+            let (warmup_out, warmup_err) =
+                Self::emit_human_message(&ralph_bin, &inject_workspace, &warmup_payload).await?;
 
-            Ok::<_, String>((cmd, agents_before, out, err))
+            // 等待 warmup turn 完整跑过一轮,把“首次 human.message 已触发 Running”这件事坐实。
+            Self::wait_for_ralph_running_then_idle(&inject_workspace).await?;
+
+            // 再等待一段超过 max_runtime_seconds 的窗口。
+            // 若旧语义仍在,这里会在第二次 emit 前被 MaxRuntime 收掉。
+            tokio::time::sleep(post_warmup_wait).await;
+
+            let finish_payload = format!(
+                "marker: {IDLE_START_MARKER}; phase: {FINISH_PHASE}; question: {QUESTION_1}; question: {QUESTION_2}"
+            );
+            let finish_cmd = format!(
+                "ralph emit human.message \"{finish_payload}\" --target-instance ralph#1 --session-strategy app_server"
+            );
+            let (finish_out, finish_err) =
+                Self::emit_human_message(&ralph_bin, &inject_workspace, &finish_payload).await?;
+
+            Ok::<_, String>((
+                vec![warmup_cmd, finish_cmd],
+                agents_before,
+                warmup_out,
+                warmup_err,
+                finish_out,
+                finish_err,
+            ))
         });
 
         let start = Instant::now();
@@ -663,38 +801,36 @@ hats: {}
             .map_err(|e| ScenarioError::ExecutionError(format!("ralph execution failed: {e}")))?;
         let duration = start.elapsed();
 
-        let inject_res: Result<(String, String, String, String), String> = match inject.await {
-            Ok(res) => res,
-            Err(e) => Err(format!("injector task panicked: {e}")),
-        };
+        let inject_res: Result<(Vec<String>, String, String, String, String, String), String> =
+            match inject.await {
+                Ok(res) => res,
+                Err(e) => Err(format!("injector task panicked: {e}")),
+            };
 
         // 落盘 emit stdout/stderr,便于 human-log 审计.
         let dir = executor.workspace().join(".e2e");
         let _ = std::fs::create_dir_all(&dir);
 
-        let mut emit_cmd = String::new();
+        let mut emit_cmds = Vec::new();
         let mut agents_before = None;
-        let mut emit_out = None;
-        let mut emit_err = None;
 
-        if let Ok((cmd, agents_json, out, err)) = &inject_res {
-            emit_cmd = cmd.clone();
+        if let Ok((cmds, agents_json, out1, err1, out2, err2)) = &inject_res {
+            emit_cmds = cmds.clone();
             agents_before = Some(agents_json.clone());
-            emit_out = Some(out.clone());
-            emit_err = Some(err.clone());
-            let _ = std::fs::write(dir.join("emit-1.stdout.txt"), out);
-            let _ = std::fs::write(dir.join("emit-1.stderr.txt"), err);
+            let _ = std::fs::write(dir.join("emit-1.stdout.txt"), out1);
+            let _ = std::fs::write(dir.join("emit-1.stderr.txt"), err1);
+            let _ = std::fs::write(dir.join("emit-2.stdout.txt"), out2);
+            let _ = std::fs::write(dir.join("emit-2.stderr.txt"), err2);
             let _ = std::fs::write(dir.join("agents-before.json"), agents_json);
         }
 
         let _ = self.write_human_log(
             executor,
             &execution,
-            emit_cmd.as_str(),
-            idle_wait,
+            &emit_cmds,
+            pre_wait,
+            post_warmup_wait,
             agents_before,
-            emit_out,
-            emit_err,
         );
 
         let mut assertions = vec![
@@ -704,7 +840,9 @@ hats: {}
             Assertions::duration_within(&execution, Duration::from_secs(120)),
             self.fake_app_server_used(&execution),
             self.marker_observed(&execution),
+            self.warmup_ack_observed(&execution),
             self.answers_observed(&execution),
+            self.survived_two_runtime_windows(&execution, pre_wait, post_warmup_wait),
             self.loop_complete_detected(&execution),
             self.human_log_written(executor),
         ];
@@ -712,7 +850,7 @@ hats: {}
         // 注入本身也要断言,否则会出现“输出碰巧包含答案但注入失败”的假阳性.
         assertions.push({
             let builder = AssertionBuilder::new("Injector succeeded")
-                .expected("ralph emit human.message succeeds after idle wait")
+                .expected("ralph emit human.message succeeds twice across warmup + finish")
                 .actual(match &inject_res {
                     Ok(_) => "ok=true".to_string(),
                     Err(e) => format!("ok=false, error={e}"),
