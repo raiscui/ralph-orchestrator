@@ -154,6 +154,16 @@ Some v1 features are handled differently in v2:
 | ACP protocol | Not supported (direct CLI only) |
 | Metrics export | Diagnostics system |
 
+## Startup Bootstrap Without PROMPT.md
+
+Newer v2 builds can start from an empty workspace for inspection or first-run
+orientation. If neither `ralph.yml` nor `PROMPT.md` exists, and the user did not
+pass an explicit config or prompt source, Ralph resolves a startup prompt from
+its embedded resource catalog.
+
+This does not remove prompt-file compatibility. It only means `PROMPT.md` is no
+longer the only possible default task source.
+
 ## PROMPT.md Compatibility
 
 The prompt file format is mostly compatible:
@@ -182,9 +192,19 @@ Description here.
 | `.agent/checkpoints/` | Git-based |
 | `.agent/prompts/` | (removed) |
 | `.agent/plans/` | (removed) |
-| (none) | `.agent/memories.md` |
+| (none) | `.agent/memories.md` (current compatibility baseline) |
 | (none) | `.agent/tasks.jsonl` |
 | (none) | `.agent/event_history.jsonl` |
+
+Newer builds may also introduce scoped experience files such as:
+
+- project-root `experience.md`
+- `.ralph/roles/<hat_id>/experience.md`
+- `.ralph/roles/<hat_id>/handoff.md`
+- `.ralph/canonical-writers/...`
+- `.ralph/log/<instance_id>/...`
+
+These scoped files extend the v2 memory model. They do not remove `.agent/memories.md` immediately, because the current implementation still treats that file as the compatibility baseline for persistent learning.
 
 ## Migration Steps
 

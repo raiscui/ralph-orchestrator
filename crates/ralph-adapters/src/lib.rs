@@ -27,6 +27,7 @@ mod auto_detect;
 mod claude_stream;
 mod cli_backend;
 mod cli_executor;
+mod codex_env;
 mod pty_executor;
 pub mod pty_handle;
 mod stream_handler;
@@ -40,6 +41,10 @@ pub use claude_stream::{
 };
 pub use cli_backend::{CliBackend, CustomBackendError, OutputFormat, PromptMode};
 pub use cli_executor::{CliExecutor, ExecutionResult};
+pub use codex_env::{
+    CODEX_PARENT_SESSION_ENV_VARS, is_codex_command, scrub_codex_parent_session_env,
+    scrub_codex_parent_session_env_tokio,
+};
 pub use pty_executor::{
     CtrlCAction, CtrlCState, PtyConfig, PtyExecutionResult, PtyExecutor, TerminationType,
 };

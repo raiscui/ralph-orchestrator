@@ -316,3 +316,52 @@
   - 不要只写原则
   - 要给 literal 输出模板
   - 必要时把关键字段固定到示例值
+
+## [2026-05-12 21:05:00] [Session ID: omx-1778510695653-7pd7o2] 错误修复: heredoc 未加引号导致反引号命令替换
+
+### 问题
+- 在追加 `task_plan.md` 时使用了未加引号的 `cat <<EOF`。
+- 正文里包含反引号包裹的 `adapter-contract-tests`, zsh 将其当成命令替换执行,出现 `zsh:3: command not found: adapter-contract-tests`。
+
+### 原因
+- 违反了项目规则: 向上下文 Markdown 追加内容且正文包含反引号时,必须使用 `cat <<'EOF'`。
+
+### 修复
+- 后续追加上下文文件统一使用单引号 heredoc。
+- 本次错误没有造成代码文件损坏,但已将流程错误记录到 `ERRORFIX.md` 供后续避免。
+
+### 验证
+- 已读取 `task_plan.md` 尾部,确认内容仍可读,仅正文里的 change 名少了反引号显示。
+
+## [2026-05-12 23:30:22] [Session ID: omx-1778510695653-7pd7o2] 问题: startup artifact 写出过早与 capability child runner 测试边界
+
+### 现象
+- startup bootstrap 初始实现把 `.ralph/resolved-config.yml` 写在 CLI override / validate / backend auto-detect 之前。
+- runtime capability 初始实现抽象 child runner 时一度把 resolved config path 替换成不存在的 `latest-resolved-config-not-used.yml`。
+
+### 原因
+- 对“resolved config artifact”语义理解不够严格: artifact 应代表真实即将启动的最终配置,而不是 selector 刚生成的中间配置。
+- 在为测试隔离抽象 child output 时,先改了函数签名,但没有同步保持生产路径的真实 resolved config 参数。
+
+### 修复
+- 将 `write_bootstrap_artifacts()` 移动到 CLI override / validate / backend auto-detect 后,仍保持在 dry-run / EventLoop / Supervisor 初始化前。
+- `runtime capability` 改为 `invoke_isolated_with_runner(workspace, capability, choice, input, runner)`,生产 runner 接收真实 `resolved_config_path`,测试 runner 注入 fake child output。
+
+### 验证
+- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 2 passed。
+- `cargo test -p ralph-cli --test integration_capability -- --nocapture`: 2 passed。
+- `openspec validate --all --strict`: 归档后 24 passed,0 failed。
+
+## [2026-05-13 14:15:15] [Session ID: omx-1778510695653-7pd7o2] 错误修复: cargo test 的 `--exact` 参数位置错误
+
+### 问题
+- 首次运行 focused tests 时把 `--exact` 放在 cargo 参数区,终端报错: `unexpected argument '--exact' found`。
+
+### 原因
+- `--exact` 是 test harness 参数,需要放在 `--` 后面,而不是直接作为 `cargo test` 参数。
+
+### 修复
+- 改用形如 `cargo test --package <pkg> --lib <test-path> -- --exact` 的命令。
+
+### 验证
+- 同一组 focused tests 已用正确格式重跑,全部通过。

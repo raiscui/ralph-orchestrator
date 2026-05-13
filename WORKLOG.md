@@ -219,6 +219,38 @@
 - 新增第五批 3 个真实并行 example:
   - `examples/parallel-finance-close-control-room`
 
+## [2026-03-19 14:14:57] [Session ID: 019d003c-4cdd-7ee2-95c5-d061873df462] 任务名称: review startup bootstrap 与 runtime workflow/hat capability 分层,并正式落盘双 change
+
+### 任务内容
+- 继续评审 `startup-resource-bootstrap` 的 scope,确认它应该只覆盖 startup bootstrap。
+- 把用户新增的“workflow / hat 像 skill 一样运行时调用”诉求单独建模成 follow-up change。
+- 把 selector 的 v1 / v2 路线与“注释 vs 结构化 metadata”的边界正式写进 OpenSpec 和六文件上下文。
+
+### 完成过程
+- 回读了活跃六文件和 `startup-resource-bootstrap` 的 proposal / design / tasks / spec。
+- 结合代码静态阅读确认了 4 个关键事实:
+  - `preset` 简介当前是编译期常量,不是运行时从 YAML 注释提取
+  - `hat.description` 是正式结构化字段
+  - 串行 multi-hat mode 下真正执行者仍然是 `ralph`
+  - 并行 `spawn_dynamic_instance()` 只能扩容当前 config 里已有的 hat 模板
+- 已更新 `startup-resource-bootstrap`:
+  - 明确 startup-only 边界
+  - 新增结构化 metadata 要求
+  - 固定 selector 的 v1 / v2 路线
+- 已新增 follow-up change:
+  - `openspec/changes/runtime-capability-invocation/`
+  - 包含 proposal / design / tasks / spec
+  - 明确 workflow capability 与 hat capability 都走 isolated child run / micro-run,不热改 live topology
+- 已验证:
+  - `openspec validate startup-resource-bootstrap`
+  - `openspec validate runtime-capability-invocation`
+  - `beautiful-mermaid-rs` mermaid 校验
+  - `git diff --check`
+
+### 总结感悟
+- 这轮最重要的不是“再补几条 selector 规则”,而是把 startup 和 runtime capability 两层彻底拆开。
+- YAML 注释适合给人看,不适合承担机器语义主边界。真正要给 `ralph#1` 用的数据,必须是结构化 metadata。
+
 ## 2026-03-12 16:28:00 +0800 任务名称: OpenSpec `hat-request-reply-channel` 实现闭环
 
 ### 任务内容
@@ -283,6 +315,36 @@
 
 - OpenSpec archive 真正重要的不是“把目录移走”,而是确保主 specs 已经接住这次 change 的长期语义。
 - 对这种新增 capability 的 change,归档前同步主 spec 是非常值得坚持的动作,否则 archive 后主线知识会断层。
+
+## 2026-03-15 10:20:00 +0800 任务名称: 补齐 OpenSpec `event-id-and-reply` 的缺失 tasks 与主 spec 同步
+
+### 任务内容
+
+- 延续前一轮 OpenSpec 主线,处理 `event-id-and-reply` 这个还活跃但缺少 `tasks.md` 的 change。
+- 将已经存在于代码中的 event id / reply / prompt 暴露能力,补回 OpenSpec tasks 与主 spec。
+
+### 完成过程
+
+- 先检查了 `event-id-and-reply` 的 proposal、design、delta spec 和当前代码实现。
+- 发现这条 change 的核心实现其实已经在仓库里,缺的主要是:
+  - `openspec/changes/event-id-and-reply/tasks.md`
+  - 主 spec 对 `parallel-hat-instances` 的同步
+- 随后新增了 `tasks.md`,并按“现状已落地”的事实把任务整理成已勾选条目。
+- 之后把 delta spec 中的 3 条 requirement 合并进:
+  - `openspec/specs/parallel-hat-instances/spec.md`
+- 最后执行 OpenSpec 校验,确认这个 change 已进入完整状态。
+
+### 验证结果
+
+- `git diff --check -- openspec/changes/event-id-and-reply/tasks.md openspec/specs/parallel-hat-instances/spec.md task_plan.md` ✅
+- `openspec validate event-id-and-reply --type change` ✅
+- `openspec status --change "event-id-and-reply" --json` ✅
+  - 结果: `proposal/design/specs/tasks` 全部 `done`
+
+### 总结感悟
+
+- 有些 OpenSpec change 不是“实现没做”,而是“文档闭环掉了一截”。
+- 这种场景最重要的是先核对代码现状,不要机械补一份和现实脱节的待办。
   - `examples/parallel-hiring-debrief-panel`
   - `examples/parallel-customer-onboarding-activation`
 - 为每个 example 补齐 direct example E2E scenario、注册点、README 与自包含测试。
@@ -614,3 +676,255 @@
 ### 总结感悟
 - 把“事件关联”与“答案回流”拆成两个 change 后,协议边界明显更稳了
 - `reply.hat.message` 这种显式 topic 比“让所有 reply 自动回送”更可控,也更适合未来做测试和诊断
+## [2026-03-18 18:02:00] [Session ID: 2d1fc46f-d36c-45b6-af3b-ab3318b8c122] 任务名称: explore 默认内嵌配置 / prompt / preset catalog 方向
+
+### 任务内容
+- 围绕“无 `PROMPT.md`、无 `ralph.yml` 也能工作”的目标,梳理 Ralph 当前配置、prompt、preset 与 embed 机制。
+- 评估将 presets/examples 编译期内嵌并首次释放到用户配置目录的设计空间。
+- 对比“运行前 selector 选 preset”与“运行中热切换 preset / 混编 hats”两类路线的复杂度与风险。
+
+### 完成过程
+- 回读六文件与 OpenSpec 状态,确认当前没有直接对应的活跃 change。
+- 盘点了 `ralph run`、`resolve_prompt_content()`、parallel idle_start、`ralph init`、embedded presets、`config/all_hat.md` 的代码路径。
+- 额外检查了 `presets/`、`presets/minimal/`、`scripts/sync-embedded-files.sh` 与 builtin preset 注册表之间的关系。
+- 用 `directories::ProjectDirs` 的文档确认了跨平台用户配置目录的标准做法,用于评估 `~/.ralph` 与系统规范路径的关系。
+- 最终得出建议: 把“Ralph 自主选择 preset”做成启动前 selector 阶段,而不是正式 run 中途热切换拓扑。
+
+### 总结感悟
+- 真正需要统一抽象的不是单个 `PROMPT.md` 文件,而是“任务输入从哪里来”这件事。
+- 资源 embed、资源 catalog、资源落盘、运行时拓扑选择,这 4 层必须拆开,否则后面会把简单需求做成一锅粥。
+- 多 preset 混编不是不能做,但应该建立在结构化 merge 规则之上,而不是直接拼 YAML 文本。
+## [2026-03-18 18:36:00] [Session ID: 2d1fc46f-d36c-45b6-af3b-ab3318b8c122] 任务名称: 起草 OpenSpec change `bootstrap-resource-catalog`
+
+### 任务内容
+- 按上一轮 explore 的“最佳方案”,把默认资源 catalog、用户目录释放、bootstrap selector 与结构化 preset 组合整理成正式 OpenSpec 变更。
+- 产出 proposal / design / tasks / delta spec,并验证 change 合法性。
+
+### 完成过程
+- 回读已有 OpenSpec change 的 proposal/design/tasks/spec 样式,对齐仓库写法。
+- 结合现有 `ralph run`、`ralph init`、embedded presets、`config/all_hat.md` 与 doctor/preset 文档现状,确定 change 名称为 `bootstrap-resource-catalog`。
+- 起草了 4 份 artifact:
+  - `openspec/changes/bootstrap-resource-catalog/proposal.md`
+  - `openspec/changes/bootstrap-resource-catalog/design.md`
+  - `openspec/changes/bootstrap-resource-catalog/tasks.md`
+  - `openspec/changes/bootstrap-resource-catalog/specs/resource-bootstrap/spec.md`
+- 使用 `openspec validate bootstrap-resource-catalog` 做校验,结果通过。
+
+### 总结感悟
+- 这类问题如果不先把“资源 catalog / 资源落盘 / 启动选择 / 真实 run”拆层,后续实现很容易互相污染。
+- OpenSpec 最有价值的地方,就是在动代码前先把这些边界钉死。
+
+## [2026-05-11 23:10:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 对比 ralph-orchestrator / oh-my-codex / hermes-agent
+
+### 任务内容
+- 只读分析当前项目 `ralph-orchestrator`、本地 `/Users/cuiluming/local_doc/l_dev/my/rust/oh-my-codex` 和公开 `https://github.com/NousResearch/hermes-agent` 的差异。
+- 覆盖 README、Cargo/package 入口、关键源码导出、项目长期记忆、Hermes 公开文档。
+
+### 完成过程
+- 读取本仓库上下文文件概况和 `EXPERIENCE.md`。
+- 查询长期记忆中与 `ralph-orchestrator` 运行图、Codex CLI 接入方式相关的记录。
+- 尝试使用 `omx explore` 做只读探索, 但该命令 120 秒超时并被 harness 终止。随后改用普通只读 shell 命令读取事实源。
+- 读取 `ralph-orchestrator` 的 `README.md`、`Cargo.toml`、`crates/ralph-core/src/lib.rs`、`crates/ralph-cli/src/main.rs`。
+- 读取 `oh-my-codex` 的 `README.md`、`package.json`、`Cargo.toml`、`src/index.ts`、`docs/adapt.md`、`src/adapt/hermes.ts`。
+- 通过公开 GitHub/官方文档查看 `hermes-agent` 的 README、architecture、skills、memory 和 pyproject 信息。
+
+### 总结感悟
+- 三者都使用 agent、skills、memory、orchestration 等词, 但它们不是同一层抽象。
+- Ralph 是可独立运行的 Rust orchestration framework, 关注 loop、hats、events、backpressure 和证据。
+- OMX 是 Codex CLI 的 workflow/runtime 外层, 关注 prompt/skill/AGENTS/hook/team/tmux/状态治理。
+- Hermes-Agent 是自学习 agent 应用栈, 关注跨平台入口、终端/消息网关、工具后端、记忆、技能和自动化任务。
+- 本轮没有发现需要写入 `EPIPHANY_LOG.md` 的架构级灾难点, 也没有需要新增到 `LATER_PLANS.md` 的延期事项。
+
+## [2026-05-12 17:32:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 重新审视 Ralph 演进方向优先级
+
+### 任务内容
+- 基于当前新增内容,重新判断 Ralph 现在最值得做的演进方向。
+- 只读查看工作区状态、OpenSpec 列表、核心 change proposal/tasks 和关键代码落点。
+
+### 完成过程
+- 查看 `git status --short` 与 `git diff --stat`,确认当前工作区覆盖多条并行改动线。
+- 查看 `openspec list`,识别 completed / open change 的分布。
+- 运行 `openspec validate --all --strict`,结果 21 passed, 0 failed。
+- 抽读 `agent-guidance-contracts`、`agent-guidance-catalog-cli`、`prompt-contract-runtime-alignment`、`state-operation-layer`、`startup-resource-bootstrap`、`runtime-capability-invocation`、`scoped-experience-system` 等 change 的 proposal/tasks。
+- 查看 `agent_guidance_manifest.rs`、`state_operations.rs`、`experience*.rs` 和 `main.rs` 中相关实现入口。
+- 查看 `.agent/tasks.jsonl`,确认 docs gate 仍有一个打开任务。
+
+### 总结感悟
+- 当前 Ralph 的新增内容已经从“想法”进入“多条基础设施并行落地”的阶段。
+- 现在最有价值的动作是收口、归档、契约化测试和主线排序,而不是继续增加新的 runtime 面。
+- `runtime evidence` 与 `adapter contract` 仍然值得做,但应作为可测边界推进,不要和 `startup-resource-bootstrap` / `runtime-capability-invocation` 混成一锅。
+
+## [2026-05-12 21:44:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 完成 adapter-contract-tests OpenSpec 实现
+
+### 任务内容
+- 按 OpenSpec `adapter-contract-tests` 补齐 stdout-only event parsing、prompt transport、event envelope、termination flush 的契约测试。
+- 修复 mock-cli replay 把 stderr cassette 记录错投到 stdout 的契约漂移。
+
+### 完成过程
+- 加强 `parallel_runner` stdout-only 测试,明确 stdout 事件仍会被解析,stderr 中的 `<event ...>` 不会进入默认 event parser 输入。
+- 新增 custom backend `prompt_mode=stdin` 测试,证明 prompt 走 stdin,不会追加为尾部 argv。
+- 修复 `ralph-e2e mock-cli` 回放逻辑,按 `TerminalWrite.stdout` 分别写入 stdout/stderr。
+- 新增 mock-mode runner 测试,固定 mock-cli custom backend 必须配置 `prompt_mode: stdin`。
+- 新增 `EventRecord` id/reply、`TerminalWrite.instance_id`、record-session critical sequence strict parse、drop 前 flush 等契约测试。
+- 更新 `openspec/changes/adapter-contract-tests/tasks.md`,所有任务已勾选完成。
+
+### 验证证据
+- `cargo fmt --all --check`: 通过。
+- `parallel_runner::guardrail_tests::parallel_output_for_event_parsing_is_stdout_only`: 1 passed。
+- `cli_backend::tests::test_custom_backend_stdin_prompt_mode_keeps_prompt_off_argv`: 1 passed。
+- `mock_cli::tests::test_replay_terminal_write_records_preserves_stdout_stderr_streams`: 1 passed。
+- `runner::tests::test_configure_mock_mode_uses_stdin_prompt_mode_for_mock_cli`: 1 passed。
+- `event_logger::tests::test_event_record_preserves_id_and_reply`: 1 passed。
+- `ux_event::tests::test_terminal_write_instance_id_roundtrip`: 1 passed。
+- `event_logger::tests::test_runtime_durable_payloads_are_not_truncated`: 1 passed。
+- `session_recorder::tests::test_record_session_critical_sequence_strict_parseable_after_flush`: 1 passed。
+- `session_recorder::tests::test_critical_records_flush_to_file_before_recorder_drop`: 1 passed。
+- `session_recorder::tests::test_flush_policy_meta_and_bus_publish_flush`: 1 passed。
+- `session_recorder::tests::test_flush_policy_terminal_write_stdout_only`: 1 passed。
+- `beautiful-mermaid-rs --ascii`: 成功渲染 design Mermaid 图。
+- `openspec validate adapter-contract-tests --type change`: 通过。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `openspec validate --all --strict`: 24 passed, 0 failed。
+
+### 总结感悟
+- adapter contract 不是大重构,关键是把 stdout/stderr、prompt transport 和 evidence envelope 的边界变成明确失败的测试。
+- mock replay 必须尽量还原真实 stream,否则 cassette 会把本来在 stderr 的 prompt/log/event 示例升级成 stdout 语义输入。
+
+## [2026-05-12 21:49:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 归档 adapter-contract-tests
+
+### 任务内容
+- 将刚完成的 OpenSpec change `adapter-contract-tests` 归档。
+- 同步新增主规格 `openspec/specs/adapter-contract-tests/spec.md`。
+
+### 完成过程
+- 运行 `openspec archive -y adapter-contract-tests`。
+- OpenSpec 自动创建主 spec,并移动 change 到 archive。
+- 随后运行全量 strict validate。
+
+### 验证证据
+- `openspec archive -y adapter-contract-tests`: 成功,创建 `openspec/specs/adapter-contract-tests/spec.md`,归档为 `2026-05-12-adapter-contract-tests`。
+- `openspec validate --all --strict`: 24 passed,0 failed。
+- `openspec list`: active changes 剩余 `runtime-capability-invocation`、`startup-resource-bootstrap`、`tui-mdfried-viewer`。
+
+### 总结感悟
+- 新增 contract change 完成后立即归档,能减少后续实施 `startup-resource-bootstrap` 时的 active change 噪音。
+
+## [2026-05-12 23:30:22] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Ralph 演进四步收口
+
+### 任务内容
+- 按用户指定顺序完成:
+  - 收口 completed OpenSpec changes。
+  - 补 adapter contract tests。
+  - 推进并归档 `startup-resource-bootstrap v1`。
+  - 推进并归档 `runtime-capability-invocation v1`。
+- 本轮继续点主要覆盖第3、第4步:
+  - `crates/ralph-cli/src/startup_resources.rs`
+  - `crates/ralph-cli/src/capability.rs`
+  - `crates/ralph-core/src/capability.rs`
+  - `crates/ralph-cli/tests/integration_startup_resources.rs`
+  - `crates/ralph-cli/tests/integration_capability.rs`
+  - `docs/runbook/startup-resource-bootstrap.md`
+  - `docs/runbook/runtime-capabilities.md`
+  - OpenSpec archive / main spec sync。
+
+### 完成过程
+- 修正 startup bootstrap 的 resolved config artifact 写出时机,确保写出的是 CLI override / validate / backend auto-detect 后的实际启动配置。
+- 增加 `cli_config_was_explicit()` 原始 argv 检测,避免显式 `--config ralph.yml` 被误当成默认缺失配置。
+- 让 startup resource resolver 的测试注入临时资源根目录,避免污染用户真实 `$HOME/.ralph/resources`。
+- 增加 startup CLI dry-run integration,验证无 `ralph.yml` / 无 `PROMPT.md` 时产出 `.ralph/bootstrap-selection.json` 与 `.ralph/resolved-config.yml`。
+- 增加 runtime capability metadata / invocation artifact 类型,以及 `ralph tools capability list|summaries|invoke` agent-facing 工具。
+- runtime capability v1 采用隔离 child dry-run / micro-run artifact,写 `.ralph/capability-invocations/<id>/` 与 `.ralph/events.jsonl`,不修改 parent topology。
+- 将 `startup-resource-bootstrap` 归档为 `openspec/changes/archive/2026-05-12-startup-resource-bootstrap/`,并同步 `openspec/specs/resource-bootstrap/spec.md`。
+- 将 `runtime-capability-invocation` 归档为 `openspec/changes/archive/2026-05-12-runtime-capability-invocation/`,并同步 `openspec/specs/capability-invocation/spec.md`。
+
+### 验证证据
+- `cargo fmt --all --check`: 通过。
+- `cargo test -p ralph-cli --bin ralph startup_resources -- --nocapture`: 8 passed。
+- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 2 passed。
+- `cargo test -p ralph-core capability -- --nocapture`: 1 passed。
+- `cargo test -p ralph-cli --bin ralph capability -- --nocapture`: 3 passed。
+- `cargo test -p ralph-cli --test integration_capability -- --nocapture`: 2 passed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `.venv/bin/mkdocs build --strict`: 退出码 0。
+- `openspec validate --all --strict`: 归档后 24 passed,0 failed。
+
+### 总结感悟
+- resolved artifact 必须代表真实将启动的配置,不能在 CLI override 之前提前写。
+- runtime capability 最稳的 v1 边界是“agent-facing tool + isolated artifact”,而不是把 capability 注入 live `HatRegistry` / `Supervisor`。
+- OpenSpec tasks 要和测试证据对齐;如果任务写得宽,应补齐覆盖再勾选。
+
+## [2026-05-12 23:43:10] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Ralph 演进四步最终收口验证
+
+### 任务内容
+- 接续上一轮没有留下最终退出状态的 `cargo test`。
+- 用当前会话重新补齐完成声明所需的验证证据。
+- 将用户指定的四步路线收口成可汇报状态。
+
+### 完成过程
+- 检查没有残留正在运行的 `cargo test` 进程后,重新执行全量 `cargo test`。
+- 补跑格式检查、replay smoke、OpenSpec strict validate 和 MkDocs strict build。
+- 确认 active OpenSpec changes 只剩 `tui-mdfried-viewer`,不属于本轮用户指定四步路线。
+- 追加更新 `task_plan.md`,把四步路线和最终门禁标记为完成。
+
+### 验证证据
+- `cargo test`: 退出码 0,日志 `/tmp/ralph-cargo-test-20260512-233917.log`。
+- `cargo fmt --all --check`: 退出码 0。
+- `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
+- `openspec validate --all --strict`: 24 passed,0 failed。
+- `.venv/bin/mkdocs build --strict`: 退出码 0。
+- `openspec list --json`: 只剩 `tui-mdfried-viewer` 13/15 in-progress。
+
+### 总结感悟
+- 这次继续点的核心不是再改代码,而是把“上一轮摘要”降级为线索,重新取得当前会话可证明的最终门禁。
+- `runtime capability` 和 `startup bootstrap` 的边界已经按用户要求落在隔离 artifact 和启动前 resolution 上,没有引入 live topology 热改。
+
+## [2026-05-13 13:01:39] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 提交前变更分组审查
+
+### 任务内容
+- 接续四步收口后的安全后续,审查当前 worktree 是否适合提交。
+- 不提交、不清理、不撤回任何非当前任务改动。
+
+### 完成过程
+- 读取上下文文件和记忆索引,确认上一轮完成点。
+- 运行 `git status --short`、`git diff --stat`、`git diff --name-status`、`git ls-files --others --exclude-standard`。
+- 用脚本按路径和主题分桶当前改动。
+- 运行 `git diff --check` 和 `git status --ignored -s`,检查 whitespace 与 ignored generated artifact 风险。
+- 抽查 `Cargo.toml` / `.envrc` / `.gitignore` / `main.rs` diff hunk header。
+
+### 验证证据
+- `git diff --check`: 无输出,未发现 whitespace error。
+- `git status --ignored -s`: `site/`、`target/`、`.ralph/`、`.omx/`、`.venv/` 等为 ignored。
+- `.agent/tasks.jsonl`: 当前查询未发现 open/pending/in_progress/todo 或 completed=false 条目。
+
+### 总结感悟
+- 当前工作区是多条已完成/在途线叠加,提交前必须拆组。
+- 对这批改动,最危险的动作是 `git add .` 后做一个大提交;这会把 OpenSpec、runtime graph、docs、TUI、context logs 和当前四步主线混在一起。
+
+## [2026-05-13 14:15:15] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 准备 adapter/evidence contract staged diff
+
+### 任务内容
+- 按前一轮分组建议,准备第一组 `adapter contract tests + evidence stream fixes` staged diff。
+- 避免把 runtime graph、startup bootstrap、runtime capability、TUI、docs site 等其他线混入第一组。
+
+### 完成过程
+- 执行 `git reset --quiet`,清空 index 中可能存在的历史 staged 状态。
+- stage adapter/evidence 相关文件与 `adapter-contract-tests` OpenSpec archive/spec。
+- 对 `crates/ralph-cli/src/parallel_runner.rs` 使用 `git add -p`,只 stage stdout-only parser guardrail test hunks。
+- 跳过同文件中的 runtime graph recorder、Codex escaped-event normalization、process env scrub 等其他主题 hunks。
+- 修复 `openspec/specs/adapter-contract-tests/spec.md` 末尾多余空行后重新 stage。
+
+### 验证证据
+- `git diff --cached --check`: 通过。
+- `cargo test --package ralph-adapters --lib cli_backend::tests::test_custom_backend_stdin_prompt_mode_keeps_prompt_off_argv -- --exact`: 1 passed。
+- `cargo test --package ralph-cli --bin ralph parallel_runner::guardrail_tests::parallel_output_for_event_parsing_is_stdout_only -- --exact`: 1 passed。
+- `cargo test --package ralph-core --lib event_logger::tests::test_event_record_preserves_id_and_reply -- --exact`: 1 passed。
+- `cargo test --package ralph-core --lib event_logger::tests::test_runtime_durable_payloads_are_not_truncated -- --exact`: 1 passed。
+- `cargo test --package ralph-core --lib session_recorder::tests::test_record_session_critical_sequence_strict_parseable_after_flush -- --exact`: 1 passed。
+- `cargo test --package ralph-core --lib session_recorder::tests::test_critical_records_flush_to_file_before_recorder_drop -- --exact`: 1 passed。
+- `cargo test --package ralph-e2e --lib mock_cli::tests::test_replay_terminal_write_records_preserves_stdout_stderr_streams -- --exact`: 1 passed。
+- `cargo test --package ralph-proto --lib ux_event::tests::test_terminal_write_instance_id_roundtrip -- --exact`: 1 passed。
+- `openspec validate adapter-contract-tests --type spec`: valid。
+
+### 总结感悟
+- 第一组不能直接按文件粗 stage,因为 `parallel_runner.rs` 已经混入多条线。
+- 对这种混线文件,patch staging 比路径 staging 更可靠。

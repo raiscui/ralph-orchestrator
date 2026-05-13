@@ -7,7 +7,7 @@
 //! - 断言尽量“硬”，优先用 `.ralph/events.jsonl`（比 stdout 更稳）
 
 use super::parallel::{
-    parse_parallel_job_line, read_agents_snapshot, replace_top_level_yaml_block,
+    parse_parallel_job_line, read_agents_snapshot, replace_or_append_top_level_yaml_block,
 };
 use super::{AssertionBuilder, Assertions, ScenarioError, TestScenario};
 use crate::Backend;
@@ -25,6 +25,60 @@ use std::time::Duration;
 // - 该 example 的目的是验证“多实验 -> 审计 -> 集成 -> 收敛”的完整闭环。
 // - 我们在 E2E 里强制预填 2 个实验，避免真实后端漂移导致“只跑 1 个实验”却误判通过。
 const EXPECTED_EXPERIMENTS: usize = 2;
+
+// -------------------------------------------------------------------------
+// E2E workspace root AGENTS override
+// -------------------------------------------------------------------------
+// 说明:
+// - 这个 example 是验证 `examples/parallel-experimental-dev-engine` 的 workflow 闭环,
+//   不是验证仓库根目录里给 Codex 开发本仓库时用的重型 AGENTS 规范。
+// - 若直接克隆整个仓库并原样运行,worker 会继承根 `AGENTS.md` 里的六文件/续档/
+//   持续学习等流程,把一个本该很短的 experiment/integration 任务拖成超长开发任务。
+// - 因此 E2E setup 需要在隔离 workspace 根目录覆盖一份极简 AGENTS,只保留:
+//   - 跟随当前 incoming event
+//   - 尊重当前 hat instructions
+//   - 用最小动作完成当前 workflow 并尽快发出结构化事件
+// -------------------------------------------------------------------------
+const E2E_WORKSPACE_AGENTS_OVERRIDE: &str = r#"# AGENTS.md
+
+## E2E Workspace
+
+- 这是隔离的 E2E workspace,目标是验证 `examples/parallel-experimental-dev-engine` 的 workflow 是否闭环。
+- 这里的首要真相源是:
+  - 当前 hat instructions
+  - 当前 incoming event payload
+  - 当前 example 配置与工作区文件
+- 只执行完成当前 event 必需的最小步骤。不要把任务扩展成仓库开发流程。
+
+## Do
+
+- 优先使用当前 hat instructions 明确要求的命令、验证和事件格式。
+- 完成 verification 后,直接输出当前 workflow 需要的 `<event ...>...</event>` 正文事件。
+- 如果当前任务只需要读写少量文件,就只做这些最小文件操作。
+
+## Do Not
+
+- 不要读取或维护仓库级 `task_plan.md`、`notes.md`、`WORKLOG.md`、`ERRORFIX.md`、`EPIPHANY_LOG.md`、`LATER_PLANS.md`,除非当前 incoming event 明确要求。
+- 不要执行 OpenSpec、持续学习、归档、文档同步、项目级 review 流程。
+- 不要为了“流程完整”创建额外计划、日志、经验文件。
+- 不要把事件写进 shell transcript、文件内容或 stderr 后再口头说明“已经上报”。
+- 不要输出与当前 event 无关的大段背景分析。
+"#;
+
+// -------------------------------------------------------------------------
+// E2E light all-hat overlay
+// -------------------------------------------------------------------------
+// 说明:
+// - `config/all_hat.md` 对真实仓库开发很有用,但对这个 example/E2E 来说偏重。
+// - 这里给隔离 workspace 显式切一份“只保留协议必需语义”的轻量 overlay。
+// - 目标不是改变默认产品行为,而是减少 worker 被开发型元指令拉长尾巴。
+// -------------------------------------------------------------------------
+const E2E_LIGHT_ALL_HAT_PROMPT: &str = r#"你是 Ralph workflow 中的一个 agent。
+- 优先遵守当前 hat instructions 与 incoming event payload。
+- 只执行完成当前 event 必需的最小步骤,不要把任务扩展成仓库开发流程。
+- 需要回流 workflow 结果时,直接在最终 assistant 回复中输出原始 `<event ...>...</event>`。
+- 不要通过 shell、文件、stderr、代码块或工具 transcript 间接打印 `<event ...>`。
+- 如果当前 job 不是在回复人类,不要输出 `reply.human.message`。"#;
 
 /// 直接覆盖 `examples/parallel-experimental-dev-engine` 的端到端（E2E）场景。
 ///
@@ -62,12 +116,11 @@ impl ParallelExperimentalDevEngineExampleScenario {
         // - 但 E2E 运行时会受到本机 `~/.codex/config.toml` 的推理强度/总结输出影响，导致噪音与耗时抖动。
         // - 因此这里仅在 E2E workspace 覆写 `cli` 段，注入 `-c ...` 降噪/提速参数。
         // ---------------------------------------------------------------------
-        if backend != Backend::Codex {
-            return Ok(config_content.to_string());
-        }
+        let mut patched = config_content.to_string();
 
-        // 注意：该 example 需要更高权限来跑 git/文件写入，因此保留 `--sandbox danger-full-access`。
-        let cli_block = r#"cli:
+        if backend == Backend::Codex {
+            // 注意：该 example 需要更高权限来跑 git/文件写入，因此保留 `--sandbox danger-full-access`。
+            let cli_block = r#"cli:
   # E2E: 覆写 Codex 参数,降噪/提速(不影响仓库 example 原文件).
   backend: "custom"
   command: "codex"
@@ -87,9 +140,19 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
 "#;
 
-        replace_top_level_yaml_block(config_content, "cli:", cli_block).map_err(|e| {
+            patched = replace_or_append_top_level_yaml_block(&patched, "cli:", cli_block).map_err(
+                |e| {
+                    ScenarioError::SetupError(format!(
+                        "failed to patch example ralph.yml cli block for e2e: {e}"
+                    ))
+                },
+            )?;
+        }
+
+        let core_block = build_inline_all_hat_prompt_block(E2E_LIGHT_ALL_HAT_PROMPT);
+        replace_or_append_top_level_yaml_block(&patched, "core:", &core_block).map_err(|e| {
             ScenarioError::SetupError(format!(
-                "failed to patch example ralph.yml cli block for e2e: {e}"
+                "failed to patch example ralph.yml core all-hat overlay block for e2e: {e}"
             ))
         })
     }
@@ -199,9 +262,7 @@ impl ParallelExperimentalDevEngineExampleScenario {
             .events
             .iter()
             .filter(|e| {
-                e.topic == "experiment.reviewed"
-                    && (e.payload.contains("evidence_ok: true")
-                        || e.payload.contains("\"evidence_ok\":true"))
+                e.topic == "experiment.reviewed" && payload_field_is_true(&e.payload, "evidence_ok")
             })
             .count();
 
@@ -373,7 +434,11 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
 ## 最终验收（Final Verification / 主工作区）
 
-- `rg -n "exp-00[12]" . -g 'e2e_marker_exp_*.txt'`
+- `integration.task.final_verification` 必须根据被采纳的 `experiment_id` 选择对应命令:
+  - 如果采纳 `exp-001`: `rg -n "exp-001" e2e_marker_exp_001.txt`
+  - 如果采纳 `exp-002`: `rg -n "exp-002" e2e_marker_exp_002.txt`
+- 不要要求主工作区同时存在 `exp-001` 与 `exp-002` 两个 marker。
+- 两个实验都已跑完并通过审计,由 `experiment.reviewed` 链保证,不要求 integrator 把两个实验都 cherry-pick 到主工作区。
 
 ## 实验列表（Experiments）
 
@@ -485,6 +550,110 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
         Ok(())
     }
+
+    fn commit_workspace_seed_state(workspace: &Path) -> Result<(), ScenarioError> {
+        // -----------------------------------------------------------------
+        // 说明：
+        // - 这个 example 的 runner / integrator 使用 `workspace.strategy: worktree`。
+        // - `git worktree add --detach <path> HEAD` 只会基于当前 `HEAD` 提交态创建新 worktree，
+        //   不会自动带上源工作树里的未提交修改。
+        // - E2E setup 会在 clone 后把 `PROMPT.md` / example `ralph.yml` 改成测试专用内容。
+        //   如果这里不立刻做一个隔离 snapshot commit，后续 worktree job 看到的仍然是旧版仓库输入。
+        // -----------------------------------------------------------------
+        let add = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(workspace)
+            .output()
+            .map_err(|e| {
+                ScenarioError::SetupError(format!(
+                    "failed to stage seeded workspace patches in {}: {e}",
+                    workspace.display()
+                ))
+            })?;
+
+        if !add.status.success() {
+            return Err(ScenarioError::SetupError(format!(
+                "git add -A for seeded workspace failed: workspace={} exit_code={:?} stdout={} stderr={}",
+                workspace.display(),
+                add.status.code(),
+                String::from_utf8_lossy(&add.stdout),
+                String::from_utf8_lossy(&add.stderr),
+            )));
+        }
+
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "user.name=ralph",
+                "-c",
+                "user.email=ralph@local",
+                "commit",
+                "-m",
+                "e2e: seed parallel experimental dev engine workspace",
+            ])
+            .current_dir(workspace)
+            .output()
+            .map_err(|e| {
+                ScenarioError::SetupError(format!(
+                    "failed to create seeded workspace snapshot commit in {}: {e}",
+                    workspace.display()
+                ))
+            })?;
+
+        if !commit.status.success() {
+            return Err(ScenarioError::SetupError(format!(
+                "seeded workspace snapshot commit failed: workspace={} exit_code={:?} stdout={} stderr={}",
+                workspace.display(),
+                commit.status.code(),
+                String::from_utf8_lossy(&commit.stdout),
+                String::from_utf8_lossy(&commit.stderr),
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn write_workspace_root_agents_override(workspace: &Path) -> Result<(), ScenarioError> {
+        // -----------------------------------------------------------------
+        // 说明：
+        // - 覆盖隔离 workspace 根目录的 `AGENTS.md`，避免 example worker 继承仓库开发型
+        //   prompt（六文件、续档、持续学习等）。
+        // - 这不是修改仓库真实文件；只发生在 E2E clone 工作区里，并会进入 snapshot HEAD，
+        //   让后续 worktree job 看到同一套轻量规则。
+        // -----------------------------------------------------------------
+        std::fs::write(workspace.join("AGENTS.md"), E2E_WORKSPACE_AGENTS_OVERRIDE).map_err(|e| {
+            ScenarioError::SetupError(format!(
+                "failed to write workspace root AGENTS override {}: {e}",
+                workspace.join("AGENTS.md").display()
+            ))
+        })
+    }
+}
+
+fn build_inline_all_hat_prompt_block(text: &str) -> String {
+    let mut block = String::from("core:\n  all_hat_prompt:\n    mode: inline\n    text: |\n");
+    for line in text.lines() {
+        block.push_str("      ");
+        block.push_str(line);
+        block.push('\n');
+    }
+    block
+}
+
+fn payload_field_is_true(payload: &str, field: &str) -> bool {
+    // -----------------------------------------------------------------
+    // 说明:
+    // - `experiment.reviewed` 既可能是 YAML 风格 payload,也可能是 JSON。
+    // - 真后端里 JSON 有时会写成 `"evidence_ok": true`，有时是 `"evidence_ok":true`。
+    // - 用结构化解析比字符串猜测更稳,只有解析失败时才回退到兼容字符串匹配。
+    // -----------------------------------------------------------------
+    if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(payload) {
+        return value.get(field).and_then(serde_yaml::Value::as_bool) == Some(true);
+    }
+
+    payload.contains(&format!("{field}: true"))
+        || payload.contains(&format!("\"{field}\":true"))
+        || payload.contains(&format!("\"{field}\": true"))
 }
 
 impl Default for ParallelExperimentalDevEngineExampleScenario {
@@ -568,6 +737,17 @@ impl TestScenario for ParallelExperimentalDevEngineExampleScenario {
         std::fs::write(workspace.join("PROMPT.md"), prompt_filled.as_str()).map_err(|e| {
             ScenarioError::SetupError(format!("failed to write workspace root PROMPT.md: {e}"))
         })?;
+
+        Self::write_workspace_root_agents_override(workspace)?;
+
+        // -----------------------------------------------------------------
+        // 说明：
+        // - 上面这些 E2E 专用 patch 只写进了 workspace 工作树。
+        // - 但该 example 的 runner / integrator 会从 `HEAD` 切出新 worktree。
+        // - 因此必须先把 patch 固化成一次隔离 snapshot commit，保证后续 worktree job
+        //   看到的输入世界与 `ralph#1` 当前工作树一致。
+        // -----------------------------------------------------------------
+        Self::commit_workspace_seed_state(workspace)?;
 
         Ok(ScenarioConfig {
             config_file: "examples/parallel-experimental-dev-engine/ralph.yml".into(),
@@ -741,6 +921,97 @@ mod tests {
     }
 
     #[test]
+    fn seeded_workspace_snapshot_commit_makes_patched_prompt_visible_to_worktree() {
+        let repo_root = TempDir::new().expect("repo tempdir");
+        init_git_repo(repo_root.path());
+
+        let workspace_parent = TempDir::new().expect("workspace parent");
+        let workspace = workspace_parent.path().join("scenario-workspace");
+        ParallelExperimentalDevEngineExampleScenario::seed_workspace_git_clone(
+            &workspace,
+            repo_root.path(),
+        )
+        .expect("seed isolated clone");
+
+        std::fs::write(
+            workspace.join("PROMPT.md"),
+            "# 实验计划（E2E 预填）\n\n- snapshot root prompt\n",
+        )
+        .expect("write workspace root prompt");
+        std::fs::write(
+            workspace.join("examples/parallel-experimental-dev-engine/PROMPT.md"),
+            "# 实验计划（E2E 预填）\n\n- snapshot example prompt\n",
+        )
+        .expect("write workspace example prompt");
+        std::fs::write(
+            workspace.join("examples/parallel-experimental-dev-engine/ralph.yml"),
+            "event_loop:\n  prompt_file: \"PROMPT.md\"\nparallel:\n  workspace:\n    worktree_backend: worktree\n",
+        )
+        .expect("write workspace example config");
+        ParallelExperimentalDevEngineExampleScenario::write_workspace_root_agents_override(
+            &workspace,
+        )
+        .expect("write workspace root agents override");
+
+        ParallelExperimentalDevEngineExampleScenario::commit_workspace_seed_state(&workspace)
+            .expect("commit seeded workspace state");
+
+        let status = Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git status");
+        assert!(
+            status.status.success(),
+            "git status should succeed after seeded workspace commit"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "",
+            "seeded workspace should be clean after snapshot commit"
+        );
+
+        let worktree = workspace.join(".tmp-worktree");
+        let add = Command::new("git")
+            .args(["worktree", "add", "--detach"])
+            .arg(&worktree)
+            .arg("HEAD")
+            .current_dir(&workspace)
+            .output()
+            .expect("git worktree add");
+        assert!(
+            add.status.success(),
+            "git worktree add should succeed: stdout={} stderr={}",
+            String::from_utf8_lossy(&add.stdout),
+            String::from_utf8_lossy(&add.stderr),
+        );
+
+        let root_prompt =
+            std::fs::read_to_string(worktree.join("PROMPT.md")).expect("read worktree root prompt");
+        assert!(
+            root_prompt.contains("snapshot root prompt"),
+            "worktree should see the committed E2E root prompt, got: {root_prompt}"
+        );
+
+        let example_prompt = std::fs::read_to_string(
+            worktree.join("examples/parallel-experimental-dev-engine/PROMPT.md"),
+        )
+        .expect("read worktree example prompt");
+        assert!(
+            example_prompt.contains("snapshot example prompt"),
+            "worktree should see the committed E2E example prompt, got: {example_prompt}"
+        );
+
+        let root_agents =
+            std::fs::read_to_string(worktree.join("AGENTS.md")).expect("read worktree root AGENTS");
+        assert!(
+            root_agents.contains("这是隔离的 E2E workspace")
+                && root_agents.contains("不要读取或维护仓库级 `task_plan.md`"),
+            "worktree should see the committed E2E root AGENTS override, got: {root_agents}"
+        );
+    }
+
+    #[test]
     fn example_config_does_not_embed_raw_event_blocks() {
         let config =
             include_str!("../../../../examples/parallel-experimental-dev-engine/ralph.yml");
@@ -789,6 +1060,45 @@ mod tests {
                 && plan.contains("experiment.reviewed")
                 && plan.contains("verification_evidence"),
             "filled experiment plan should reinforce the structured commit contract"
+        );
+    }
+
+    #[test]
+    fn patch_example_config_for_e2e_adds_lightweight_all_hat_overlay() {
+        let config = "event_loop:\n  prompt_file: \"PROMPT.md\"\n";
+        let patched = ParallelExperimentalDevEngineExampleScenario::patch_example_config_for_e2e(
+            config,
+            Backend::Codex,
+        )
+        .expect("patch example config");
+
+        assert!(
+            patched.contains("core:\n  all_hat_prompt:\n    mode: inline\n    text: |"),
+            "patched config should add a runtime all-hat overlay block"
+        );
+        assert!(
+            patched.contains("只执行完成当前 event 必需的最小步骤"),
+            "patched config should carry the lightweight E2E overlay"
+        );
+    }
+
+    #[test]
+    fn payload_field_is_true_accepts_yaml_and_both_json_spacing_styles() {
+        assert!(payload_field_is_true(
+            "evidence_ok: true\nverdict: approved\n",
+            "evidence_ok"
+        ));
+        assert!(payload_field_is_true(
+            "{\"evidence_ok\":true,\"verdict\":\"approved\"}",
+            "evidence_ok"
+        ));
+        assert!(payload_field_is_true(
+            "{\n  \"evidence_ok\": true,\n  \"verdict\": \"approved\"\n}",
+            "evidence_ok"
+        ));
+        assert!(
+            !payload_field_is_true("{\"evidence_ok\":false}", "evidence_ok"),
+            "false should not be treated as true"
         );
     }
 }

@@ -6,7 +6,9 @@
 
 use super::ParallelSupervisor;
 use crate::TerminationReason;
-use crate::config::{HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig};
+use crate::config::{
+    CoreConfig, HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig,
+};
 use crate::event_logger::{EventHistory, EventLogger};
 use crate::parallel::{
     HatInstanceCommand, HatInstanceHandle, HatJob, HatJobControl, HatJobExecutor,
@@ -15,8 +17,10 @@ use crate::parallel::{
 use anyhow::Context;
 use ralph_proto::{
     AudienceOverride, AudienceSelector, Delivery, Event, HatId, HatInstanceId, HatInstanceState,
-    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, TOPIC_REPLY_HAT_MESSAGE,
-    TOPIC_REQUESTER_RETURN, TopicContract, TurnAction,
+    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, RuntimeDeliveryKind,
+    RuntimeDeliveryRecord, RuntimeLifecycleKind, RuntimeLifecycleRecord, TOPIC_DISPATCH_DECISION,
+    TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN, TOPIC_RUNTIME_DELIVERY,
+    TOPIC_RUNTIME_LIFECYCLE, TopicContract, TurnAction,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -226,6 +230,13 @@ struct IdleStartPersistentExecutor {
 #[derive(Debug, Clone)]
 struct CompletionStopsRoutingExecutor {
     /// 记录每个 instance 实际启动了多少次（用于断言“收敛后不再派生新 job”）。
+    starts: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
+}
+
+#[derive(Debug, Clone)]
+struct QueuedRalphJobAfterCompletionExecutor {
+    /// 记录每个 instance 的启动次数,用于验证“completion 前已排队的 ralph job”
+    /// 是否会在 `LOOP_COMPLETE` 之后继续起跑。
     starts: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
 }
 
@@ -770,6 +781,61 @@ async fn supervisor_does_not_route_new_events_after_completion_promise() {
     );
 }
 
+#[tokio::test]
+async fn supervisor_freezes_prequeued_ralph_job_after_completion_promise() {
+    // =====================================================================
+    // 目的：
+    // - 验证一个更贴近“旧 job 5 尾巴”的机制:
+    //   如果内部 orphan event 在 completion 之前已经进入 `ralph#1.pending`,
+    //   它是否会在 `LOOP_COMPLETE` 之后继续起跑成下一份 ralph job。
+    // - 修复后,这类 prequeued orphan event 不应再在 completion 后起跑。
+    // =====================================================================
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.max_runtime_seconds = 10;
+    config.core = config.core.with_workspace_root(temp_dir.path());
+
+    config.hats.insert(
+        "emitter".to_string(),
+        hat_config("Emitter", vec!["build.task"], 1),
+    );
+
+    let starts: Arc<tokio::sync::Mutex<HashMap<String, usize>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    let executor = QueuedRalphJobAfterCompletionExecutor {
+        starts: Arc::clone(&starts),
+    };
+
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), Arc::new(executor))
+        .expect("ParallelSupervisor::new should succeed");
+    supervisor.event_logger = EventLogger::new(events_path);
+
+    let result = supervisor
+        .run(false)
+        .await
+        .expect("supervisor run should succeed");
+
+    let got = starts.lock().await.clone();
+    let get = |id: &str| got.get(id).copied().unwrap_or(0);
+
+    assert_eq!(
+        result.termination,
+        Some(TerminationReason::CompletionPromise),
+        "test should still end via completion promise"
+    );
+    assert_eq!(get("emitter#1"), 1, "emitter should run exactly once");
+    assert_eq!(
+        get("ralph#1"),
+        2,
+        "completion should freeze prequeued ralph pending jobs instead of starting a tail job"
+    );
+}
+
 #[async_trait::async_trait]
 impl HatJobExecutor for CompletionStopsRoutingExecutor {
     async fn execute(
@@ -835,6 +901,68 @@ status: ok
 
             // collector：理论上不应被触发；如果触发了，输出任意文本即可（用于定位）。
             "collector#1" => "collector saw build.done\n".to_string(),
+
+            _ => String::new(),
+        };
+
+        Ok(HatJobResult {
+            output_for_parsing: output,
+            observed_stderr: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for QueuedRalphJobAfterCompletionExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
+    ) -> anyhow::Result<HatJobResult> {
+        let instance_id = job.instance_id.to_string();
+        let now = {
+            let mut starts = self.starts.lock().await;
+            let entry = starts.entry(instance_id.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+
+        let output = match instance_id.as_str() {
+            // 第一次：先触发一个 worker，让它一次性把两条 orphan event 送回 ralph。
+            "ralph#1" if now == 1 => r#"<event topic="build.task">
+Task: queue two orphan events back to ralph
+</event>
+"#
+            .to_string(),
+
+            // 第二次：延迟一点再输出 completion，确保第二条 orphan event
+            // 有机会在 ralph#1 仍处于 Running 时进入 pending。
+            "ralph#1" if now == 2 => {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                "LOOP_COMPLETE\n".to_string()
+            }
+
+            // 第三次：如果能跑到这里，就证明“completion 前已排队的 ralph job”
+            // 会在 completion 之后再次起跑。
+            "ralph#1" => "queued orphan event started a post-completion ralph job\n".to_string(),
+
+            // worker 一次性发两条 orphan event：
+            // - 第一条触发 ralph#1 第二次 job
+            // - 第二条在 ralph#1 Running 时进入同一实例 pending
+            "emitter#1" => r#"<event topic="routing.escalate">
+first orphan
+</event>
+<event topic="routing.escalate">
+second orphan
+</event>
+"#
+            .to_string(),
 
             _ => String::new(),
         };
@@ -1092,6 +1220,30 @@ fn make_supervisor(
     supervisor
 }
 
+fn runtime_delivery_records(events_path: &PathBuf) -> Vec<RuntimeDeliveryRecord> {
+    EventHistory::new(events_path)
+        .filter_by_topic(TOPIC_RUNTIME_DELIVERY)
+        .expect("runtime.delivery records should be readable")
+        .into_iter()
+        .map(|record| {
+            serde_json::from_str::<RuntimeDeliveryRecord>(&record.payload)
+                .expect("runtime.delivery payload should be valid JSON")
+        })
+        .collect()
+}
+
+fn runtime_lifecycle_records(events_path: &PathBuf) -> Vec<RuntimeLifecycleRecord> {
+    EventHistory::new(events_path)
+        .filter_by_topic(TOPIC_RUNTIME_LIFECYCLE)
+        .expect("runtime.lifecycle records should be readable")
+        .into_iter()
+        .map(|record| {
+            serde_json::from_str::<RuntimeLifecycleRecord>(&record.payload)
+                .expect("runtime.lifecycle payload should be valid JSON")
+        })
+        .collect()
+}
+
 async fn capture_timeout_for_instance(
     mut config: RalphConfig,
     target_instance: &str,
@@ -1172,7 +1324,7 @@ async fn parallel_writer_and_tester_run_concurrently() {
         seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     };
 
-    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path.clone());
 
     // 直接路由一条 build.task，验证两个实例同时进入 execute
     let event = Event::new("build.task", "do it").with_id("e1");
@@ -1207,7 +1359,7 @@ async fn trigger_routing_delivers_to_single_instance_per_hat() {
         seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     };
 
-    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path.clone());
 
     let event = Event::new("build.task", "do it").with_id("e-single");
     supervisor
@@ -1248,7 +1400,7 @@ async fn spawn_instance_forces_new_dynamic_instance_and_delivers_direct() {
         seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     };
 
-    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path.clone());
 
     // 显式请求 spawn 一个新实例(上下文隔离),并直达投递.
     let event = Event::new("build.task", "hello")
@@ -1276,6 +1428,244 @@ async fn spawn_instance_forces_new_dynamic_instance_and_delivers_direct() {
             .instances
             .contains_key(&HatInstanceId::new("writer#1"))
     );
+
+    let lifecycle_records = runtime_lifecycle_records(&events_path);
+    let spawn_record = lifecycle_records
+        .iter()
+        .find(|record| {
+            record.instance_id == HatInstanceId::new("writer#2")
+                && record.kind == RuntimeLifecycleKind::Spawn
+        })
+        .expect("dynamic spawn should be durably recorded");
+    assert!(spawn_record.dynamic);
+    assert_eq!(spawn_record.source_event_id.as_deref(), Some("e-spawn-1"));
+    assert_eq!(
+        spawn_record.reason.as_deref(),
+        Some("explicit_spawn_instance")
+    );
+}
+
+#[tokio::test]
+async fn direct_delivery_writes_runtime_delivery_record() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path.clone());
+
+    let event = Event::new("build.task", "direct")
+        .with_id("e-direct")
+        .with_target_instance(HatInstanceId::new("writer#1"));
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let delivery_records = runtime_delivery_records(&events_path);
+    let delivery = delivery_records
+        .iter()
+        .find(|record| record.event_id.as_deref() == Some("e-direct"))
+        .expect("direct delivery should be durably recorded");
+    assert_eq!(delivery.recipient, HatInstanceId::new("writer#1"));
+    assert_eq!(delivery.mode, RuntimeDeliveryKind::Direct);
+}
+
+#[tokio::test]
+async fn fanout_delivery_writes_one_runtime_delivery_record_per_recipient() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+    config.hats.insert(
+        "tester".to_string(),
+        hat_config("Tester", vec!["build.task"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 2,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path.clone());
+
+    let event = Event::new("build.task", "fanout").with_id("e-fanout");
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let mut recipients: Vec<String> = runtime_delivery_records(&events_path)
+        .into_iter()
+        .filter(|record| record.event_id.as_deref() == Some("e-fanout"))
+        .map(|record| {
+            assert_eq!(record.mode, RuntimeDeliveryKind::Fanout);
+            record.recipient.to_string()
+        })
+        .collect();
+    recipients.sort();
+    assert_eq!(
+        recipients,
+        vec!["tester#1".to_string(), "writer#1".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn queue_delivery_writes_runtime_delivery_record() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 2),
+    );
+    config.parallel.topic_contracts.insert(
+        "build.task".to_string(),
+        TopicContract {
+            delivery: Delivery::Queue,
+            audience: AudienceSelector {
+                instances: vec![
+                    HatInstanceId::new("writer#1"),
+                    HatInstanceId::new("writer#2"),
+                ],
+                ..Default::default()
+            },
+            queue_selection: QueueSelection::Deterministic,
+            missing_instance_policy: MissingInstancePolicy::Queue,
+        },
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path.clone());
+
+    let event = Event::new("build.task", "queue").with_id("e-queue");
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let delivery = runtime_delivery_records(&events_path)
+        .into_iter()
+        .find(|record| record.event_id.as_deref() == Some("e-queue"))
+        .expect("queue delivery should be durably recorded");
+    assert_eq!(delivery.mode, RuntimeDeliveryKind::Queue);
+    assert!(matches!(
+        delivery.recipient.as_str(),
+        "writer#1" | "writer#2"
+    ));
+}
+
+#[tokio::test]
+async fn reply_delivery_writes_runtime_delivery_record() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "planner".to_string(),
+        hat_config("Planner", vec!["planning.request"], 1),
+    );
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.question"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 2,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path.clone());
+
+    let request = Event::new("build.question", "question")
+        .with_id("req-1")
+        .with_source_instance(HatInstanceId::new("planner#1"))
+        .with_target_instance(HatInstanceId::new("writer#1"));
+    supervisor
+        .route_event(request)
+        .await
+        .expect("request route should succeed");
+
+    let reply = Event::new(TOPIC_REPLY_HAT_MESSAGE, "answer")
+        .with_id("reply-1")
+        .with_reply("req-1")
+        .with_source_instance(HatInstanceId::new("writer#1"));
+    supervisor
+        .route_event(reply)
+        .await
+        .expect("reply route should succeed");
+
+    let delivery = runtime_delivery_records(&events_path)
+        .into_iter()
+        .find(|record| record.event_id.as_deref() == Some("reply-1"))
+        .expect("reply delivery should be durably recorded");
+    assert_eq!(delivery.recipient, HatInstanceId::new("planner#1"));
+    assert_eq!(delivery.mode, RuntimeDeliveryKind::Reply);
+    assert_eq!(delivery.reply.as_deref(), Some("req-1"));
+}
+
+#[tokio::test]
+async fn lifecycle_controls_write_freeze_cancel_shutdown_records() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path.clone());
+
+    supervisor.freeze_pending_on_all_instances();
+    supervisor.shutdown_instances().await;
+
+    let lifecycle_records = runtime_lifecycle_records(&events_path);
+    for kind in [
+        RuntimeLifecycleKind::Freeze,
+        RuntimeLifecycleKind::Cancel,
+        RuntimeLifecycleKind::Shutdown,
+    ] {
+        assert!(
+            lifecycle_records.iter().any(|record| record.kind == kind
+                && record.instance_id == HatInstanceId::new("writer#1")),
+            "expected lifecycle control record for {:?}",
+            kind
+        );
+    }
 }
 
 #[tokio::test]
@@ -1611,7 +2001,8 @@ async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
     let events_path = temp_dir.path().join("events.jsonl");
 
     // 验证编译期语义：从已内嵌 overlay 中提取一行稳定文本作为断言锚点。
-    let all_hat_overlay = crate::prompt_overlay::load_all_hat_prompt()
+    let all_hat_overlay = crate::prompt_overlay::load_all_hat_prompt(&CoreConfig::default())
+        .expect("compiled all-hat overlay should load")
         .expect("compiled all-hat overlay should not be empty");
     let overlay_anchor = all_hat_overlay
         .lines()
@@ -1723,7 +2114,7 @@ async fn parallel_injects_human_message_subscription_for_strict_target_validatio
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<HatInstanceCommand>(8);
     supervisor
         .instances
-        .insert(instance_id.clone(), HatInstanceHandle { cmd_tx });
+        .insert(instance_id.clone(), HatInstanceHandle::from_cmd_tx(cmd_tx));
 
     let event = Event::new("human.message", "hello")
         .with_id("e-human")
@@ -1774,7 +2165,7 @@ async fn parallel_does_not_route_hat_sourced_human_message_to_prevent_self_chat_
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<HatInstanceCommand>(8);
     supervisor
         .instances
-        .insert(instance_id.clone(), HatInstanceHandle { cmd_tx });
+        .insert(instance_id.clone(), HatInstanceHandle::from_cmd_tx(cmd_tx));
 
     // 模拟 "hat -> human" 的回复事件:
     // - topic 仍然是 human.message
@@ -1825,7 +2216,7 @@ async fn parallel_does_not_route_reply_human_message_topic() {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<HatInstanceCommand>(8);
     supervisor
         .instances
-        .insert(instance_id.clone(), HatInstanceHandle { cmd_tx });
+        .insert(instance_id.clone(), HatInstanceHandle::from_cmd_tx(cmd_tx));
 
     // reply.human.message 是“输出专用 topic”，只用于 UI 展示，不应再被路由回 hats。
     let event = Event::new("reply.human.message", "hello to human")
@@ -2761,10 +3152,11 @@ async fn queue_decision_is_loaded_from_history_and_not_recomputed() {
         .expect("channel closed");
     assert_eq!(got, "writer#1");
 
-    // 文件里仍然只有 1 条 dispatch.decision（没有新增记录）
-    let content = std::fs::read_to_string(&events_path).unwrap();
-    let lines = content.lines().filter(|l| !l.trim().is_empty()).count();
-    assert_eq!(lines, 1);
+    // 文件里仍然只有 1 条 dispatch.decision（允许 V2 runtime.lifecycle 旁路记录存在）。
+    let dispatch_decisions = EventHistory::new(&events_path)
+        .filter_by_topic(TOPIC_DISPATCH_DECISION)
+        .expect("dispatch.decision records should be readable");
+    assert_eq!(dispatch_decisions.len(), 1);
 }
 
 // =====================================================================

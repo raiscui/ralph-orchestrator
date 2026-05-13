@@ -932,6 +932,64 @@ mod tests {
     }
 
     #[test]
+    fn test_configure_mock_mode_uses_stdin_prompt_mode_for_mock_cli() {
+        let workspace = test_workspace_base("mock-mode-stdin-contract");
+        cleanup_workspace(&workspace);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("ralph.yml"),
+            "cli:\n  backend: claude\n  max_iterations: 1\n",
+        )
+        .unwrap();
+
+        let cassette_dir = workspace.join("cassettes");
+        std::fs::create_dir_all(&cassette_dir).unwrap();
+        std::fs::write(
+            cassette_dir.join("mock-1-claude.jsonl"),
+            "{\"ts\":1,\"event\":\"ux.terminal.write\",\"data\":{\"bytes\":\"T0s=\",\"stdout\":true,\"offset_ms\":0}}\n",
+        )
+        .unwrap();
+
+        let runner = TestRunner::new(WorkspaceManager::new(workspace.join("out")), vec![]);
+        let mock_config = MockConfig::new(&cassette_dir);
+        runner
+            .configure_mock_mode(&workspace, "mock-1", Backend::Claude, &mock_config)
+            .unwrap();
+
+        let config_text = std::fs::read_to_string(workspace.join("ralph.yml")).unwrap();
+        let config: serde_yaml::Value = serde_yaml::from_str(&config_text).unwrap();
+        let cli = config.get("cli").and_then(|v| v.as_mapping()).unwrap();
+        let prompt_mode = cli
+            .get(serde_yaml::Value::String("prompt_mode".to_string()))
+            .and_then(|v| v.as_str());
+        let args = cli
+            .get(serde_yaml::Value::String("args".to_string()))
+            .and_then(|v| v.as_sequence())
+            .unwrap();
+
+        assert_eq!(
+            prompt_mode,
+            Some("stdin"),
+            "mock-cli custom backend must receive prompt via stdin so clap does not see extra argv"
+        );
+        assert!(
+            args.iter()
+                .filter_map(|v| v.as_str())
+                .any(|arg| arg == "mock-cli"),
+            "mock backend args should still invoke the mock-cli subcommand"
+        );
+        assert!(
+            !args
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|arg| arg == "mock prompt"),
+            "scenario prompt must not be serialized into mock-cli argv"
+        );
+
+        cleanup_workspace(&workspace);
+    }
+
+    #[test]
     fn test_runner_matching_scenarios_with_filter() {
         let workspace = test_workspace_base("matching-filter");
         let workspace_mgr = WorkspaceManager::new(workspace.clone());

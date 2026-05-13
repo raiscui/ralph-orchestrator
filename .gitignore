@@ -90,3 +90,4 @@ PROMPT.md
 .agent/
 !.agent/memories.md
 !.agent/tasks.jsonl
+.omx/

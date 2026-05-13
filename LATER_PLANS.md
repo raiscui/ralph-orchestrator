@@ -459,3 +459,16 @@
   - 优先选能写出固定终态字段的场景
   - 对高漂移 lane 默认给 literal 单行模板
   - live E2E 仍优先使用 stdout out 行提取 final payload
+
+## [2026-03-18 18:02:00] [Session ID: 2d1fc46f-d36c-45b6-af3b-ab3318b8c122] 默认资源仓 / selector preset 系统(探索结论待落地)
+
+- 建议分阶段推进:
+  1. 统一 `config source` 与 `prompt source` 的来源解析优先级,先补齐“无 `PROMPT.md` / 无 `ralph.yml`”启动闭环。
+  2. 引入 resource catalog,把 builtin presets、minimal presets、prompt templates、example bundles 做成结构化索引。
+  3. 引入用户级资源目录(实现层建议走 `ProjectDirs`,如有需要再给 `~/.ralph` 别名入口)。
+  4. 若要让 Ralph 自选 preset,优先实现 bootstrap selector -> resolved config -> real run 的两阶段模式。
+  5. 多 preset 混编只在定义清楚 merge 规则后开放,尤其要先处理 `cli` / `event_loop` / `hats` / `parallel` / `events` 的冲突策略。
+
+- 特别提醒:
+  - 不建议直接做“正式 run 中途热切换整套 `ralph.yml`”。
+  - `examples/` 更像 bundle/template,未必都适合作为默认 selector catalog 的候选 workflow,最好单独分类。

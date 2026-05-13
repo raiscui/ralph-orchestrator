@@ -1,0 +1,442 @@
+schema_version = 1
+
+[[assets]]
+id = "agents-root-contract"
+type = "root_contract"
+path = "AGENTS.md"
+status = "active"
+summary = "Root operating contract for repository agents."
+required_in_agents_index = false
+
+[[assets]]
+id = "project-experience"
+type = "experience"
+path = "EXPERIENCE.md"
+status = "active"
+summary = "Project-level reusable lessons extracted from six-file contexts and continuous-learning runs."
+required_in_agents_index = true
+
+[[assets]]
+id = "agent-guidance-schema"
+type = "schema_doc"
+path = "docs/agent-guidance-schema.md"
+status = "active"
+summary = "Schema for classifying and maintaining agent-facing guidance assets."
+required_in_agents_index = true
+
+[[assets]]
+id = "prompt-contract"
+type = "prompt_contract"
+path = "docs/prompt-contract.md"
+status = "active"
+summary = "Minimum behavior, evidence, scope, and escalation contract for prompt-like assets."
+required_in_agents_index = true
+
+[[assets]]
+id = "oh-my-codex-learning-analysis"
+type = "report"
+path = "specs/oh-my-codex-learning-analysis.md"
+status = "active"
+summary = "Comparative learning report that motivates the guidance governance sequence."
+required_in_agents_index = true
+
+[[assets]]
+id = "agent-guidance-contracts-change"
+type = "openspec_change"
+path = "openspec/changes/archive/2026-05-12-agent-guidance-contracts/proposal.md"
+status = "archived"
+summary = "OpenSpec change defining guidance schema, prompt contract, manifest, and verifier work."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-code-assist"
+type = "skill"
+path = ".agents/skills/code-assist/SKILL.md"
+status = "active"
+summary = "This sop guides the implementation of code tasks using test-driven development principles, following a structured Explore, Plan, Code, Commi"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-code-task-generator"
+type = "skill"
+path = ".agents/skills/code-task-generator/SKILL.md"
+status = "active"
+summary = "This sop generates structured code task files from rough descriptions, ideas, or PDD implementation plans. It automatically detects the inpu"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-codebase-summary"
+type = "skill"
+path = ".agents/skills/codebase-summary/SKILL.md"
+status = "active"
+summary = "This sop analyzes a codebase and generates comprehensive documentation including structured metadata files that describe the system architec"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-create-hat-collection"
+type = "skill"
+path = ".agents/skills/create-hat-collection/SKILL.md"
+status = "active"
+summary = "Generates new Ralph hat collection presets through guided conversation. Asks clarifying questions, validates against schema constraints, and"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-eval"
+type = "skill"
+path = ".agents/skills/eval/SKILL.md"
+status = "active"
+summary = "EvalKit is a conversational evaluation framework for AI agents that guides you through creating robust evaluations using the Strands Evals S"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-evaluate-presets"
+type = "skill"
+path = ".agents/skills/evaluate-presets/SKILL.md"
+status = "active"
+summary = "Use when testing Ralph's hat collection presets, validating preset configurations, or auditing the preset library for bugs and UX issues."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-find-code-tasks"
+type = "skill"
+path = ".agents/skills/find-code-tasks/SKILL.md"
+status = "active"
+summary = "Lists all code tasks in the repository with their status, dates, and metadata. Useful for getting an overview of pending work or finding spe"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-apply-change"
+type = "skill"
+path = ".agents/skills/openspec-apply-change/SKILL.md"
+status = "active"
+summary = "Implement tasks from an OpenSpec change. Use when the user wants to start implementing, continue implementation, or work through tasks."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-archive-change"
+type = "skill"
+path = ".agents/skills/openspec-archive-change/SKILL.md"
+status = "active"
+summary = "Archive a completed change in the experimental workflow. Use when the user wants to finalize and archive a change after implementation is co"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-bulk-archive-change"
+type = "skill"
+path = ".agents/skills/openspec-bulk-archive-change/SKILL.md"
+status = "active"
+summary = "Archive multiple completed changes at once. Use when archiving several parallel changes."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-continue-change"
+type = "skill"
+path = ".agents/skills/openspec-continue-change/SKILL.md"
+status = "active"
+summary = "Continue working on an OpenSpec change by creating the next artifact. Use when the user wants to progress their change, create the next arti"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-explore"
+type = "skill"
+path = ".agents/skills/openspec-explore/SKILL.md"
+status = "active"
+summary = "Enter explore mode - a thinking partner for exploring ideas, investigating problems, and clarifying requirements. Use when the user wants to"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-ff-change"
+type = "skill"
+path = ".agents/skills/openspec-ff-change/SKILL.md"
+status = "active"
+summary = "Fast-forward through OpenSpec artifact creation. Use when the user wants to quickly create all artifacts needed for implementation without s"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-new-change"
+type = "skill"
+path = ".agents/skills/openspec-new-change/SKILL.md"
+status = "active"
+summary = "Start a new OpenSpec change using the experimental artifact workflow. Use when the user wants to create a new feature, fix, or modification "
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-onboard"
+type = "skill"
+path = ".agents/skills/openspec-onboard/SKILL.md"
+status = "active"
+summary = "Guided onboarding for OpenSpec - walk through a complete workflow cycle with narration and real codebase work."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-sync-specs"
+type = "skill"
+path = ".agents/skills/openspec-sync-specs/SKILL.md"
+status = "active"
+summary = "Sync delta specs from a change to main specs. Use when the user wants to update main specs with changes from a delta spec, without archiving"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-openspec-verify-change"
+type = "skill"
+path = ".agents/skills/openspec-verify-change/SKILL.md"
+status = "active"
+summary = "Verify implementation matches change artifacts. Use when the user wants to validate that implementation is complete, correct, and coherent b"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-pdd"
+type = "skill"
+path = ".agents/skills/pdd/SKILL.md"
+status = "active"
+summary = "This sop guides you through the process of transforming a rough idea into a detailed design document with an implementation plan and todo li"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-pr-demo"
+type = "skill"
+path = ".agents/skills/pr-demo/SKILL.md"
+status = "active"
+summary = "Use when creating animated demos (GIFs) for pull requests or documentation. Covers terminal recording with asciinema and conversion to GIF/S"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-ralph-memories"
+type = "skill"
+path = ".agents/skills/ralph-memories/SKILL.md"
+status = "active"
+summary = "Use when discovering codebase patterns, making architectural decisions, solving recurring problems, or learning project-specific context tha"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-ralph-tools"
+type = "skill"
+path = ".agents/skills/ralph-tools/SKILL.md"
+status = "active"
+summary = "Use when managing runtime tasks or memories during Ralph orchestration runs"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-release-bump"
+type = "skill"
+path = ".agents/skills/release-bump/SKILL.md"
+status = "active"
+summary = "Use when bumping ralph-orchestrator version for a new release, after fixes are committed and ready to publish"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-agents-skills-tui-validate"
+type = "skill"
+path = ".agents/skills/tui-validate/SKILL.md"
+status = "active"
+summary = "Validates Terminal User Interface (TUI) output using freeze for screenshot capture and LLM-as-judge for semantic validation. Supports both v"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-apply-change"
+type = "skill"
+path = ".codex/skills/openspec-apply-change/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-apply-change; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-archive-change"
+type = "skill"
+path = ".codex/skills/openspec-archive-change/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-archive-change; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-bulk-archive-change"
+type = "skill"
+path = ".codex/skills/openspec-bulk-archive-change/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-bulk-archive-change; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-continue-change"
+type = "skill"
+path = ".codex/skills/openspec-continue-change/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-continue-change; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-explore"
+type = "skill"
+path = ".codex/skills/openspec-explore/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-explore; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-ff-change"
+type = "skill"
+path = ".codex/skills/openspec-ff-change/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-ff-change; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-new-change"
+type = "skill"
+path = ".codex/skills/openspec-new-change/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-new-change; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-onboard"
+type = "skill"
+path = ".codex/skills/openspec-onboard/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-onboard; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-sync-specs"
+type = "skill"
+path = ".codex/skills/openspec-sync-specs/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-sync-specs; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-openspec-verify-change"
+type = "skill"
+path = ".codex/skills/openspec-verify-change/SKILL.md"
+status = "archived"
+summary = "Archived duplicate skill catalog entry for openspec-verify-change; canonical active entry is registered earlier."
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-parallel-engine-autopilot"
+type = "skill"
+path = ".codex/skills/parallel-engine-autopilot/SKILL.md"
+status = "active"
+summary = "在已初始化的 Git 仓库内,无人值守运行 `ralph autopilot run` 或离线 `ralph autopilot analyze`,"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-llm-multi-agent-prompt-isolation"
+type = "skill"
+path = ".codex/skills/self-learning.llm-multi-agent-prompt-isolation/SKILL.md"
+status = "active"
+summary = "修复/规避多智能体（多角色）并行系统里“顶层 prompt 污染 worker”导致行为漂移的问题。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-openspec-requirement-first-sentence-must-shall"
+type = "skill"
+path = ".codex/skills/self-learning.openspec-requirement-first-sentence-must-shall/SKILL.md"
+status = "active"
+summary = "修复 OpenSpec 在归档 change 时的校验失败：`openspec archive` 报错 “Requirement must contain SHALL or MUST”。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-ralph-autopilot-agent-analysis-custom-backend"
+type = "skill"
+path = ".codex/skills/self-learning.ralph-autopilot-agent-analysis-custom-backend/SKILL.md"
+status = "active"
+summary = "修复/排查 `ralph autopilot run|analyze` 在 agent analysis 阶段因 custom backend 配置不完整而失败的问题。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-ralph-codex-app-server-steer-live-reply-two-turn"
+type = "skill"
+path = ".codex/skills/self-learning.ralph-codex-app-server-steer-live-reply-two-turn/SKILL.md"
+status = "active"
+summary = "修复/规避在 Ralph 并行模式 + 真实 Codex app-server 下验证 turn/steer 时出现的“有 ACK 但看起来无回复”的不稳定问题。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-ralph-e2e-mock-cli-segmented-replay"
+type = "skill"
+path = ".codex/skills/self-learning.ralph-e2e-mock-cli-segmented-replay/SKILL.md"
+status = "active"
+summary = "修复/避免 ralph-e2e 的 mock-mode 在“同一 instance 多次 job/迭代”场景下回放失真：旧 mock-cli 每次调用都会回放该 instance 的全部输出，"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-ralph-e2e-workspace-reuse-contamination"
+type = "skill"
+path = ".codex/skills/self-learning.ralph-e2e-workspace-reuse-contamination/SKILL.md"
+status = "active"
+summary = "修复 Ralph E2E 复跑污染：使用 `--keep-workspace`（或复用同一路径）后再次运行相同 scenario，会把历史 `.ralph/events.jsonl` 叠加到新 run，导致事件计数断言“虚假通过/虚假失败”。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-ralph-parallel-event-parser-stdout-only"
+type = "skill"
+path = ".codex/skills/self-learning.ralph-parallel-event-parser-stdout-only/SKILL.md"
+status = "active"
+summary = "修复 Ralph 并行模式下的“假事件/重复事件”问题：Codex/后端回显写到 stderr，包含 `<event ...>`，被 EventParser 误判为真实事件，导致路由与 E2E 统计波动。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-ralph-parallel-secondary-coordinator-prompt-drift"
+type = "skill"
+path = ".codex/skills/self-learning.ralph-parallel-secondary-coordinator-prompt-drift/SKILL.md"
+status = "active"
+summary = "修复/规避并行模式下动态创建的备用协调实例(例如 `ralph#2`)因缺少 coordinator prompt/护栏而发生 topic 漂移的问题。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-ralph-scratchpad-clear-truncate-not-delete"
+type = "skill"
+path = ".codex/skills/self-learning.ralph-scratchpad-clear-truncate-not-delete/SKILL.md"
+status = "active"
+summary = "修复 Ralph 在 fresh run 清理 scratchpad 时“误删文件”导致 `ralph run --continue` 直接失败的问题。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-ralph-starting-event-semantics"
+type = "skill"
+path = ".codex/skills/self-learning.ralph-starting-event-semantics/SKILL.md"
+status = "active"
+summary = "修复/避免 Ralph 中 `event_loop.starting_event` 语义被误读：把 starting_event 当作“初始化事件 topic / first event”。"
+required_in_agents_index = false
+
+[[assets]]
+id = "skill-codex-skills-self-learning-rust-utf8-safe-string-truncation"
+type = "skill"
+path = ".codex/skills/self-learning.rust-utf8-safe-string-truncation/SKILL.md"
+status = "active"
+summary = "Use when Rust panics with \"byte index ... is not a char boundary\", or when code truncates UTF-8 strings by a token/character budget."
+required_in_agents_index = false
+
+[[assets]]
+id = "agent-guidance-catalog-cli-change"
+type = "openspec_change"
+path = "openspec/changes/archive/2026-05-12-agent-guidance-catalog-cli/proposal.md"
+status = "archived"
+summary = "OpenSpec change extending guidance governance to project skill catalog and standalone verifier CLI."
+required_in_agents_index = false
+
+[[assets]]
+id = "prompt-contract-runtime-alignment-change"
+type = "openspec_change"
+path = "openspec/changes/archive/2026-05-12-prompt-contract-runtime-alignment/proposal.md"
+status = "archived"
+summary = "OpenSpec change aligning prompt contract output fields with InstructionBuilder and hat prompt tests."
+required_in_agents_index = false
+
+
+[[assets]]
+id = "state-operation-layer-change"
+type = "openspec_change"
+path = "openspec/changes/archive/2026-05-12-state-operation-layer/proposal.md"
+status = "archived"
+summary = "OpenSpec change defining a unified runtime workflow state operation layer contract."
+required_in_agents_index = false
+
+[[assets]]
+id = "ralph-state-cli-adapter-change"
+type = "openspec_change"
+path = "openspec/changes/archive/2026-05-12-ralph-state-cli-adapter/proposal.md"
+status = "archived"
+summary = "OpenSpec change adding a CLI adapter for runtime workflow state status/read/clear over StateOperationStore."
+required_in_agents_index = false

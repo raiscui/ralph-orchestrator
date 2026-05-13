@@ -651,18 +651,41 @@ mod duration_serde {
 fn truncate_with_notice(input: &str, max_chars: usize) -> String {
     // 说明：
     // - 这里按“字符数”裁剪,避免把多字节 UTF-8 截断成非法字节序列。
-    // - 为了让排障者知道这是被截断的,会追加一个固定尾注。
+    // - 为了让排障者知道这是被截断的,会追加一个固定提示。
+    // - 以前只保留“前半段”,像 `LOOP_COMPLETE` 这类收尾证据很容易被直接截掉。
+    // - 现在改成同时保留“开头 + 结尾”,方便排查 `job N` 尾巴、最终 completion 等现象。
     let count = input.chars().count();
     if count <= max_chars {
         return input.to_string();
     }
 
-    let mut out = input.chars().take(max_chars).collect::<String>();
-    out.push_str(&format!(
-        "\n... [truncated for e2e artifact, {} chars total]\n",
+    let notice = format!(
+        "\n... [truncated for e2e artifact, {} chars total; kept head+tail]\n",
         count
-    ));
-    out
+    );
+    let notice_chars = notice.chars().count();
+
+    // 兜底：
+    // - 如果预算特别小,至少保留一小段前缀 + 截断说明。
+    // - 避免因为 notice 太长,把真实内容完全挤没。
+    if max_chars <= notice_chars + 8 {
+        let keep = max_chars.saturating_sub(notice_chars).max(1);
+        let mut out = input.chars().take(keep).collect::<String>();
+        out.push_str(&notice);
+        return out;
+    }
+
+    let payload_budget = max_chars.saturating_sub(notice_chars);
+    let head_budget = payload_budget / 2;
+    let tail_budget = payload_budget.saturating_sub(head_budget);
+
+    let head = input.chars().take(head_budget).collect::<String>();
+    let tail = input
+        .chars()
+        .skip(count.saturating_sub(tail_budget))
+        .collect::<String>();
+
+    format!("{head}{notice}{tail}")
 }
 
 #[cfg(test)]
@@ -798,6 +821,36 @@ mod tests {
         let executor = RalphExecutor::new(PathBuf::from("/tmp"));
         let reason = executor.detect_termination_reason("normal output");
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn test_truncate_with_notice_preserves_head_and_tail() {
+        let input = format!(
+            "{}{}",
+            "A".repeat(120),
+            "TAIL: LOOP_COMPLETE / ralph#1 job=5"
+        );
+
+        let truncated = truncate_with_notice(&input, 140);
+
+        assert!(
+            truncated.starts_with(&"A".repeat(16)),
+            "truncated artifact should still preserve the head"
+        );
+        assert!(
+            truncated.contains("TAIL: LOOP_COMPLETE / ralph#1 job=5"),
+            "truncated artifact should preserve tail evidence for debugging"
+        );
+        assert!(
+            truncated.contains("[truncated for e2e artifact"),
+            "truncated artifact should include an explicit notice"
+        );
+    }
+
+    #[test]
+    fn test_truncate_with_notice_returns_original_when_short_enough() {
+        let input = "short output with LOOP_COMPLETE";
+        assert_eq!(truncate_with_notice(input, 200), input);
     }
 
     #[tokio::test]

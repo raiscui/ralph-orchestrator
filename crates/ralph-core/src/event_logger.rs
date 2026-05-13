@@ -3,7 +3,10 @@
 //! Logs all events to `.ralph/events.jsonl` as specified in the event-loop spec.
 //! The observer pattern allows hooking into the event bus without modifying routing.
 
-use ralph_proto::{Event, HatId, QueueDecisionRecord, TOPIC_DISPATCH_DECISION};
+use ralph_proto::{
+    Event, HatId, QueueDecisionRecord, RuntimeDeliveryRecord, RuntimeLifecycleRecord,
+    TOPIC_DISPATCH_DECISION, TOPIC_RUNTIME_DELIVERY, TOPIC_RUNTIME_LIFECYCLE,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -115,7 +118,10 @@ impl EventRecord {
     /// - 但少数事件 payload 是“replay 需要的结构化数据”（例如 queue 决策记录），
     ///   一旦截断就可能导致 JSON 不可解析，从而破坏回放确定性。
     fn should_truncate_payload(topic: &str) -> bool {
-        topic != TOPIC_DISPATCH_DECISION
+        !matches!(
+            topic,
+            TOPIC_DISPATCH_DECISION | TOPIC_RUNTIME_DELIVERY | TOPIC_RUNTIME_LIFECYCLE
+        )
     }
 
     /// Creates a new event record.
@@ -265,6 +271,42 @@ impl EventLogger {
         self.log_event(iteration, hat, &event, None)
     }
 
+    /// 记录一次真实 runtime delivery（用于 V2 durable replay graph，不允许截断）。
+    pub fn log_runtime_delivery(
+        &mut self,
+        iteration: u32,
+        hat: &str,
+        delivery: &RuntimeDeliveryRecord,
+    ) -> std::io::Result<()> {
+        let payload = serde_json::to_string(delivery).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to serialize RuntimeDeliveryRecord: {e}"),
+            )
+        })?;
+
+        let event = Event::new(TOPIC_RUNTIME_DELIVERY, payload);
+        self.log_event(iteration, hat, &event, None)
+    }
+
+    /// 记录一次 runtime lifecycle / control 动作（用于 V2 durable replay graph，不允许截断）。
+    pub fn log_runtime_lifecycle(
+        &mut self,
+        iteration: u32,
+        hat: &str,
+        lifecycle: &RuntimeLifecycleRecord,
+    ) -> std::io::Result<()> {
+        let payload = serde_json::to_string(lifecycle).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to serialize RuntimeLifecycleRecord: {e}"),
+            )
+        })?;
+
+        let event = Event::new(TOPIC_RUNTIME_LIFECYCLE, payload);
+        self.log_event(iteration, hat, &event, None)
+    }
+
     /// Returns the path to the log file.
     pub fn path(&self) -> &Path {
         &self.path
@@ -352,7 +394,7 @@ impl EventHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ralph_proto::HatInstanceId;
+    use ralph_proto::{HatInstanceId, HatInstanceState, RuntimeDeliveryKind, RuntimeLifecycleKind};
     use tempfile::TempDir;
 
     fn make_event(topic: &str, payload: &str) -> Event {
@@ -458,6 +500,22 @@ mod tests {
         assert!(record.payload.contains("[truncated"));
         // Verify the payload is valid UTF-8 (would panic on iteration if not)
         for _ in record.payload.chars() {}
+    }
+
+    #[test]
+    fn test_event_record_preserves_id_and_reply() {
+        let event = make_event("reply.hat.message", "answer")
+            .with_id("evt-answer-1")
+            .with_reply("evt-request-1");
+        let record = EventRecord::new(1, "responder", &event, None);
+
+        assert_eq!(record.id.as_deref(), Some("evt-answer-1"));
+        assert_eq!(record.reply.as_deref(), Some("evt-request-1"));
+
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: EventRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id.as_deref(), Some("evt-answer-1"));
+        assert_eq!(parsed.reply.as_deref(), Some("evt-request-1"));
     }
 
     #[test]
@@ -650,5 +708,55 @@ mod tests {
             serde_json::from_str(&records[0].payload).expect("Payload should be valid JSON");
         assert_eq!(parsed.chosen_instance, candidates[0]);
         assert_eq!(parsed.candidates.len(), candidates.len());
+    }
+
+    #[test]
+    fn test_runtime_durable_payloads_are_not_truncated() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("events.jsonl");
+
+        let mut logger = EventLogger::new(&path);
+        let long_topic = format!("build.{}", "very_long_topic_".repeat(80));
+        let delivery = RuntimeDeliveryRecord::new(
+            Some("event-runtime-delivery".to_string()),
+            None,
+            long_topic,
+            Some(HatInstanceId::new("planner#1")),
+            HatInstanceId::new("writer#1"),
+            RuntimeDeliveryKind::Fanout,
+        );
+        let lifecycle = RuntimeLifecycleRecord::new(
+            HatInstanceId::new("writer#2"),
+            RuntimeLifecycleKind::Spawn,
+        )
+        .with_state(HatInstanceState::Created)
+        .with_dynamic(true)
+        .with_source_event_id("event-runtime-delivery")
+        .with_reason("explicit_spawn_instance");
+
+        logger
+            .log_runtime_delivery(0, "supervisor", &delivery)
+            .unwrap();
+        logger
+            .log_runtime_lifecycle(0, "supervisor", &lifecycle)
+            .unwrap();
+
+        let history = EventHistory::new(&path);
+        let records = history.read_all().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].topic, TOPIC_RUNTIME_DELIVERY);
+        assert_eq!(records[1].topic, TOPIC_RUNTIME_LIFECYCLE);
+        assert!(!records[0].payload.contains("[truncated"));
+        assert!(!records[1].payload.contains("[truncated"));
+
+        let parsed_delivery: RuntimeDeliveryRecord =
+            serde_json::from_str(&records[0].payload).unwrap();
+        let parsed_lifecycle: RuntimeLifecycleRecord =
+            serde_json::from_str(&records[1].payload).unwrap();
+        assert_eq!(parsed_delivery.recipient, HatInstanceId::new("writer#1"));
+        assert_eq!(parsed_delivery.mode, RuntimeDeliveryKind::Fanout);
+        assert_eq!(parsed_lifecycle.instance_id, HatInstanceId::new("writer#2"));
+        assert_eq!(parsed_lifecycle.kind, RuntimeLifecycleKind::Spawn);
+        assert_eq!(parsed_lifecycle.state, Some(HatInstanceState::Created));
     }
 }

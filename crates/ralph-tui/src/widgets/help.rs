@@ -62,13 +62,10 @@ pub fn render(f: &mut Frame, area: Rect) {
             Span::raw("    Next/prev match"),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            "Mouse (parallel):",
-            Style::default().fg(Color::Yellow),
-        )),
+        Line::from(Span::styled("Mouse:", Style::default().fg(Color::Yellow))),
         Line::from(vec![
             Span::styled("  Click", Style::default().fg(Color::Cyan)),
-            Span::raw("  Select instance / gate / focus chat"),
+            Span::raw("  Select output / instance / gate / focus chat"),
         ]),
         Line::from(vec![
             Span::styled("  Drag", Style::default().fg(Color::Cyan)),
@@ -94,7 +91,7 @@ pub fn render(f: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  y", Style::default().fg(Color::Cyan)),
-            Span::raw("      Copy current selection (parallel)"),
+            Span::raw("      Copy current output selection"),
         ]),
         Line::from(vec![
             Span::styled("  p", Style::default().fg(Color::Cyan)),

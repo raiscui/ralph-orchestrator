@@ -7,7 +7,7 @@
 use crate::codex_app_server_session::CodexAppServerRuntime;
 use crate::codex_mcp_session::CodexMcpRuntime;
 use anyhow::{Context, Result};
-use ralph_adapters::CliBackend;
+use ralph_adapters::{CliBackend, scrub_codex_parent_session_env_tokio};
 use ralph_core::{
     HatJob, HatJobControl, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend,
     OutputStream,
@@ -32,6 +32,7 @@ use tracing::{debug, warn};
 
 use crate::display::colors;
 use crate::process_management;
+use crate::runtime_graph::RuntimeGraphRecorder;
 use crate::{ColorMode, Verbosity};
 
 const PARALLEL_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -169,6 +170,7 @@ impl HatJobExecutor for CliHatJobExecutor {
         command.args(&args);
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        scrub_codex_parent_session_env_tokio(&mut command, &cmd);
 
         // Unix: 让每个 job 成为一个新的进程组 leader。
         //
@@ -404,10 +406,103 @@ impl CliHatJobExecutor {
         if backend.emits_structured_response()
             && let Some(response) = backend.finalize_structured_stdout_for_display(stdout_output)
         {
-            return response;
+            return Self::normalize_codex_leading_escaped_event_output(backend, &response)
+                .unwrap_or(response);
         }
 
-        stdout_output.to_string()
+        Self::normalize_codex_leading_escaped_event_output(backend, stdout_output)
+            .unwrap_or_else(|| stdout_output.to_string())
+    }
+
+    fn normalize_codex_leading_escaped_event_output(
+        backend: &CliBackend,
+        output: &str,
+    ) -> Option<String> {
+        // -----------------------------------------------------------------
+        // 说明：
+        // - 这里故意不去改 `EventParser` 的通用协议。
+        // - 仓库里大量 prompt / overlay / README 会把 `<event ...>` 转义成
+        //   `&lt;event ...&gt;` 作为“展示文本”，它们默认不应被当成真实事件。
+        // - 但真实 Codex 最终回复偶尔会把“本来就要发到 stdout 的真实事件”
+        //   HTML 转义后再吐出来，导致 durable 主流漏事件。
+        // - 因此这里只做一个很窄的恢复：
+        //   - 仅限 `codex`
+        //   - 仅限去掉前导空白后就直接以 `&lt;event` 开头的回复
+        //   - 仅解码 tag 边界，不做全量 HTML unescape
+        // -----------------------------------------------------------------
+        const ESCAPED_OPEN_TAG: &str = "&lt;event";
+        const ESCAPED_OPEN_END: &str = "&gt;";
+        const ESCAPED_CLOSE_TAG: &str = "&lt;/event&gt;";
+        const ESCAPED_CLOSE_TAG_JSON_STYLE: &str = "&lt;\\/event&gt;";
+
+        if backend.command != "codex" {
+            return None;
+        }
+
+        let trimmed = output.trim_start_matches(|ch: char| ch.is_whitespace());
+        if !trimmed.starts_with(ESCAPED_OPEN_TAG) {
+            return None;
+        }
+
+        let leading_whitespace_len = output.len() - trimmed.len();
+        let mut remaining = trimmed;
+        let mut normalized = String::with_capacity(output.len());
+        normalized.push_str(&output[..leading_whitespace_len]);
+        let mut converted_any = false;
+
+        loop {
+            if !remaining.starts_with(ESCAPED_OPEN_TAG) {
+                break;
+            }
+
+            let Some(open_end_idx) = remaining.find(ESCAPED_OPEN_END) else {
+                break;
+            };
+            let opening_attrs = &remaining[ESCAPED_OPEN_TAG.len()..open_end_idx];
+            let content_start = &remaining[open_end_idx + ESCAPED_OPEN_END.len()..];
+
+            let standard_close = content_start
+                .find(ESCAPED_CLOSE_TAG)
+                .map(|idx| (idx, ESCAPED_CLOSE_TAG, "</event>"));
+            let json_style_close = content_start
+                .find(ESCAPED_CLOSE_TAG_JSON_STYLE)
+                .map(|idx| (idx, ESCAPED_CLOSE_TAG_JSON_STYLE, "<\\/event>"));
+
+            let Some((close_idx, close_raw, close_normalized)) =
+                (match (standard_close, json_style_close) {
+                    (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+                    (Some(found), None) | (None, Some(found)) => Some(found),
+                    (None, None) => None,
+                })
+            else {
+                break;
+            };
+
+            normalized.push_str("<event");
+            normalized.push_str(opening_attrs);
+            normalized.push('>');
+            normalized.push_str(&content_start[..close_idx]);
+            normalized.push_str(close_normalized);
+            remaining = &content_start[close_idx + close_raw.len()..];
+            converted_any = true;
+
+            // 只继续吞连续的 leading escaped event block。
+            // 一旦进入普通 prose，就立即停下，避免把正文里引用的示例也“扶正”为真实事件。
+            let next_trimmed = remaining.trim_start_matches(|ch: char| ch.is_whitespace());
+            let whitespace_len = remaining.len() - next_trimmed.len();
+            normalized.push_str(&remaining[..whitespace_len]);
+            remaining = next_trimmed;
+            if !remaining.starts_with(ESCAPED_OPEN_TAG) {
+                break;
+            }
+        }
+
+        if !converted_any {
+            return None;
+        }
+
+        normalized.push_str(remaining);
+        Some(normalized)
     }
 
     fn should_use_codex_mcp(job: &HatJob, backend: &CliBackend) -> bool {
@@ -653,6 +748,7 @@ mod guardrail_tests {
         let mut stderr_output = String::new();
 
         // 1) stdout: 必须进入 output(用于事件解析).
+        let stdout_line = "<event topic=\"build.done\">ok</event>".to_string();
         CliHatJobExecutor::handle_output_line(
             job_id,
             &instance_id,
@@ -661,16 +757,25 @@ mod guardrail_tests {
             &mut stdout_output,
             &mut stderr_output,
             OutputStream::Stdout,
-            "hello".to_string(),
+            stdout_line.clone(),
         )
         .await;
 
-        assert_eq!(stdout_output, "hello\n");
+        assert_eq!(stdout_output, format!("{stdout_line}\n"));
         let chunk = output_rx.recv().await.expect("should receive stdout chunk");
         assert_eq!(chunk.job_id, job_id);
         assert_eq!(chunk.instance_id, instance_id);
         assert_eq!(chunk.stream, OutputStream::Stdout);
-        assert_eq!(chunk.line, "hello");
+        assert_eq!(chunk.line, stdout_line);
+
+        let parser = ralph_core::EventParser::new();
+        let events = parser.parse(&CliHatJobExecutor::finalize_output_for_parsing(
+            &backend,
+            &stdout_output,
+        ));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].topic.as_str(), "build.done");
+        assert_eq!(events[0].payload, "ok");
 
         // 2) stderr: 仍要流式转发给 supervisor 做可观测输出,但绝不能污染 output.
         let stderr_line = "<event topic=\"build.task\">should_not_parse</event>".to_string();
@@ -687,7 +792,7 @@ mod guardrail_tests {
         .await;
 
         assert_eq!(
-            stdout_output, "hello\n",
+            stdout_output, "<event topic=\"build.done\">ok</event>\n",
             "REGRESSION: stderr must NOT be appended to output used for event parsing"
         );
         assert_eq!(stderr_output, format!("{stderr_line}\n"));
@@ -696,6 +801,17 @@ mod guardrail_tests {
         assert_eq!(chunk.instance_id, instance_id);
         assert_eq!(chunk.stream, OutputStream::Stderr);
         assert_eq!(chunk.line, stderr_line);
+
+        let events = parser.parse(&CliHatJobExecutor::finalize_output_for_parsing(
+            &backend,
+            &stdout_output,
+        ));
+        assert_eq!(
+            events.len(),
+            1,
+            "REGRESSION: stderr event text must not create extra parsed events"
+        );
+        assert_eq!(events[0].topic.as_str(), "build.done");
     }
 }
 
@@ -703,7 +819,7 @@ mod guardrail_tests {
 ///
 /// 说明：
 /// - 目前 parallel 模式先走“日志输出”路径，TUI 仍沿用旧串行实现。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ParallelLoopFlags {
     pub resume: bool,
     pub enable_tui: bool,
@@ -713,6 +829,8 @@ pub struct ParallelLoopFlags {
     pub idle_start: bool,
     /// 并行 TUI: 仅当没有 CLI prompt 覆盖时,才允许自动待机。
     pub allow_tui_auto_idle: bool,
+    /// 可选的 Rerun `.rrd` 录制路径（V1 live runtime graph）。
+    pub runtime_graph_rrd: Option<PathBuf>,
 }
 
 pub async fn run_parallel_loop_impl(
@@ -729,6 +847,7 @@ pub async fn run_parallel_loop_impl(
     let resume = flags.resume;
     let plain = flags.plain;
     let show_stderr = flags.show_stderr;
+    let runtime_graph_rrd = flags.runtime_graph_rrd.clone();
 
     // TUI 需要 stdin/stdout 都是 TTY（crossterm 既要读键盘也要写屏幕）
     let enable_tui = flags.enable_tui && stdin().is_terminal() && stdout().is_terminal();
@@ -1124,6 +1243,47 @@ pub async fn run_parallel_loop_impl(
         (observer, state_observer, event_observer)
     };
 
+    // ------------------------------------------------------------------
+    // 可选的 Rerun live runtime graph 记录器
+    //
+    // 说明:
+    // - 这是 V1 MVP: 基于现有 live observers 直接输出 `.rrd` artifact。
+    // - recorder 初始化失败时直接报错:
+    //   用户既然显式要求录制,就不应该 silent skip。
+    // ------------------------------------------------------------------
+    let runtime_graph = runtime_graph_rrd
+        .map(RuntimeGraphRecorder::create)
+        .transpose()?
+        .map(Arc::new);
+
+    if let Some(graph) = &runtime_graph {
+        tracing::info!(
+            path = %graph.output_path().display(),
+            "Runtime graph recording enabled"
+        );
+    }
+
+    let state_observer: StateObserver = {
+        let prior = Arc::clone(&state_observer);
+        let runtime_graph = runtime_graph.clone();
+        Arc::new(move |instance_id: &HatInstanceId, state| {
+            prior(instance_id, state);
+            if let Some(graph) = &runtime_graph {
+                graph.observe_instance_state(instance_id, state);
+            }
+        })
+    };
+
+    let event_observer: Option<EventObserver> = event_observer.map(|prior| {
+        let runtime_graph = runtime_graph.clone();
+        Arc::new(move |event: &ralph_proto::Event| {
+            prior(event);
+            if let Some(graph) = &runtime_graph {
+                graph.observe_event(event);
+            }
+        }) as EventObserver
+    });
+
     // Spawn signal handlers AFTER TUI initialization to avoid deadlock
     // (TUI must enter raw mode and create EventStream before signal handlers are registered)
     let interrupt_tx_sigint = interrupt_tx.clone();
@@ -1168,6 +1328,12 @@ pub async fn run_parallel_loop_impl(
         .with_idle_start(idle_start);
     if let Some(event_observer) = event_observer {
         supervisor = supervisor.with_event_observer(event_observer);
+    }
+    if let Some(runtime_graph) = runtime_graph.clone() {
+        let delivery_observer = Arc::new(move |obs: &ralph_core::RuntimeDeliveryObservation| {
+            runtime_graph.observe_delivery(obs);
+        });
+        supervisor = supervisor.with_delivery_observer(delivery_observer);
     }
 
     // Ctrl+C/SIGTERM/SIGHUP: 让 TUI 立即退出(如果还在跑)。
@@ -1218,6 +1384,10 @@ pub async fn run_parallel_loop_impl(
         instance_states,
         ..
     } = result;
+
+    if let Some(runtime_graph) = &runtime_graph {
+        runtime_graph.finish();
+    }
 
     // 6.1：结束时打印最终状态快照
     if !enable_tui && !matches!(verbosity, Verbosity::Quiet) {
@@ -1318,5 +1488,41 @@ mod tests {
         let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
 
         assert_eq!(output, r#"<event topic="spec.ready">ok</event>"#);
+    }
+
+    #[test]
+    fn finalize_output_for_parsing_normalizes_leading_escaped_codex_event_block() {
+        let backend = CliBackend::codex();
+        let stdout = concat!(
+            "&lt;event topic=\"experiment.result\" reply=\"E1\"&gt;\n",
+            "comparison: 2 &gt; 1\n",
+            "&lt;/event&gt;\n",
+            "- trailing prose stays visible\n",
+        );
+
+        let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
+
+        assert_eq!(
+            output,
+            concat!(
+                "<event topic=\"experiment.result\" reply=\"E1\">\n",
+                "comparison: 2 &gt; 1\n",
+                "</event>\n",
+                "- trailing prose stays visible\n",
+            )
+        );
+    }
+
+    #[test]
+    fn finalize_output_for_parsing_does_not_normalize_escaped_event_after_prose() {
+        let backend = CliBackend::codex();
+        let stdout = concat!(
+            "Here is an example event block:\n",
+            "&lt;event topic=\"experiment.result\"&gt;demo&lt;/event&gt;\n",
+        );
+
+        let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
+
+        assert_eq!(output, stdout);
     }
 }

@@ -11,7 +11,7 @@
 
 use crate::display::colors;
 use anyhow::{Context, Result};
-use ralph_adapters::CliBackend;
+use ralph_adapters::{CliBackend, scrub_codex_parent_session_env_tokio};
 use ralph_core::{HatJob, HatJobControl, HatJobOutputChunk, HatJobResult, OutputStream};
 use ralph_proto::HatInstanceId;
 use serde_json::{Value, json};
@@ -199,6 +199,7 @@ impl CodexAppServerSession {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         command.kill_on_drop(true);
+        scrub_codex_parent_session_env_tokio(&mut command, codex_command);
 
         let mut child = command
             .spawn()

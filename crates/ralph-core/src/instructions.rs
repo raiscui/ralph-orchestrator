@@ -192,6 +192,12 @@ You MUST NOT close tasks unless ALL conditions are met:
 
 ### 3. REPORT
 You MUST publish a result event with evidence.
+Your report MUST include:
+- outcome: what changed or what decision was made
+- evidence: command output, tests, logs, or artifact paths
+- changed files: key paths changed, if any
+- known gaps: skipped checks, uncertain boundaries, or remaining risks
+- next suggestions: useful follow-up after this task
 {publish_topics}{must_publish}
 
 ### GUARDRAILS
@@ -213,6 +219,7 @@ You MUST handle these events:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AllHatPromptConfig;
 
     fn default_builder(promise: &str) -> InstructionBuilder {
         InstructionBuilder::new(promise, CoreConfig::default())
@@ -245,9 +252,14 @@ mod tests {
         assert!(instructions.contains("You MUST run tests and verify implementation"));
         assert!(instructions.contains("You MUST NOT close tasks unless"));
 
-        // Report phase with RFC2119
+        // Report phase with RFC2119 and prompt-contract output anchors
         assert!(instructions.contains("### 3. REPORT"));
         assert!(instructions.contains("You MUST publish a result event"));
+        assert!(instructions.contains("outcome:"));
+        assert!(instructions.contains("evidence:"));
+        assert!(instructions.contains("changed files:"));
+        assert!(instructions.contains("known gaps:"));
+        assert!(instructions.contains("next suggestions:"));
 
         // Guardrails section with high numbers
         assert!(instructions.contains("### GUARDRAILS"));
@@ -264,6 +276,7 @@ mod tests {
             scratchpad: ".workspace/plan.md".to_string(),
             specs_dir: "./specifications/".to_string(),
             guardrails: vec!["Custom rule one".to_string(), "Custom rule two".to_string()],
+            all_hat_prompt: AllHatPromptConfig::Compiled,
             workspace_root: std::path::PathBuf::from("."),
         };
         let builder = InstructionBuilder::new("DONE", custom_core);

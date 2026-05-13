@@ -20,6 +20,7 @@
 
 use crate::claude_stream::{ClaudeStreamEvent, ClaudeStreamParser, ContentBlock, UserContentBlock};
 use crate::cli_backend::{CliBackend, OutputFormat};
+use crate::codex_env::scrub_codex_parent_session_env_pty;
 use crate::stream_handler::{SessionResult, StreamHandler};
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
@@ -282,6 +283,7 @@ impl PtyExecutor {
 
         let mut cmd_builder = CommandBuilder::new(&cmd);
         cmd_builder.args(&args);
+        scrub_codex_parent_session_env_pty(&mut cmd_builder, &cmd);
 
         // Set explicit working directory from config (captured at startup to avoid
         // current_dir() failures when workspace no longer exists)

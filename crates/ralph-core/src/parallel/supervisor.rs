@@ -26,8 +26,8 @@ use crate::{
 };
 use anyhow::Context;
 use ralph_proto::{
-    Event, Hat, HatId, HatInstanceId, HatInstanceState, SessionStrategy, TurnAction,
-    WorkspaceStrategy,
+    Event, Hat, HatId, HatInstanceId, HatInstanceState, RuntimeDeliveryKind, RuntimeDeliveryRecord,
+    RuntimeLifecycleKind, RuntimeLifecycleRecord, SessionStrategy, TurnAction, WorkspaceStrategy,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -42,6 +42,18 @@ pub struct ParallelRunResult {
     pub ralph_iterations: u32,
     pub instance_states: HashMap<HatInstanceId, HatInstanceState>,
     pub output_chunks: usize,
+}
+
+/// Runtime graph delivery mode for live and durable observability.
+pub type RuntimeDeliveryMode = RuntimeDeliveryKind;
+
+/// Best-effort live delivery observation for runtime graph recording.
+#[derive(Debug, Clone)]
+pub struct RuntimeDeliveryObservation {
+    pub topic: String,
+    pub source_instance: Option<HatInstanceId>,
+    pub recipient: HatInstanceId,
+    pub mode: RuntimeDeliveryMode,
 }
 
 /// 并行调度器。
@@ -121,6 +133,8 @@ pub struct ParallelSupervisor {
     instance_state_observer: Option<Arc<dyn Fn(&HatInstanceId, HatInstanceState) + Send + Sync>>,
     /// 事件观察者（用于并行 TUI 展示 gate/chat 等控制面事件）。
     event_observer: Option<Arc<dyn Fn(&Event) + Send + Sync>>,
+    /// 投递观察者（用于 live runtime graph 记录 source -> recipient 关系）。
+    delivery_observer: Option<Arc<dyn Fn(&RuntimeDeliveryObservation) + Send + Sync>>,
 }
 
 impl ParallelSupervisor {
@@ -147,7 +161,9 @@ impl ParallelSupervisor {
         let max_running_jobs = config.parallel.autoscale.max_running_jobs.max(1);
         let job_semaphore = Arc::new(Semaphore::new(max_running_jobs));
         let command_queue = Arc::new(CommandQueue::new());
-        let all_hat_prompt = prompt_overlay::load_all_hat_prompt();
+        let all_hat_prompt = prompt_overlay::load_all_hat_prompt(&config.core)
+            .map_err(anyhow::Error::msg)
+            .context("failed to load configured all-hat overlay")?;
 
         Ok(Self {
             config,
@@ -182,6 +198,7 @@ impl ParallelSupervisor {
             output_observer: None,
             instance_state_observer: None,
             event_observer: None,
+            delivery_observer: None,
         })
     }
 
@@ -206,6 +223,15 @@ impl ParallelSupervisor {
     /// 设置事件观察者（用于 TUI 展示 gate/chat 等事件）。
     pub fn with_event_observer(mut self, observer: Arc<dyn Fn(&Event) + Send + Sync>) -> Self {
         self.event_observer = Some(observer);
+        self
+    }
+
+    /// 设置投递观察者（用于 live runtime graph 记录）。
+    pub fn with_delivery_observer(
+        mut self,
+        observer: Arc<dyn Fn(&RuntimeDeliveryObservation) + Send + Sync>,
+    ) -> Self {
+        self.delivery_observer = Some(observer);
         self
     }
 
@@ -410,9 +436,8 @@ impl ParallelSupervisor {
                     match msg {
                         HatInstanceEvent::StateChanged { instance_id, state } => {
                             self.instance_states.insert(instance_id.clone(), state);
-                            if let Some(observer) = &self.instance_state_observer {
-                                observer(&instance_id, state);
-                            }
+                            self.notify_instance_state_observer(&instance_id, state);
+                            self.log_runtime_lifecycle_state(&instance_id, state);
 
                             // max_runtime：暂停态(例如 idle_start / parallel-tui completion pause)下，
                             // 直到看到任意实例进入 Running 才重新开始计时。
@@ -452,21 +477,6 @@ impl ParallelSupervisor {
                                     &self.config.event_loop.completion_promise,
                                 );
 
-                            let stop_spawning = matches!(termination, Some(TerminationReason::CompletionPromise))
-                                || completion_lockdown;
-
-                            // 将新事件继续路由
-                            //
-                            // 说明：
-                            // - completion promise 之后，我们不再派生任何新 job（避免“已收敛但仍继续跑”的假活跃）。
-                            // - 但“触发 completion 的那次 ralph 输出”仍允许正常路由其同轮解析出的事件
-                            //   （尽管按规范 ralph 在输出 completion 时不应再发事件，这里仍做防御性处理）。
-                            // - 在顺序路由这些事件时，我们无法同时消费 `StateChanged`，
-                            //   因此需要在 batch 内维护一份“乐观运行态”，避免后续事件误判实例仍然空闲。
-                            if !stop_spawning || completion_promise {
-                                self.route_events_batch(events).await?;
-                            }
-
                             if completion_promise {
                                 if self.pause_on_completion_promise {
                                     // TUI：进入暂停态（但不退出）。
@@ -482,9 +492,30 @@ impl ParallelSupervisor {
                                     }
                                 } else if completion_promise_seen_at.is_none() {
                                     // CLI/CI：进入收敛退出态。
+                                    self.freeze_pending_on_all_instances();
                                     termination = Some(TerminationReason::CompletionPromise);
                                     completion_promise_seen_at = Some(std::time::Instant::now());
                                 }
+                            }
+
+                            let stop_spawning =
+                                matches!(termination, Some(TerminationReason::CompletionPromise))
+                                    || completion_lockdown;
+
+                            // 将新事件继续路由
+                            //
+                            // 说明：
+                            // - completion promise 之后，我们不再派生任何新 job（避免“已收敛但仍继续跑”的假活跃）。
+                            // - 新语义下，CLI/CI 在看到 completion 后会立刻冻结所有 instance 的 pending，
+                            //   因此连“触发 completion 的这一批输出事件”也不再继续路由。
+                            // - 仅 parallel-tui 的 pause 模式保留旧行为：允许当前 completion 批里的事件继续路由，
+                            //   因为用户可能希望在暂停态下继续对话并恢复运行。
+                            // - 在顺序路由这些事件时，我们无法同时消费 `StateChanged`，
+                            //   因此需要在 batch 内维护一份“乐观运行态”，避免后续事件误判实例仍然空闲。
+                            if !stop_spawning
+                                || (completion_promise && self.pause_on_completion_promise)
+                            {
+                                self.route_events_batch(events).await?;
                             }
 
                             // 迭代上限：以 ralph#1 的 job 完成次数为准（见上方说明）。
@@ -763,6 +794,7 @@ impl ParallelSupervisor {
             .expect("instance_tx must be set before spawn_instances()");
 
         let dynamic_idle_ttl = self.effective_dynamic_idle_ttl();
+        let mut configured_lifecycle_instances = Vec::new();
 
         // 先注册 config 里定义的 hats
         for hat in self.registry.all() {
@@ -797,6 +829,8 @@ impl ParallelSupervisor {
                 );
                 self.instance_states
                     .insert(instance_id.clone(), HatInstanceState::Created);
+                self.notify_instance_state_observer(&instance_id, HatInstanceState::Created);
+                configured_lifecycle_instances.push(instance_id.clone());
                 self.instances.insert(instance_id.clone(), handle);
                 ids.push(instance_id);
             }
@@ -805,6 +839,10 @@ impl ParallelSupervisor {
                 hat_id,
                 u64::try_from(instances).unwrap_or(1).saturating_add(1),
             );
+        }
+
+        for instance_id in configured_lifecycle_instances {
+            self.log_runtime_lifecycle_created(&instance_id, false, None, Some("configured"));
         }
 
         // 始终注册 Ralph fallback（即使 config 没写）
@@ -840,11 +878,90 @@ impl ParallelSupervisor {
         );
         self.instance_states
             .insert(ralph_instance.clone(), HatInstanceState::Created);
+        self.notify_instance_state_observer(&ralph_instance, HatInstanceState::Created);
+        self.log_runtime_lifecycle_created(&ralph_instance, false, None, Some("fallback"));
         self.instances.insert(ralph_instance.clone(), handle);
         self.instances_by_hat.insert(ralph_id, vec![ralph_instance]);
         self.next_instance_seq_by_hat.insert(HatId::new("ralph"), 2);
 
         Ok(())
+    }
+
+    fn notify_instance_state_observer(&self, instance_id: &HatInstanceId, state: HatInstanceState) {
+        if let Some(observer) = &self.instance_state_observer {
+            observer(instance_id, state);
+        }
+    }
+
+    fn notify_delivery_observer(&self, observation: RuntimeDeliveryObservation) {
+        if let Some(observer) = &self.delivery_observer {
+            observer(&observation);
+        }
+    }
+
+    fn log_runtime_delivery_record(&mut self, record: RuntimeDeliveryRecord) {
+        if let Err(error) = self
+            .event_logger
+            .log_runtime_delivery(0, "supervisor", &record)
+        {
+            tracing::warn!(%error, "Failed to log runtime delivery record");
+        }
+    }
+
+    fn log_runtime_lifecycle_record(&mut self, record: RuntimeLifecycleRecord) {
+        if let Err(error) = self
+            .event_logger
+            .log_runtime_lifecycle(0, "supervisor", &record)
+        {
+            tracing::warn!(%error, "Failed to log runtime lifecycle record");
+        }
+    }
+
+    fn log_runtime_lifecycle_created(
+        &mut self,
+        instance_id: &HatInstanceId,
+        dynamic: bool,
+        source_event_id: Option<String>,
+        reason: Option<&str>,
+    ) {
+        let kind = if dynamic {
+            RuntimeLifecycleKind::Spawn
+        } else {
+            RuntimeLifecycleKind::Create
+        };
+        let mut record = RuntimeLifecycleRecord::new(instance_id.clone(), kind)
+            .with_state(HatInstanceState::Created)
+            .with_dynamic(dynamic);
+
+        if let Some(source_event_id) = source_event_id {
+            record = record.with_source_event_id(source_event_id);
+        }
+        if let Some(reason) = reason {
+            record = record.with_reason(reason);
+        }
+
+        self.log_runtime_lifecycle_record(record);
+    }
+
+    fn log_runtime_lifecycle_state(
+        &mut self,
+        instance_id: &HatInstanceId,
+        state: HatInstanceState,
+    ) {
+        let record = RuntimeLifecycleRecord::new(instance_id.clone(), RuntimeLifecycleKind::State)
+            .with_state(state);
+        self.log_runtime_lifecycle_record(record);
+    }
+
+    fn log_runtime_lifecycle_control(
+        &mut self,
+        instance_id: &HatInstanceId,
+        kind: RuntimeLifecycleKind,
+        reason: &str,
+    ) {
+        let record =
+            RuntimeLifecycleRecord::new(instance_id.clone(), kind).with_reason(reason.to_string());
+        self.log_runtime_lifecycle_record(record);
     }
 
     fn build_ralph_coordinator_instructions(&self, instance_id: &HatInstanceId) -> String {
@@ -1232,13 +1349,40 @@ impl ParallelSupervisor {
         }
     }
 
-    async fn shutdown_instances(&self) {
-        for handle in self.instances.values() {
-            let _ = handle
-                .cmd_tx
-                .send(HatInstanceCommand::CancelCurrentJob)
-                .await;
-            let _ = handle.cmd_tx.send(HatInstanceCommand::Shutdown).await;
+    async fn shutdown_instances(&mut self) {
+        let targets: Vec<(HatInstanceId, mpsc::Sender<HatInstanceCommand>)> = self
+            .instances
+            .iter()
+            .map(|(instance_id, handle)| (instance_id.clone(), handle.cmd_tx.clone()))
+            .collect();
+
+        for (instance_id, cmd_tx) in targets {
+            self.log_runtime_lifecycle_control(
+                &instance_id,
+                RuntimeLifecycleKind::Cancel,
+                "supervisor_shutdown",
+            );
+            let _ = cmd_tx.send(HatInstanceCommand::CancelCurrentJob).await;
+            self.log_runtime_lifecycle_control(
+                &instance_id,
+                RuntimeLifecycleKind::Shutdown,
+                "supervisor_shutdown",
+            );
+            let _ = cmd_tx.send(HatInstanceCommand::Shutdown).await;
+        }
+    }
+
+    fn freeze_pending_on_all_instances(&mut self) {
+        let instance_ids: Vec<HatInstanceId> = self.instances.keys().cloned().collect();
+        for instance_id in instance_ids {
+            if let Some(handle) = self.instances.get(&instance_id) {
+                handle.request_completion_freeze();
+            }
+            self.log_runtime_lifecycle_control(
+                &instance_id,
+                RuntimeLifecycleKind::Freeze,
+                "completion_promise",
+            );
         }
     }
 

@@ -12,6 +12,7 @@ use ralph_proto::{
 
 const EVENT_OPEN_TAG: &str = "<event";
 const EVENT_CLOSE_TAG: &str = "</event>";
+const EVENT_CLOSE_TAG_ESCAPED: &str = "<\\/event>";
 
 /// Strips ANSI escape sequences from a string.
 ///
@@ -143,13 +144,13 @@ impl EventParser {
             // Find the closing tag
             let content_start = &after_start[tag_end + 1..];
             let nested_event_idx = Self::find_event_start(content_start);
-            let close_idx = content_start.find(EVENT_CLOSE_TAG);
+            let close_tag = Self::find_event_close_tag(content_start);
 
-            let (payload, total_consumed) = if let Some(close_idx) = close_idx
+            let (payload, total_consumed) = if let Some((close_idx, close_tag_len)) = close_tag
                 && nested_event_idx.is_none_or(|nested| nested > close_idx)
             {
                 let payload = content_start[..close_idx].trim().to_string();
-                let total_consumed = start_idx + tag_end + 1 + close_idx + EVENT_CLOSE_TAG.len();
+                let total_consumed = start_idx + tag_end + 1 + close_idx + close_tag_len;
                 (payload, Some(total_consumed))
             } else {
                 // ------------------------------------------------------------------
@@ -292,6 +293,26 @@ impl EventParser {
         None
     }
 
+    /// 查找 event closing tag。
+    ///
+    /// 兼容两种形态:
+    /// - 标准协议: `</event>`
+    /// - 模型偶发 JSON/HTML 风格转义: `<\\/event>`
+    fn find_event_close_tag(output: &str) -> Option<(usize, usize)> {
+        let standard = output
+            .find(EVENT_CLOSE_TAG)
+            .map(|idx| (idx, EVENT_CLOSE_TAG.len()));
+        let escaped = output
+            .find(EVENT_CLOSE_TAG_ESCAPED)
+            .map(|idx| (idx, EVENT_CLOSE_TAG_ESCAPED.len()));
+
+        match (standard, escaped) {
+            (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+            (Some(found), None) | (None, Some(found)) => Some(found),
+            (None, None) => None,
+        }
+    }
+
     /// Parses backpressure evidence from build.done event payload.
     ///
     /// Expected format:
@@ -373,7 +394,7 @@ impl EventParser {
 
             // Find the closing tag
             let content_start = &after_start[tag_end + 1..];
-            let Some(close_idx) = content_start.find(EVENT_CLOSE_TAG) else {
+            let Some((close_idx, close_tag_len)) = Self::find_event_close_tag(content_start) else {
                 return content_start.contains(promise);
             };
 
@@ -383,7 +404,7 @@ impl EventParser {
             }
 
             // Move past this event
-            let total_consumed = start_idx + tag_end + 1 + close_idx + EVENT_CLOSE_TAG.len();
+            let total_consumed = start_idx + tag_end + 1 + close_idx + close_tag_len;
             remaining = &remaining[total_consumed..];
         }
 
@@ -405,9 +426,9 @@ impl EventParser {
             let after_start = &remaining[start_idx..];
 
             // Find the closing tag
-            if let Some(close_idx) = after_start.find(EVENT_CLOSE_TAG) {
+            if let Some((close_idx, close_tag_len)) = Self::find_event_close_tag(after_start) {
                 // Skip past the entire event block
-                remaining = &after_start[close_idx + EVENT_CLOSE_TAG.len()..];
+                remaining = &after_start[close_idx + close_tag_len..];
             } else {
                 // 安全优先:
                 // - 未闭合的 opening tag 之后都视为“仍在 event 内”.
@@ -534,6 +555,17 @@ Some trailing text.
         assert_eq!(events[0].topic.as_str(), "reply.human.message");
         assert_eq!(events[0].reply.as_deref(), Some("E1"));
         assert_eq!(events[0].payload, "hello");
+    }
+
+    #[test]
+    fn test_parse_event_with_escaped_close_tag() {
+        let output = r#"<event topic="integration.task">{"run_id":"e2e"}<\/event>"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].topic.as_str(), "integration.task");
+        assert_eq!(events[0].payload, r#"{"run_id":"e2e"}"#);
     }
 
     #[test]
@@ -692,6 +724,14 @@ prefix
     }
 
     #[test]
+    fn test_extract_last_payload_for_topic_accepts_escaped_close_tag() {
+        let output = r#"<event topic="analyze.complete">{"verdict":"ok"}<\/event>"#;
+        let payload = EventParser::extract_last_payload_for_topic(output, "analyze.complete")
+            .expect("expected escaped-close payload");
+        assert_eq!(payload, r#"{"verdict":"ok"}"#);
+    }
+
+    #[test]
     fn test_extract_last_payload_for_topic_returns_none_when_topic_missing() {
         let output = r#"<event topic="build.done">done</event>"#;
         let payload = EventParser::extract_last_payload_for_topic(output, "analyze.complete");
@@ -784,6 +824,20 @@ LOOP_COMPLETE
         let output = r#"before <event topic="reply.human.message">payload LOOP_COMPLETE"#;
         let stripped = EventParser::strip_event_tags(output);
         assert_eq!(stripped, "before ");
+    }
+
+    #[test]
+    fn test_strip_event_tags_accepts_escaped_close_tag() {
+        let output = r#"before <event topic="test">payload<\/event> after"#;
+        let stripped = EventParser::strip_event_tags(output);
+        assert_eq!(stripped, "before  after");
+    }
+
+    #[test]
+    fn test_contains_promise_ignores_payload_in_escaped_close_event() {
+        let output = r#"<event topic="summary">contains LOOP_COMPLETE<\/event>"#;
+        assert!(EventParser::promise_in_event_tags(output, "LOOP_COMPLETE"));
+        assert!(!EventParser::contains_promise(output, "LOOP_COMPLETE"));
     }
 
     #[test]

@@ -4,6 +4,8 @@
 //! - 用于注入“所有 hat 通用补充提示”.
 //! - 来源文件 `config/all_hat.md` 在编译期静态内嵌.
 
+use crate::config::{AllHatPromptConfig, CoreConfig};
+
 /// 统一注入段落标题，便于测试和日志定位。
 const ALL_HAT_PROMPT_HEADER: &str = "## ALL HAT PROMPT (config/all_hat.md)";
 
@@ -20,10 +22,30 @@ const COMPILED_ALL_HAT_PROMPT: &str = include_str!(concat!(
 /// 加载所有 hat 通用补充提示（编译期内嵌版本）。
 ///
 /// 规则:
-/// - 内嵌内容为空白: 返回 `None`(不注入)
-/// - 其余: 返回去掉首尾空白后的正文
-pub(crate) fn load_all_hat_prompt() -> Option<String> {
-    let trimmed = COMPILED_ALL_HAT_PROMPT.trim();
+/// - `compiled`: 读取编译期内嵌 `config/all_hat.md`
+/// - `disabled`: 返回 `None`(不注入)
+/// - `inline`: 使用配置内联文本
+/// - `file`: 读取运行时文件（相对路径按 workspace root 解析）
+pub(crate) fn load_all_hat_prompt(core: &CoreConfig) -> Result<Option<String>, String> {
+    match &core.all_hat_prompt {
+        AllHatPromptConfig::Compiled => Ok(trim_prompt(COMPILED_ALL_HAT_PROMPT)),
+        AllHatPromptConfig::Disabled => Ok(None),
+        AllHatPromptConfig::Inline { text } => Ok(trim_prompt(text)),
+        AllHatPromptConfig::File { path } => {
+            let resolved = core.resolve_path(path);
+            let content = std::fs::read_to_string(&resolved).map_err(|error| {
+                format!(
+                    "failed to read core.all_hat_prompt file {}: {error}",
+                    resolved.display()
+                )
+            })?;
+            Ok(trim_prompt(&content))
+        }
+    }
+}
+
+fn trim_prompt(content: &str) -> Option<String> {
+    let trimmed = content.trim();
     if trimmed.is_empty() {
         None
     } else {
@@ -93,6 +115,7 @@ fn sanitize_overlay_protocol_examples(extra: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn inject_all_hat_prompt_skips_none_or_blank() {
@@ -145,11 +168,52 @@ mod tests {
 
     #[test]
     fn load_all_hat_prompt_reads_compiled_overlay() {
-        let overlay = load_all_hat_prompt().expect("compiled all-hat overlay should not be empty");
+        let overlay = load_all_hat_prompt(&CoreConfig::default())
+            .expect("compiled all-hat overlay should load")
+            .expect("compiled all-hat overlay should not be empty");
         assert!(
             overlay.contains("文件上下文位置特殊情况转移"),
             "compiled overlay should contain content from config/all_hat.md"
         );
+    }
+
+    #[test]
+    fn load_all_hat_prompt_respects_disabled_mode() {
+        let mut core = CoreConfig::default();
+        core.all_hat_prompt = AllHatPromptConfig::Disabled;
+
+        let overlay = load_all_hat_prompt(&core).expect("disabled mode should load cleanly");
+        assert_eq!(overlay, None);
+    }
+
+    #[test]
+    fn load_all_hat_prompt_reads_inline_override() {
+        let mut core = CoreConfig::default();
+        core.all_hat_prompt = AllHatPromptConfig::Inline {
+            text: "  lightweight overlay  \n".to_string(),
+        };
+
+        let overlay = load_all_hat_prompt(&core)
+            .expect("inline mode should load")
+            .expect("inline mode should produce prompt");
+        assert_eq!(overlay, "lightweight overlay");
+    }
+
+    #[test]
+    fn load_all_hat_prompt_reads_file_override_relative_to_workspace_root() {
+        let temp_dir = tempdir().expect("tempdir");
+        let overlay_path = temp_dir.path().join("overlay.md");
+        std::fs::write(&overlay_path, "file overlay\n").expect("write overlay");
+
+        let mut core = CoreConfig::default().with_workspace_root(temp_dir.path());
+        core.all_hat_prompt = AllHatPromptConfig::File {
+            path: "overlay.md".to_string(),
+        };
+
+        let overlay = load_all_hat_prompt(&core)
+            .expect("file mode should load")
+            .expect("file mode should produce prompt");
+        assert_eq!(overlay, "file overlay");
     }
 
     #[test]

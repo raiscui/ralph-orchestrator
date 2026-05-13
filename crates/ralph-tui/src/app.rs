@@ -1074,6 +1074,51 @@ fn extract_output_selection_text(
     lines.join("\n")
 }
 
+fn copy_selection_text_status(selected_text: &str) -> String {
+    if selected_text.trim().is_empty() {
+        return "copy: no text selected".to_string();
+    }
+
+    match copy_text_to_clipboard(selected_text) {
+        Ok(outcome) => {
+            let method = match outcome.method {
+                ClipboardCopyMethod::Pbcopy => "pbcopy",
+                ClipboardCopyMethod::Osc52 => "osc52",
+            };
+            let truncated = if outcome.truncated {
+                " (truncated)"
+            } else {
+                ""
+            };
+            format!(
+                "copied {} chars to clipboard via {method}{truncated}",
+                selected_text.chars().count()
+            )
+        }
+        Err(e) => format!("copy failed: {e:#}"),
+    }
+}
+
+fn handle_serial_mouse_down(
+    mouse: MouseEvent,
+    state: &mut TuiState,
+    content_area: ratatui::layout::Rect,
+) {
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return;
+    }
+
+    let x = mouse.column;
+    let y = mouse.row;
+    if contains_point(content_area, x, y) {
+        let rel_x = x.saturating_sub(content_area.x);
+        let rel_y = y.saturating_sub(content_area.y);
+        state.start_serial_output_selection(crate::state::ScreenPos { x: rel_x, y: rel_y });
+    } else {
+        state.clear_serial_output_selection();
+    }
+}
+
 fn handle_parallel_mouse_down(
     mouse: MouseEvent,
     state: &mut TuiState,
@@ -1373,6 +1418,8 @@ impl App {
 
         // 并行模式：保存“最近一次渲染”的布局快照，用于鼠标 hit-test
         let mut parallel_layout: Option<ParallelLayoutSnapshot> = None;
+        // 串行模式：保存最近一次渲染的输出区域,用于鼠标选择 hit-test。
+        let mut serial_content_area: Option<ratatui::layout::Rect> = None;
         // 并行模式：Chat 区域的鼠标拖拽选择锚点（Down→Drag→Up）。
         let mut chat_drag_anchor: Option<crate::state::TextPos> = None;
 
@@ -1465,26 +1512,45 @@ impl App {
                                         }
                                         MouseEventKind::Down(MouseButton::Left) => {
                                             let mut state = self.state.lock().unwrap();
-                                            if matches!(state.mode, TuiMode::Parallel)
-                                                && let Some(layout) = parallel_layout
-                                            {
-                                                handle_parallel_mouse_down(
-                                                    mouse,
-                                                    &mut state,
-                                                    layout,
-                                                    &mut chat_drag_anchor,
-                                                );
+                                            match state.mode {
+                                                TuiMode::Serial => {
+                                                    if let Some(area) = serial_content_area {
+                                                        handle_serial_mouse_down(mouse, &mut state, area);
+                                                    }
+                                                }
+                                                TuiMode::Parallel => {
+                                                    if let Some(layout) = parallel_layout {
+                                                        handle_parallel_mouse_down(
+                                                            mouse,
+                                                            &mut state,
+                                                            layout,
+                                                            &mut chat_drag_anchor,
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                         // 说明：Drag/Up 的选择逻辑会在后续任务里补齐（输出框选 / chat 框选）。
                                         // 这里先做结构化分发，避免未来再大改输入循环。
                                         MouseEventKind::Drag(MouseButton::Left) => {
                                             let mut state = self.state.lock().unwrap();
-                                            if matches!(state.mode, TuiMode::Parallel)
-                                                && let Some(layout) = parallel_layout
-                                            {
-                                                let x = mouse.column;
-                                                let y = mouse.row;
+                                            let x = mouse.column;
+                                            let y = mouse.row;
+
+                                            if matches!(state.mode, TuiMode::Serial) {
+                                                if state.serial_output_selecting
+                                                    && let Some(area) = serial_content_area
+                                                {
+                                                    let clamped_x = clamp_to_area(x, area.x, area.width);
+                                                    let clamped_y = clamp_to_area(y, area.y, area.height);
+                                                    let rel_x = clamped_x.saturating_sub(area.x);
+                                                    let rel_y = clamped_y.saturating_sub(area.y);
+                                                    state.update_serial_output_selection_cursor(
+                                                        crate::state::ScreenPos { x: rel_x, y: rel_y },
+                                                    );
+                                                    continue;
+                                                }
+                                            } else if let Some(layout) = parallel_layout {
 
                                                 // Output：拖拽更新选择区域（屏幕坐标）。
                                                 if state.parallel.output_selecting {
@@ -1541,9 +1607,26 @@ impl App {
                                         }
                                         MouseEventKind::Up(MouseButton::Left) => {
                                             let mut state = self.state.lock().unwrap();
-                                            if matches!(state.mode, TuiMode::Parallel)
-                                                && let Some(layout) = parallel_layout
-                                            {
+                                            if matches!(state.mode, TuiMode::Serial) {
+                                                if state.serial_output_selecting {
+                                                    state.finish_serial_output_selection();
+
+                                                    if let Some(sel) = state.serial_output_selection
+                                                        && let Some(area) = serial_content_area
+                                                        && let Some(buffer) = state.current_output_buffer()
+                                                    {
+                                                        let selected_text = extract_output_selection_text(
+                                                            buffer,
+                                                            area.width,
+                                                            area.height,
+                                                            sel,
+                                                            state.search_state.query.as_deref(),
+                                                        );
+                                                        state.serial_output_status =
+                                                            Some(copy_selection_text_status(&selected_text));
+                                                    }
+                                                }
+                                            } else if let Some(layout) = parallel_layout {
                                                 // Output：结束拖拽选择。
                                                 if state.parallel.output_selecting {
                                                     state.parallel.finish_output_selection();
@@ -1678,6 +1761,64 @@ impl App {
 
                                     match state.mode {
                                         TuiMode::Serial => {
+                                            if key.code == KeyCode::Esc {
+                                                state.clear_serial_output_selection();
+                                                continue;
+                                            }
+
+                                            if key.code == KeyCode::Char('y') {
+                                                let Some(sel) = state.serial_output_selection else {
+                                                    state.serial_output_status =
+                                                        Some("copy: no selection".to_string());
+                                                    continue;
+                                                };
+
+                                                let Some(area) = serial_content_area else {
+                                                    state.serial_output_status =
+                                                        Some("copy failed: layout not ready".to_string());
+                                                    continue;
+                                                };
+
+                                                let Some(buffer) = state.current_output_buffer() else {
+                                                    state.serial_output_status =
+                                                        Some("copy failed: no output buffer".to_string());
+                                                    continue;
+                                                };
+
+                                                let selected_text = extract_output_selection_text(
+                                                    buffer,
+                                                    area.width,
+                                                    area.height,
+                                                    sel,
+                                                    state.search_state.query.as_deref(),
+                                                );
+                                                state.serial_output_status =
+                                                    Some(copy_selection_text_status(&selected_text));
+                                                continue;
+                                            }
+
+                                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                                let (dx, dy) = match key.code {
+                                                    KeyCode::Left => (-1, 0),
+                                                    KeyCode::Right => (1, 0),
+                                                    KeyCode::Up => (0, -1),
+                                                    KeyCode::Down => (0, 1),
+                                                    _ => (0, 0),
+                                                };
+
+                                                if (dx, dy) != (0, 0)
+                                                    && let Some(area) = serial_content_area
+                                                {
+                                                    state.extend_serial_output_selection_by_delta(
+                                                        dx,
+                                                        dy,
+                                                        area.width,
+                                                        area.height,
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+
                                             let action = map_key(key);
                                             if action == Action::Quit {
                                                 // 说明：
@@ -2201,16 +2342,31 @@ impl App {
 
                         match state.mode {
                             TuiMode::Serial => {
+                                serial_content_area = Some(content_area);
+                                parallel_layout = None;
+
                                 // Render content using ContentPane
                                 if let Some(buffer) = state.current_iteration() {
                                     let mut content_widget = ContentPane::new(buffer, theme);
                                     if let Some(query) = &state.search_state.query {
                                         content_widget = content_widget.with_search(query);
                                     }
+                                    if let Some(sel) = state.serial_output_selection {
+                                        content_widget = content_widget.with_selection(
+                                            SelectionBounds::from_points(
+                                                sel.anchor.x,
+                                                sel.anchor.y,
+                                                sel.cursor.x,
+                                                sel.cursor.y,
+                                            ),
+                                        );
+                                    }
                                     f.render_widget(content_widget, content_area);
                                 }
                             }
                             TuiMode::Parallel => {
+                                serial_content_area = None;
+
                                 // 布局：上（实例列表 + 输出） / 下（chat + gate）
                                 let panes = split_parallel_pane_areas(content_area);
                                 let bottom_area = panes.bottom_area;
@@ -3349,6 +3505,41 @@ mod tests {
             None,
         );
         assert_eq!(got, "hello\nworld");
+    }
+
+    #[test]
+    fn serial_mouse_down_starts_output_selection() {
+        let mut state = TuiState::new();
+        let area = ratatui::layout::Rect::new(10, 5, 40, 8);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 13,
+            row: 7,
+            modifiers: KeyModifiers::empty(),
+        };
+
+        handle_serial_mouse_down(mouse, &mut state, area);
+
+        let selection = state
+            .serial_output_selection
+            .expect("serial output selection should start on content click");
+        assert_eq!(selection.anchor, crate::state::ScreenPos { x: 3, y: 2 });
+        assert_eq!(selection.cursor, crate::state::ScreenPos { x: 3, y: 2 });
+        assert!(state.serial_output_selecting);
+    }
+
+    #[test]
+    fn serial_output_selection_can_extend_with_keyboard_delta() {
+        let mut state = TuiState::new();
+        state.start_serial_output_selection(crate::state::ScreenPos { x: 1, y: 1 });
+
+        state.extend_serial_output_selection_by_delta(5, 2, 4, 3);
+
+        let selection = state
+            .serial_output_selection
+            .expect("selection should remain active");
+        assert_eq!(selection.anchor, crate::state::ScreenPos { x: 1, y: 1 });
+        assert_eq!(selection.cursor, crate::state::ScreenPos { x: 3, y: 2 });
     }
 
     // =========================================================================

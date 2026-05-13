@@ -43,6 +43,22 @@
 - 推荐用法(让 coordinator 施加 backpressure):
   - 发送 `human.message` 给 `ralph#1`,让它决定是否派发新任务/窗口大小/是否需要更多证据.
 
+### 正常 workflow event 发射(关键,不要和 `ralph emit` 混淆)
+
+- 对当前 hat 的正常工作流事件(例如 `experiment.result`、`build.done`、`spec.ready`、`integration.applied`)：
+  - 必须直接作为你**最终 assistant 回复里的原始 `<event ...>...</event>` 文本**输出
+  - 这样它才会进入当前 job 的 stdout,并被 Ralph 正常路由
+- 禁止用以下方式“间接发事件”:
+  - 通过 shell/tool 执行 `cat`、`echo`、`printf`、`python -c` 等命令去打印 `<event ...>`
+  - 通过 `ralph emit` 代替当前 hat 的正常结果上报
+  - 把 `<event ...>` 写进文件、diff、tool transcript、stderr 日志后,再口头说“我已经上报”
+- 原因:
+  - 并行模式的 event parsing 只消费当前 hat 的 stdout 正文
+  - tool transcript / stderr / 文件内容里的 `<event ...>` 不会被当成当前 hat 的正常回流事件
+- `ralph emit` 只用于:
+  - 外部人类/工具对**正在运行中的 Ralph**做 out-of-band 注入
+  - 不用于当前 hat 完成自己这一次 job 时的正常结果上报
+
 示例(在启动 `ralph run` 的同一工作区根目录执行):
 
 ```bash

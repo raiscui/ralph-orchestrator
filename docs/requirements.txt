@@ -1,0 +1,7 @@
+# Docs build dependencies verified with Python 3.12.
+# Keep this file pinned so GitHub Pages builds do not drift with latest releases.
+mkdocs==1.6.1
+mkdocs-material==9.7.6
+mkdocs-material-extensions==1.3.1
+pymdown-extensions==10.21.2
+mkdocs-minify-plugin==0.8.0

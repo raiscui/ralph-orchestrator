@@ -465,6 +465,99 @@ mod tests {
     }
 
     #[test]
+    fn test_record_session_critical_sequence_strict_parseable_after_flush() {
+        use ralph_proto::TerminalWrite;
+
+        let mut output = Vec::new();
+        {
+            let recorder = SessionRecorder::new(&mut output);
+            recorder.record_meta(Record::meta_session_start(
+                Some("/tmp/project"),
+                Some("/tmp/project"),
+                &["ralph".to_string(), "run".to_string()],
+                123,
+                Some("/tmp/bin/ralph"),
+                Some("0.0.0-test"),
+            ));
+            recorder.record_meta(Record::meta_loop_start("PROMPT.md", 3, Some("cli")));
+            recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(
+                b"<event topic=\"reply.human.message\">done</event>\n",
+                true,
+                10,
+            )));
+            recorder.record_bus_event(&Event::new("reply.human.message", "done"));
+            recorder.record_meta(Record::meta_termination("LoopComplete", 1, 0.25, 1));
+            recorder.flush().unwrap();
+        }
+
+        let player = crate::SessionPlayer::from_bytes(&output).unwrap();
+        let events: Vec<&str> = player
+            .records()
+            .iter()
+            .map(|record| record.record.event.as_str())
+            .collect();
+
+        assert_eq!(
+            events,
+            vec![
+                "_meta.session_start",
+                "_meta.loop_start",
+                "ux.terminal.write",
+                "bus.publish",
+                "_meta.termination"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_critical_records_flush_to_file_before_recorder_drop() {
+        use ralph_proto::TerminalWrite;
+
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let path = temp.path().to_path_buf();
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let recorder = SessionRecorder::new(std::io::BufWriter::new(file));
+
+        recorder.record_meta(Record::meta_session_start(
+            Some("/tmp/project"),
+            Some("/tmp/project"),
+            &["ralph".to_string(), "run".to_string()],
+            123,
+            Some("/tmp/bin/ralph"),
+            Some("0.0.0-test"),
+        ));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("_meta.session_start"),
+            "meta records must flush before recorder drop"
+        );
+        crate::SessionPlayer::from_bytes(contents.as_bytes()).unwrap();
+
+        recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(
+            b"visible stdout\n",
+            true,
+            10,
+        )));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("visible stdout"),
+            "stdout terminal writes must flush before recorder drop"
+        );
+        crate::SessionPlayer::from_bytes(contents.as_bytes()).unwrap();
+
+        recorder.record_bus_event(&Event::new("reply.human.message", "done"));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("bus.publish"),
+            "bus.publish records must flush before recorder drop"
+        );
+        crate::SessionPlayer::from_bytes(contents.as_bytes()).unwrap();
+    }
+
+    #[test]
     fn test_jsonl_format() {
         let mut output = Vec::new();
         {

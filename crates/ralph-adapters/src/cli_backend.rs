@@ -957,6 +957,38 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_backend_stdin_prompt_mode_keeps_prompt_off_argv() {
+        let config = CliConfig {
+            backend: "custom".to_string(),
+            command: Some("ralph-e2e".to_string()),
+            args: vec![
+                "mock-cli".to_string(),
+                "--cassette".to_string(),
+                "fixture.jsonl".to_string(),
+            ],
+            prompt_mode: "stdin".to_string(),
+            // 即使用户误配了 prompt_flag,stdin 模式也不能再追加 prompt argv。
+            prompt_flag: Some("--prompt".to_string()),
+            ..Default::default()
+        };
+        let backend = CliBackend::from_config(&config).unwrap();
+        let prompt = "adapter contract prompt";
+        let (cmd, args, stdin, _temp) = backend.build_command(prompt, false);
+
+        assert_eq!(cmd, "ralph-e2e");
+        assert_eq!(
+            args,
+            vec!["mock-cli", "--cassette", "fixture.jsonl"],
+            "stdin mode must preserve configured argv without appending prompt or prompt_flag"
+        );
+        assert_eq!(stdin.as_deref(), Some(prompt));
+        assert!(
+            !args.iter().any(|arg| arg == prompt || arg == "--prompt"),
+            "prompt must be transported through stdin, not as argv"
+        );
+    }
+
+    #[test]
     fn test_custom_backend_without_command_returns_error() {
         let config = CliConfig {
             backend: "custom".to_string(),

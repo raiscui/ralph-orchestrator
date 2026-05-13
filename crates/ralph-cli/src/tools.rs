@@ -11,6 +11,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::capability;
 use crate::memory;
 use crate::task_cli;
 
@@ -28,6 +29,9 @@ pub enum ToolsCommands {
 
     /// Manage work items (task tracking)
     Task(task_cli::TaskArgs),
+
+    /// List or invoke runtime capabilities (agent-facing)
+    Capability(capability::CapabilityArgs),
 }
 
 /// Execute a tools command.
@@ -35,5 +39,8 @@ pub fn execute(args: ToolsArgs, use_colors: bool) -> Result<()> {
     match args.command {
         ToolsCommands::Memory(memory_args) => memory::execute(memory_args, use_colors),
         ToolsCommands::Task(task_args) => task_cli::execute(task_args, use_colors),
+        ToolsCommands::Capability(capability_args) => {
+            capability::execute(capability_args, use_colors)
+        }
     }
 }

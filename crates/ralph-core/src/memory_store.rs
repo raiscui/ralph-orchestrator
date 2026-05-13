@@ -300,15 +300,14 @@ pub fn truncate_to_budget(content: &str, budget: usize) -> String {
         return content.to_string();
     }
 
-    // Rough estimate: 4 chars per token
-    let char_budget = budget * 4;
-
-    if content.len() <= char_budget {
+    // 预算语义是“字符数”,不能直接拿它当 byte index 切 UTF-8 字符串。
+    let char_budget = budget.saturating_mul(4);
+    let Some(truncate_at) = crate::text::byte_index_after_chars(content, char_budget) else {
         return content.to_string();
-    }
+    };
 
     // Find a good break point (end of a memory block)
-    let truncated = &content[..char_budget];
+    let truncated = &content[..truncate_at];
 
     // Try to find the last complete memory block (ends with -->)
     if let Some(last_complete) = truncated.rfind("-->") {
@@ -713,5 +712,14 @@ mod tests {
 
         assert!(result.len() < content.len());
         assert!(result.contains("<!-- truncated:"));
+    }
+
+    #[test]
+    fn test_truncate_to_budget_is_utf8_safe_for_chinese() {
+        let content = format!("{}设置完成后还有内容", "x".repeat(1198));
+        let result = truncate_to_budget(&content, 300); // 300 tokens = 1200 chars
+
+        assert!(result.contains("设置"));
+        assert!(result.contains("<!-- truncated: budget 300 tokens exceeded -->"));
     }
 }

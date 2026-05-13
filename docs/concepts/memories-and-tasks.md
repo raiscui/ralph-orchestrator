@@ -1,12 +1,22 @@
 # Memories & Tasks
 
-Ralph uses two complementary systems for persistent state: memories for cross-session learning, and tasks for runtime work tracking.
+Ralph currently uses two active persistence systems by default: memories for cross-session learning, and tasks for runtime work tracking.
+
+The implementation baseline is still `.agent/memories.md`, but the scoped experience design now distinguishes five layers of state:
+
+- Runtime work graph: `.agent/tasks.jsonl`
+- Instance context: `.ralph/log/<instance_id>/...`
+- Topic shared context: `task_plan__topic.md`, `notes__topic.md`, `WORKLOG__topic.md`
+- Role experience: `.ralph/roles/<hat_id>/experience.md`
+- Project experience: project-root `experience.md`
+
+Today, only the legacy memories layer is fully implemented as the default long-term store. The newer role/project experience layers are the forward design direction and must remain compatible with `.agent/memories.md` during migration.
 
 ## Overview
 
 | System | Storage | Purpose |
 |--------|---------|---------|
-| **Memories** | `.agent/memories.md` | Accumulated wisdom across sessions |
+| **Memories** | `.agent/memories.md` | Current compatibility baseline for accumulated wisdom across sessions |
 | **Tasks** | `.agent/tasks.jsonl` | Runtime work items |
 
 Both are enabled by default and work together to replace the legacy scratchpad.
@@ -14,6 +24,20 @@ Both are enabled by default and work together to replace the legacy scratchpad.
 ## Memories
 
 Memories persist learning across sessions. They capture patterns, decisions, fixes, and context that Ralph should remember.
+
+### Scoped Experience Roadmap
+
+The scoped experience system extends the current memory model rather than replacing it overnight:
+
+| Scope | Storage | Role |
+|------|---------|------|
+| Runtime | `.agent/tasks.jsonl` | Open work graph |
+| Instance | `.ralph/log/<instance_id>/...` | Raw execution trail |
+| Topic | `task_plan__topic.md`, `notes__topic.md`, `WORKLOG__topic.md` | Shared topic conclusion |
+| Role | `.ralph/roles/<hat_id>/experience.md` | Reusable guidance for one role |
+| Project | `experience.md` | Reusable guidance across roles and workflows |
+
+Until the scoped experience migration is complete, `.agent/memories.md` remains the compatibility entry point for persistent learning.
 
 ### Memory Types
 
@@ -77,6 +101,8 @@ memories:
     tags: []        # Filter by tags (empty = all)
     recent: 0       # Days limit (0 = no limit)
 ```
+
+This block documents the current implementation baseline. Even though some docs mention `memories.path`, the current core implementation still resolves the compatibility path as `.agent/memories.md`.
 
 ### Memory Best Practices
 
@@ -189,6 +215,18 @@ In this mode, `.agent/scratchpad.md` is used for all state.
 {"id":"task-001","title":"Implement auth","priority":2,"status":"open","created":"2024-01-20T10:00:00Z"}
 {"id":"task-002","title":"Add tests","priority":3,"status":"open","blocked_by":["task-001"],"created":"2024-01-20T10:01:00Z"}
 ```
+
+### scoped role/project experience (design direction)
+
+```markdown
+# Experience
+
+### exp-1737372000-a1b2
+> Only the canonical writer may update shared topic files.
+<!-- scope: project | source_topics: memory-axes | source_hats: ralph#1 | status: active | confidence: high | created_at: 2026-03-21T00:00:00Z | updated_at: 2026-03-21T00:10:00Z | supersedes:  -->
+```
+
+Role and project experience intentionally share one entry shape. Their difference comes from file location, not from using two different protocols.
 
 ## Integration with Hats
 

@@ -257,6 +257,8 @@ PY
 5. 只要存在至少一个 `verdict=approved` 的候选实验结果：
    - `ralph#1` 就可以发布 `integration.task`
    - 但前提是该候选已经在 `experiment.reviewed` 里带出明确的顶层 `commit`
+   - `integration.task.final_verification` 应只验证"被采纳 experiment 在主工作区的期望结果"
+   - 不应把未采纳实验的 marker 一并写进 `final_verification`
    - 不需要等待所有实验都变成 “OK”
 6. `experiment_integrator` 必须对 `integration.task` 产出：
    - 成功：`integration.applied`（并额外发布 `experiment.complete`）

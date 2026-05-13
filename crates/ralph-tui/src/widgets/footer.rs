@@ -94,6 +94,14 @@ impl Widget for Footer<'_> {
         };
         left_spans.push(Span::raw(elapsed_display));
 
+        if let Some(status) = &self.state.serial_output_status {
+            left_spans.push(Span::raw(" │ "));
+            left_spans.push(Span::styled(
+                status.clone(),
+                Style::default().fg(self.theme.colors().sky),
+            ));
+        }
+
         let indicator_text = if self.state.loop_completed {
             "■ DONE"
         } else {

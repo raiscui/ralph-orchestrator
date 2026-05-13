@@ -453,3 +453,68 @@
   - `openspec/changes/event-id-and-reply/design.md`
   - `crates/ralph-core/src/parallel/instance.rs`
   - `crates/ralph-core/src/parallel/supervisor/routing.rs`
+## [2026-03-18 18:02:00] [Session ID: 2d1fc46f-d36c-45b6-af3b-ab3318b8c122] 主题: preset 自主选择应放在 bootstrap 阶段,不要在正式 run 中途热切换拓扑
+
+### 发现来源
+- 探索“无 `PROMPT.md` / 无 `ralph.yml` 默认运行 + presets 内嵌 + Ralph 自选 preset/hat”时,回读了 `EventLoop`、`HatRegistry`、`parallel Supervisor`、config validate 与 preset embed 代码。
+
+### 核心问题
+- 当前 Ralph 的大量护栏都建立在“run 启动前已经有一份最终 `RalphConfig`”这个前提上。
+- 如果在正式运行中途再切换整套 preset / hat 拓扑,就会把配置校验、路由约束、收敛语义、topic contract 全部推成动态重建问题。
+
+### 为什么重要
+- 这类需求很容易被表述成“让 Ralph 自己决定就好了”。
+- 但真正危险的地方不在选择动作本身,而在“选择发生在哪个时刻”。
+- 时机一旦错了,系统复杂度会指数上升。
+
+### 未来风险
+- 若直接支持运行中热切换 preset:
+  - 可能破坏 `complete_publishes` 的发布者约束
+  - 可能引入 trigger 冲突与 hat 污染
+  - 可能让串行/并行模式的验证规则失去意义
+
+### 当前结论
+- “Ralph 自主选择 preset”是可行方向。
+- 但应优先设计成 bootstrap selector,先产出 resolved config,再启动真实 run。
+- 只有这样,现有 guardrails 和可验证性才能最大程度复用。
+
+### 后续讨论入口
+- 先讨论 resource catalog 的结构与 resolved config 产物格式。
+- 再决定 selector 是规则优先、LLM 优先,还是二者结合。
+
+## [2026-03-19 14:14:57] [Session ID: 019d003c-4cdd-7ee2-95c5-d061873df462] 主题: YAML 注释不是稳定的 runtime metadata contract
+
+### 发现来源
+- 评审 `startup-resource-bootstrap` 时,用户提出希望把 `ralph.yml` 头部注释和 hat 描述一起注入给 `ralph#1`,用于 workflow / hat 选择。
+- 对照 `crates/ralph-cli/src/presets.rs`、`crates/ralph-core/src/config.rs`、`crates/ralph-core/src/hat_registry.rs` 的当前实现得到。
+
+### 核心问题
+- `hat.description` 是正式结构化字段,能稳定进入 runtime。
+- 但 workflow 文件头的 YAML 注释不会进入 `RalphConfig`,当前 preset 简介也是编译期手工常量,不是运行时动态解析注释。
+- 如果把 selector / capability invoker 建在注释上,后面 catalog、materialize、用户编辑、child run 都会出现不一致。
+
+### 为什么重要
+- 这不是一个“实现细节”,而是 catalog 设计边界。
+- 一旦边界错了,后续所有:
+  - startup selector
+  - runtime capability discovery
+  - doctor / debug / replay
+  都会建立在不稳定输入上。
+
+### 未来风险
+- 继续把 workflow 摘要写在注释头里,很容易出现:
+  - 人类看到有说明
+  - 机器运行时却根本拿不到
+- 以后换一种 materialization / parse 路径时,还会重复冒出“为什么这次读不到描述”的隐性问题。
+
+### 当前结论
+- 注释可以保留,但只能作为人类可读说明。
+- 真正给 `ralph#1`、selector、capability invoker 使用的信息,必须落在结构化 metadata 上。
+- 这条规则已经分别写进:
+  - `startup-resource-bootstrap`
+  - `runtime-capability-invocation`
+
+### 后续讨论入口
+- 下次如果继续做 catalog / capability,优先先看:
+  - `openspec/changes/startup-resource-bootstrap/design.md`
+  - `openspec/changes/runtime-capability-invocation/design.md`

@@ -102,6 +102,9 @@ event_loop:
     进入集成时:
     - 发布 `integration.task`(驱动 integrator 在主工作区 `git cherry-pick <commit>` 并执行 `final_verification`).
       - `integration.task.commit` 必须直接复制自被采纳候选的 `experiment.reviewed.commit`.
+      - `integration.task.final_verification` 必须与被采纳的 `experiment_id` 一一对应,只验证“被采纳 commit 在主工作区的期望结果”。
+      - 不要把未采纳实验的 marker / artifact 一并塞进 `final_verification`。
+      - “所有实验都已跑完并审计”的覆盖应由 `experiment.reviewed` 链保证,不是由 integrator 在主工作区重新验收所有 runner 产物。
       - 如果首选候选缺少可直接使用的顶层 `commit`,你必须回到实验阶段补证据,或改选另一个已批准且 commit 明确的候选.
     - 在收到 `integration.applied` 之前:
       - 你不得发布 `experiment.complete`
@@ -225,6 +228,12 @@ hats:
       - 如果遇到外部依赖（例如数据库未启动）导致验证无法进行：
         - status 用 "blocked"
         - 在 verification_evidence 里写清楚“缺什么”和“如何恢复”
+      - `experiment.result` 必须直接出现在你最终 assistant 回复的 stdout 中
+        - 禁止通过 shell/tool/`cat`/`echo`/`printf`/`ralph emit`/写文件 来“间接发事件”
+        - 如果 `&lt;event ...&gt;` 只出现在 tool transcript、stderr 或文件内容里,Supervisor 不会把它当成回流事件
+      - 推荐做法:
+        - 先直接输出完整 `&lt;event topic="experiment.result" ...&gt;...&lt;/event&gt;`
+        - 需要补充说明时,把说明写在 event 前后都可以,但 event block 本身必须作为普通回答正文直接输出
 
       发事件必须使用如下格式（下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块）：
 
@@ -310,7 +319,7 @@ hats:
       - objective
       - experiment_id（被选中的候选）
       - commit（git hash，来自该候选的 experiment.reviewed.commit）
-      - final_verification（在主工作区集成后要跑的验收命令）
+      - final_verification（在主工作区集成后要跑的验收命令；必须和被选中的 experiment_id 对齐）
 
       integration.applied 的 payload 必须包含（最低要求）：
       - run_id

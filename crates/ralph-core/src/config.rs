@@ -572,6 +572,50 @@ impl RalphConfig {
             return Err(ConfigError::CustomBackendRequiresCommand);
         }
 
+        // Check all-hat overlay configuration is internally consistent.
+        match &self.core.all_hat_prompt {
+            AllHatPromptConfig::Compiled | AllHatPromptConfig::Disabled => {}
+            AllHatPromptConfig::Inline { text } => {
+                if text.trim().is_empty() {
+                    return Err(ConfigError::InvalidValue {
+                        field: "core.all_hat_prompt.text".to_string(),
+                        message: "must not be empty when core.all_hat_prompt.mode=inline"
+                            .to_string(),
+                    });
+                }
+            }
+            AllHatPromptConfig::File { path } => {
+                let trimmed = path.trim();
+                if trimmed.is_empty() {
+                    return Err(ConfigError::InvalidValue {
+                        field: "core.all_hat_prompt.path".to_string(),
+                        message: "must not be empty when core.all_hat_prompt.mode=file".to_string(),
+                    });
+                }
+
+                let resolved = self.core.resolve_path(trimmed);
+                if !resolved.is_file() {
+                    return Err(ConfigError::InvalidValue {
+                        field: "core.all_hat_prompt.path".to_string(),
+                        message: format!(
+                            "resolved file does not exist or is not a file: {}",
+                            resolved.display()
+                        ),
+                    });
+                }
+
+                if let Err(error) = std::fs::read_to_string(&resolved) {
+                    return Err(ConfigError::InvalidValue {
+                        field: "core.all_hat_prompt.path".to_string(),
+                        message: format!(
+                            "failed to read configured overlay file {}: {error}",
+                            resolved.display()
+                        ),
+                    });
+                }
+            }
+        }
+
         // Check for deferred features
         if warnings_enabled && self.archive_prompts {
             warnings.push(ConfigWarning::DeferredFeature {
@@ -827,6 +871,25 @@ impl Default for EventLoopConfig {
     }
 }
 
+/// 所有 hat 共用 overlay 的来源配置。
+///
+/// 说明：
+/// - 默认继续使用编译期内嵌 `config/all_hat.md`，保持现有行为不变。
+/// - 当某些 example / E2E 需要降噪时，可以显式切到 `disabled` / `inline` / `file`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AllHatPromptConfig {
+    /// 使用编译期内嵌的 `config/all_hat.md`。
+    #[default]
+    Compiled,
+    /// 完全关闭 all-hat overlay 注入。
+    Disabled,
+    /// 直接在配置里提供轻量 overlay 文本。
+    Inline { text: String },
+    /// 从运行时文件读取 overlay 文本（相对路径按 workspace root 解析）。
+    File { path: String },
+}
+
 /// Core paths and settings shared across all hats.
 ///
 /// Per spec: "Core behaviors (always injected, can customize paths)"
@@ -846,6 +909,14 @@ pub struct CoreConfig {
     #[serde(default = "default_guardrails")]
     pub guardrails: Vec<String>,
 
+    /// 项目级 all-hat overlay 的来源配置。
+    ///
+    /// 说明：
+    /// - 该 overlay 会注入所有 hat（包含 `ralph#1`）。
+    /// - 默认保持编译期内嵌；仅在需要降噪或替换时显式覆写。
+    #[serde(default)]
+    pub all_hat_prompt: AllHatPromptConfig,
+
     /// Root directory for workspace-relative paths (.agent/, memories, etc.).
     ///
     /// All relative paths (scratchpad, specs_dir, memories) are resolved relative
@@ -864,6 +935,22 @@ fn default_specs_dir() -> String {
     "./specs/".to_string()
 }
 
+fn default_legacy_memories_path() -> &'static str {
+    ".agent/memories.md"
+}
+
+fn default_project_experience_path() -> &'static str {
+    "experience.md"
+}
+
+fn default_role_experience_root() -> &'static str {
+    ".ralph/roles"
+}
+
+fn default_instance_context_root() -> &'static str {
+    ".ralph/log"
+}
+
 fn default_guardrails() -> Vec<String> {
     vec![
         "Fresh context each iteration - scratchpad is memory".to_string(),
@@ -878,6 +965,7 @@ impl Default for CoreConfig {
             scratchpad: default_scratchpad(),
             specs_dir: default_specs_dir(),
             guardrails: default_guardrails(),
+            all_hat_prompt: AllHatPromptConfig::default(),
             workspace_root: std::env::var("RALPH_WORKSPACE_ROOT")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| {
@@ -907,6 +995,51 @@ impl CoreConfig {
         } else {
             self.workspace_root.join(path)
         }
+    }
+
+    /// Resolves the legacy `.agent/memories.md` compatibility path.
+    ///
+    /// 这条路径仍是当前实现的基线,后续 scoped experience 迁移也必须兼容它。
+    #[must_use]
+    pub fn resolve_legacy_memories_path(&self) -> std::path::PathBuf {
+        self.resolve_path(default_legacy_memories_path())
+    }
+
+    /// Resolves the project-level `experience.md` path.
+    #[must_use]
+    pub fn resolve_project_experience_path(&self) -> std::path::PathBuf {
+        self.resolve_path(default_project_experience_path())
+    }
+
+    /// Resolves the role directory for a given hat id.
+    #[must_use]
+    pub fn resolve_role_dir(&self, hat_id: &str) -> std::path::PathBuf {
+        self.resolve_path(default_role_experience_root())
+            .join(hat_id)
+    }
+
+    /// Resolves the role-level `experience.md` path for a given hat id.
+    #[must_use]
+    pub fn resolve_role_experience_path(&self, hat_id: &str) -> std::path::PathBuf {
+        self.resolve_role_dir(hat_id).join("experience.md")
+    }
+
+    /// Resolves the instance context directory for a given instance id.
+    #[must_use]
+    pub fn resolve_instance_context_dir(&self, instance_id: &str) -> std::path::PathBuf {
+        self.resolve_path(default_instance_context_root())
+            .join(instance_id)
+    }
+
+    /// Resolves a file inside an instance context directory.
+    #[must_use]
+    pub fn resolve_instance_context_path(
+        &self,
+        instance_id: &str,
+        file_name: &str,
+    ) -> std::path::PathBuf {
+        self.resolve_instance_context_dir(instance_id)
+            .join(file_name)
     }
 }
 
@@ -1859,6 +1992,7 @@ hats:
         assert!(config.core.guardrails[0].contains("Fresh context"));
         assert!(config.core.guardrails[1].contains("search first"));
         assert!(config.core.guardrails[2].contains("Backpressure"));
+        assert_eq!(config.core.all_hat_prompt, AllHatPromptConfig::Compiled);
     }
 
     #[test]
@@ -1889,6 +2023,98 @@ core:
         assert_eq!(config.core.guardrails.len(), 2);
         assert_eq!(config.core.guardrails[0], "Custom rule one");
         assert_eq!(config.core.guardrails[1], "Custom rule two");
+    }
+
+    #[test]
+    fn test_parse_yaml_with_inline_all_hat_prompt_override() {
+        let yaml = r#"
+core:
+  all_hat_prompt:
+    mode: inline
+    text: |
+      lightweight overlay
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.core.all_hat_prompt,
+            AllHatPromptConfig::Inline {
+                text: "lightweight overlay\n".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_validate_inline_all_hat_prompt_requires_text() {
+        let yaml = r#"
+core:
+  all_hat_prompt:
+    mode: inline
+    text: "   "
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { field, .. }) if field == "core.all_hat_prompt.text"
+        ));
+    }
+
+    #[test]
+    fn test_validate_file_all_hat_prompt_requires_existing_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let existing = temp_dir.path().join("overlay.md");
+        std::fs::write(&existing, "file overlay\n").expect("write overlay file");
+
+        let yaml = format!(
+            "core:\n  all_hat_prompt:\n    mode: file\n    path: \"{}\"\n",
+            existing.display()
+        );
+        let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "existing overlay file should validate"
+        );
+
+        let missing_yaml = format!(
+            "core:\n  all_hat_prompt:\n    mode: file\n    path: \"{}\"\n",
+            temp_dir.path().join("missing.md").display()
+        );
+        let missing_config: RalphConfig = serde_yaml::from_str(&missing_yaml).unwrap();
+        let result = missing_config.validate();
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { field, .. }) if field == "core.all_hat_prompt.path"
+        ));
+    }
+
+    #[test]
+    fn test_core_config_resolves_scoped_experience_paths() {
+        let core = CoreConfig::default().with_workspace_root("/tmp/ralph-scoped-experience");
+
+        assert_eq!(
+            core.resolve_legacy_memories_path(),
+            std::path::PathBuf::from("/tmp/ralph-scoped-experience/.agent/memories.md")
+        );
+        assert_eq!(
+            core.resolve_project_experience_path(),
+            std::path::PathBuf::from("/tmp/ralph-scoped-experience/experience.md")
+        );
+        assert_eq!(
+            core.resolve_role_experience_path("spec_reviewer"),
+            std::path::PathBuf::from(
+                "/tmp/ralph-scoped-experience/.ralph/roles/spec_reviewer/experience.md"
+            )
+        );
+        assert_eq!(
+            core.resolve_instance_context_dir("writer#1"),
+            std::path::PathBuf::from("/tmp/ralph-scoped-experience/.ralph/log/writer#1")
+        );
+        assert_eq!(
+            core.resolve_instance_context_path("writer#1", "WORKLOG.md"),
+            std::path::PathBuf::from("/tmp/ralph-scoped-experience/.ralph/log/writer#1/WORKLOG.md")
+        );
     }
 
     #[test]

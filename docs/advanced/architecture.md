@@ -168,15 +168,39 @@ flowchart TD
 
 ### Files on Disk
 
-All persistent state lives in `.agent/`:
+Ralph currently persists state across several layers:
 
 ```
 .agent/
-├── memories.md         # Persistent learning
+├── memories.md         # Current compatibility baseline for persistent learning
 ├── tasks.jsonl         # Runtime work tracking
 ├── event_history.jsonl # Event audit log
 └── scratchpad.md       # Legacy state (deprecated)
+
+.ralph/
+├── canonical-writers/...        # Topic / role / project writer ownership metadata
+├── log/<instance_id>/...        # Instance-local raw context
+└── roles/<hat_id>/
+    ├── experience.md            # Role-level reusable experience
+    └── handoff.md               # Append-only role writer transfer summary
+
+./
+├── experience.md                # Project-level reusable experience
+└── task_plan__topic.md          # Topic-level shared context (with notes/worklog siblings)
 ```
+
+The scoped experience design intentionally separates:
+
+- runtime work graph
+- instance execution trail
+- topic shared conclusion
+- role reusable guidance
+- project reusable guidance
+
+This keeps `.agent/memories.md` as the current implementation baseline while newer scoped experience files are phased in.
+
+Canonical writer state is intentionally kept outside the main experience files.
+That lets Ralph enforce write ownership and retain handoff history without mixing operational transfer metadata into reusable experience entries.
 
 ### Event Bus
 

@@ -1,143 +1,85 @@
 # Ralph Orchestrator
 
-<div align="center" markdown>
+<section class="ralph-hero" markdown>
 
-**Hat-based orchestration framework that keeps AI agents in a loop until the task is done.**
+<div markdown>
 
-[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/mikeyobrien/ralph-orchestrator/blob/main/LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.86+-orange)](https://www.rust-lang.org/)
-[![Build](https://img.shields.io/github/actions/workflow/status/mikeyobrien/ralph-orchestrator/ci.yml?branch=main&label=CI)](https://github.com/mikeyobrien/ralph-orchestrator/actions)
+Ralph is a Rust implementation of the Ralph Wiggum orchestration technique.
+It keeps an AI agent in a loop until the task is actually done, then uses tests,
+recorded evidence, and event routing to prevent false "done" claims.
 
-> "Me fail English? That's unpossible!" - Ralph Wiggum
-
-</div>
-
----
-
-## What is Ralph?
-
-Ralph implements the [Ralph Wiggum technique](https://ghuntley.com/ralph/) — autonomous task completion through continuous iteration. Give Ralph a task, and it will keep working until it's done.
-
-> "The orchestrator is a thin coordination layer, not a platform. Ralph is smart; let Ralph do the work."
-
-### Two Modes of Operation
-
-| Mode | Description | Best For |
-|------|-------------|----------|
-| **Traditional** | Simple loop — Ralph iterates until done | Quick tasks, simple automation |
-| **Hat-Based** | Specialized personas coordinate through events | Complex workflows, multi-step processes |
-
-## Key Features
-
-<div class="grid cards" markdown>
-
--   :material-robot: **Multi-Backend Support**
-
-    Works with Claude Code, Kiro, Gemini CLI, Codex, Amp, Copilot CLI, and OpenCode
-
--   :material-hat-fedora: **Hat System**
-
-    Specialized Ralph personas with distinct behaviors coordinating through typed events
-
--   :material-shield-check: **Backpressure Enforcement**
-
-    Gates that reject incomplete work — tests, lint, typecheck must pass
-
--   :material-brain: **Memories & Tasks**
-
-    Persistent learning across sessions and runtime work tracking
-
--   :material-monitor: **Interactive TUI**
-
-    Real-time terminal UI for monitoring Ralph's activity
-
--   :material-cog: **31 Presets**
-
-    Pre-configured workflows for TDD, spec-driven development, debugging, and more
+[Start with Ralph](start/index.md){ .md-button .md-button--primary }
+[Read the method](method/ralph-wiggum.md){ .md-button }
 
 </div>
 
-## Quick Example
-
-```bash
-# Initialize with traditional mode
-ralph init --backend claude
-
-# Create a task
-cat > PROMPT.md << 'EOF'
-Build a REST API with these endpoints:
-- POST /users - Create user
-- GET /users/:id - Get user by ID
-- PUT /users/:id - Update user
-
-Use Express.js with TypeScript.
-EOF
-
-# Run Ralph
-ralph run
+```text
+PROMPT.md + specs
+      |
+      v
+ralph run --record-session /tmp/session.jsonl
+      |
+      +--> agent iteration
+      +--> files, git, memories, tasks
+      +--> build.done only after evidence
 ```
 
-Ralph iterates until it outputs `LOOP_COMPLETE` or hits the iteration limit.
+</section>
 
-## The Ralph Tenets
-
-1. **Fresh Context Is Reliability** — Each iteration clears context. Re-read specs, plan, code every cycle.
-2. **Backpressure Over Prescription** — Don't prescribe how; create gates that reject bad work.
-3. **The Plan Is Disposable** — Regeneration costs one planning loop. Cheap.
-4. **Disk Is State, Git Is Memory** — Files are the handoff mechanism.
-5. **Steer With Signals, Not Scripts** — Add signs, not scripts.
-6. **Let Ralph Ralph** — Sit *on* the loop, not *in* it.
-
-## Getting Started
+## What This Site Covers
 
 <div class="grid cards" markdown>
 
--   :material-download: **[Installation](getting-started/installation.md)**
+-   **Method**
 
-    Install Ralph via npm, Homebrew, or Cargo
+    How Ralph adapts the original loop into fresh context, disk-backed state,
+    and verification backpressure.
 
--   :material-rocket-launch: **[Quick Start](getting-started/quick-start.md)**
+-   **System**
 
-    Get up and running in 5 minutes
+    The Cargo workspace, hats, events, parallel supervisor, and where each
+    responsibility lives in the codebase.
 
--   :material-book-open: **[Concepts](concepts/index.md)**
+-   **Runbook**
 
-    Understand hats, events, memories, and backpressure
+    The commands that matter: initialize, run, emit, inspect agents, record
+    sessions, validate hats, and run tests.
 
--   :material-cog: **[Configuration](guide/configuration.md)**
+-   **Sources**
 
-    Configure Ralph for your workflow
-
-</div>
-
-## Architecture
-
-Ralph is organized as a Cargo workspace with seven crates:
-
-| Crate | Purpose |
-|-------|---------|
-| `ralph-proto` | Protocol types: Event, Hat, Topic |
-| `ralph-core` | Business logic: EventLoop, Config |
-| `ralph-adapters` | CLI backend integrations |
-| `ralph-tui` | Terminal UI with ratatui |
-| `ralph-cli` | Binary entry point |
-| `ralph-e2e` | End-to-end testing |
-| `ralph-bench` | Benchmarking |
-
-## Community
-
-- [GitHub Issues](https://github.com/mikeyobrien/ralph-orchestrator/issues) — Report bugs and request features
-- [GitHub Discussions](https://github.com/mikeyobrien/ralph-orchestrator/discussions) — Ask questions and share ideas
-- [Contributing Guide](contributing/index.md) — Help improve Ralph
-
-## License
-
-Ralph Orchestrator is open source software licensed under [MIT](https://github.com/mikeyobrien/ralph-orchestrator/blob/main/LICENSE).
-
----
-
-<div align="center" markdown>
-
-*"I'm learnding!" - Ralph Wiggum*
+    A source map that ties claims back to `AGENTS.md`, `README.md`, `specs/`,
+    and crate source files.
 
 </div>
+
+## Current Shape
+
+Ralph Orchestrator is a Cargo workspace with seven crates:
+
+| Crate | Responsibility |
+| --- | --- |
+| `ralph-proto` | Protocol types such as events, hats, topics, and routing metadata |
+| `ralph-core` | Configuration, event loop, event parsing, memory and task stores |
+| `ralph-adapters` | Backend CLI execution for agent providers |
+| `ralph-tui` | Terminal UI and live observation surfaces |
+| `ralph-cli` | The `ralph` command line entry point |
+| `ralph-e2e` | End-to-end scenarios against real or mock backends |
+| `ralph-bench` | Benchmark and performance harnesses |
+
+## Design Posture
+
+The project is intentionally not a platform with every behavior hard-coded into
+the orchestrator. The main job of Ralph is to route work, apply backpressure,
+record evidence, and let capable agents do the implementation.
+
+That stance shows up everywhere:
+
+- specs live in `specs/`
+- runtime work lives in `.agent/tasks.jsonl`
+- persistent memories live in `.agent/memories.md`
+- record-session JSONL is the evidence stream
+- `build.done` is accepted only when the evidence is present
+
+## Next
+
+Start with [the first run guide](start/index.md), then read [the Ralph Wiggum method](method/ralph-wiggum.md).

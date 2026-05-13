@@ -16,6 +16,16 @@
 
 6. **Let Ralph Ralph** — Sit *on* the loop, not *in* it. Tune like a guitar, don't conduct like an orchestra.
 
+## Project Knowledge Index
+
+- `EXPERIENCE.md`: Agent-facing project experience extracted from six-file contexts and continuous-learning runs; read it before continuing runtime graph, TUI mode, memory/truncation, or context archival work. This is separate from the runtime scoped-experience design's lower-case `experience.md`.
+- `docs/agent-guidance-schema.md`: Schema for classifying agent-facing guidance assets; read it before adding or moving AGENTS / EXPERIENCE / prompt-contract / skill / report governance files.
+- `docs/prompt-contract.md`: Minimum prompt-like asset behavior contract; read it before changing prompt, skill, hat, or final-response instructions.
+- `agent-guidance-manifest.toml`: Machine-readable manifest for core agent guidance assets; update it with new long-term guidance files so verifier tests catch drift.
+- `specs/oh-my-codex-learning-analysis.md`: Learning report for `/Users/cuiluming/local_doc/l_dev/my/rust/oh-my-codex`; read section 4 when continuing guidance-governance adoption.
+- `.codex/skills/self-learning.rust-utf8-safe-string-truncation/SKILL.md`: Rust UTF-8 safe truncation playbook; use when a panic says `byte index ... is not a char boundary`, or when code mixes character budgets with byte slicing.
+- `archive/manifests/`: Archive batch manifests for six-file context moves; read the relevant manifest before reopening an archived branch context under `archive/branch_contexts/<topic>/`.
+
 ## Anti-Patterns
 
 - ❌ Building features into the orchestrator that agents can handle

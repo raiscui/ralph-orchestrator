@@ -33,18 +33,19 @@
 /// assert_eq!(truncate_with_ellipsis("🎉🎊🎁🎄", 2), "🎉🎊...");
 /// ```
 pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        // Find the byte index of the max_chars-th character
-        // This ensures we never slice in the middle of a multi-byte character
-        let byte_idx = s
-            .char_indices()
-            .nth(max_chars)
-            .map(|(idx, _)| idx)
-            .unwrap_or(s.len());
+    if let Some(byte_idx) = byte_index_after_chars(s, max_chars) {
         format!("{}...", &s[..byte_idx])
+    } else {
+        s.to_string()
     }
+}
+
+/// 返回保留指定字符数之后的字节边界。
+///
+/// Rust 字符串只能在 UTF-8 字符边界切片。所有“字符预算”截断都应该先通过
+/// 这个 helper 把字符数量转换为安全的 byte index,避免中文和 emoji 被切开。
+pub(crate) fn byte_index_after_chars(s: &str, max_chars: usize) -> Option<usize> {
+    s.char_indices().nth(max_chars).map(|(idx, _)| idx)
 }
 
 #[cfg(test)]
@@ -104,5 +105,12 @@ mod tests {
     fn test_single_char_truncation() {
         assert_eq!(truncate_with_ellipsis("hello", 1), "h...");
         assert_eq!(truncate_with_ellipsis("🎉hello", 1), "🎉...");
+    }
+
+    #[test]
+    fn test_byte_index_after_chars_uses_utf8_boundaries() {
+        assert_eq!(byte_index_after_chars("设置", 0), Some(0));
+        assert_eq!(byte_index_after_chars("设置", 1), Some("设".len()));
+        assert_eq!(byte_index_after_chars("设置", 2), None);
     }
 }

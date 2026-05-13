@@ -120,6 +120,26 @@ pub(in crate::scenarios) fn replace_top_level_yaml_block(
     Ok(merged)
 }
 
+pub(in crate::scenarios) fn replace_or_append_top_level_yaml_block(
+    content: &str,
+    block_key_line: &str,
+    replacement_block: &str,
+) -> Result<String, String> {
+    match replace_top_level_yaml_block(content, block_key_line, replacement_block) {
+        Ok(updated) => Ok(updated),
+        Err(error) if error.starts_with("missing top-level block key: ") => {
+            let mut merged = content.trim_end_matches('\n').to_string();
+            if !merged.is_empty() {
+                merged.push_str("\n\n");
+            }
+            merged.push_str(replacement_block.trim_end_matches('\n'));
+            merged.push('\n');
+            Ok(merged)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(in crate::scenarios) fn patch_example_config_for_codex_e2e(
     config_content: &str,
     backend: Backend,

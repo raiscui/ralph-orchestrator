@@ -10,7 +10,7 @@ use crate::presets;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use ralph_adapters::{detect_backend, is_backend_available};
-use ralph_core::{EventLoop, HatRegistry, RalphConfig};
+use ralph_core::{CanonicalWriterStore, EventLoop, HatRegistry, RalphConfig};
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
@@ -368,6 +368,17 @@ async fn run_doctor<W: Write>(
         )?;
     }
 
+    // D4.5: scoped experience 路径与 writer 可见性
+    if let Some(cfg) = config.as_ref() {
+        check_scoped_experience_visibility(&mut reporter, cfg)?;
+    } else {
+        reporter.err(
+            "experience.visibility.skipped",
+            "experience",
+            "Skipped scoped experience visibility: config invalid. Fix: repair config first",
+        )?;
+    }
+
     // D5: 当前 run 的 events marker 健康度(如果存在)
     check_and_fix_events_marker(&mut reporter, &workspace_root, args.fix)?;
 
@@ -561,6 +572,69 @@ fn check_hat_topology<W: Write>(
             ),
         )?;
     }
+
+    Ok(())
+}
+
+fn check_scoped_experience_visibility<W: Write>(
+    reporter: &mut DoctorReporter<'_, W>,
+    config: &RalphConfig,
+) -> Result<()> {
+    let store = CanonicalWriterStore::new(&config.core);
+    let inspection = store.inspect(config.hats.keys().cloned().collect::<Vec<_>>())?;
+
+    reporter.ok(
+        "experience.paths",
+        "experience",
+        format!(
+            "Scoped experience paths resolved: project={}, role_root={}, writer_root={}",
+            inspection.project_experience_path.display(),
+            inspection.role_experience_root.display(),
+            inspection.writer_root.display(),
+        ),
+    )?;
+
+    let mut writer_parts = vec![format!("project={}", inspection.project_writer.owner)];
+
+    if inspection.role_writers.is_empty() {
+        writer_parts.push("roles=none".to_string());
+    } else {
+        let roles = inspection
+            .role_writers
+            .iter()
+            .map(|record| match &record.scope {
+                ralph_core::SharedKnowledgeScope::Role { hat_id } => {
+                    format!("{hat_id}:{}", record.owner)
+                }
+                _ => unreachable!("inspection role_writers only contains role scopes"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        writer_parts.push(format!("roles=[{roles}]"));
+    }
+
+    if inspection.topic_writers.is_empty() {
+        writer_parts.push("topics=none".to_string());
+    } else {
+        let topics = inspection
+            .topic_writers
+            .iter()
+            .map(|record| match &record.scope {
+                ralph_core::SharedKnowledgeScope::Topic { suffix } => {
+                    format!("{suffix}:{}", record.owner)
+                }
+                _ => unreachable!("inspection topic_writers only contains topic scopes"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        writer_parts.push(format!("topics=[{topics}]"));
+    }
+
+    reporter.ok(
+        "experience.writers",
+        "experience",
+        format!("Scoped writer ownership: {}", writer_parts.join(" ; ")),
+    )?;
 
     Ok(())
 }
@@ -1337,5 +1411,79 @@ core:
         assert_eq!(value["schema_version"].as_u64(), Some(1));
         assert_eq!(value["verdict"].as_str(), Some("pass"));
         assert_eq!(value["counts"]["errors"].as_u64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn doctor_json_reports_scoped_experience_paths_and_writers() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp_dir.path().to_path_buf();
+
+        let cfg_path = workspace_root.join("ralph.yml");
+        fs::write(
+            &cfg_path,
+            r#"
+event_loop:
+  prompt_file: "PROMPT.md"
+cli:
+  backend: "custom"
+  command: "true"
+core:
+  scratchpad: ".agent/scratchpad.md"
+hats:
+  spec_reviewer:
+    name: "Spec Reviewer"
+    description: "Reviews specs"
+    triggers: ["review.spec"]
+"#,
+        )
+        .expect("write config");
+        fs::write(
+            workspace_root.join("task_plan__alpha.md"),
+            "## Active topic\n",
+        )
+        .unwrap();
+
+        let mut out = Vec::<u8>::new();
+        let res = run_doctor(
+            &mut out,
+            cfg_path,
+            DoctorArgs {
+                fix: true,
+                strict: false,
+                format: DoctorOutputFormat::Text,
+                json: true,
+            },
+            false,
+            workspace_root,
+        )
+        .await;
+
+        assert!(res.is_ok(), "doctor should succeed in json mode");
+
+        let value: serde_json::Value = serde_json::from_slice(&out).expect("doctor json");
+        let checks = value["checks"]
+            .as_array()
+            .expect("checks should be an array");
+
+        let paths = checks
+            .iter()
+            .find(|c| c["id"] == "experience.paths")
+            .expect("should include experience.paths");
+        assert!(
+            paths["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("experience.md"),
+            "paths message should mention experience.md"
+        );
+
+        let writers = checks
+            .iter()
+            .find(|c| c["id"] == "experience.writers")
+            .expect("should include experience.writers");
+        let writers_message = writers["message"].as_str().unwrap_or_default();
+        assert!(writers_message.contains("project=ralph#1"));
+        assert!(writers_message.contains("spec_reviewer:ralph#1"));
+        assert!(writers_message.contains("alpha:ralph#1"));
     }
 }

@@ -11,10 +11,10 @@ pub use loop_state::LoopState;
 use crate::config::{HatBackend, InjectMode, RalphConfig};
 use crate::event_parser::EventParser;
 use crate::event_reader::EventReader;
+use crate::experience_injection::{ScopedPromptMode, inject_scoped_context};
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
-use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget};
 use crate::prompt_overlay;
 use ralph_proto::{Event, EventBus, Hat, HatId};
 use std::time::Duration;
@@ -172,7 +172,14 @@ impl EventLoop {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| ".ralph/events.jsonl".to_string());
         let event_reader = EventReader::new(&events_path);
-        let all_hat_prompt = prompt_overlay::load_all_hat_prompt();
+        let all_hat_prompt =
+            prompt_overlay::load_all_hat_prompt(&config.core).unwrap_or_else(|error| {
+                warn!(
+                    error = %error,
+                    "Failed to load configured all-hat overlay; continuing without overlay"
+                );
+                None
+            });
 
         Self {
             config,
@@ -409,7 +416,12 @@ impl EventLoop {
 
                 // Build base prompt and prepend memories + scratchpad if available
                 let base_prompt = self.ralph.build_prompt(&events_context, &[]);
-                let with_memories = self.prepend_memories(base_prompt);
+                let with_memories = self.prepend_memories(
+                    base_prompt,
+                    ScopedPromptMode::Coordinator {
+                        owner_role_hint: None,
+                    },
+                );
                 let final_prompt = self.prepend_scratchpad(with_memories);
                 let final_prompt = Self::inject_hat_instance_id(final_prompt, hat_id.as_str());
                 let final_prompt = self.inject_all_hat_prompt(final_prompt);
@@ -464,7 +476,16 @@ impl EventLoop {
 
                 // Build base prompt and prepend memories + scratchpad if available
                 let base_prompt = self.ralph.build_prompt(&events_context, &active_hats);
-                let with_memories = self.prepend_memories(base_prompt);
+                let owner_role_hint = match active_hat_ids.as_slice() {
+                    [single_hat_id] if single_hat_id.as_str() != "ralph" => {
+                        Some(single_hat_id.as_str())
+                    }
+                    _ => None,
+                };
+                let with_memories = self.prepend_memories(
+                    base_prompt,
+                    ScopedPromptMode::Coordinator { owner_role_hint },
+                );
                 let final_prompt = self.prepend_scratchpad(with_memories);
                 let final_prompt = Self::inject_hat_instance_id(final_prompt, hat_id.as_str());
                 let final_prompt = self.inject_all_hat_prompt(final_prompt);
@@ -508,6 +529,13 @@ impl EventLoop {
         let prompt = self
             .instruction_builder
             .build_custom_hat(hat, &events_context);
+        let prompt = self.prepend_memories(
+            prompt,
+            ScopedPromptMode::Ordinary {
+                role_hat_id: hat_id.as_str(),
+                instance_id: hat_id.as_str(),
+            },
+        );
         let prompt = Self::inject_hat_instance_id(prompt, hat_id.as_str());
         Some(self.inject_all_hat_prompt(prompt))
     }
@@ -525,89 +553,33 @@ impl EventLoop {
         prompt_overlay::inject_all_hat_prompt(prompt, self.all_hat_prompt.as_deref())
     }
 
-    /// Prepends memories and usage skill to the prompt if auto-injection is enabled.
+    /// Prepends scoped experience layers and memory skill to the prompt when enabled.
     ///
-    /// Per spec: When `memories.inject: auto` is configured, memories are loaded
-    /// from `.agent/memories.md` and prepended to every prompt.
-    fn prepend_memories(&self, prompt: String) -> String {
-        let memories_config = &self.config.memories;
-
+    /// 迁移期仍沿用 `memories.enabled` / `memories.inject` 作为总开关。
+    /// 但注入内容已经扩展为 project / role / topic / instance / runtime 五层。
+    fn prepend_memories(&self, prompt: String, mode: ScopedPromptMode<'_>) -> String {
         info!(
-            "Memory injection check: enabled={}, inject={:?}, workspace_root={:?}",
-            memories_config.enabled, memories_config.inject, self.config.core.workspace_root
+            "Scoped memory injection check: enabled={}, inject={:?}, workspace_root={:?}",
+            self.config.memories.enabled,
+            self.config.memories.inject,
+            self.config.core.workspace_root
         );
 
-        // Only inject if enabled and set to auto mode
-        if !memories_config.enabled || memories_config.inject != InjectMode::Auto {
+        if !self.config.memories.enabled || self.config.memories.inject != InjectMode::Auto {
             info!(
-                "Memory injection skipped: enabled={}, inject={:?}",
-                memories_config.enabled, memories_config.inject
+                "Scoped memory injection skipped: enabled={}, inject={:?}",
+                self.config.memories.enabled, self.config.memories.inject
             );
             return prompt;
         }
 
-        // Load memories from the store using workspace root for path resolution
-        let workspace_root = &self.config.core.workspace_root;
-        let store = MarkdownMemoryStore::with_default_path(workspace_root);
-        let memories_path = workspace_root.join(".agent/memories.md");
-
-        info!(
-            "Looking for memories at: {:?} (exists: {})",
-            memories_path,
-            memories_path.exists()
-        );
-
-        let memories = match store.load() {
-            Ok(memories) => {
-                info!("Successfully loaded {} memories from store", memories.len());
-                memories
-            }
-            Err(e) => {
-                info!(
-                    "Failed to load memories for injection: {} (path: {:?})",
-                    e, memories_path
-                );
-                return prompt;
-            }
-        };
-
-        if memories.is_empty() {
-            info!("Memory store is empty - no memories to inject");
-            return prompt;
-        }
-
-        // Format memories as markdown
-        let mut memories_content = format_memories_as_markdown(&memories);
-
-        // Apply budget if configured
-        if memories_config.budget > 0 {
-            let original_len = memories_content.len();
-            memories_content = truncate_to_budget(&memories_content, memories_config.budget);
-            debug!(
-                "Applied budget: {} chars -> {} chars (budget: {})",
-                original_len,
-                memories_content.len(),
-                memories_config.budget
-            );
-        }
-
-        info!(
-            "Injecting {} memories ({} chars) into prompt",
-            memories.len(),
-            memories_content.len()
-        );
-
-        // Build final prompt with memories prefix
-        let mut final_prompt = memories_content;
-
-        // Always add usage skill when memories are enabled (implicit skill injection)
-        final_prompt.push_str(MEMORIES_SKILL);
-        debug!("Added memory usage skill to prompt");
-
-        final_prompt.push_str("\n\n");
-        final_prompt.push_str(&prompt);
-
-        final_prompt
+        inject_scoped_context(
+            prompt,
+            &self.config.core,
+            &self.config.memories,
+            mode,
+            MEMORIES_SKILL,
+        )
     }
 
     /// Prepends scratchpad content to the prompt if the file exists and is non-empty.
@@ -641,13 +613,17 @@ impl EventLoop {
 
         // 预算：4000 tokens ≈ 16000 chars。保留尾部（最近内容）。
         let char_budget = 4000 * 4;
-        let content = if content.len() > char_budget {
-            let start = content.len() - char_budget;
+        let total_chars = content.chars().count();
+        let content = if total_chars > char_budget {
+            let start_chars = total_chars - char_budget;
+            let start =
+                crate::text::byte_index_after_chars(&content, start_chars).unwrap_or(content.len());
             // 选择一个“换行边界”，避免从半行开始截断导致可读性差。
             let line_start = content[start..].find('\n').map_or(start, |n| start + n + 1);
+            let omitted_chars = content[..line_start].chars().count();
             format!(
                 "<!-- earlier content truncated ({} chars omitted) -->\n\n{}",
-                line_start,
+                omitted_chars,
                 &content[line_start..]
             )
         } else {

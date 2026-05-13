@@ -28,10 +28,45 @@ event_loop:
   starting_event: "build.task"
 
 cli:
-  backend: "claude"
+  backend: "custom"
+  command: "codex"
+  prompt_mode: "arg"
+  args:
+    - "exec"
+    - "--sandbox"
+    - "danger-full-access"
 
 core:
   specs_dir: "./specs/"
+
+
+parallel:
+  enabled: true
+
+  # 安全刹车：
+  # - max_running_jobs 是“硬上限（cap）”，真实并行度由 ralph#1 自己决定（P_max / P）
+  # - 你选择了独立 auditor，因此建议 cap 至少预留 2 个 slot（ralph#1 + auditor）
+  autoscale:
+    max_running_jobs: 7
+    dynamic_idle_ttl_secs: 30
+
+  gate:
+    # ask 模式下的默认等待上限（0 表示不超时）
+    default_timeout_secs: 60
+
+  workspace:
+    # worktree 的创建目录（每个 job 一次，结束后回收）
+    worktree_base_dir: ".ralph/worktrees"
+    # worktree / clone
+    # 兼容某些工具沙箱: runner 只能写当前目录,无法写上级仓库的 .git/worktrees/...
+    # 选择 clone 后,每个 job 会用 `git clone` 创建独立 .git,并在回收前把 HEAD 引入主仓库.
+    worktree_backend: worktree
+
+  # 作为 example：默认 allow，确保“一条命令跑通”
+  # 生产/团队协作建议：至少把 worktree 改为 ask；hooks 可保持 allow（避免每次 hook 都打断流程）
+  permissions:
+    worktree: allow
+    hooks: allow
 
 hats:
   builder:

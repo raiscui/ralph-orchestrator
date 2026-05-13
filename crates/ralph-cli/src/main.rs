@@ -13,6 +13,7 @@
 //! - Work item tracking via `ralph task`
 
 mod autopilot;
+mod capability;
 mod codex_app_server_session;
 mod codex_mcp_session;
 mod display;
@@ -25,14 +26,20 @@ mod parallel_runner;
 mod presets;
 mod record_cli;
 mod record_session;
+mod runtime_graph;
 mod sop_runner;
+mod startup_resources;
 mod task_cli;
 mod tools;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_adapters::detect_backend;
-use ralph_core::{EventHistory, RalphConfig};
+use ralph_core::{
+    EventHistory, RalphConfig, StateClearRequest, StateMode, StateOperationStore,
+    agent_guidance_manifest::{DEFAULT_AGENT_GUIDANCE_MANIFEST, verify_manifest_at_with_report},
+};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{IsTerminal, Write, stdout};
 use std::path::{Path, PathBuf};
@@ -189,6 +196,30 @@ impl Verbosity {
     }
 }
 
+/// 判断用户是否显式传入了全局 `--config` / `-c`。
+///
+/// 说明:
+/// - startup bootstrap 只在“没有显式 config source”时触发。
+/// - `Cli` 解析后的 `config: PathBuf` 无法区分默认值和显式传入同名路径。
+/// - 因此这里在 clap 解析前扫描原始 argv,遇到 `--` 后停止,避免把 backend 自定义参数误判为 Ralph config。
+fn cli_config_was_explicit<'a>(args: impl IntoIterator<Item = &'a OsStr>) -> bool {
+    for arg in args.into_iter().skip(1) {
+        if arg == OsStr::new("--") {
+            return false;
+        }
+
+        let value = arg.to_string_lossy();
+        if value == "--config" || value.starts_with("--config=") {
+            return true;
+        }
+        if value == "-c" || (value.starts_with("-c") && value.len() > 2) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Output format for events command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum OutputFormat {
@@ -299,6 +330,15 @@ enum Commands {
 
     /// Inspect record-session JSONL files (summary, watch)
     Record(record_cli::RecordArgs),
+
+    /// Build Rerun runtime graph artifacts from live or durable evidence
+    RuntimeGraph(RuntimeGraphArgs),
+
+    /// Verify repository governance contracts and generated artifacts
+    Verify(VerifyArgs),
+
+    /// Inspect or clear runtime workflow state
+    State(StateArgs),
 
     /// Diagnose common startup issues and provide safe fixes
     Doctor(doctor::DoctorArgs),
@@ -411,6 +451,15 @@ struct RunArgs {
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
 
+    /// (Parallel mode) Record a live runtime graph to a Rerun `.rrd` file.
+    ///
+    /// 说明:
+    /// - 这是 V1 live runtime graph 的最小入口。
+    /// - 录制结果可以用 `rerun <FILE>` 打开。
+    /// - 目前只支持并行模式。
+    #[arg(long, value_name = "FILE")]
+    runtime_graph_rrd: Option<PathBuf>,
+
     /// Custom backend command and arguments (use after --)
     ///
     /// 示例：
@@ -471,6 +520,15 @@ struct ResumeArgs {
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
 
+    /// (Parallel mode) Record a live runtime graph to a Rerun `.rrd` file.
+    ///
+    /// 说明:
+    /// - 这是 V1 live runtime graph 的最小入口。
+    /// - 录制结果可以用 `rerun <FILE>` 打开。
+    /// - 目前只支持并行模式。
+    #[arg(long, value_name = "FILE")]
+    runtime_graph_rrd: Option<PathBuf>,
+
     /// (Parallel mode) Hide stderr (`:err:`) streaming lines (shown by default).
     #[arg(long = "hide-stderr", action = clap::ArgAction::SetFalse, default_value_t = true)]
     show_stderr: bool,
@@ -530,6 +588,128 @@ struct AgentsArgs {
     /// Refresh interval in milliseconds for --watch.
     #[arg(long, value_name = "MS", default_value_t = 1000)]
     watch_interval_ms: u64,
+}
+
+/// Arguments for the runtime-graph subcommand.
+#[derive(Parser, Debug)]
+struct RuntimeGraphArgs {
+    #[command(subcommand)]
+    command: RuntimeGraphCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum RuntimeGraphCommands {
+    /// Replay a finished run from durable `.ralph/events.jsonl` evidence.
+    Replay(RuntimeGraphReplayArgs),
+}
+
+#[derive(Parser, Debug)]
+struct RuntimeGraphReplayArgs {
+    /// Path to events JSONL (default: auto-detects current run).
+    #[arg(long)]
+    events: Option<PathBuf>,
+
+    /// Output Rerun `.rrd` file.
+    #[arg(long, value_name = "FILE")]
+    output: PathBuf,
+
+    /// Keep only workflow / delivery records for this exact topic.
+    #[arg(long)]
+    topic: Option<String>,
+
+    /// Keep only records related to this instance.
+    #[arg(long, value_name = "HAT#KEY")]
+    instance: Option<String>,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    format: OutputFormat,
+}
+
+/// Arguments for the verify command group.
+#[derive(Parser, Debug)]
+struct VerifyArgs {
+    #[command(subcommand)]
+    command: VerifyCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum VerifyCommands {
+    /// Verify the agent guidance manifest and registered guidance assets.
+    AgentGuidance(VerifyAgentGuidanceArgs),
+}
+
+/// Arguments for `ralph verify agent-guidance`.
+#[derive(Parser, Debug)]
+struct VerifyAgentGuidanceArgs {
+    /// Path to the guidance manifest, relative to the repository root.
+    #[arg(long, default_value = DEFAULT_AGENT_GUIDANCE_MANIFEST)]
+    manifest: String,
+}
+
+/// Arguments for the state command group.
+#[derive(Parser, Debug)]
+struct StateArgs {
+    #[command(subcommand)]
+    command: StateCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum StateCommands {
+    /// Show runtime workflow state summaries.
+    Status(StateStatusArgs),
+
+    /// Read one runtime workflow state record.
+    Read(StateReadArgs),
+
+    /// Clear runtime workflow state for one mode.
+    Clear(StateClearArgs),
+}
+
+/// Arguments for `ralph state status`.
+#[derive(Parser, Debug)]
+struct StateStatusArgs {
+    /// Limit status to one supported state mode.
+    #[arg(long)]
+    mode: Option<String>,
+
+    /// Read session-scoped state, falling back to global state when absent.
+    #[arg(long)]
+    session_id: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Arguments for `ralph state read <mode>`.
+#[derive(Parser, Debug)]
+struct StateReadArgs {
+    /// Supported state mode: ralph, ralplan, team, deep-interview, capability-invocation.
+    mode: String,
+
+    /// Read session-scoped state, falling back to global state when absent.
+    #[arg(long)]
+    session_id: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Arguments for `ralph state clear <mode>`.
+#[derive(Parser, Debug)]
+struct StateClearArgs {
+    /// Supported state mode: ralph, ralplan, team, deep-interview, capability-invocation.
+    mode: String,
+
+    /// Clear only this session-scoped state.
+    #[arg(long, conflicts_with = "all_sessions")]
+    session_id: Option<String>,
+
+    /// Clear global state plus all session-scoped state for the mode.
+    #[arg(long, conflicts_with = "session_id")]
+    all_sessions: bool,
 }
 
 /// Arguments for the clean subcommand.
@@ -719,7 +899,9 @@ async fn main() -> Result<()> {
     // This prevents the terminal from being left in raw mode or alternate screen
     install_panic_hook();
 
-    let cli = Cli::parse();
+    let raw_args = std::env::args_os().collect::<Vec<_>>();
+    let config_was_explicit = cli_config_was_explicit(raw_args.iter().map(|arg| arg.as_os_str()));
+    let cli = Cli::parse_from(raw_args);
 
     // Detect if TUI mode is requested - TUI owns the terminal, so logs must not go to stdout
     // TUI is enabled by default unless --no-tui is specified or --autonomous is used
@@ -814,7 +996,16 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Run(args)) => run_command(cli.config, cli.verbose, cli.color, args).await,
+        Some(Commands::Run(args)) => {
+            run_command(
+                cli.config,
+                config_was_explicit,
+                cli.verbose,
+                cli.color,
+                args,
+            )
+            .await
+        }
         Some(Commands::Resume(args)) => {
             resume_command(cli.config, cli.verbose, cli.color, args).await
         }
@@ -832,6 +1023,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Autopilot(args)) => autopilot::execute(cli.config, args).await,
         Some(Commands::Record(args)) => record_cli::execute(args).await,
+        Some(Commands::RuntimeGraph(args)) => runtime_graph_command(cli.color, args),
+        Some(Commands::Verify(args)) => verify_command(cli.color, args),
+        Some(Commands::State(args)) => state_command(args),
         Some(Commands::Doctor(args)) => {
             doctor::execute(cli.config, args, cli.color.should_use_colors()).await
         }
@@ -853,17 +1047,19 @@ async fn main() -> Result<()> {
                 verbose: false,
                 quiet: false,
                 record_session: None,
+                runtime_graph_rrd: None,
                 custom_args: Vec::new(),
                 show_stderr: true,
                 instance: Vec::new(),
             };
-            run_command(cli.config, cli.verbose, cli.color, args).await
+            run_command(cli.config, false, cli.verbose, cli.color, args).await
         }
     }
 }
 
 async fn run_command(
     config_path: PathBuf,
+    config_was_explicit: bool,
     verbose: bool,
     color_mode: ColorMode,
     args: RunArgs,
@@ -871,12 +1067,29 @@ async fn run_command(
     // Parse config source (file, builtin, or remote)
     let config_source = ConfigSource::parse(config_path.to_string_lossy().as_ref());
 
-    // Load configuration based on source type
+    // Load configuration based on source type.
+    //
+    // 说明:
+    // - startup bootstrap 只能发生在真实 EventLoop / Supervisor 初始化前。
+    // - v1 selector 只在默认 `ralph.yml` 缺失、且用户没有显式 prompt/config 意图时运行。
+    // - 这样既能支持“无 config / 无 prompt 启动”,也不会吞掉显式配置错误。
+    let mut bootstrap_selection = None;
     let mut config = match config_source {
         ConfigSource::File(path) => {
             if path.exists() {
                 RalphConfig::from_file(&path)
                     .with_context(|| format!("Failed to load config from {:?}", path))?
+            } else if startup_resources::should_bootstrap_missing_default_config(
+                &path,
+                config_was_explicit,
+                args.prompt_text.is_some(),
+                args.prompt_file.is_some(),
+                args.continue_mode,
+            ) {
+                let resolution = startup_resources::resolve_default_bootstrap()
+                    .context("Failed to resolve startup resources")?;
+                bootstrap_selection = Some(resolution.selection);
+                resolution.config
             } else {
                 warn!("Config file {:?} not found, using defaults", path);
                 RalphConfig::default()
@@ -1012,6 +1225,19 @@ async fn run_command(
         }
     }
 
+    if let Some(selection) = bootstrap_selection.as_ref() {
+        // 说明:
+        // - 这里写出的 artifact 必须代表真实 run 接下来会使用的最终配置。
+        // - 因此它放在 CLI override、validate、backend auto-detect 之后。
+        // - 仍然位于 dry-run/真实 EventLoop/Supervisor 初始化之前,保持 startup-only 边界。
+        startup_resources::write_bootstrap_artifacts(
+            &config.core.workspace_root,
+            selection,
+            &config,
+        )
+        .context("Failed to write startup bootstrap artifacts")?;
+    }
+
     if args.dry_run {
         println!("Dry run mode - configuration:");
         println!(
@@ -1064,6 +1290,9 @@ async fn run_command(
     if args.idle_start && !config.parallel.enabled {
         anyhow::bail!("`--idle-start` requires `parallel.enabled=true` in config.");
     }
+    if args.runtime_graph_rrd.is_some() && !config.parallel.enabled {
+        anyhow::bail!("`--runtime-graph-rrd` requires `parallel.enabled=true` in config.");
+    }
 
     let reason = if config.parallel.enabled {
         parallel_runner::run_parallel_loop_impl(
@@ -1076,6 +1305,7 @@ async fn run_command(
                 show_stderr: args.show_stderr,
                 idle_start: args.idle_start,
                 allow_tui_auto_idle,
+                runtime_graph_rrd: args.runtime_graph_rrd.clone(),
             },
             verbosity,
             args.record_session,
@@ -1210,6 +1440,9 @@ async fn resume_command(
     // TUI is enabled by default (unless --no-tui or --autonomous is specified)
     let enable_tui = !args.no_tui && !args.autonomous;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
+    if args.runtime_graph_rrd.is_some() && !config.parallel.enabled {
+        anyhow::bail!("`--runtime-graph-rrd` requires `parallel.enabled=true` in config.");
+    }
     let reason = if config.parallel.enabled {
         parallel_runner::run_parallel_loop_impl(
             config,
@@ -1221,6 +1454,7 @@ async fn resume_command(
                 show_stderr: args.show_stderr,
                 idle_start: false,
                 allow_tui_auto_idle: false,
+                runtime_graph_rrd: args.runtime_graph_rrd.clone(),
             },
             verbosity,
             args.record_session,
@@ -1411,6 +1645,301 @@ fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
         }
         OutputFormat::Table => {
             display::print_events_table(&records, use_colors);
+        }
+    }
+
+    Ok(())
+}
+
+fn runtime_graph_command(color_mode: ColorMode, args: RuntimeGraphArgs) -> Result<()> {
+    match args.command {
+        RuntimeGraphCommands::Replay(args) => runtime_graph_replay_command(color_mode, args),
+    }
+}
+
+fn verify_command(color_mode: ColorMode, args: VerifyArgs) -> Result<()> {
+    match args.command {
+        VerifyCommands::AgentGuidance(args) => verify_agent_guidance_command(color_mode, args),
+    }
+}
+
+fn verify_agent_guidance_command(
+    color_mode: ColorMode,
+    args: VerifyAgentGuidanceArgs,
+) -> Result<()> {
+    // 当前命令只做本地静态验证,repo root 就是调用者当前目录。
+    // 这样 CI、开发机和 agent 都能用同一个入口复查 guidance drift。
+    let repo_root = Path::new(".");
+    let report = verify_manifest_at_with_report(repo_root, &args.manifest)
+        .with_context(|| "agent guidance manifest verification failed")?;
+
+    if color_mode.should_use_colors() {
+        println!(
+            "{}✓{} Agent guidance manifest verified: {}",
+            colors::GREEN,
+            colors::RESET,
+            report.manifest_path
+        );
+    } else {
+        println!("Agent guidance manifest verified: {}", report.manifest_path);
+    }
+
+    println!("Assets checked: {}", report.asset_count);
+    println!("Skills checked: {}", report.skill_count);
+
+    Ok(())
+}
+
+fn state_command(args: StateArgs) -> Result<()> {
+    match args.command {
+        StateCommands::Status(args) => state_status_command(args),
+        StateCommands::Read(args) => state_read_command(args),
+        StateCommands::Clear(args) => state_clear_command(args),
+    }
+}
+
+fn state_status_command(args: StateStatusArgs) -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // CLI 只负责把用户意图转换成 core operation 调用。
+    // 状态路径、session fallback、malformed JSON 处理都继续归 core 层所有。
+    // ─────────────────────────────────────────────────────────────────────
+    let store = StateOperationStore::new(".");
+    let modes = match args.mode {
+        Some(mode) => vec![parse_state_mode(&mode)?],
+        None => StateMode::all().to_vec(),
+    };
+
+    let mut entries = Vec::with_capacity(modes.len());
+    for mode in modes {
+        let statuses = store
+            .state_get_status(Some(mode), args.session_id.as_deref())
+            .with_context(|| format!("state status failed for mode `{mode}`"))?;
+        let fallback_path = store
+            .state_path(mode, args.session_id.as_deref())
+            .with_context(|| format!("state status failed for mode `{mode}`"))?;
+        entries.push(match statuses.get(&mode) {
+            Some(status) => serde_json::json!({
+                "mode": mode.as_str(),
+                "exists": true,
+                "active": status.active,
+                "current_phase": status.current_phase,
+                "run_outcome": status.run_outcome.map(|outcome| outcome.as_str()),
+                "lifecycle_outcome": status.lifecycle_outcome.map(|outcome| outcome.as_str()),
+                "path": status.path.display().to_string(),
+                "error": status.error,
+            }),
+            None => serde_json::json!({
+                "mode": mode.as_str(),
+                "exists": false,
+                "active": null,
+                "current_phase": null,
+                "run_outcome": null,
+                "lifecycle_outcome": null,
+                "path": fallback_path.display().to_string(),
+                "error": null,
+            }),
+        });
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "statuses": entries }))?
+        );
+        return Ok(());
+    }
+
+    for entry in entries {
+        println!("mode: {}", entry["mode"].as_str().unwrap_or("<unknown>"));
+        println!("  exists: {}", entry["exists"].as_bool().unwrap_or(false));
+        println!(
+            "  active: {}",
+            state_json_field_to_text(entry.get("active").unwrap_or(&serde_json::Value::Null))
+        );
+        println!(
+            "  current_phase: {}",
+            state_json_field_to_text(
+                entry
+                    .get("current_phase")
+                    .unwrap_or(&serde_json::Value::Null)
+            )
+        );
+        println!(
+            "  run_outcome: {}",
+            state_json_field_to_text(entry.get("run_outcome").unwrap_or(&serde_json::Value::Null))
+        );
+        println!(
+            "  lifecycle_outcome: {}",
+            state_json_field_to_text(
+                entry
+                    .get("lifecycle_outcome")
+                    .unwrap_or(&serde_json::Value::Null)
+            )
+        );
+        println!("  path: {}", entry["path"].as_str().unwrap_or("<none>"));
+        if !entry["error"].is_null() {
+            println!(
+                "  error: {}",
+                state_json_field_to_text(entry.get("error").unwrap_or(&serde_json::Value::Null))
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn state_read_command(args: StateReadArgs) -> Result<()> {
+    let mode = parse_state_mode(&args.mode)?;
+    let store = StateOperationStore::new(".");
+    let result = store
+        .state_read(mode, args.session_id.as_deref())
+        .with_context(|| format!("state read failed for mode `{mode}`"))?;
+    let exists = result.exists();
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": mode.as_str(),
+                "exists": exists,
+                "path": result.path.map(|path| path.display().to_string()),
+                "record": result.record,
+            }))?
+        );
+        return Ok(());
+    }
+
+    match result.record {
+        Some(record) => {
+            println!("State found for mode `{mode}`");
+            if let Some(path) = result.path {
+                println!("path: {}", path.display());
+            }
+            println!("{}", serde_json::to_string_pretty(&record)?);
+        }
+        None => {
+            println!("No state found for mode `{mode}`");
+        }
+    }
+
+    Ok(())
+}
+
+fn state_clear_command(args: StateClearArgs) -> Result<()> {
+    let mode = parse_state_mode(&args.mode)?;
+    let store = StateOperationStore::new(".");
+    let mut request = StateClearRequest::new(mode);
+
+    if let Some(session_id) = args.session_id {
+        request = request.with_session_id(session_id);
+    }
+    if args.all_sessions {
+        request = request.with_all_sessions(true);
+    }
+
+    let result = store
+        .state_clear(request)
+        .with_context(|| format!("state clear failed for mode `{mode}`"))?;
+    let count = result.removed_paths.len();
+    let suffix = if count == 1 { "" } else { "s" };
+    println!("Cleared {count} state file{suffix}");
+    for path in result.removed_paths {
+        println!("- {}", path.display());
+    }
+
+    Ok(())
+}
+
+fn parse_state_mode(mode: &str) -> Result<StateMode> {
+    mode.parse()
+        .with_context(|| format!("invalid state mode `{mode}`"))
+}
+
+fn state_json_field_to_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "-".to_string(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn runtime_graph_replay_command(color_mode: ColorMode, args: RuntimeGraphReplayArgs) -> Result<()> {
+    let events_path = args.events.unwrap_or_else(|| {
+        resolve_events_file_from_marker_in_parents(PathBuf::from(".ralph/events.jsonl"))
+    });
+
+    if !events_path.exists() {
+        anyhow::bail!(
+            "runtime graph replay events file does not exist: {}",
+            events_path.display()
+        );
+    }
+
+    let filter = runtime_graph::RuntimeGraphReplayFilter {
+        topic: args.topic,
+        instance: args.instance.map(ralph_proto::HatInstanceId::new),
+    };
+    let report = runtime_graph::RuntimeGraphRecorder::replay_from_events(
+        &events_path,
+        &args.output,
+        filter,
+    )?;
+
+    match args.format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "output": report.output_path,
+                    "events": events_path,
+                    "records_read": report.records_read,
+                    "workflow_records": report.workflow_records,
+                    "delivery_records": report.delivery_records,
+                    "lifecycle_records": report.lifecycle_records,
+                    "lifecycle_control_records": report.lifecycle_control_records,
+                    "full_fidelity": report.full_fidelity,
+                })
+            );
+        }
+        OutputFormat::Table => {
+            let use_colors = color_mode.should_use_colors();
+            let fidelity = if report.full_fidelity {
+                "full"
+            } else {
+                "approximate"
+            };
+
+            if use_colors {
+                println!(
+                    "{}✓{} Runtime replay graph written: {}",
+                    colors::GREEN,
+                    colors::RESET,
+                    report.output_path.display()
+                );
+            } else {
+                println!(
+                    "Runtime replay graph written: {}",
+                    report.output_path.display()
+                );
+            }
+
+            println!("Events: {}", events_path.display());
+            println!("Fidelity: {fidelity}");
+            println!("Records read: {}", report.records_read);
+            println!("Workflow records: {}", report.workflow_records);
+            println!("Delivery records: {}", report.delivery_records);
+            println!("Lifecycle records: {}", report.lifecycle_records);
+            println!(
+                "Lifecycle control records: {}",
+                report.lifecycle_control_records
+            );
+
+            if !report.full_fidelity {
+                println!(
+                    "Warning: replay graph is approximate because durable delivery or lifecycle control records are missing."
+                );
+            }
         }
     }
 
@@ -2074,6 +2603,37 @@ mod tests {
     #[test]
     fn test_verbosity_default() {
         assert_eq!(Verbosity::resolve(false, false), Verbosity::Normal);
+    }
+
+    #[test]
+    fn cli_config_explicit_detector_handles_global_config_forms() {
+        assert!(cli_config_was_explicit([
+            OsStr::new("ralph"),
+            OsStr::new("--config"),
+            OsStr::new("ralph.yml"),
+            OsStr::new("run"),
+        ]));
+        assert!(cli_config_was_explicit([
+            OsStr::new("ralph"),
+            OsStr::new("run"),
+            OsStr::new("--config=custom.yml"),
+        ]));
+        assert!(cli_config_was_explicit([
+            OsStr::new("ralph"),
+            OsStr::new("-ccustom.yml"),
+            OsStr::new("run"),
+        ]));
+    }
+
+    #[test]
+    fn cli_config_explicit_detector_ignores_backend_custom_args_after_separator() {
+        assert!(!cli_config_was_explicit([
+            OsStr::new("ralph"),
+            OsStr::new("run"),
+            OsStr::new("--"),
+            OsStr::new("--config"),
+            OsStr::new("backend.yml"),
+        ]));
     }
 
     #[test]

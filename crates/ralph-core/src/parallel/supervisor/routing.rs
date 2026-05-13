@@ -8,7 +8,7 @@
 //!   - missing：best-effort + require_delivery 分支清晰，避免 silent reroute
 
 use super::super::{HatInstanceCommand, HatInstanceHandle, HatJob, JobBackend};
-use super::ParallelSupervisor;
+use super::{ParallelSupervisor, RuntimeDeliveryMode, RuntimeDeliveryObservation};
 use crate::EventParser;
 use crate::config::HatConfig;
 use crate::event_logger::EventHistory;
@@ -16,10 +16,10 @@ use crate::prompt_overlay;
 use anyhow::Context;
 use ralph_proto::{
     Delivery, Event, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
-    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, SessionStrategy,
-    TOPIC_DISPATCH_DECISION, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT,
-    TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN, Topic, TopicContract, TurnAction,
-    new_event_id,
+    MissingInstancePolicy, QueueDecisionRecord, QueueSelection, RuntimeDeliveryRecord,
+    SessionStrategy, TOPIC_DISPATCH_DECISION, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE,
+    TOPIC_GATE_TIMEOUT, TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN, Topic, TopicContract,
+    TurnAction, new_event_id,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -88,7 +88,8 @@ impl ParallelSupervisor {
                         None,
                     );
 
-                    self.deliver_to_instance_id(event, target_instance).await?;
+                    self.deliver_to_instance_id(event, target_instance, RuntimeDeliveryMode::Reply)
+                        .await?;
                     return Ok(());
                 }
                 RequestReplyResolution::UnknownRequestId => {
@@ -259,7 +260,11 @@ impl ParallelSupervisor {
                     )
                     .await?;
                 } else {
-                    match self.spawn_dynamic_instance(&target_hat) {
+                    match self.spawn_dynamic_instance(
+                        &target_hat,
+                        Some(&event),
+                        "explicit_spawn_instance",
+                    ) {
                         Ok(instance_id) => {
                             event.target_instance = Some(instance_id);
                         }
@@ -379,7 +384,7 @@ impl ParallelSupervisor {
                 self.record_agents_last_input(&target_instance, &event);
             }
 
-            let Some(handle) = self.instances.get(&target_instance) else {
+            let Some(_handle) = self.instances.get(&target_instance) else {
                 self.escalate_delivery_failure(
                     &event,
                     format!(
@@ -392,13 +397,8 @@ impl ParallelSupervisor {
                 .await?;
                 return Ok(());
             };
-            handle
-                .cmd_tx
-                .send(HatInstanceCommand::Deliver(Box::new(event)))
-                .await
-                .context("Failed to deliver event to target_instance")?;
-            self.mark_inflight_delivery(&target_instance);
-            self.write_agents_snapshot_best_effort();
+            self.deliver_to_instance_id(event, target_instance, RuntimeDeliveryMode::Direct)
+                .await?;
             return Ok(());
         }
 
@@ -558,7 +558,7 @@ impl ParallelSupervisor {
                 && hat_id.as_str() != "ralph"
                 && self.available_permits_for_routing() > 0
             {
-                match self.spawn_dynamic_instance(&hat_id) {
+                match self.spawn_dynamic_instance(&hat_id, Some(&event), "autoscale_busy_hat") {
                     Ok(new_instance) => new_instance,
                     Err(e) => {
                         tracing::warn!(
@@ -921,7 +921,12 @@ impl ParallelSupervisor {
                     if self.instances.contains_key(missing) {
                         continue;
                     }
-                    self.spawn_instance(missing.clone(), false)?;
+                    self.spawn_instance(
+                        missing.clone(),
+                        false,
+                        event.id.clone(),
+                        Some("missing_instance_policy_spawn"),
+                    )?;
                     recipients.push(missing.clone());
                 }
                 recipients.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -961,12 +966,27 @@ impl ParallelSupervisor {
         for instance_id in recipients {
             self.record_agents_last_input(instance_id, &event);
             if let Some(handle) = self.instances.get(instance_id) {
+                let delivery_record = RuntimeDeliveryRecord::new(
+                    event.id.clone(),
+                    event.reply.clone(),
+                    event.topic.to_string(),
+                    event.source_instance.clone(),
+                    instance_id.clone(),
+                    RuntimeDeliveryMode::Fanout,
+                );
                 handle
                     .cmd_tx
                     .send(HatInstanceCommand::Deliver(Box::new(event.clone())))
                     .await
                     .context("Failed to deliver fanout event")?;
+                self.log_runtime_delivery_record(delivery_record);
                 self.mark_inflight_delivery(instance_id);
+                self.notify_delivery_observer(RuntimeDeliveryObservation {
+                    topic: event.topic.to_string(),
+                    source_instance: event.source_instance.clone(),
+                    recipient: instance_id.clone(),
+                    mode: RuntimeDeliveryMode::Fanout,
+                });
             }
         }
         self.write_agents_snapshot_best_effort();
@@ -995,7 +1015,8 @@ impl ParallelSupervisor {
         if let Some(chosen) = self.queue_decisions.get(&event_id)
             && recipients.iter().any(|id| id == chosen)
         {
-            self.deliver_to_instance_id(event, chosen.clone()).await?;
+            self.deliver_to_instance_id(event, chosen.clone(), RuntimeDeliveryMode::Queue)
+                .await?;
             return Ok(());
         }
 
@@ -1036,14 +1057,26 @@ impl ParallelSupervisor {
             .context("Failed to log queue decision (dispatch.decision)")?;
         self.queue_decisions.insert(event_id, chosen.clone());
 
-        self.deliver_to_instance_id(event, chosen).await
+        self.deliver_to_instance_id(event, chosen, RuntimeDeliveryMode::Queue)
+            .await
     }
 
     async fn deliver_to_instance_id(
         &mut self,
         event: Event,
         instance_id: HatInstanceId,
+        mode: RuntimeDeliveryMode,
     ) -> anyhow::Result<()> {
+        let topic = event.topic.to_string();
+        let source_instance = event.source_instance.clone();
+        let delivery_record = RuntimeDeliveryRecord::new(
+            event.id.clone(),
+            event.reply.clone(),
+            topic.clone(),
+            source_instance.clone(),
+            instance_id.clone(),
+            mode,
+        );
         self.record_agents_last_input(&instance_id, &event);
         let Some(handle) = self.instances.get(&instance_id) else {
             anyhow::bail!("deliver_to_instance_id: instance not found: {instance_id}");
@@ -1053,7 +1086,14 @@ impl ParallelSupervisor {
             .send(HatInstanceCommand::Deliver(Box::new(event)))
             .await
             .context("Failed to deliver event to chosen instance")?;
+        self.log_runtime_delivery_record(delivery_record);
         self.mark_inflight_delivery(&instance_id);
+        self.notify_delivery_observer(RuntimeDeliveryObservation {
+            topic,
+            source_instance,
+            recipient: instance_id,
+            mode,
+        });
         self.write_agents_snapshot_best_effort();
         Ok(())
     }
@@ -1308,7 +1348,12 @@ Candidates:\n\
         Ok(())
     }
 
-    fn spawn_dynamic_instance(&mut self, hat_id: &HatId) -> anyhow::Result<HatInstanceId> {
+    fn spawn_dynamic_instance(
+        &mut self,
+        hat_id: &HatId,
+        source_event: Option<&Event>,
+        reason: &str,
+    ) -> anyhow::Result<HatInstanceId> {
         let next = self
             .next_instance_seq_by_hat
             .entry(hat_id.clone())
@@ -1317,7 +1362,12 @@ Candidates:\n\
         *next = next.saturating_add(1);
 
         let instance_id = HatInstanceId::from_parts(hat_id.as_str(), key.to_string());
-        self.spawn_instance(instance_id.clone(), true)?;
+        self.spawn_instance(
+            instance_id.clone(),
+            true,
+            source_event.and_then(|event| event.id.clone()),
+            Some(reason),
+        )?;
         Ok(instance_id)
     }
 
@@ -1325,6 +1375,8 @@ Candidates:\n\
         &mut self,
         instance_id: HatInstanceId,
         is_dynamic: bool,
+        source_event_id: Option<String>,
+        reason: Option<&str>,
     ) -> anyhow::Result<()> {
         if self.instances.contains_key(&instance_id) {
             return Ok(());
@@ -1395,6 +1447,8 @@ Candidates:\n\
         self.instances.insert(instance_id.clone(), handle);
         self.instance_states
             .insert(instance_id.clone(), HatInstanceState::Created);
+        self.notify_instance_state_observer(&instance_id, HatInstanceState::Created);
+        self.log_runtime_lifecycle_created(&instance_id, is_dynamic, source_event_id, reason);
         self.instances_by_hat
             .entry(hat_id.clone())
             .or_default()
@@ -1524,7 +1578,7 @@ Candidates:\n\
     ) -> anyhow::Result<HatInstanceId> {
         let primary = HatInstanceId::from_parts("ralph", "1");
         if !self.instances.contains_key(&primary) {
-            self.spawn_instance(primary.clone(), false)?;
+            self.spawn_instance(primary.clone(), false, None, Some("ralph_primary_fallback"))?;
         }
 
         // 主实例优先: 只要不是 Running,就固定走 ralph#1。
@@ -1539,7 +1593,12 @@ Candidates:\n\
 
         let secondary = HatInstanceId::from_parts("ralph", "2");
         if !self.instances.contains_key(&secondary) {
-            self.spawn_instance(secondary.clone(), false)?;
+            self.spawn_instance(
+                secondary.clone(),
+                false,
+                None,
+                Some("ralph_secondary_fallback"),
+            )?;
         }
 
         if self.effective_state(&secondary) != HatInstanceState::Running {

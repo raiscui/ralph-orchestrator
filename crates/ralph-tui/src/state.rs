@@ -547,6 +547,14 @@ pub struct TuiState {
     /// Alert about a new iteration (shown when viewing history and new iteration arrives).
     /// Contains the iteration number to alert about. Cleared when navigating to latest.
     pub new_iteration_alert: Option<usize>,
+    /// 串行输出视图的当前“光标”（用于鼠标/键盘选择）。
+    pub serial_output_cursor: ScreenPos,
+    /// 串行输出视图的选择区域。
+    pub serial_output_selection: Option<ScreenSelection>,
+    /// 鼠标是否正在串行输出视图内拖拽选择。
+    pub serial_output_selecting: bool,
+    /// 串行输出复制结果提示,显示在 footer 左侧。
+    pub serial_output_status: Option<String>,
 
     // ========================================================================
     // Search State
@@ -613,6 +621,10 @@ impl TuiState {
             current_view: 0,
             following_latest: true,
             new_iteration_alert: None,
+            serial_output_cursor: ScreenPos::default(),
+            serial_output_selection: None,
+            serial_output_selecting: false,
+            serial_output_status: None,
             // Search state
             search_state: SearchState::new(),
             // Completion state
@@ -662,6 +674,10 @@ impl TuiState {
             current_view: 0,
             following_latest: true,
             new_iteration_alert: None,
+            serial_output_cursor: ScreenPos::default(),
+            serial_output_selection: None,
+            serial_output_selecting: false,
+            serial_output_status: None,
             // Search state
             search_state: SearchState::new(),
             // Completion state
@@ -1091,6 +1107,63 @@ impl TuiState {
                 .and_then(|i| i.current_job_buffer_mut())
                 .map(CurrentOutputBufferMut::Parallel),
         }
+    }
+
+    pub fn clear_serial_output_selection(&mut self) {
+        self.serial_output_selection = None;
+        self.serial_output_selecting = false;
+    }
+
+    pub fn start_serial_output_selection(&mut self, pos: ScreenPos) {
+        self.serial_output_cursor = pos;
+        self.serial_output_selection = Some(ScreenSelection::new(pos, pos));
+        self.serial_output_selecting = true;
+    }
+
+    pub fn update_serial_output_selection_cursor(&mut self, pos: ScreenPos) {
+        self.serial_output_cursor = pos;
+        if let Some(sel) = self.serial_output_selection.as_mut() {
+            sel.cursor = pos;
+        }
+    }
+
+    pub fn finish_serial_output_selection(&mut self) {
+        self.serial_output_selecting = false;
+    }
+
+    pub fn extend_serial_output_selection_by_delta(
+        &mut self,
+        dx: i16,
+        dy: i16,
+        max_x: u16,
+        max_y: u16,
+    ) {
+        if max_x == 0 || max_y == 0 {
+            return;
+        }
+
+        if self.serial_output_selection.is_none() {
+            self.serial_output_selection = Some(ScreenSelection::new(
+                self.serial_output_cursor,
+                self.serial_output_cursor,
+            ));
+        }
+
+        let Some(sel) = self.serial_output_selection.as_mut() else {
+            return;
+        };
+
+        let next_x = i32::from(sel.cursor.x).saturating_add(i32::from(dx));
+        let next_y = i32::from(sel.cursor.y).saturating_add(i32::from(dy));
+
+        let clamped_x = next_x.clamp(0, i32::from(max_x.saturating_sub(1))) as u16;
+        let clamped_y = next_y.clamp(0, i32::from(max_y.saturating_sub(1))) as u16;
+
+        sel.cursor = ScreenPos {
+            x: clamped_x,
+            y: clamped_y,
+        };
+        self.serial_output_cursor = sel.cursor;
     }
 
     /// Returns a shared handle to the current iteration's lines buffer.

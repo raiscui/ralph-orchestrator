@@ -218,6 +218,17 @@ mod tests {
     }
 
     #[test]
+    fn test_terminal_write_instance_id_roundtrip() {
+        let write = TerminalWrite::new(b"parallel output", true, 10).with_instance_id("writer#1");
+        let json = serde_json::to_string(&write).unwrap();
+        assert!(json.contains("\"instance_id\":\"writer#1\""));
+
+        let parsed: TerminalWrite = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.instance_id.as_deref(), Some("writer#1"));
+        assert_eq!(parsed.decode_bytes().unwrap(), b"parallel output");
+    }
+
+    #[test]
     fn test_ux_event_serialization() {
         let event = UxEvent::TerminalWrite(TerminalWrite::new(b"test", true, 0));
         let json = serde_json::to_string(&event).unwrap();

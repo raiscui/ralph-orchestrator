@@ -26,3 +26,5 @@
 {"id":"task-1769101694-3b53","title":"Add coverage reporting with badge in README","status":"closed","priority":1,"blocked_by":[],"created":"2026-01-22T17:08:14.211799+00:00","closed":"2026-01-22T17:14:14.014460+00:00"}
 {"id":"task-1769104209-cc15","title":"Add Custom Backends section to README","status":"closed","priority":1,"blocked_by":[],"created":"2026-01-22T17:50:09.183323+00:00","closed":"2026-01-22T17:51:41.571319+00:00"}
 {"id":"task-1769104212-6ee7","title":"Add Per-Hat Backend Configuration section to README","status":"closed","priority":1,"blocked_by":[],"created":"2026-01-22T17:50:12.814831+00:00","closed":"2026-01-22T17:51:41.576954+00:00"}
+{"id":"task-1777472782-d7b5","title":"Recreate GitHub Pages documentation site from specs and code","status":"closed","priority":1,"blocked_by":[],"created":"2026-04-29T14:26:22.382907+00:00","closed":"2026-04-29T15:01:00.471373+00:00"}
+{"id":"task-1777476369-2df3","title":"Fix: pin docs build dependencies or explicitly document docs gate","status":"closed","priority":1,"blocked_by":[],"created":"2026-04-29T15:26:09.142844+00:00","closed":"2026-05-12T12:45:06.325435+00:00"}

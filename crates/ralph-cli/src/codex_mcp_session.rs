@@ -6,7 +6,7 @@
 //! - 在不改变并行调度语义的前提下，给 TUI 持续输出可观测文本。
 
 use anyhow::{Context, Result};
-use ralph_adapters::CliBackend;
+use ralph_adapters::{CliBackend, scrub_codex_parent_session_env_tokio};
 use ralph_core::{HatJob, HatJobOutputChunk, HatJobResult, OutputStream};
 use ralph_proto::HatInstanceId;
 use serde_json::{Value, json};
@@ -85,6 +85,7 @@ impl CodexMcpSession {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         command.kill_on_drop(true);
+        scrub_codex_parent_session_env_tokio(&mut command, "codex");
 
         let mut child = command
             .spawn()

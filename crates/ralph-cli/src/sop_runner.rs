@@ -6,7 +6,10 @@
 //! 2. Build a prompt with the SOP content wrapped in XML tags
 //! 3. Spawn an interactive session with the backend
 
-use ralph_adapters::{CliBackend, CustomBackendError, NoBackendError, detect_backend_default};
+use ralph_adapters::{
+    CliBackend, CustomBackendError, NoBackendError, detect_backend_default,
+    scrub_codex_parent_session_env,
+};
 use ralph_core::RalphConfig;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -172,12 +175,15 @@ fn build_prompt(sop: Sop, user_input: Option<&str>) -> String {
 fn spawn_interactive(backend: &CliBackend, prompt: &str) -> Result<(), SopRunError> {
     let (command, args, _stdin_input, _temp_file) = backend.build_command(prompt, true);
 
-    let mut child = Command::new(&command)
+    let mut child_command = Command::new(&command);
+    child_command
         .args(&args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stderr(Stdio::inherit());
+    scrub_codex_parent_session_env(&mut child_command, &command);
+
+    let mut child = child_command.spawn()?;
 
     // Wait for the interactive session to complete
     child.wait()?;

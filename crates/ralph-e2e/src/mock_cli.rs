@@ -2,7 +2,7 @@
 //!
 //! 这个模块实现了 `ralph-e2e mock-cli` 子命令：
 //! - 读取预录制的 JSONL cassette
-//! - 回放其中的 `ux.terminal.write` 到 stdout（尽量还原真实后端输出）
+//! - 按原始 stream 回放其中的 `ux.terminal.write` 到 stdout/stderr（尽量还原真实后端输出）
 //! - 可选地从 `bus.*` 事件里提取“可执行命令”，并按 allowlist 白名单执行（无 shell）
 //!
 //! 该子命令通常会被 `ralph run` 作为 `custom backend` 调用。
@@ -56,7 +56,7 @@ pub enum MockCliError {
 /// 行为：
 /// 1) 读取并解析 cassette
 /// 2) （可选）从 `bus.*` 事件中提取命令
-/// 3) 回放 `ux.terminal.write` 到 stdout
+/// 3) 按原始 stream 回放 `ux.terminal.write` 到 stdout/stderr
 /// 4) （可选）按 allowlist 执行命令（无 shell）
 pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockCliError> {
     // 1) 打开并解析 cassette
@@ -113,9 +113,16 @@ pub fn run(cassette: &Path, speed: f32, allow: Option<&str>) -> Result<(), MockC
 
     // 5) 回放 terminal writes（近似 timing）
     let stdout = io::stdout();
-    let mut handle = stdout.lock();
+    let stderr = io::stderr();
+    let mut stdout_handle = stdout.lock();
+    let mut stderr_handle = stderr.lock();
 
-    replay_terminal_write_records(&selected_writes, &mut handle, effective_speed)?;
+    replay_terminal_write_records(
+        &selected_writes,
+        &mut stdout_handle,
+        &mut stderr_handle,
+        effective_speed,
+    )?;
 
     // 6) 如启用 allowlist，则执行白名单命令
     if let Some(whitelist) = allow {
@@ -177,9 +184,10 @@ fn extract_commands_from_terminal_writes(
 }
 
 /// 回放选中的 terminal writes（已经按 instance/分段筛选过）。
-fn replay_terminal_write_records<W: Write>(
+fn replay_terminal_write_records<WOut: Write, WErr: Write>(
     records: &[&TimestampedRecord],
-    mut writer: W,
+    mut stdout_writer: WOut,
+    mut stderr_writer: WErr,
     speed: f32,
 ) -> Result<(), MockCliError> {
     // 说明：
@@ -208,16 +216,29 @@ fn replay_terminal_write_records<W: Write>(
             }
         }
 
-        // 输出 raw bytes（保留 ANSI 控制序列）
+        // 输出 raw bytes（保留 ANSI 控制序列）。
+        //
+        // 关键契约:
+        // - stdout 是 Ralph 默认 event parser 的语义输入。
+        // - stderr 只能作为诊断流回放,不能被 mock-cli 错投到 stdout。
         let bytes = write.decode_bytes().map_err(|e| {
             MockCliError::ReplayError(format!("failed to decode base64 terminal bytes: {e}"))
         })?;
-        writer
-            .write_all(&bytes)
-            .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
-        writer
-            .flush()
-            .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
+        if write.stdout {
+            stdout_writer
+                .write_all(&bytes)
+                .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
+            stdout_writer
+                .flush()
+                .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
+        } else {
+            stderr_writer
+                .write_all(&bytes)
+                .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
+            stderr_writer
+                .flush()
+                .map_err(|e| MockCliError::ReplayError(e.to_string()))?;
+        }
     }
 
     Ok(())
@@ -712,6 +733,38 @@ mod tests {
         // Run without whitelist - should succeed without executing commands
         let result = run(&cassette, 0.0, None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_replay_terminal_write_records_preserves_stdout_stderr_streams() {
+        let stdout_record = ralph_core::Record::from_ux_event(
+            &ralph_proto::UxEvent::TerminalWrite(TerminalWrite::new(b"semantic stdout\n", true, 0)),
+        );
+        let stderr_record = ralph_core::Record::from_ux_event(
+            &ralph_proto::UxEvent::TerminalWrite(TerminalWrite::new(
+                b"<event topic=\"fake.from.stderr\">diagnostic only</event>\n",
+                false,
+                1,
+            )),
+        );
+        let jsonl = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&stdout_record).unwrap(),
+            serde_json::to_string(&stderr_record).unwrap()
+        );
+        let player = ralph_core::SessionPlayer::from_bytes(jsonl.as_bytes()).unwrap();
+        let writes = player.terminal_writes();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        replay_terminal_write_records(&writes, &mut stdout, &mut stderr, 1000.0).unwrap();
+
+        assert_eq!(String::from_utf8(stdout).unwrap(), "semantic stdout\n");
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "<event topic=\"fake.from.stderr\">diagnostic only</event>\n",
+            "stderr cassette evidence must not be replayed through stdout"
+        );
     }
 
     #[test]

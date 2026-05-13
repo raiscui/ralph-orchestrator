@@ -1,4 +1,63 @@
 use super::*;
+use crate::config::CoreConfig;
+
+fn write_project_experience(root: &std::path::Path, summary: &str) {
+    std::fs::write(
+        root.join("experience.md"),
+        format!(
+            "# Experience\n\n### exp-project-0001\n> {summary}\n<!-- scope: project | source_topics: scoped-experience | source_hats: ralph | status: active | confidence: high | created_at: 2026-03-21T00:00:00Z | updated_at: 2026-03-21T00:00:00Z | supersedes:  -->\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn write_role_experience(root: &std::path::Path, hat_id: &str, summary: &str) {
+    let path = root.join(".ralph/roles").join(hat_id).join("experience.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!(
+            "# Experience\n\n### exp-role-0001\n> {summary}\n<!-- scope: role | source_topics: scoped-experience | source_hats: {hat_id} | status: active | confidence: medium | created_at: 2026-03-21T00:00:00Z | updated_at: 2026-03-21T00:00:00Z | supersedes:  -->\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn write_legacy_memories(root: &std::path::Path, summary: &str) {
+    let path = root.join(".agent/memories.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!(
+            "# Memories\n\n## Patterns\n\n### mem-1737372000-a1b2\n> {summary}\n<!-- tags: scoped, compatibility | created: 2026-03-21 -->\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn write_topic_context(root: &std::path::Path, suffix: &str, task_plan: &str, notes: &str) {
+    std::fs::write(root.join(format!("task_plan__{suffix}.md")), task_plan).unwrap();
+    std::fs::write(root.join(format!("notes__{suffix}.md")), notes).unwrap();
+}
+
+fn write_instance_context(
+    root: &std::path::Path,
+    instance_id: &str,
+    file_name: &str,
+    content: &str,
+) {
+    let path = root.join(".ralph/log").join(instance_id).join(file_name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+fn write_open_task(root: &std::path::Path, title: &str, priority: u8) {
+    let path = root.join(".agent/tasks.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let task = crate::Task::new(title.to_string(), priority);
+    std::fs::write(path, format!("{}\n", serde_json::to_string(&task).unwrap())).unwrap();
+}
 
 #[test]
 fn test_initialization_routes_to_ralph_in_multihat_mode() {
@@ -51,7 +110,8 @@ hats:
     event_loop.initialize("Test prompt");
 
     // 从编译期内嵌 overlay 里提取稳定锚点，避免硬编码完整文本。
-    let all_hat_overlay = crate::prompt_overlay::load_all_hat_prompt()
+    let all_hat_overlay = crate::prompt_overlay::load_all_hat_prompt(&CoreConfig::default())
+        .expect("compiled all-hat overlay should load")
         .expect("compiled all-hat overlay should not be empty");
     let overlay_anchor = all_hat_overlay
         .lines()
@@ -659,6 +719,26 @@ hats:
     assert!(
         prompt.contains("Review PR #123"),
         "Should include event context"
+    );
+    assert!(
+        prompt.contains("outcome:"),
+        "Should include output contract outcome anchor"
+    );
+    assert!(
+        prompt.contains("evidence:"),
+        "Should include output contract evidence anchor"
+    );
+    assert!(
+        prompt.contains("changed files:"),
+        "Should include output contract changed files anchor"
+    );
+    assert!(
+        prompt.contains("known gaps:"),
+        "Should include output contract known gaps anchor"
+    );
+    assert!(
+        prompt.contains("next suggestions:"),
+        "Should include output contract next suggestions anchor"
     );
 }
 
@@ -1668,5 +1748,314 @@ fn test_scratchpad_injection_tail_truncation() {
     assert!(
         !prompt.contains("Line 0:"),
         "First line should be truncated (head removed)"
+    );
+}
+
+#[test]
+fn test_scratchpad_injection_tail_truncation_is_utf8_safe() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let scratchpad_path = temp_dir.path().join(".agent/scratchpad.md");
+    std::fs::create_dir_all(scratchpad_path.parent().unwrap()).unwrap();
+
+    let large_content = format!("{}尾部保留", "设".repeat(16001));
+    std::fs::write(&scratchpad_path, &large_content).unwrap();
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+
+    let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
+
+    assert!(
+        prompt.contains("earlier content truncated"),
+        "Prompt should indicate truncation occurred"
+    );
+    assert!(
+        prompt.contains("尾部保留"),
+        "UTF-8 tail content should be preserved without panic"
+    );
+}
+
+#[test]
+fn test_project_experience_injected_before_orientation_for_ralph() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    write_project_experience(
+        temp_dir.path(),
+        "Project-wide rules should be visible before narrower context.",
+    );
+
+    let mut config = RalphConfig::default();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+
+    let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
+    let project_pos = prompt
+        .find("## Project Experience")
+        .expect("project experience should be injected");
+    let orientation_pos = prompt
+        .find("### 0a. ORIENTATION")
+        .expect("orientation should still exist");
+
+    assert!(
+        project_pos < orientation_pos,
+        "project experience should appear before Ralph orientation"
+    );
+}
+
+#[test]
+fn test_ordinary_hat_injects_project_role_topic_instance_and_runtime_in_order() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    write_project_experience(
+        temp_dir.path(),
+        "Project rule: shared context stays narrow until proven reusable.",
+    );
+    write_role_experience(
+        temp_dir.path(),
+        "spec_reviewer",
+        "Role rule: reviewers must cite concrete evidence before rejecting.",
+    );
+    write_topic_context(
+        temp_dir.path(),
+        "alpha",
+        "## Current state\n- review is in progress\n",
+        "## Findings\n- one spec issue remains\n",
+    );
+    write_instance_context(
+        temp_dir.path(),
+        "spec_reviewer",
+        "WORKLOG.md",
+        "## Local worklog\n- reviewer checked schema drift\n",
+    );
+    write_open_task(temp_dir.path(), "Close the remaining spec gap", 1);
+
+    let yaml = r#"
+hats:
+  spec_reviewer:
+    name: "Spec Reviewer"
+    triggers: ["review.spec"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop
+        .bus
+        .publish(Event::new("review.spec", "Inspect the change"));
+
+    let prompt = event_loop
+        .build_prompt(&HatId::new("spec_reviewer"))
+        .unwrap();
+
+    let project_pos = prompt.find("## Project Experience").unwrap();
+    let role_pos = prompt.find("## Role Experience (spec_reviewer)").unwrap();
+    let topic_pos = prompt.find("## Topic Context Summary (alpha)").unwrap();
+    let instance_pos = prompt
+        .find("## Instance Context Summary (spec_reviewer)")
+        .unwrap();
+    let runtime_pos = prompt.find("## Runtime Task State").unwrap();
+
+    assert!(project_pos < role_pos, "project should come before role");
+    assert!(
+        role_pos < topic_pos,
+        "role should come before topic summary"
+    );
+    assert!(
+        topic_pos < instance_pos,
+        "topic summary should come before instance summary"
+    );
+    assert!(
+        instance_pos < runtime_pos,
+        "instance summary should come before runtime tasks"
+    );
+}
+
+#[test]
+fn test_ralph_metadata_first_delays_role_experience_until_after_hat_descriptions() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    write_project_experience(
+        temp_dir.path(),
+        "Project rule: route by metadata before reading narrow role context.",
+    );
+    write_role_experience(
+        temp_dir.path(),
+        "spec_reviewer",
+        "Role rule: spec reviewers care about requirement language first.",
+    );
+
+    let yaml = r#"
+hats:
+  spec_reviewer:
+    name: "Spec Reviewer"
+    description: "Reviews OpenSpec requirements"
+    triggers: ["review.spec"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+    event_loop
+        .bus
+        .publish(Event::new("review.spec", "Inspect the requirements"));
+
+    let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
+
+    let project_pos = prompt
+        .find("## Project Experience")
+        .unwrap_or_else(|| panic!("prompt missing project experience:\n{prompt}"));
+    let active_hat_pos = prompt
+        .find("## ACTIVE HAT")
+        .unwrap_or_else(|| panic!("prompt missing active hat section:\n{prompt}"));
+    let role_pos = prompt
+        .find("## Role Experience (spec_reviewer)")
+        .unwrap_or_else(|| panic!("prompt missing role experience:\n{prompt}"));
+
+    assert!(
+        project_pos < active_hat_pos,
+        "project experience should still be available before hat metadata"
+    );
+    assert!(
+        active_hat_pos < role_pos,
+        "role experience should only appear after metadata has narrowed the scope"
+    );
+}
+
+#[test]
+fn test_ralph_skips_role_experience_when_multiple_roles_are_active() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    write_project_experience(
+        temp_dir.path(),
+        "Project rule: do not eagerly inject unrelated role experiences.",
+    );
+    write_role_experience(
+        temp_dir.path(),
+        "spec_reviewer",
+        "Role rule: reviewers validate SHALL wording.",
+    );
+    write_role_experience(
+        temp_dir.path(),
+        "cab_program_lead",
+        "Role rule: CAB lead waits for agenda, host, and logistics.",
+    );
+
+    let yaml = r#"
+hats:
+  spec_reviewer:
+    name: "Spec Reviewer"
+    description: "Reviews OpenSpec requirements"
+    triggers: ["review.spec"]
+  cab_program_lead:
+    name: "CAB Lead"
+    description: "Owns CAB workflow closure"
+    triggers: ["cab.ready"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    event_loop.initialize("Test prompt");
+    event_loop
+        .bus
+        .publish(Event::new("review.spec", "Inspect spec wording"));
+    event_loop
+        .bus
+        .publish(Event::new("cab.ready", "Agenda and host are ready"));
+
+    let prompt = event_loop.build_prompt(&HatId::new("ralph")).unwrap();
+
+    assert!(
+        !prompt.contains("## Role Experience (spec_reviewer)"),
+        "Ralph should not inject one role's experience while multiple roles are active"
+    );
+    assert!(
+        !prompt.contains("## Role Experience (cab_program_lead)"),
+        "Ralph should skip all role experience until the active owner is unambiguous"
+    );
+}
+
+#[test]
+fn test_topic_summary_not_injected_when_multiple_topic_groups_exist() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    write_role_experience(
+        temp_dir.path(),
+        "spec_reviewer",
+        "Role rule: reviewers prefer explicit evidence links.",
+    );
+    write_topic_context(
+        temp_dir.path(),
+        "alpha",
+        "## Alpha plan\n- active\n",
+        "## Alpha notes\n- finding A\n",
+    );
+    write_topic_context(
+        temp_dir.path(),
+        "beta",
+        "## Beta plan\n- historical\n",
+        "## Beta notes\n- finding B\n",
+    );
+
+    let yaml = r#"
+hats:
+  spec_reviewer:
+    name: "Spec Reviewer"
+    triggers: ["review.spec"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    let prompt = event_loop
+        .build_prompt(&HatId::new("spec_reviewer"))
+        .unwrap();
+
+    assert!(
+        !prompt.contains("## Topic Context Summary"),
+        "multiple topic groups should disable eager topic summary injection"
+    );
+}
+
+#[test]
+fn test_legacy_memories_compatibility_still_injected() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    write_legacy_memories(
+        temp_dir.path(),
+        "Legacy memory should still be visible during migration.",
+    );
+
+    let yaml = r#"
+hats:
+  spec_reviewer:
+    name: "Spec Reviewer"
+    triggers: ["review.spec"]
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+
+    let mut event_loop = EventLoop::new(config);
+    let prompt = event_loop
+        .build_prompt(&HatId::new("spec_reviewer"))
+        .unwrap();
+
+    assert!(
+        prompt.contains("## Legacy Memories (Compatibility)"),
+        "legacy memories path should remain visible while scoped experience migrates\n{prompt}"
     );
 }

@@ -22,7 +22,10 @@ use ralph_proto::{
     SessionStrategy, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TurnAction, new_event_id,
 };
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -70,9 +73,26 @@ pub enum HatInstanceEvent {
 #[derive(Debug)]
 pub struct HatInstanceHandle {
     pub cmd_tx: mpsc::Sender<HatInstanceCommand>,
+    completion_freeze_requested: Arc<AtomicBool>,
 }
 
 impl HatInstanceHandle {
+    /// 请求该实例进入 completion drain:
+    /// - 不取消当前 Running job
+    /// - 但阻止任何 pending job 再起跑
+    pub fn request_completion_freeze(&self) {
+        self.completion_freeze_requested
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_cmd_tx(cmd_tx: mpsc::Sender<HatInstanceCommand>) -> Self {
+        Self {
+            cmd_tx,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// 创建并启动一个 HatInstance actor。
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
@@ -96,6 +116,8 @@ impl HatInstanceHandle {
         dynamic_idle_ttl: Duration,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(128);
+        let completion_freeze_requested = Arc::new(AtomicBool::new(false));
+        let actor_completion_freeze_requested = Arc::clone(&completion_freeze_requested);
 
         let actor_instance_id = instance_id.clone();
         tokio::spawn(async move {
@@ -145,6 +167,8 @@ impl HatInstanceHandle {
                 control_tx: None,
                 shutdown_requested: false,
                 shutdown_deadline: None,
+                completion_freeze_requested: actor_completion_freeze_requested,
+                completion_freeze_applied: false,
             };
 
             if let Err(e) = actor.run().await {
@@ -160,7 +184,10 @@ impl HatInstanceHandle {
             }
         });
 
-        Self { cmd_tx }
+        Self {
+            cmd_tx,
+            completion_freeze_requested,
+        }
     }
 }
 
@@ -236,6 +263,11 @@ struct HatInstanceActor {
     // =====================================================================
     shutdown_requested: bool,
     shutdown_deadline: Option<Instant>,
+    /// completion 收敛态:
+    /// - 一旦 Supervisor 看到 completion promise(非 pause 模式),会把这个标志置为 true
+    /// - 实例不取消当前 Running job,但会丢弃/冻结 pending,避免尾巴 job 再起跑
+    completion_freeze_requested: Arc<AtomicBool>,
+    completion_freeze_applied: bool,
 }
 
 // ============================================================================
@@ -283,6 +315,22 @@ struct RunningWorkspace {
 }
 
 impl HatInstanceActor {
+    fn completion_freeze_active(&self) -> bool {
+        self.completion_freeze_requested.load(Ordering::SeqCst)
+    }
+
+    fn apply_completion_freeze_if_requested(&mut self) {
+        if !self.completion_freeze_active() || self.completion_freeze_applied {
+            return;
+        }
+
+        self.pending.clear();
+        self.pending_permission_gate = None;
+        self.worktree_override = None;
+        self.hooks_override = None;
+        self.completion_freeze_applied = true;
+    }
+
     async fn run(&mut self) -> anyhow::Result<()> {
         self.set_state(HatInstanceState::Idle).await?;
 
@@ -294,6 +342,8 @@ impl HatInstanceActor {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    self.apply_completion_freeze_if_requested();
+
                     // shutdown draining:
                     // - 不再启动新 job
                     // - 等待 in-flight job 尽快结束(已 cancel),并在退出前做 best-effort workspace cleanup
@@ -327,10 +377,11 @@ impl HatInstanceActor {
                 }
                 cmd = self.cmd_rx.recv() => {
                     let Some(cmd) = cmd else { break };
+                    self.apply_completion_freeze_if_requested();
                     match cmd {
                         HatInstanceCommand::Deliver(mut event) => {
                             // shutdown draining: 退出路径上不再接收新事件,避免在收尾阶段又被新事件拉起。
-                            if self.shutdown_requested {
+                            if self.shutdown_requested || self.completion_freeze_active() {
                                 continue;
                             }
 
@@ -410,6 +461,7 @@ impl HatInstanceActor {
                     self.cancel_tx = None;
                     self.control_tx = None;
                     self.running_session_strategy = None;
+                    self.apply_completion_freeze_if_requested();
 
                     let Some(res) = res else { continue };
                     match res.context("JoinHandle await failed")? {
@@ -605,8 +657,10 @@ impl HatInstanceActor {
     }
 
     async fn maybe_start_job(&mut self) -> anyhow::Result<()> {
+        self.apply_completion_freeze_if_requested();
+
         // shutdown draining: 不再启动新 job.
-        if self.shutdown_requested {
+        if self.shutdown_requested || self.completion_freeze_active() {
             return Ok(());
         }
 
@@ -1785,6 +1839,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         actor.release_workspace_on_shutdown_best_effort().await;
@@ -1868,6 +1924,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         assert_eq!(
@@ -1932,6 +1990,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         assert_eq!(
@@ -1990,6 +2050,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         assert_eq!(
@@ -2079,6 +2141,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         actor.maybe_start_job().await.unwrap();
@@ -2179,6 +2243,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         actor
@@ -2270,6 +2336,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         let event = Event::new("build.task", "hello");
@@ -2346,6 +2414,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         let task = Event::new("build.task", "hello").with_id("writer#1:7");
@@ -2419,6 +2489,8 @@ mod tests {
             control_tx: None,
             shutdown_requested: false,
             shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
         };
 
         let task = Event::new("human.message", "hello").with_id("ralph#1:7");

@@ -6,6 +6,7 @@
 #[cfg(test)]
 use crate::cli_backend::PromptMode;
 use crate::cli_backend::{CliBackend, OutputFormat};
+use crate::codex_env::scrub_codex_parent_session_env_tokio;
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
@@ -83,6 +84,7 @@ impl CliExecutor {
         command.args(&args);
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        scrub_codex_parent_session_env_tokio(&mut command, &cmd);
 
         // Set working directory to current directory (mirrors PTY executor behavior)
         // Use fallback to "." if current_dir fails (e.g., E2E test workspaces)

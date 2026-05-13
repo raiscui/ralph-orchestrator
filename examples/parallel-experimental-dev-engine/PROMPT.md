@@ -22,8 +22,11 @@
 
 ## 最终验收(Final Verification / 主工作区)
 
-- 在主工作区集成后,需要跑的最终验收命令(必须真跑):
-  - `rg -n "exp-par-00[12]" parallel_smoke_*.txt`
+- 在主工作区集成后,`integration.task.final_verification` 必须根据被采纳的 `experiment_id` 选择对应命令(必须真跑):
+  - 如果采纳 `exp-par-001`: `rg -n "exp-par-001" parallel_smoke_001.txt`
+  - 如果采纳 `exp-par-002`: `rg -n "exp-par-002" parallel_smoke_002.txt`
+- 不要要求主工作区同时存在两个 marker 文件。
+- 两条并行自检是否都跑过,由 `experiment.reviewed` 链证明,不是由 integrator 重新把两个实验都集成进主工作区。
 
 ## 约束(Constraints, 可选)
 

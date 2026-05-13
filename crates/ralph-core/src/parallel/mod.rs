@@ -17,4 +17,6 @@ pub use executor::HatJobExecutor;
 pub use instance::{HatInstanceCommand, HatInstanceEvent, HatInstanceHandle};
 pub use job::{HatJob, HatJobControl, HatJobOutputChunk, HatJobResult, JobBackend, OutputStream};
 pub use router::TopicContractStore;
-pub use supervisor::{ParallelRunResult, ParallelSupervisor};
+pub use supervisor::{
+    ParallelRunResult, ParallelSupervisor, RuntimeDeliveryMode, RuntimeDeliveryObservation,
+};
