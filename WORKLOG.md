@@ -161,3 +161,34 @@
 - Phase 1A 已完成并归档,后续实现应从 `openspec/specs/runtime-evidence-index-kernel/spec.md` 读取稳定 contract。
 - Phase 2 的正确切入点不是继续做 CLI UX,而是先把 `reply.hat.message` 的成功、失败、missing/timeout 证据写进 evidence index。
 - OpenSpec CLI 的 PostHog flush 网络错误会出现在 stderr,但本轮相关命令退出码为 0,内容验证通过;不要把遥测 flush 噪声误当规格失败。
+
+## [2026-05-14 13:04:00] [Session ID: codex-20260514-phase2] 任务名称: Phase 2 request/reply answer evidence runtime wiring
+
+### 任务内容
+- 实现 OpenSpec change `request-reply-answer-evidence` 的 Phase 2 最小 runtime 闭环。
+- 将 `reply.hat.message` requester-return 的成功、失败、missing marker 证据写入 Phase 1A evidence index。
+- 保持 routing 边界: 普通带 `reply` 的 workflow event 不被当成 answer-return evidence,内部 `reply.hat.message` 不自动生成 `reply.human.message`。
+
+### 完成过程
+- 续档超过 1000 行的 `task_plan.md`,旧文件保存为 `task_plan_2026-05-14_phase1a_phase2_prev.md`。
+- 重读 Phase 2 OpenSpec、`runtime-evidence-index-kernel` 和 `hat-request-reply-channel` 稳定 spec。
+- 在 `ParallelSupervisor` 内部增加 evidence index writer,默认路径为 `.ralph/evidence-index.jsonl`。
+- 在现有 `reply.hat.message` success / fail-closed 路由分支中写入 evidence index entry。
+- 暴露 `ParallelSupervisor::record_missing_answer_evidence()` 作为 missing/timeout marker 的最小显式入口。
+- 补齐 focused tests 覆盖 success、unknown request id、missing source_instance、no reply、missing marker、ordinary workflow boundary、human-visible boundary。
+- 更新 OpenSpec tasks 进度。
+
+### 验证证据
+- `cargo test --package ralph-core --lib parallel::supervisor::routing_tests`: 48 passed。
+- `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed,无 warning。
+- `cargo test`: workspace tests and doctests passed。
+- `cargo fmt --all -- --check`: passed。
+- `git diff --check`: passed。
+- `openspec validate request-reply-answer-evidence --type change`: valid。
+- `openspec validate --all --strict`: 26 passed,0 failed。
+
+### 总结感悟
+- Phase 2 的关键不是新建 request broker,而是把已有 `reply.hat.message` requester-return 分支变成可查证的 evidence producer。
+- Evidence index 的 `producer` 字段必须保持写入者身份,失败原因应留在原始 JSONL artifact 里,不要借字段塞语义。
+- Missing/timeout 先用显式 marker API 收口,不要为了 Phase 2 最小闭环引入 broad lifecycle broker。

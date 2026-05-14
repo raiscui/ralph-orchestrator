@@ -12,6 +12,7 @@ use super::{ParallelSupervisor, RuntimeDeliveryMode, RuntimeDeliveryObservation}
 use crate::EventParser;
 use crate::config::HatConfig;
 use crate::event_logger::EventHistory;
+use crate::evidence_index::{EvidenceArtifactKind, EvidenceIndexEntry, EvidenceStatus};
 use crate::prompt_overlay;
 use anyhow::Context;
 use ralph_proto::{
@@ -88,8 +89,13 @@ impl ParallelSupervisor {
                         None,
                     );
 
-                    self.deliver_to_instance_id(event, target_instance, RuntimeDeliveryMode::Reply)
-                        .await?;
+                    self.deliver_to_instance_id(
+                        event.clone(),
+                        target_instance,
+                        RuntimeDeliveryMode::Reply,
+                    )
+                    .await?;
+                    self.record_delivered_answer_return_evidence(&event, reply_to);
                     return Ok(());
                 }
                 RequestReplyResolution::UnknownRequestId => {
@@ -1311,6 +1317,136 @@ Candidates:\n\
             .log_event(0, "supervisor", &diagnostic_event, None)
         {
             tracing::warn!(%error, "Failed to log requester-return diagnostic event");
+        }
+
+        if status != "delivered" {
+            self.record_failed_answer_return_evidence(event, reason);
+        }
+    }
+
+    fn record_delivered_answer_return_evidence(&mut self, event: &Event, request_event_id: &str) {
+        let artifact_path = self.event_logger.path().display().to_string();
+        let producer = "parallel.supervisor.requester_return";
+        let answer_event_id = event.id.as_deref();
+
+        // ---------------------------------------------------------------------
+        // Phase 2 evidence contract:
+        // - request id 能查到 answer-return artifact。
+        // - answer event id 能反查到承载该事件的 event log。
+        // - runtime_delivery durable record 仍在 events.jsonl 中作为原始真相源。
+        // ---------------------------------------------------------------------
+        let mut request_entry = EvidenceIndexEntry::new(
+            request_event_id,
+            EvidenceArtifactKind::ReplyEvent,
+            artifact_path.clone(),
+            producer,
+            EvidenceStatus::Success,
+        );
+        if let Some(answer_event_id) = answer_event_id {
+            request_entry = request_entry.with_child_correlation_id(answer_event_id);
+        }
+        self.record_evidence_index_entry(request_entry);
+
+        let mut delivery_entry = EvidenceIndexEntry::new(
+            request_event_id,
+            EvidenceArtifactKind::RuntimeDeliveryRecord,
+            artifact_path.clone(),
+            producer,
+            EvidenceStatus::Success,
+        );
+        if let Some(answer_event_id) = answer_event_id {
+            delivery_entry = delivery_entry.with_child_correlation_id(answer_event_id);
+        }
+        self.record_evidence_index_entry(delivery_entry);
+
+        if let Some(answer_event_id) = answer_event_id {
+            self.record_evidence_index_entry(
+                EvidenceIndexEntry::new(
+                    answer_event_id,
+                    EvidenceArtifactKind::EventLogJsonl,
+                    artifact_path,
+                    producer,
+                    EvidenceStatus::Success,
+                )
+                .with_parent_correlation_id(request_event_id),
+            );
+        }
+    }
+
+    fn record_failed_answer_return_evidence(&mut self, event: &Event, _reason: Option<&str>) {
+        let Some(correlation_id) = event.reply.as_deref().or(event.id.as_deref()) else {
+            return;
+        };
+
+        let artifact_path = self.event_logger.path().display().to_string();
+        let producer = "parallel.supervisor.requester_return";
+        let answer_event_id = event.id.as_deref();
+
+        let mut failure_entry = EvidenceIndexEntry::new(
+            correlation_id,
+            EvidenceArtifactKind::EventLogJsonl,
+            artifact_path.clone(),
+            producer,
+            EvidenceStatus::Failure,
+        );
+        if let Some(answer_event_id) = answer_event_id {
+            failure_entry = failure_entry.with_child_correlation_id(answer_event_id);
+        }
+        self.record_evidence_index_entry(failure_entry);
+
+        let mut missing_entry = EvidenceIndexEntry::missing(
+            correlation_id,
+            EvidenceArtifactKind::MissingArtifact,
+            artifact_path,
+            producer,
+        );
+        if let Some(answer_event_id) = answer_event_id {
+            missing_entry = missing_entry.with_child_correlation_id(answer_event_id);
+        }
+        self.record_evidence_index_entry(missing_entry);
+    }
+
+    /// 记录“预期 answer 没有产出”的最小 evidence marker。
+    ///
+    /// 说明:
+    /// - 这是 Phase 2 的缺失/超时证据入口。
+    /// - 它只写 durable JSONL 诊断事件和 evidence index link。
+    /// - 它不启动 broker,不改变 live topology,也不合成 `reply.human.message`。
+    pub fn record_missing_answer_evidence(&mut self, request_event_id: &str, reason: &str) {
+        let artifact_path = self.event_logger.path().display().to_string();
+        self.log_missing_answer_evidence_marker(request_event_id, reason);
+        self.record_evidence_index_entry(EvidenceIndexEntry::missing(
+            request_event_id,
+            EvidenceArtifactKind::MissingArtifact,
+            artifact_path,
+            "parallel.supervisor.answer_lifecycle",
+        ));
+    }
+
+    fn record_evidence_index_entry(&mut self, entry: EvidenceIndexEntry) {
+        if let Err(error) = self.evidence_index_writer.record(&entry) {
+            tracing::warn!(
+                %error,
+                correlation_id = %entry.correlation_id,
+                "Failed to write runtime evidence index entry"
+            );
+        }
+    }
+
+    fn log_missing_answer_evidence_marker(&mut self, request_event_id: &str, reason: &str) {
+        let payload = serde_json::json!({
+            "status": "missing",
+            "request_event_id": request_event_id,
+            "reason": reason,
+        })
+        .to_string();
+
+        let diagnostic_event = Event::new(TOPIC_REQUESTER_RETURN, payload);
+        if let Err(error) = self
+            .event_logger
+            .log_event(0, "supervisor", &diagnostic_event, None)
+        {
+            tracing::warn!(%error, "Failed to log missing answer evidence marker");
         }
     }
 

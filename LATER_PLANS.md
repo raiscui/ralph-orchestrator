@@ -472,3 +472,9 @@
 - 特别提醒:
   - 不建议直接做“正式 run 中途热切换整套 `ralph.yml`”。
   - `examples/` 更像 bundle/template,未必都适合作为默认 selector catalog 的候选 workflow,最好单独分类。
+
+## [2026-05-14 12:28:45] [Session ID: codex-20260514-phase2] 后续计划: task_plan 续档触发的 continuous-learning 待办
+
+- 触发事实: `task_plan.md` 在 Phase 2 启动前已达到 1023 行,本轮已续档为 `task_plan_2026-05-14_phase1a_phase2_prev.md` 并创建新的 `task_plan.md`。
+- 当前处理: 主任务是 Phase 2 实现,不应被完整 continuous-learning 流程阻塞。由于当前没有显式授权后台 subagent,先登记为最近安全点待办。
+- 后续动作: Phase 2 实现与验证完成后,按 `continuous-learning` skill 回读默认六文件与历史版本,提炼可复用经验,必要时同步 `EXPERIENCE.md` / `AGENTS.md` / docs/specs 索引。

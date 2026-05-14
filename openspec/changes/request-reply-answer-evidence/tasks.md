@@ -8,23 +8,23 @@
 
 ## 2. Implementation preparation after approval
 
-- [ ] 2.1 Map exact supervisor routing write points for success and fail-closed answer-return evidence.
-- [ ] 2.2 Decide whether evidence writes happen directly in supervisor routing or through a small helper.
-- [ ] 2.3 Decide how answer timeout/missing markers are triggered without adding a broad broker.
+- [x] 2.1 Map exact supervisor routing write points for success and fail-closed answer-return evidence.
+- [x] 2.2 Decide whether evidence writes happen directly in supervisor routing or through a small helper.
+- [x] 2.3 Decide how answer timeout/missing markers are triggered without adding a broad broker.
 
 ## 3. Contract tests to implement after approval
 
-- [ ] 3.1 Add successful `reply.hat.message` evidence index tests.
-- [ ] 3.2 Add unknown request id fail-closed evidence tests.
-- [ ] 3.3 Add no `source_instance` fail-closed evidence tests.
-- [ ] 3.4 Add missing/timeout marker tests.
-- [ ] 3.5 Add guardrail test proving ordinary workflow events with `reply` are not answer-return evidence.
-- [ ] 3.6 Add guardrail test proving `reply.hat.message` does not automatically publish `reply.human.message`.
+- [x] 3.1 Add successful `reply.hat.message` evidence index tests.
+- [x] 3.2 Add unknown request id fail-closed evidence tests.
+- [x] 3.3 Add no `source_instance` fail-closed evidence tests.
+- [x] 3.4 Add missing/timeout marker tests.
+- [x] 3.5 Add guardrail test proving ordinary workflow events with `reply` are not answer-return evidence.
+- [x] 3.6 Add guardrail test proving `reply.hat.message` does not automatically publish `reply.human.message`.
 
 ## 4. Verification to run after implementation approval
 
-- [ ] 4.1 Run focused supervisor routing tests.
-- [ ] 4.2 Run focused evidence index tests.
-- [ ] 4.3 Run `cargo test -p ralph-core smoke_runner` if runtime routing code changes.
-- [ ] 4.4 Run `cargo test` before declaring implementation complete.
-- [ ] 4.5 Run `openspec validate request-reply-answer-evidence --type change` after code changes.
+- [x] 4.1 Run focused supervisor routing tests.
+- [x] 4.2 Run focused evidence index tests.
+- [x] 4.3 Run `cargo test -p ralph-core smoke_runner` if runtime routing code changes.
+- [x] 4.4 Run `cargo test` before declaring implementation complete.
+- [x] 4.5 Run `openspec validate request-reply-answer-evidence --type change` after code changes.

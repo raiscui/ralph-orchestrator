@@ -180,6 +180,9 @@ pub struct EvidenceIndexWriter {
 }
 
 impl EvidenceIndexWriter {
+    /// Default path for the runtime evidence index JSONL file.
+    pub const DEFAULT_PATH: &'static str = ".ralph/evidence-index.jsonl";
+
     /// 创建 writer。父目录会在首次写入时创建。
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {

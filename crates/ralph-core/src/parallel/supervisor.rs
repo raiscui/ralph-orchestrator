@@ -17,6 +17,7 @@ use super::{
 };
 use crate::config::{HatBackend, HatConfig, RalphConfig};
 use crate::event_logger::EventLogger;
+use crate::evidence_index::EvidenceIndexWriter;
 use crate::hat_registry::HatRegistry;
 use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
@@ -66,6 +67,7 @@ pub struct ParallelSupervisor {
     executor: Arc<dyn HatJobExecutor>,
     contracts: TopicContractStore,
     event_logger: EventLogger,
+    evidence_index_writer: EvidenceIndexWriter,
 
     // 运行态
     instances: HashMap<HatInstanceId, HatInstanceHandle>,
@@ -165,6 +167,8 @@ impl ParallelSupervisor {
             .map_err(anyhow::Error::msg)
             .context("failed to load configured all-hat overlay")?;
 
+        let evidence_index_path = config.core.resolve_path(EvidenceIndexWriter::DEFAULT_PATH);
+
         Ok(Self {
             config,
             registry,
@@ -174,6 +178,7 @@ impl ParallelSupervisor {
             executor,
             contracts,
             event_logger: EventLogger::default_path(),
+            evidence_index_writer: EvidenceIndexWriter::new(evidence_index_path),
             instances: HashMap::new(),
             instances_by_hat: HashMap::new(),
             instance_states: HashMap::new(),

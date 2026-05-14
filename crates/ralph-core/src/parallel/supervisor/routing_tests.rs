@@ -10,6 +10,9 @@ use crate::config::{
     CoreConfig, HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig,
 };
 use crate::event_logger::{EventHistory, EventLogger};
+use crate::evidence_index::{
+    EvidenceArtifactKind, EvidenceIndexReader, EvidenceIndexWriter, EvidenceLookup, EvidenceStatus,
+};
 use crate::parallel::{
     HatInstanceCommand, HatInstanceHandle, HatJob, HatJobControl, HatJobExecutor,
     HatJobOutputChunk, HatJobResult,
@@ -1200,6 +1203,12 @@ fn make_supervisor(
 
     // 写到临时文件，避免污染 repo 的 .ralph/events.jsonl
     supervisor.event_logger = EventLogger::new(events_path);
+    supervisor.evidence_index_writer = EvidenceIndexWriter::new(
+        supervisor
+            .event_logger
+            .path()
+            .with_file_name("evidence-index.jsonl"),
+    );
 
     // 初始化并行通道（spawn_instances 需要）
     let (output_tx, mut output_rx) = mpsc::channel::<HatJobOutputChunk>(16);
@@ -1230,6 +1239,23 @@ fn runtime_delivery_records(events_path: &PathBuf) -> Vec<RuntimeDeliveryRecord>
                 .expect("runtime.delivery payload should be valid JSON")
         })
         .collect()
+}
+
+fn evidence_lookup_for_events_path(events_path: &PathBuf, correlation_id: &str) -> EvidenceLookup {
+    let index_path = events_path.with_file_name("evidence-index.jsonl");
+    EvidenceIndexReader::new(index_path)
+        .find_by_correlation(correlation_id)
+        .expect("evidence index lookup should succeed")
+}
+
+fn assert_no_evidence_entry(events_path: &PathBuf, correlation_id: &str) {
+    assert!(
+        matches!(
+            evidence_lookup_for_events_path(events_path, correlation_id),
+            EvidenceLookup::NoEntry
+        ),
+        "correlation id `{correlation_id}` should not have answer-return evidence"
+    );
 }
 
 fn runtime_lifecycle_records(events_path: &PathBuf) -> Vec<RuntimeLifecycleRecord> {
@@ -2289,6 +2315,40 @@ async fn parallel_routes_reply_hat_message_back_to_requester_and_logs_resolution
     .expect("requester-return payload should be valid JSON");
     assert_eq!(payload["status"], "delivered");
     assert_eq!(payload["requester_instance"], "planner#1");
+
+    let request_lookup = evidence_lookup_for_events_path(&events_path, "req-1");
+    let request_entries = request_lookup.entries();
+    assert!(matches!(request_lookup, EvidenceLookup::Entries(_)));
+    assert!(
+        request_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::ReplyEvent
+                && entry.status == EvidenceStatus::Success
+                && entry.child_correlation_id.as_deref() == Some("ans-1")
+                && entry.artifact_path == events_path.display().to_string()
+        }),
+        "request id should resolve to successful reply event evidence"
+    );
+    assert!(
+        request_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::RuntimeDeliveryRecord
+                && entry.status == EvidenceStatus::Success
+                && entry.child_correlation_id.as_deref() == Some("ans-1")
+        }),
+        "request id should resolve to runtime delivery evidence"
+    );
+
+    let answer_lookup = evidence_lookup_for_events_path(&events_path, "ans-1");
+    let answer_entries = answer_lookup.entries();
+    assert!(matches!(answer_lookup, EvidenceLookup::Entries(_)));
+    assert!(
+        answer_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::EventLogJsonl
+                && entry.status == EvidenceStatus::Success
+                && entry.parent_correlation_id.as_deref() == Some("req-1")
+                && entry.artifact_path == events_path.display().to_string()
+        }),
+        "answer event id should resolve back to the durable event log artifact"
+    );
 }
 
 #[tokio::test]
@@ -2340,6 +2400,88 @@ async fn parallel_reply_hat_message_unknown_reply_id_fails_closed() {
     .expect("requester-return payload should be valid JSON");
     assert_eq!(payload["status"], "unresolved");
     assert_eq!(payload["reason"], "reply target event id was not found");
+
+    let lookup = evidence_lookup_for_events_path(&events_path, "missing-id");
+    let entries = lookup.entries();
+    assert!(matches!(lookup, EvidenceLookup::Missing(_)));
+    assert!(
+        entries.iter().any(|entry| {
+            entry.status == EvidenceStatus::Failure
+                && entry.artifact_kind == EvidenceArtifactKind::EventLogJsonl
+                && entry.child_correlation_id.as_deref() == Some("ans-missing")
+        }),
+        "unknown request id should retain failure evidence"
+    );
+    assert!(
+        entries.iter().any(|entry| {
+            entry.status == EvidenceStatus::Missing
+                && entry.artifact_kind == EvidenceArtifactKind::MissingArtifact
+                && entry.producer == "parallel.supervisor.requester_return"
+        }),
+        "unknown request id should retain a missing marker distinguishable from no entry"
+    );
+}
+
+#[tokio::test]
+async fn parallel_reply_hat_message_without_reply_fails_closed_with_evidence() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "researcher".to_string(),
+        hat_config("Researcher", vec![], 1),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(4);
+    let executor = Arc::new(test_executors::TestExecutor::new(tx));
+    let mut supervisor = make_supervisor(config, executor, events_path.clone());
+
+    let event = Event::new(TOPIC_REPLY_HAT_MESSAGE, "answer without request id")
+        .with_id("ans-no-reply")
+        .with_source(HatId::new("researcher"))
+        .with_source_instance(HatInstanceId::new("researcher#1"));
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    let recv = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(
+        recv.is_err(),
+        "Expected fail-closed with no delivery, but got: {recv:?}"
+    );
+
+    let history = EventHistory::new(&events_path);
+    let records = history
+        .filter_by_topic(TOPIC_REQUESTER_RETURN)
+        .expect("should read requester-return records");
+    let payload: serde_json::Value = serde_json::from_str(
+        &records
+            .last()
+            .expect("should have requester-return record")
+            .payload,
+    )
+    .expect("requester-return payload should be valid JSON");
+    assert_eq!(payload["status"], "unresolved");
+    assert_eq!(
+        payload["reason"],
+        "reply.hat.message requires a non-empty reply=<request_event_id>"
+    );
+
+    let lookup = evidence_lookup_for_events_path(&events_path, "ans-no-reply");
+    let entries = lookup.entries();
+    assert!(matches!(lookup, EvidenceLookup::Missing(_)));
+    assert!(
+        entries.iter().any(|entry| {
+            entry.status == EvidenceStatus::Missing
+                && entry.artifact_kind == EvidenceArtifactKind::MissingArtifact
+                && entry.producer == "parallel.supervisor.requester_return"
+        }),
+        "reply.hat.message without reply should retain a missing evidence marker by answer id"
+    );
 }
 
 #[tokio::test]
@@ -2396,6 +2538,156 @@ async fn parallel_reply_hat_message_without_requester_source_instance_fails_clos
     assert_eq!(
         payload["reason"],
         "referenced request event has no source_instance"
+    );
+
+    let lookup = evidence_lookup_for_events_path(&events_path, "external-1");
+    let entries = lookup.entries();
+    assert!(matches!(lookup, EvidenceLookup::Missing(_)));
+    assert!(
+        entries.iter().any(|entry| {
+            entry.status == EvidenceStatus::Missing
+                && entry.artifact_kind == EvidenceArtifactKind::MissingArtifact
+                && entry.producer == "parallel.supervisor.requester_return"
+                && entry.child_correlation_id.as_deref() == Some("ans-external")
+        }),
+        "request without source_instance should retain reason-specific missing evidence"
+    );
+}
+
+#[tokio::test]
+async fn parallel_missing_expected_answer_can_be_indexed_without_graph_artifact() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+
+    let (tx, _rx) = mpsc::channel::<String>(4);
+    let executor = Arc::new(test_executors::TestExecutor::new(tx));
+    let mut supervisor = make_supervisor(config, executor, events_path.clone());
+
+    supervisor.record_missing_answer_evidence(
+        "req-timeout-1",
+        "answer lifecycle closed before reply.hat.message was produced",
+    );
+
+    let lookup = evidence_lookup_for_events_path(&events_path, "req-timeout-1");
+    let entries = lookup.entries();
+    assert!(matches!(lookup, EvidenceLookup::Missing(_)));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, EvidenceStatus::Missing);
+    assert_eq!(
+        entries[0].artifact_kind,
+        EvidenceArtifactKind::MissingArtifact
+    );
+    assert_eq!(entries[0].producer, "parallel.supervisor.answer_lifecycle");
+    assert_eq!(entries[0].artifact_path, events_path.display().to_string());
+    let records = EventHistory::new(&events_path)
+        .filter_by_topic(TOPIC_REQUESTER_RETURN)
+        .expect("should read requester-return records");
+    let payload: serde_json::Value = serde_json::from_str(
+        &records
+            .last()
+            .expect("should have missing answer diagnostic")
+            .payload,
+    )
+    .expect("missing answer diagnostic should be valid JSON");
+    assert_eq!(payload["status"], "missing");
+    assert_eq!(payload["request_event_id"], "req-timeout-1");
+    assert_eq!(
+        payload["reason"],
+        "answer lifecycle closed before reply.hat.message was produced"
+    );
+    assert!(
+        !entries[0].artifact_path.contains("rerun")
+            && !entries[0].artifact_path.contains("runtime_graph"),
+        "missing answer evidence must not depend on graph artifacts"
+    );
+}
+
+#[tokio::test]
+async fn parallel_workflow_event_with_reply_is_not_answer_return_evidence() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "manager".to_string(),
+        hat_config("Manager", vec!["research.ready"], 1),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(4);
+    let executor = Arc::new(test_executors::TestExecutor::new(tx));
+    let mut supervisor = make_supervisor(config, executor, events_path.clone());
+
+    let workflow = Event::new("research.ready", "done")
+        .with_id("ready-with-reply")
+        .with_reply("req-ordinary")
+        .with_source(HatId::new("researcher"))
+        .with_source_instance(HatInstanceId::new("researcher#1"));
+
+    supervisor
+        .route_event(workflow)
+        .await
+        .expect("workflow event should route normally");
+
+    let got = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("should receive normal workflow delivery")
+        .expect("channel closed");
+    assert_eq!(got, "manager#1");
+    assert_no_evidence_entry(&events_path, "req-ordinary");
+    assert_no_evidence_entry(&events_path, "ready-with-reply");
+}
+
+#[tokio::test]
+async fn parallel_reply_hat_message_does_not_auto_publish_reply_human_message() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config
+        .hats
+        .insert("planner".to_string(), hat_config("Planner", vec![], 1));
+    config.hats.insert(
+        "researcher".to_string(),
+        hat_config("Researcher", vec![], 1),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(4);
+    let executor = Arc::new(test_executors::TestExecutor::new(tx));
+    let mut supervisor = make_supervisor(config, executor, events_path.clone());
+    supervisor.request_reply_origins.insert(
+        "req-human-boundary".to_string(),
+        Some(HatInstanceId::new("planner#1")),
+    );
+
+    let answer = Event::new(TOPIC_REPLY_HAT_MESSAGE, "internal answer")
+        .with_id("ans-human-boundary")
+        .with_reply("req-human-boundary")
+        .with_source(HatId::new("researcher"))
+        .with_source_instance(HatInstanceId::new("researcher#1"));
+    supervisor
+        .route_event(answer)
+        .await
+        .expect("reply.hat.message should route");
+
+    let got = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("should deliver only to requester")
+        .expect("channel closed");
+    assert_eq!(got, "planner#1");
+
+    let records = EventHistory::new(&events_path)
+        .read_all()
+        .expect("events log should be readable");
+    assert!(
+        records
+            .iter()
+            .all(|record| record.topic != "reply.human.message"),
+        "internal reply.hat.message must not synthesize reply.human.message records"
     );
 }
 
