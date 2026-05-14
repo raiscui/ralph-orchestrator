@@ -982,3 +982,42 @@
   - 运行 `git diff --check`。
   - stage archive 移动、主 spec 和 task_plan。
   - 做第二个本地 commit。
+
+
+## [2026-05-14 11:15:58] [Session ID: omx-1778510695653-7pd7o2] 状态更新: 准备 Phase 2 request/reply answer return OpenSpec
+
+- 当前 git 状态: archive 后工作区干净。
+- 已完成提交:
+  - `cadefa8` Build evidence lookup before evidence UX。
+  - `0e00eb7` Archive evidence index contract after kernel landing。
+- 当前 OpenSpec active changes:
+  - 只剩无关 `tui-mdfried-viewer`,`runtime-evidence-index-kernel` 已归档。
+- Phase 2 目标:
+  - request/reply 与 answer return 最小闭环。
+  - 让 evidence index 开始服务真实 runtime 链路,而不是只作为 standalone kernel。
+- 本阶段不做:
+  - 不实现代码。
+  - 不热改 live topology。
+  - 不引入大而全的 request broker。
+  - 不把所有 hat final answer 默认显示给 human。
+- 即将执行:
+  - 读取现有 `hat-request-reply-channel`, `runtime-evidence-index-kernel`, `capability-invocation` 主规格和相关代码锚点。
+  - 创建 Phase 2 OpenSpec change,包含 proposal/design/spec delta/tasks/test-plan。
+  - 运行 `openspec validate <change> --type change` 和 `openspec validate --all --strict`。
+
+
+## [2026-05-14 11:20:01] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: Phase 2 request-reply-answer-evidence OpenSpec 草案已验证
+
+- 已创建 OpenSpec change: `openspec/changes/request-reply-answer-evidence/`。
+- 已产出:
+  - `proposal.md`
+  - `design.md`
+  - `specs/request-reply-answer-evidence/spec.md`
+  - `tasks.md`
+  - `test-plan.md`
+- 已通过验证:
+  - `openspec validate request-reply-answer-evidence --type change`: valid。
+  - `openspec validate --all --strict`: 26 passed,0 failed。
+  - `git diff --check`: exit 0。
+- 当前没有实现 Phase 2 代码。
+- 下一步建议: 提交 Phase 2 OpenSpec 草案,然后等待确认再进入实现。
