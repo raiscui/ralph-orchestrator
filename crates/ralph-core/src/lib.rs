@@ -20,6 +20,7 @@ mod event_logger;
 mod event_loop;
 mod event_parser;
 mod event_reader;
+pub mod evidence_index;
 mod experience;
 mod experience_governance;
 mod experience_injection;
@@ -64,6 +65,10 @@ pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{EventLoop, LoopState, TerminationReason};
 pub use event_parser::EventParser;
 pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
+pub use evidence_index::{
+    EVIDENCE_INDEX_SCHEMA_VERSION, EvidenceArtifactKind, EvidenceIndexEntry, EvidenceIndexError,
+    EvidenceIndexReader, EvidenceIndexWriter, EvidenceLookup, EvidenceStatus,
+};
 pub use experience::{ExperienceConfidence, ExperienceEntry, ExperienceScope, ExperienceStatus};
 pub use experience_governance::{
     CanonicalWriterRecord, CanonicalWriterStore, DEFAULT_CANONICAL_WRITER_ID,

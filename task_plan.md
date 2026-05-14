@@ -614,3 +614,330 @@
 - 第一组 staged diff 已准备好。
 - 尚未 commit。
 - unstaged worktree 仍保留其他主题线改动。
+
+## [2026-05-13 17:36:27] [Session ID: omx-1778510695653-7pd7o2] 状态更新: 记录 Ralph 后续演进方案
+
+- 当前目标: 把“提交收口 -> runtime evidence v2 -> capability invocation v2 -> request-reply -> startup resources v2 -> E2E matrix”的后续演进整理成可落地方案文档。
+- 约束:
+  - 不改代码。
+  - 不触碰当前已经 staged 的 adapter/evidence contract 第一组 diff。
+  - 方案先作为 roadmap / planning artifact,不直接开工实现。
+- 即将执行:
+  - 新建 `specs/ralph-evolution-roadmap.md`。
+  - 文档内包含优先级、阶段、交付物、验收门禁、风险和不做事项。
+  - 加入 flowchart 和 sequenceDiagram,并用 `beautiful-mermaid-rs --ascii` 验证 Mermaid 语法。
+
+## [2026-05-13 17:40:26] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: Ralph 后续演进方案已落盘
+
+- [x] 已创建 `specs/ralph-evolution-roadmap.md`。
+- [x] 已整理阶段路线:
+  - 阶段 0: 提交收口。
+  - 阶段 1: Runtime evidence v2。
+  - 阶段 2: Capability invocation v2。
+  - 阶段 3: Request reply / answer return。
+  - 阶段 4: Startup resources v2。
+  - 阶段 5: E2E / smoke matrix。
+- [x] 已写入优先级、交付物、验收门禁、风险和不建议事项。
+- [x] 已用 `beautiful-mermaid-rs --ascii` 验证文档中的 flowchart 和 sequenceDiagram。
+
+当前状态:
+- 方案文档已作为后续 OpenSpec / task 拆分入口。
+- 本次没有改代码。
+- 本次没有提交 git。
+
+## [2026-05-13 17:42:30] [Session ID: omx-1778661172041-6j6c3s] 状态更新: 启动 ralplan 共识规划
+
+- 当前目标: 对 `specs/ralph-evolution-roadmap.md` 做 `` 共识规划,产出可执行的后续计划。
+- 工作流要求: 先做 pre-context intake,再按 Planner -> Architect -> Critic 顺序评审,非 interactive 模式不向用户中途确认。
+- 约束:
+  - 这是规划任务,不直接实现 roadmap。
+  - 不改当前 staged adapter/evidence contract diff。
+  - 计划需要包含 ADR、可选执行路径、验证门禁和 agent staffing 建议。
+
+## [2026-05-13 17:55:19] [Session ID: omx-1778661172041-6j6c3s] 状态更新: ralplan Architect 要求迭代
+
+- Architect verdict: ITERATE。
+- 认可点: Option A 总体 sound,已正确纳入 staged diff 为空的当前事实,stable topology 边界清楚。
+- 必须修正:
+  - 将 Runtime evidence v2 拆成 Phase 1A minimal evidence index kernel 和 Phase 1B evidence CLI / doctor expansion。
+  - 把 staged-empty re-baseline 写成执行前硬门禁。
+- 即将执行: 交回 Planner 修订,然后重新 Architect review,再 Critic review。
+
+## [2026-05-13 18:22:20] [Session ID: omx-1778661172041-6j6c3s] 状态更新: ralplan Critic 要求 handoff 小修
+
+- Critic verdict: ITERATE。
+- 路线本身基本通过,但最终 handoff 还缺 3 个最小修正:
+  1. 更新计划状态: Architect re-review 已 APPROVE,不能继续显示旧的 ITERATE。
+  2. 补强 `` handoff: 明确 headcount / role count / launch hint。
+  3. 给 team lane 补 reasoning 明细。
+- 即将执行: Planner revision -> Architect re-review -> Critic re-review。
+
+## [2026-05-13 18:42:04] [Session ID: omx-1778661172041-6j6c3s] 阶段完成: ralplan 共识规划 APPROVE
+
+- [x] Planner 已产出并两轮修订 `.omx/plans/ralph-evolution-roadmap-consensus-draft.md`。
+- [x] Architect 初审 ITERATE,要求把 Runtime evidence v2 拆成 minimal kernel 和后置 CLI / doctor expansion。
+- [x] Planner 已修订 Phase 1A / Phase 1B 顺序,并写入 staged-empty re-baseline 硬门禁。
+- [x] Architect re-review 已 APPROVE。
+- [x] Critic 初审 ITERATE,要求补齐状态行、` 5:executor` handoff、team lane reasoning。
+- [x] Planner 文件已补齐 handoff 信息。
+- [x] Critic final re-review 已 APPROVE。
+
+当前状态:
+- ` specs/ralph-evolution-roadmap.md` 已完成共识规划。
+- 最终计划文件: `.omx/plans/ralph-evolution-roadmap-consensus-draft.md`。
+- 本轮没有实现代码。
+
+## [2026-05-13 18:43:36] [Session ID: omx-1778661172041-6j6c3s] 状态更新: ralplan 收尾证据复核
+
+- 当前目标: 复核  的 ralplan 产物、OMX state 与 git 状态,确认可以向用户交付最终规划结果。
+- 即将执行:
+  - 读取  的关键状态与最终路线。
+  - 执行  检查 ralplan 是否仍 active。
+  - 执行  M WORKLOG.md
+ M task_plan.md
+?? specs/ralph-evolution-roadmap.md 与  确认没有误把实现改动混入本轮规划。
+- 约束:
+  - 本轮仍然只做规划收尾,不实现 roadmap。
+  - 不触碰用户或其他支线的非本轮代码改动。
+
+
+## [2026-05-13 18:44:11] [Session ID: omx-1778661172041-6j6c3s] 状态更新: 修正上一条 task_plan 记录的 shell 反引号污染
+
+- 现象: 上一条 task_plan 追加记录使用了未加单引号的 heredoc,正文中的反引号触发了 shell command substitution,导致记录里的路径和命令文本被替换/清空。
+- 影响: 只污染了 task_plan 的一条追加记录。命令输出显示触发的是只读/失败命令,没有改动代码或 staged index。
+- 修正: 从现在开始继续使用单引号 heredoc 或 Python 字符串追加,不编辑中间历史记录。
+- 当前正确的收尾动作:
+  - 读取 `.omx/plans/ralph-evolution-roadmap-consensus-draft.md` 的最终路线和 reviewer verdict。
+  - 执行 `omx state read --input '{"mode":"ralplan"}' --json` 与 `omx state list-active --json`。
+  - 执行 `git status --porcelain=v1` 与 `git diff --cached --name-status`。
+
+
+## [2026-05-13 18:46:13] [Session ID: omx-1778661172041-6j6c3s] 阶段完成: ralplan 收尾验证完成
+
+- [x] 已确认最终计划文件: `.omx/plans/ralph-evolution-roadmap-consensus-draft.md`。
+- [x] 已修正计划文件顶部旧状态,现在显示 Architect re-review APPROVE 与 Critic final re-review APPROVE。
+- [x] 已关闭 OMX ralplan state: `active=false`, `current_phase=complete`, `verdict=APPROVE`。
+- [x] 已确认 `omx state list-active --json` 返回空 active modes。
+- [x] 已确认 `git diff --cached --name-status` 为空。
+- [x] 已确认当前 unstaged/untracked 只包含工作上下文与 roadmap 文档: `ERRORFIX.md`, `WORKLOG.md`, `task_plan.md`, `specs/ralph-evolution-roadmap.md`。
+
+当前状态:
+- `$ralplan specs/ralph-evolution-roadmap.md` 已完成。
+- 本轮没有实现 roadmap 代码。
+- 下一步若要执行,建议只从 Phase 1A minimal evidence index kernel 开始,且先重新验证 staged diff 为空。
+
+
+## [2026-05-13 18:59:05] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: 启动 Ralph Phase 1A OpenSpec 与测试计划
+
+- 当前目标: 按 `.omx/plans/ralph-evolution-roadmap-consensus-draft.md` 只推进 Phase 1A minimal evidence index kernel 的 OpenSpec 与测试计划。
+- 用户边界: 启动前必须重新验证 staged diff 为空; 先产出 OpenSpec 和测试计划; 未经确认不要实现代码。
+- 本轮不做事项:
+  - 不实现 Rust 代码。
+  - 不创建 evidence runtime kernel 的生产实现。
+  - 不提前做 Phase 1B evidence CLI / doctor。
+- 即将执行:
+  - 复查 active Ralph state 与 context snapshot。
+  - 运行 `git status --porcelain=v1` 与 `git diff --cached --name-status`。
+  - 检查现有 OpenSpec changes/specs,选择 Phase 1A change 名称。
+  - 读取 roadmap consensus 中 Phase 1A 的边界和验收门禁。
+  - 创建或补齐 OpenSpec proposal / design / tasks / delta spec 与测试计划文档。
+
+
+## [2026-05-13 19:00:58] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: 修复 context snapshot 反引号污染
+
+- 现象: 新建 context snapshot 时,未加引号 heredoc 触发 shell command substitution,导致部分 Markdown 代码文本被清空。
+- 处理: 由于该 snapshot 是本轮 Ralph 创建的文件,已直接重写为正确内容,并追加 `ERRORFIX.md`。
+- 当前状态: Ralph context snapshot 可继续作为本轮 OpenSpec / 测试计划的 grounding artifact。
+
+
+## [2026-05-13 19:32:06] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: 准备创建 OpenSpec change
+
+- 已确认 baseline: cached diff 为空,当前 worktree 只有上下文和 roadmap 文档变更。
+- `omx explore` 因 429 失败,已改用本地只读 `rg/find/sed` 映射代码面。
+- 已识别 Phase 1A OpenSpec 应引用的现有锚点:
+  - `crates/ralph-core/src/event_logger.rs`
+  - `crates/ralph-core/src/capability.rs`
+  - `crates/ralph-cli/src/capability.rs`
+  - `openspec/specs/record-session-contract-and-watch/spec.md`
+  - `openspec/specs/adapter-contract-tests/spec.md`
+  - `openspec/specs/runtime-graph-observability/spec.md`
+  - `openspec/specs/capability-invocation/spec.md`
+  - `openspec/specs/hat-request-reply-channel/spec.md`
+- 即将执行: 创建 `openspec/changes/runtime-evidence-index-kernel/` 并补齐 proposal/design/tasks/spec delta 与测试计划。
+
+
+## [2026-05-13 19:35:11] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: 修复 OpenSpec delta 格式
+
+- `openspec validate runtime-evidence-index-kernel --type change` 失败。
+- 失败原因: `spec.md` 缺少 `## ADDED Requirements` delta section。
+- 当前判断: 这是 OpenSpec 格式问题,不是 Phase 1A 方案内容问题。
+- 即将执行: 将 spec 改为 delta 格式,并重新运行 validate。
+
+
+## [2026-05-13 19:37:49] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: WORKLOG 超 1000 行续档
+
+- 现象: 收尾检查发现 `WORKLOG.md` 为 1006 行,超过六文件续档阈值。
+- 处理策略: 当前主线任务已经处于收尾验证点,执行最小 continuous-learning 续档,不展开全仓历史归档。
+- 即将执行:
+  - 将本轮可复用经验追加到 `EXPERIENCE.md`。
+  - 将旧 `WORKLOG.md` 日期化保存。
+  - 创建新的 `WORKLOG.md` 记录当前 Ralph 交付和验证证据。
+
+
+## [2026-05-13 19:38:17] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 阶段完成: Phase 1A OpenSpec 与测试计划已产出
+
+- [x] 已重新验证启动 baseline: `git diff --cached --name-status` 为空。
+- [x] 已创建 OpenSpec change: `openspec/changes/runtime-evidence-index-kernel/`。
+- [x] 已产出 proposal/design/spec delta/tasks/test-plan。
+- [x] 已修复 OpenSpec delta 格式问题。
+- [x] 已通过 `openspec validate runtime-evidence-index-kernel --type change`。
+- [x] 已通过 `openspec validate --all --strict`,结果 25 passed,0 failed。
+- [x] 已做 changed-file scoped anti-slop / boundary review,确认没有提前实现 Phase 1B CLI / doctor。
+- [x] 已因 `WORKLOG.md` 超 1000 行执行最小 continuous-learning 续档,并将经验写入 `EXPERIENCE.md`。
+- [x] 本轮没有实现 Rust 代码。
+
+当前状态:
+- 用户要求的 OpenSpec 与测试计划已经完成。
+- 下一步需要用户确认后,才能进入 Phase 1A 实现。
+
+
+## [2026-05-13 21:47:59] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: 用户确认进入 runtime-evidence-index-kernel 实现
+
+- 当前目标: 按 OpenSpec change `runtime-evidence-index-kernel` 进入 Phase 1A 代码实现。
+- 边界:
+  - 只实现 minimal evidence index kernel。
+  - 不实现 `ralph evidence summary` / `ralph evidence inspect` / `ralph doctor evidence`。
+  - 不改变 live topology。
+- 即将执行:
+  - 重新验证 `git diff --cached --name-status` 为空。
+  - 读取 `openspec instructions apply --change runtime-evidence-index-kernel --json`。
+  - 阅读 proposal/design/spec/tasks/test-plan。
+  - 先补 schema / writer-reader / missing marker / parent-child contract tests,再实现最小 core module。
+
+
+## [2026-05-13 21:58:25] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: evidence_index focused test 首次过滤错误
+
+- 现象: `cargo test --package ralph-core --lib evidence_index -- --exact` 编译成功,但输出 `running 0 tests`。
+- 判断: 这不能作为通过证据,因为 `--exact` 过滤条件没有匹配真实测试路径。
+- 即将执行: 改用模块路径过滤运行 `cargo test --package ralph-core --lib evidence_index::tests`,确保实际执行新测试。
+
+
+## [2026-05-13 22:07:43] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: 实现验证进入收尾
+
+- 已实现 `ralph-core::evidence_index` 最小 JSONL kernel。
+- 已导出 `EvidenceIndexEntry`, `EvidenceIndexWriter`, `EvidenceIndexReader`, `EvidenceLookup`, `EvidenceArtifactKind`, `EvidenceStatus`。
+- 已通过新模块 7 个 contract tests。
+- 已通过 record-session / event_logger / capability focused tests。
+- 已通过 `cargo test -p ralph-core smoke_runner`。
+- 已通过全量 `cargo test`。
+- `cargo clippy --all-targets --all-features` 退出码为 0,但输出大量既有 warning; 未发现本轮新增 `evidence_index.rs` warning。
+- 即将执行: 最终格式检查、OpenSpec 验证、diff/status 复核、WORKLOG 收尾和 Ralph state close。
+
+
+## [2026-05-13 22:10:12] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 阶段完成: runtime-evidence-index-kernel Phase 1A 实现完成
+
+- [x] OpenSpec change `runtime-evidence-index-kernel` 所有 tasks 已完成。
+- [x] 新增 core evidence index module。
+- [x] 新增并通过 7 个 contract tests。
+- [x] focused tests / smoke tests / 全量 `cargo test` / OpenSpec validate 已通过。
+- [x] 本轮未实现 evidence CLI / doctor UX。
+- [x] 本轮未改变 live topology。
+
+当前状态:
+- 可以进入 review / commit 准备。
+- 若下一步继续 roadmap,建议进入 Phase 2 request/reply 与 answer return 最小闭环。
+
+
+## [2026-05-13 22:13:14] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 状态更新: 补 Ralph completion audit
+
+- Hook 阻止完成: `missing_completion_audit`。
+- 已创建审计文件: `.omx/audits/runtime-evidence-index-kernel-completion-audit.md`。
+- 审计内容覆盖原始 prompt、scope contract、prompt-to-artifact checklist、验证命令、known gaps 和 completion verdict。
+- 即将执行: 重跑关键验证命令,更新 Ralph state 后再汇报。
+
+
+## [2026-05-13 22:16:43] [Session ID: omx-1778510695653-7pd7o2] 状态更新: 接续 runtime-evidence-index-kernel 实现收尾验证
+
+- 当前目标: 继续上轮已确认进入实现的 Phase 1A `runtime-evidence-index-kernel`,完成 post-audit verification 与 Ralph state close。
+- 已知背景: 实现和 completion audit 已由上一轮写入,但 completion hook 要求审计证据写入后继续验证,不能直接宣称完成。
+- 即将执行:
+  - 复读 `.omx/audits/runtime-evidence-index-kernel-completion-audit.md`。
+  - 复读 OpenSpec tasks 与核心实现文件。
+  - 运行 focused tests / OpenSpec validate / diff check / format check。
+  - 将 completion audit path 写入 Ralph state 并确认 active mode 清空。
+- 停止条件: 所有关键验证退出码为 0,且 Ralph state 显示 complete/inactive。
+
+
+## [2026-05-13 22:20:17] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: post-audit verification 已通过
+
+- [x] 已复读 completion audit: `.omx/audits/runtime-evidence-index-kernel-completion-audit.md`。
+- [x] 已复读 OpenSpec tasks,确认 `runtime-evidence-index-kernel` 全部任务勾选完成。
+- [x] 已复读核心实现: `crates/ralph-core/src/evidence_index.rs` 与 `crates/ralph-core/src/lib.rs`。
+- [x] 已通过 `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed,0 failed。
+- [x] 已通过 `openspec validate runtime-evidence-index-kernel --type change`: valid。
+- [x] 已通过 `git diff --check`: exit 0。
+- [x] 已通过 `cargo fmt --all -- --check`: exit 0。
+- [x] 已通过 `cargo test -p ralph-core smoke_runner`: 12 passed in smoke runner unit tests,无失败。
+- [x] 已通过 `cargo test`: workspace unit tests 与 doctests 通过。
+- [x] 已通过 `openspec validate --all --strict`: 25 passed,0 failed。
+
+当前状态:
+- Implementation 与 audit 均已验证。
+- 即将更新 Ralph state 为 inactive/complete,并确认 active mode 清空。
+
+
+## [2026-05-13 22:21:38] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: Ralph state 已关闭
+
+- [x] 已写入 Ralph completion state: `active=false`, `current_phase=complete`, `status=complete`, `verdict=APPROVE`。
+- [x] 已写入 completion audit path: `.omx/audits/runtime-evidence-index-kernel-completion-audit.md`。
+- [x] 已确认 `omx state read --input '{"mode":"ralph"}' --json` 返回 `completion_audit_gate=passed`。
+- [x] 已确认 `omx state list-active --json` 返回 `{"active_modes":[]}`。
+
+当前状态:
+- Phase 1A minimal evidence index kernel 本轮实现与验证闭环完成。
+- 当前没有继续实现中的 Ralph active mode。
+
+
+## [2026-05-13 22:23:20] [Session ID: omx-1778510695653-7pd7o2] 状态更新: 响应 hook missing_completion_audit
+
+- 当前现象: Stop hook 提示 `missing_completion_audit`,并指出 state 文件 `.omx/state/sessions/019e1b71-f86a-7752-9341-cc0358edfb48/ralph-state.json` 仍未满足 completion audit gate。
+- 当前假设: 上轮写入了 `completion_audit_path` 和 `completion_audit_gate=passed`,但 state 里可能仍残留 `completion_audit_missing_reason` / `audit_blocker` 等旧 blocker 字段,hook 仍按这些字段判定失败。
+- 最强备选解释: audit 文件本身缺少 hook 要求的 prompt-to-artifact checklist 或 verification evidence 字段/格式,不是 state 残留问题。
+- 即将执行:
+  - 读取 state 文件、audit 文件和 hook 配置/脚本,确认 hook 具体判定条件。
+  - 若是 state 残留 blocker,用最小方式清理或覆盖 blocker 字段。
+  - 若是 audit 内容格式不足,补写 prompt-to-artifact checklist 与验证证据。
+  - 重跑最小验证并重新读 state,在 hook 条件满足前不宣称完成。
+
+
+## [2026-05-13 22:31:33] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: hook missing_completion_audit 已修正
+
+- [x] 已确认根因: hook 只接受 `.json` audit artifact 或内联 `completion_audit` object,不接受 Markdown audit path。
+- [x] 已新增 `.omx/audits/runtime-evidence-index-kernel-completion-audit.json`。
+- [x] 已更新 Ralph state,移除旧 blocker 字段并写入 `completion_audit_gate=passed`。
+- [x] 已直接调用 hook evaluator,返回 `complete=true`, `reason=completion_audit_passed`, `source=state`。
+- [x] 已确认 `omx state list-active --json` 返回 `{"active_modes":[]}`。
+
+当前状态:
+- Stop hook 指出的 `missing_completion_audit` 已按真实 hook 判定条件修正。
+- 可以重新进入最终汇报,但必须说明刚才的修正点是 audit JSON 兼容,不是新增功能实现。
+
+
+## [2026-05-14 11:01:39] [Session ID: omx-1778510695653-7pd7o2] 状态更新: 按建议继续 Phase 1A 收口与 Phase 2 准备
+
+- 用户明确执行顺序:
+  - 1. 先 review 当前 diff。
+  - 2. 做一次本地提交。
+  - 3. 再决定是否 archive OpenSpec change。
+  - 4. 下一条产品演进线: Phase 2 request/reply 与 answer return 最小闭环。
+- 当前边界:
+  - 本轮可以做本地 commit,但不 push。
+  - 需要保护非本轮生成的用户改动,不能 `git add .`。
+  - `.omx/state` 这类运行态文件不应提交。
+- 即将执行:
+  - 复查 git status / diff / ignored 状态。
+  - 分类哪些文件属于 Phase 1A 实现与规格,哪些只是运行态证据。
+  - 运行提交前验证门。
+  - 做本地 commit。
+  - 提交后执行 OpenSpec archive 评估,若任务与验证满足条件则归档并再做验证/提交。
+  - 最后只规划 Phase 2,不直接实现 Phase 2 代码。

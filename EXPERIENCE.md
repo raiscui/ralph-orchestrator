@@ -81,3 +81,23 @@
 - 未来动作:
   - 继续此方向时,优先读 `specs/oh-my-codex-learning-analysis.md` 第 4 节。
   - 如果要进入代码实现,先走 OpenSpec change,避免直接把治理规则散落在 docs 和 tests 里。
+
+
+### exp-20260513-runtime-evidence-index-kernel-boundary
+> Phase 1A runtime evidence 只能先做 minimal evidence index kernel: artifact link、correlation lookup、status marker、parent-child link。不要提前把 `ralph evidence summary`、`ralph evidence inspect`、`ralph doctor evidence` 或诊断 taxonomy 塞进 kernel。
+<!-- scope: project | source_topics: runtime_evidence_index_kernel,ralph_evolution_roadmap | source_hats: codex | status: active | confidence: high | created_at: 2026-05-13T19:37:49+08:00 | updated_at: 2026-05-13T19:37:49+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 继续 `.omx/plans/ralph-evolution-roadmap-consensus-draft.md` 的 Phase 1A。
+  - 讨论 record-session、runtime delivery / lifecycle、reply、capability invocation artifacts 的统一 evidence contract。
+- 已验证事实:
+  - OpenSpec change `runtime-evidence-index-kernel` 已创建并通过 `openspec validate runtime-evidence-index-kernel --type change`。
+  - `openspec validate --all --strict` 返回 25 passed,0 failed。
+  - `openspec show runtime-evidence-index-kernel --json --deltas-only` 解析出 5 个 ADDED requirements。
+- 关键边界:
+  - index 是最小 artifact lookup kernel,不是 CLI UX、doctor、runtime graph 或 orchestration platform。
+  - live runtime graph / Rerun layout 不能作为 durable truth source。
+  - parent-child link 使用 correlation id,不能要求热改 parent topology。
+- 未来动作:
+  - 实现前先读 `openspec/changes/runtime-evidence-index-kernel/design.md` 与 `test-plan.md`。
+  - 先补 schema / writer-reader / missing marker / parent-child contract tests,再接现有 record-session、event logger、capability artifacts。

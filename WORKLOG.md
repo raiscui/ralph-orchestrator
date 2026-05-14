@@ -1,930 +1,120 @@
-## 2026-03-09 11:54:58 +0800 | WORKLOG 续档
+# WORKLOG.md
+
+> Previous WORKLOG exceeded 1000 lines and was rolled to `WORKLOG_2026-05-13_1937_prev.md` during the Ralph Phase 1A OpenSpec task.
+
+
+## [2026-05-13 19:37:49] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 任务名称: Ralph Phase 1A runtime evidence index OpenSpec
 
 ### 任务内容
-
-- 因 `WORKLOG.md` 超过 1000 行,按项目规则执行续档。
-- 同步为 `task_plan.md`、`notes.md`、`ERRORFIX.md` 一并重开新档,避免本轮 example E2E 证据继续堆在旧文件中。
-
-### 完成过程
-
-- 已将旧文件重命名为带时间戳版本。
-- 已回读当前四文件与最近一批归档文件尾部,完成持续学习摘要。
-- 新档已建立,当前任务将继续在新档中记录。
-
-### 总结感悟
-
-- 续档不是机械换文件名。
-- 真正有价值的是把最近几轮形成的稳定规律提炼出来,再继续执行。
-
-## 2026-03-09 13:42:00 +0800 任务名称: 静态排查 parallel-trigger-routing-example completion 后的 JobCompleted 发送失败
-
-### 任务内容
-- 只做代码阅读与运行证据比对,不改代码。
-- 排查 `HatInstance actor exited with error instance=ralph#1 error=Failed to send JobCompleted to supervisor` 的最可能触发路径与收尾时序。
+- 按 `.omx/plans/ralph-evolution-roadmap-consensus-draft.md` 只推进 Phase 1A minimal evidence index kernel。
+- 启动前重新验证 staged diff 为空。
+- 产出 OpenSpec 和测试计划,不实现 Rust 代码。
 
 ### 完成过程
-- 回读了仓库六文件上下文,确认这个问题此前已被记录为 example 场景的高风险项。
-- 定位到 warning 只会从 `crates/ralph-core/src/parallel/instance.rs` 的 `JobCompleted` 发送路径冒出。
-- 对照 `parallel/supervisor.rs` 的 completion drain / shutdown drain 与 `.ralph/session-20260309-1201.jsonl` 的 `_meta.termination` 证据,确认这是 completion 后的退出期竞态。
-- 同时核对 `crates/ralph-e2e/src/executor.rs`,确认 E2E timeout 会对进程组发终止,能解释最终 `exit 130`。
-
-### 总结感悟
-- 这次现象不是“业务没完成”,而是“业务已完成但进程没彻底收干净”。
-- record-session 与 stdout artifact 必须分开看: 前者证明语义完成,后者暴露退出期 race。
-
-## 2026-03-09 12:34:05 +0800 任务名称: 收敛 example 覆盖型 E2E 的 stdout 丢尾与 cleanup 卡死
-
-### 任务内容
-- 修复 `parallel-trigger-routing-example` 在真实 Codex E2E 下的双重失败:
-  - log-mode stdout 尾部输出丢失,导致 job 计数与 `LOOP_COMPLETE` 断言假失败
-  - completion 已发生后,并行 runtime cleanup 无界等待,导致最终 `exit 130`
-- 覆盖验证:
-  - `parallel-trigger-routing-example`
-  - `example`
-  - `cargo test -p ralph-core smoke_runner`
-  - `cargo test`
-
-### 完成过程
-- 在 `crates/ralph-cli/src/parallel_runner.rs` 增加了 `write_parallel_cli_line()`:
-  - 统一把 log-mode stdout 的“写一行”升级成“写入 + flush”
-  - 让 E2E 父进程、pipe、`tee` 能及时拿到完整带前缀的实例输出
-- 在同文件增加 `shutdown_parallel_runtime_with_timeout()` 与 `shutdown_parallel_runtimes()`:
-  - 给 `codex_mcp_runtime.shutdown_all()`
-  - 给 `codex_app_server_runtime.shutdown_all()`
-  - 都加上有界等待,避免 `_meta.termination` 已写出后还无限卡在 cleanup
-- 新增了 3 条回归测试:
-  - stdout 写入会立刻 flush
-  - runtime cleanup timeout 会被检测为 timeout
-  - runtime cleanup 正常完成时会返回 success
-- 动态验证结果:
-  - `parallel-trigger-routing-example` ✅ `86.2s`
-  - `example` ✅ `463.7s`
-    - `parallel-trigger-routing-example` `79.7s`
-    - `parallel-experimental-dev-engine-example` `382.1s`
-  - `cargo test -p ralph-core smoke_runner` ✅
-  - `cargo test` ✅
-
-### 总结感悟
-- 并行 E2E 不能只看“record-session 里有没有事件”,也不能只看“stdout 表面有没有前缀行”。
-- 真正可靠的判断需要把三层拆开看:
-  - 语义完成
-  - 可见性/耐久性
-  - 进程退出
-
-## 2026-03-09 16:35:00 +0800 任务名称: 扩充 3 个真实并行 example 与对应 live E2E
-
-### 任务内容
-- 新增 3 个更贴近真实工作流的并行范例:
-  - `examples/parallel-pr-review`
-  - `examples/parallel-release-checklist`
-  - `examples/parallel-human-approval-gate`
-- 为每个范例补齐 `ralph-e2e` scenario,让 example 目录不只是展示,还能自动回归验证。
-- 同步补齐 spec、README、E2E README 与 example 自包含性测试。
-
-### 完成过程
-- 先写了 `specs/parallel-real-world-examples.spec.md`,把 3 条协议链路、terminal topic 与验证目标先钉清楚。
-- 再分别实现 3 个 example 的 `ralph.yml`、`PROMPT.md`、`README.md`,保持都能独立阅读和运行。
-- 在 `crates/ralph-e2e/src/scenarios/` 新增 3 个 direct example scenario,并补到:
-  - `crates/ralph-e2e/src/scenarios/mod.rs`
-  - `crates/ralph-e2e/src/lib.rs`
-  - `crates/ralph-e2e/src/main.rs`
-- 在 `crates/ralph-e2e/src/scenarios/parallel/mod.rs` 提出共享 helper `patch_example_config_for_codex_e2e`,避免 3 份 Codex 降噪 patch 重复漂移。
-- 真实验证时先后修正了两个协议边界:
-  - completion topic 需要由具体 hat 发布,不能只写在 event loop 完成条件里
-  - 人类审批注入场景的等待窗口不能过短
-- 最终验证:
-  - live E2E:
-    - `parallel-pr-review-example` ✅ `179.7s`
-    - `parallel-release-checklist-example` ✅ `127.5s`
-    - `parallel-human-approval-gate-example` ✅ `201.9s`
-  - fresh 仓库级验证:
-    - `cargo test` ✅
-
-### 总结感悟
-- 真正有价值的 example,不是“看起来像 demo”,而是能被真实后端跑通并留下自动化证据。
-- 对并行工作流来说,terminal topic 的归属与外部事件等待预算,都是一等设计问题,不是测试细节。
-
-## 2026-03-09 23:19:50 +0800 任务名称: 扩充第二批真实并行 example 并修复 migration rehearsal 的 premature completion
-
-### 任务内容
-- 新增第二批 3 个真实并行 example:
-  - `examples/parallel-incident-response-war-room`
-  - `examples/parallel-migration-rehearsal`
-  - `examples/parallel-proposal-assembly`
-- 为每个 example 补齐 direct example E2E scenario、注册点、README 与自包含性验证。
-- 在验证过程中修复 `parallel-migration-rehearsal-example` 的 premature completion 问题。
-
-### 完成过程
-- 先实现第二批 spec、example 三件套与 direct example scenario。
-- 再补到:
-  - `crates/ralph-e2e/src/scenarios/mod.rs`
-  - `crates/ralph-e2e/src/lib.rs`
-  - `crates/ralph-e2e/src/main.rs`
-- 共享接线层做了一个小改良:
-  - 在 `crates/ralph-e2e/src/scenarios/parallel/mod.rs` 新增 `setup_prompt_file_example_workspace(...)`
-  - 让 direct example 的 workspace setup 不再在 6 个 scenario 里重复漂移
-- live E2E 过程中发现 migration 场景首轮失败。
-  - 通过 `.ralph/events.jsonl`、`.e2e/stdout.txt` 与 `EventParser::contains_promise()` 的代码路径对照,确认是 coordinator 普通文本误提 `LOOP_COMPLETE` 导致提前 completion drain。
-  - 随后只强化 migration example 的 coordinator 静默等待规则与 finalizer 触发约束,并补充 guard 测试。
-
-### 验证结果
-- live E2E:
-  - `parallel-incident-response-war-room-example` ✅ `104.7s`
-  - `parallel-migration-rehearsal-example` ✅ `88.5s`
-  - `parallel-proposal-assembly-example` ✅ `151.1s`
-- targeted regression:
-  - `cargo test --package ralph-e2e --lib scenarios::parallel_migration_rehearsal_example::tests::example_config_requires_silent_wait_before_all_ready_lanes -- --exact` ✅
-- fresh 仓库级验证:
-  - `cargo test` ✅
-
-### 总结感悟
-- completion promise 不只是“最后一行文案”,它在当前 runtime 里其实是控制面信号。
-- 只要 example 允许 coordinator 在等待态输出自由文本,就有机会把 terminal token 意外带进普通 prose,从而提前切断后续路由。
-- 对这类 direct example,等待态最好机械化:
-  - 要么发事件
-  - 要么静默
-  - 不要写“半解释、半自言自语”的过渡文本
-
-## 2026-03-10 20:55:00 +0800 任务名称: 修复 postmortem 并行 example 收敛与 reporter UTF-8 panic
-
-### 任务内容
-- 收敛 `examples/parallel-postmortem-action-board` 的 live E2E 失败。
-- 修复 `crates/ralph-e2e/src/reporter.rs` 因中文多字节字符被按字节截断而 panic 的问题。
-- 补齐该场景的自包含测试与 payload 语义断言,并完成 live + 仓库级验证。
-
-### 完成过程
-- 先复跑 `parallel-postmortem-action-board-example` live E2E,对照 `.ralph/events.jsonl` 与 `stdout.txt` 做最小可证伪验证。
-- 动态证据确认第一轮阻塞不是 runtime 丢事件,而是 `action_owner_mapper` 漂移成输出 `&lt;event ...&gt;` 展示文本,没有真正发布 `actions.ready`。
-- 随后收紧了 `examples/parallel-postmortem-action-board/ralph.yml`:
-  - worker / facilitator 必须从真实 event 开始标签直接输出
-  - 禁止 `&lt;event`、代码块、前后 prose、后续建议
-  - README 也同步补了“转义展示文本不算真实事件”的说明
-- 第二轮 live E2E 把业务 topic 已打通到 `postmortem.board.ready`,但 reporter 在 `crates/ralph-e2e/src/reporter.rs` 因 `&s[..max_len]` 截断中文 JSON payload 而 panic。
-- 我把 reporter 的截断逻辑统一改成按字符边界安全截断,并补了中文回归测试。
-- 最后把 `parallel_postmortem_action_board_example` 的最终 payload 断言改成语义匹配,兼容 JSON 与 `key: value` 两种合法 payload 形态。
-
-### 总结感悟
-- 对 live backend 的 example,最脆弱的往往不是“主逻辑有没有写”,而是 prompt 是否足够机械到能稳定产出真实事件。
-- E2E 框架自己的报告层也必须做 Unicode 安全处理,否则会出现“业务已通过,测试框架自己先炸掉”的假失败。
-
-## 2026-03-10 22:08:00 +0800 任务名称: 扩充第四批真实并行 example 并修复 renewal 的 self-closing event 漂移
-
-### 任务内容
-- 新增第四批 3 个真实并行 example:
-  - `examples/parallel-security-exception-review`
-  - `examples/parallel-customer-renewal-desk`
-  - `examples/parallel-audit-evidence-pack`
-- 为每个 example 补齐 direct example E2E scenario、注册点、README 与自包含测试。
-- 在 live 验证过程中修复 `parallel-customer-renewal-desk-example` 的 self-closing event 漂移问题。
-
-### 完成过程
-- 先根据 `specs/parallel-real-world-examples-batch-4.spec.md` 和前三批已通过的 prompt-file 骨架,落了 3 个 example 的 `ralph.yml`、`PROMPT.md`、`README.md`。
-- 再新增 3 个 direct example scenario,并补到:
-  - `crates/ralph-e2e/src/scenarios/mod.rs`
-  - `crates/ralph-e2e/src/lib.rs`
-  - `crates/ralph-e2e/src/main.rs`
-  - `crates/ralph-cli/tests/integration_examples.rs`
-- 文档入口也一并补到:
-  - `README.md`
-  - `crates/ralph-e2e/README.md`
-- live E2E 首轮中,`parallel-customer-renewal-desk-example` 失败。
-  - 通过 `.ralph/events.jsonl` 与 `.e2e/stdout.txt` 对照,确认不是 worker 没产出,而是 `commercial_owner` / `sponsor_mapper` 输出了自闭合 `<event .../>`,导致 parser 不记账。
-  - 随后只收紧 renewal 与 audit example 的 event 形态约束:
-    - 禁止自闭合 `&lt;event .../&gt;`
-    - 禁止把业务字段塞进 opening tag 属性
-    - 强制开始标签 + payload 正文 + 结束标签
-  - 同步补 guard 测试后复跑 live,renewal 即通过。
-
-### 验证结果
-- `cargo fmt --all --check` ✅
-- 定向测试:
-  - `cargo test -p ralph-e2e parallel_security_exception_review_example` ✅
-  - `cargo test -p ralph-e2e parallel_customer_renewal_desk_example` ✅
-  - `cargo test -p ralph-e2e parallel_audit_evidence_pack_example` ✅
-  - `cargo test -p ralph-cli --test integration_examples` ✅
-- live E2E:
-  - `cargo run -p ralph-e2e -- codex --filter parallel-security-exception-review-example --skip-analysis --keep-workspace --verbose` ✅ `130.5s`
-  - `cargo run -p ralph-e2e -- codex --filter parallel-customer-renewal-desk-example --skip-analysis --keep-workspace --verbose` ✅ `131.1s`
-  - `cargo run -p ralph-e2e -- codex --filter parallel-audit-evidence-pack-example --skip-analysis --keep-workspace --verbose` ✅ `113.2s`
-- 仓库级验证:
-  - `cargo test` ✅
-
-### 总结感悟
-- 对 direct example 来说,只要求“从真实 event 开始”还不够,还要把 event 形态写死,否则模型会偷懒输出自闭合标签。
-- live E2E 最有价值的地方,就是能把这种“stdout 看起来像事件,但 runtime 实际没收到”的假闭环抓出来。
-
-## 2026-03-11 18:12:53 +0800 任务名称: 扩充第五批真实并行 example 到 finance / hiring / onboarding
-
-### 任务内容
-- 新增第五批 3 个真实并行 example:
-  - `examples/parallel-finance-close-control-room`
-
-## [2026-03-19 14:14:57] [Session ID: 019d003c-4cdd-7ee2-95c5-d061873df462] 任务名称: review startup bootstrap 与 runtime workflow/hat capability 分层,并正式落盘双 change
-
-### 任务内容
-- 继续评审 `startup-resource-bootstrap` 的 scope,确认它应该只覆盖 startup bootstrap。
-- 把用户新增的“workflow / hat 像 skill 一样运行时调用”诉求单独建模成 follow-up change。
-- 把 selector 的 v1 / v2 路线与“注释 vs 结构化 metadata”的边界正式写进 OpenSpec 和六文件上下文。
-
-### 完成过程
-- 回读了活跃六文件和 `startup-resource-bootstrap` 的 proposal / design / tasks / spec。
-- 结合代码静态阅读确认了 4 个关键事实:
-  - `preset` 简介当前是编译期常量,不是运行时从 YAML 注释提取
-  - `hat.description` 是正式结构化字段
-  - 串行 multi-hat mode 下真正执行者仍然是 `ralph`
-  - 并行 `spawn_dynamic_instance()` 只能扩容当前 config 里已有的 hat 模板
-- 已更新 `startup-resource-bootstrap`:
-  - 明确 startup-only 边界
-  - 新增结构化 metadata 要求
-  - 固定 selector 的 v1 / v2 路线
-- 已新增 follow-up change:
-  - `openspec/changes/runtime-capability-invocation/`
-  - 包含 proposal / design / tasks / spec
-  - 明确 workflow capability 与 hat capability 都走 isolated child run / micro-run,不热改 live topology
-- 已验证:
-  - `openspec validate startup-resource-bootstrap`
-  - `openspec validate runtime-capability-invocation`
-  - `beautiful-mermaid-rs` mermaid 校验
-  - `git diff --check`
-
-### 总结感悟
-- 这轮最重要的不是“再补几条 selector 规则”,而是把 startup 和 runtime capability 两层彻底拆开。
-- YAML 注释适合给人看,不适合承担机器语义主边界。真正要给 `ralph#1` 用的数据,必须是结构化 metadata。
-
-## 2026-03-12 16:28:00 +0800 任务名称: OpenSpec `hat-request-reply-channel` 实现闭环
-
-### 任务内容
-
-- 按 OpenSpec change `hat-request-reply-channel` 把 hat-to-hat 答案回流协议真正落到并行运行时。
-- 完成协议常量、路由 special-case、resume 恢复索引、可观测性记录、prompt / 文档说明和测试闭环。
-
-### 完成过程
-
-- 在 `crates/ralph-proto` 增加了:
-  - `reply.hat.message`
-  - `routing.requester_return`
-- 在 `ParallelSupervisor` 路由层增加 requester-return 分支:
-  - 先记录 `event_id -> source_instance`
-  - 再对 `reply.hat.message` 按 `reply=<request_event_id>` 解析原请求方
-  - 成功时定向回送给 requester
-  - 失败时 fail-closed,并写 requester-return 诊断日志
-  - resume 时从历史 `events.jsonl` 恢复该薄索引
-- 在并行 prompt 和 `config/all_hat.md` 中补齐 `reply.hat.message` 的中文说明,明确它不是普通 workflow topic。
-- 在 `routing_tests.rs` 中补了 4 条覆盖:
-  - requester 成功收回答案
-  - unknown reply id fail-closed
-  - missing `source_instance` fail-closed
-  - answer-return 与 workflow event 同批共存
-
-### 验证结果
-
-- `cargo test --package ralph-core --lib busy_ralph_secondary_includes_coordinator_instructions_and_config_prompt` ✅
-- `cargo test --package ralph-core --lib parallel::supervisor::routing_tests` ✅
-- `cargo fmt --all` ✅
-- `cargo fmt --all --check` ✅
-- `cargo test -p ralph-core` ✅
-- `cargo test` ✅
-
-### 总结感悟
-
-- 这次最关键的点,不是“多一个 topic”,而是把“答案回流”和“流程推进”彻底拆开了。
-- 运行时只用最薄的一层 `event_id -> source_instance` 索引就能完成 requester-return,这是对现有结构侵入较小、但语义提升很大的改良。
-
-## 2026-03-13 00:16:00 +0800 任务名称: 归档 OpenSpec `hat-request-reply-channel`
-
-### 任务内容
-
-- 对已完成实现的 `hat-request-reply-channel` 做主 specs sync 与 archive 收尾。
-- 保证归档后主 specs 中仍然保留这项能力定义,而不是只留在 change archive 里。
-
-### 完成过程
-
-- 先检查了:
-  - `openspec status --change "hat-request-reply-channel" --json`
-  - `openspec/changes/hat-request-reply-channel/tasks.md`
-- 确认 artifacts 全部完成,任务 9/9 已完成。
-- 因为主 specs 中还没有对应 capability,所以先新建:
-  - `openspec/specs/hat-request-reply-channel/spec.md`
-- 同步完成后执行:
-  - `openspec validate hat-request-reply-channel --type change`
-- 然后将 change 目录移动到:
-  - `openspec/changes/archive/2026-03-13-hat-request-reply-channel/`
-- 最后用 `openspec list --json` 确认 active changes 已不再包含它。
-
-### 总结感悟
-
-- OpenSpec archive 真正重要的不是“把目录移走”,而是确保主 specs 已经接住这次 change 的长期语义。
-- 对这种新增 capability 的 change,归档前同步主 spec 是非常值得坚持的动作,否则 archive 后主线知识会断层。
-
-## 2026-03-15 10:20:00 +0800 任务名称: 补齐 OpenSpec `event-id-and-reply` 的缺失 tasks 与主 spec 同步
-
-### 任务内容
-
-- 延续前一轮 OpenSpec 主线,处理 `event-id-and-reply` 这个还活跃但缺少 `tasks.md` 的 change。
-- 将已经存在于代码中的 event id / reply / prompt 暴露能力,补回 OpenSpec tasks 与主 spec。
-
-### 完成过程
-
-- 先检查了 `event-id-and-reply` 的 proposal、design、delta spec 和当前代码实现。
-- 发现这条 change 的核心实现其实已经在仓库里,缺的主要是:
-  - `openspec/changes/event-id-and-reply/tasks.md`
-  - 主 spec 对 `parallel-hat-instances` 的同步
-- 随后新增了 `tasks.md`,并按“现状已落地”的事实把任务整理成已勾选条目。
-- 之后把 delta spec 中的 3 条 requirement 合并进:
-  - `openspec/specs/parallel-hat-instances/spec.md`
-- 最后执行 OpenSpec 校验,确认这个 change 已进入完整状态。
-
-### 验证结果
-
-- `git diff --check -- openspec/changes/event-id-and-reply/tasks.md openspec/specs/parallel-hat-instances/spec.md task_plan.md` ✅
-- `openspec validate event-id-and-reply --type change` ✅
-- `openspec status --change "event-id-and-reply" --json` ✅
-  - 结果: `proposal/design/specs/tasks` 全部 `done`
-
-### 总结感悟
-
-- 有些 OpenSpec change 不是“实现没做”,而是“文档闭环掉了一截”。
-- 这种场景最重要的是先核对代码现状,不要机械补一份和现实脱节的待办。
-  - `examples/parallel-hiring-debrief-panel`
-  - `examples/parallel-customer-onboarding-activation`
-- 为每个 example 补齐 direct example E2E scenario、注册点、README 与自包含测试。
-- 完成 mermaid 校验、定向测试、3 条 live E2E 与仓库级验证。
-
-### 完成过程
-- 先回读六文件、batch-4 成功模板和 `specs/parallel-real-world-examples-batch-5.spec.md`,确认继续沿用:
-  - `prompt_file: "PROMPT.md"`
-  - 4 lane + 1 fan-in request + 1 final topic
-  - coordinator 未收齐 ready 前静默
-  - worker / finalizer event-only
-- 用 `beautiful-mermaid-rs --ascii` 校验 batch-5 spec 的 2 个 mermaid block,确保图表语法无误。
-- 新增 3 个 direct example scenario:
-  - `crates/ralph-e2e/src/scenarios/parallel_finance_close_control_room_example.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_hiring_debrief_panel_example.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_customer_onboarding_activation_example.rs`
-- 同步接线到:
-  - `crates/ralph-e2e/src/scenarios/mod.rs`
-  - `crates/ralph-e2e/src/lib.rs`
-  - `crates/ralph-e2e/src/main.rs`
-  - `crates/ralph-cli/tests/integration_examples.rs`
-- README 入口同步到:
-  - `README.md`
-  - `crates/ralph-e2e/README.md`
-- 中途碰到的唯一小插曲是:
-  - `rustfmt` 默认按旧 edition 解释新文件
-  - 改成 `rustfmt --edition 2024` 后即恢复正常
-
-### 验证结果
-- `cargo fmt --all --check` ✅
-- `cargo test -p ralph-e2e parallel_finance_close_control_room_example` ✅
-- `cargo test -p ralph-e2e parallel_hiring_debrief_panel_example` ✅
-- `cargo test -p ralph-e2e parallel_customer_onboarding_activation_example` ✅
-- `cargo test -p ralph-cli --test integration_examples` ✅
-- live E2E:
-  - `parallel-finance-close-control-room-example` ✅ `89.1s`
-  - `parallel-hiring-debrief-panel-example` ✅ `81.4s`
-  - `parallel-customer-onboarding-activation-example` ✅ `87.1s`
-- 仓库级验证:
-  - `cargo test` ✅
-
-### 总结感悟
-- 这批场景继续证明了一个很有价值的点:
-  - 并行 example 不是只能服务工程和治理
-  - 也能稳定表达 finance、people、post-sales activation 这类真实运营工作流
-- 当前 direct example 方法已经形成比较稳的建模套路:
-  - coordinator 静默等待
-  - terminal topic 明确 owner
-  - event 形态写死为 `<event ...>payload</event>`
-  - payload 断言兼容 JSON / `key: value`
-
-## 2026-03-11 21:17:47 +0800 任务名称: 扩充第六批真实并行 example 到 support / partner / field enablement
-
-### 任务内容
-- 新增第六批 3 个真实并行 example:
-  - `examples/parallel-support-escalation-desk`
-  - `examples/parallel-partner-launch-coordination`
-  - `examples/parallel-field-enablement-rollout`
-- 为每个 example 补齐 direct example E2E scenario、注册点、README 与测试入口。
-- 完成 mermaid 校验、定向测试、3 条 live E2E、仓库级验证,以及六文件续档收尾。
-
-### 完成过程
-- 先回读六文件与 batch-5 结果,确认继续沿用已经验证过的 direct example 骨架:
-  - `prompt_file: "PROMPT.md"`
-  - `4 lane + 1 fan-in request + 1 final topic`
-  - coordinator 未收齐 ready 前静默
-  - worker / finalizer 继续 event-only
-- 为了避免题材重复,本轮刻意避开:
-  - incident
-  - launch
-  - vendor procurement
-  - onboarding
-  - approval
-- 最终选择了 3 个更偏实际运营协同的场景:
-  - support escalation desk
-  - partner launch coordination
-  - field enablement rollout
-- 用 `beautiful-mermaid-rs --ascii` 校验 `specs/parallel-real-world-examples-batch-6.spec.md` 中的 2 个 mermaid block。
-- 新增 3 个 direct example scenario:
-  - `crates/ralph-e2e/src/scenarios/parallel_support_escalation_desk_example.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_partner_launch_coordination_example.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_field_enablement_rollout_example.rs`
-- 同步接线到:
-  - `crates/ralph-e2e/src/scenarios/mod.rs`
-  - `crates/ralph-e2e/src/lib.rs`
-  - `crates/ralph-e2e/src/main.rs`
-  - `crates/ralph-cli/tests/integration_examples.rs`
-- README 入口同步到:
-  - `README.md`
-  - `crates/ralph-e2e/README.md`
-- 收尾时按超过 1000 行规则续档了:
-  - `task_plan.md` -> `archive/task_plan_20260311-211747.md`
-  - `notes.md` -> `archive/notes_20260311-211747.md`
-
-### 验证结果
-- `cargo fmt --all --check` ✅
-- `cargo test -p ralph-e2e parallel_support_escalation_desk_example` ✅
-- `cargo test -p ralph-e2e parallel_partner_launch_coordination_example` ✅
-- `cargo test -p ralph-e2e parallel_field_enablement_rollout_example` ✅
-- `cargo test -p ralph-cli --test integration_examples` ✅
-- live E2E:
-  - `parallel-support-escalation-desk-example` ✅ `96.1s`
-  - `parallel-partner-launch-coordination-example` ✅ `130.0s`
-  - `parallel-field-enablement-rollout-example` ✅ `98.8s`
-- 仓库级验证:
-  - `cargo test` ✅
-
-### 总结感悟
-- 这轮最有价值的点不是“又多了 3 个 demo”,而是继续证明了 direct example 方法的横向泛化能力。
-- 当前真实并行 example 已经稳定扩到 support、ecosystem、enablement,这会让用户更容易把 Ralph 理解成通用协作编排器,而不是只偏工程链路。
-- 本轮没有新增架构级 epiphany,说明我们前几批收敛出的协议骨架已经比较稳:
-  - coordinator 静默等待
-  - finalizer 明确 owner
-  - event 形态强约束
-  - 固定终态字段利于 live E2E 锁定
-
-## 2026-03-11 22:52:08 +0800 任务名称: 把真实并行 example 的方案和描述收敛成中文
-
-### 任务内容
-- 为真实并行 example 新增一份集中式中文总览。
-- 把根 README、`crates/ralph-e2e/README.md` 以及 batch-6 的 3 个 example README 里的相关描述改成中文。
-- 保留路径名、topic、类名这些技术标识不变,只调整面向人的说明文本。
-
-### 完成过程
-- 先回读现有文档入口,确认英文描述主要分布在:
-  - `README.md`
-  - `crates/ralph-e2e/README.md`
-  - batch-6 三个 example README
-- 新增 `docs/examples/parallel-real-world-examples.zh-CN.md`,把以下内容集中收敛:
-  - 共用方案骨架
-  - 按题材分组的快速选型
-  - 全量范例矩阵
-  - batch-6 三个场景的中文解释
-  - 后续扩批建议
-- 同步把根 README 的 parallel example 列表描述切换成中文,并挂上中文总览入口。
-- 同步把 `crates/ralph-e2e/README.md` 中 parallel example scenario 的说明切换成中文。
-- 继续打磨 batch-6 三个 example README,把标题、用途说明和运行期说明都改得更像自然中文。
-
-### 验证结果
-- `git diff --check -- README.md crates/ralph-e2e/README.md docs/examples/parallel-real-world-examples.zh-CN.md examples/parallel-support-escalation-desk/README.md examples/parallel-partner-launch-coordination/README.md examples/parallel-field-enablement-rollout/README.md` ✅
-
-### 总结感悟
-- 这轮没有改任何并行 runtime 逻辑,但对外说明层的价值很高。
-- 当 example 数量越来越多时,如果没有中文总览和按题材分组的入口,用户会更容易“看到目录,但不知道先看哪个”。
-- 现在这套 example 已经不只是跑得通,也更接近“可教、可选、可复用”的范例库了。
-
-## 2026-03-11 23:08:21 +0800 任务名称: 统一 batch-1 到 batch-5 的中文 README,并接入 docs 入口
-
-### 任务内容
-- 把 batch-1 到 batch-5 的真实并行 example README 统一成中文风格。
-- 把中文总览接入 `docs/examples/index.md`,让 docs 入口也能直接找到中文方案页。
-
-### 完成过程
-- 先用 `rg` 扫描 batch-1 到 batch-5 的 README,把残留的说明性英文摸出来。
-- 统一重写了 15 个 README 的标题、开场说明、用途说明和替换说明。
-- 统一保留:
-  - 路径名
-  - topic 名
-  - 类名 / hat 名
-  - prompt section 标题
-- 这样既保证中文可读性,也不破坏和代码、prompt 的对齐关系。
-- 继续把 `docs/examples/index.md` 改成更偏中文的入口页,并把 `parallel-real-world-examples.zh-CN.md` 正式挂进去。
-
-### 验证结果
-- `git diff --check -- docs/examples/index.md docs/examples/parallel-real-world-examples.zh-CN.md examples/parallel-pr-review/README.md examples/parallel-release-checklist/README.md examples/parallel-human-approval-gate/README.md examples/parallel-incident-response-war-room/README.md examples/parallel-security-exception-review/README.md examples/parallel-customer-renewal-desk/README.md examples/parallel-audit-evidence-pack/README.md examples/parallel-finance-close-control-room/README.md examples/parallel-hiring-debrief-panel/README.md examples/parallel-customer-onboarding-activation/README.md examples/parallel-launch-readiness-command/README.md examples/parallel-migration-rehearsal/README.md examples/parallel-postmortem-action-board/README.md examples/parallel-proposal-assembly/README.md examples/parallel-vendor-security-procurement/README.md task_plan.md notes.md WORKLOG.md` ✅
-
-### 总结感悟
-- 这轮最重要的成果不是“翻译了 15 个 README”,而是把整条 example 阅读路径补齐了。
-- 现在用户可以:
-  - 先从 docs 入口看到中文总览
-  - 再按题材选具体范例
-  - 进入单个 example 后继续看到统一风格的中文说明
-- 这会让后续继续扩 batch-7 时,新范例也有现成的中文文档模板可复用。
-
-## 2026-03-12 00:52:00 +0800 任务名称: batch-7 真实并行范例落地与 live E2E 验收
-
-### 任务内容
-- 新增第七批 3 个真实并行 example:
-  - `examples/parallel-revops-quote-desk`
-  - `examples/parallel-executive-business-review-prep`
-  - `examples/parallel-customer-advisory-board-prep`
-- 为每个 example 补齐 direct example E2E scenario、共享注册点、中文文档入口和测试入口。
-- 完成 mermaid 校验、定向测试、3 条真实 Codex live E2E、仓库级 `cargo test` 与六文件收尾。
-
-### 完成过程
-- 先回读六文件和 batch-6 结果,确认 batch-7 继续沿用已验证稳定的 direct example 骨架:
-  - `prompt_file: "PROMPT.md"`
-  - 4 lane fanout
-  - 1 次 fan-in request
-  - 1 个 final topic
-  - coordinator 未收齐 ready 前保持静默
-- 新增并接线:
-  - `crates/ralph-e2e/src/scenarios/parallel_revops_quote_desk_example.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_executive_business_review_prep_example.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_customer_advisory_board_prep_example.rs`
-  - `crates/ralph-e2e/src/scenarios/mod.rs`
-  - `crates/ralph-e2e/src/lib.rs`
-  - `crates/ralph-e2e/src/main.rs`
-  - `crates/ralph-cli/tests/integration_examples.rs`
-- 中文入口同步到:
-  - `README.md`
-  - `crates/ralph-e2e/README.md`
-  - `docs/examples/parallel-real-world-examples.zh-CN.md`
-- 过程中修掉了 2 个 live E2E 才会暴露的问题:
-  - batch-7 scenario 直接依赖截断版 `events.jsonl` payload,导致 quote 首轮出现假失败
-  - `billing_setup_reviewer` 在真实 backend 下把多行 event 的 closing tag 写坏,导致 quote 第二轮真超时
-- 为此补了两个稳定器:
-  - 并行 stdout payload 提取 helper,优先从去前缀后的 `:out:job=` 行提取最终 event payload
-  - quote billing lane 改成“单行 JSON + 精确 `&lt;/event&gt;`”的硬约束
-
-### 验证结果
-- `beautiful-mermaid-rs --ascii` 校验 `specs/parallel-real-world-examples-batch-7.spec.md` 两个 mermaid 图 ✅
-- `cargo test -p ralph-e2e parallel_revops_quote_desk_example` ✅
-- `cargo test -p ralph-e2e parallel_executive_business_review_prep_example` ✅
-- `cargo test -p ralph-e2e parallel_customer_advisory_board_prep_example` ✅
-- `cargo test -p ralph-cli --test integration_examples` ✅
-- live E2E:
-  - `cargo run -p ralph-e2e -- codex --filter parallel-revops-quote-desk-example --skip-analysis --keep-workspace --verbose` ✅ `184.5s`
-  - `cargo run -p ralph-e2e -- codex --filter parallel-executive-business-review-prep-example --skip-analysis --keep-workspace --verbose` ✅ `146.6s`
-  - `cargo run -p ralph-e2e -- codex --filter parallel-customer-advisory-board-prep-example --skip-analysis --keep-workspace --verbose` ✅ `102.4s`
-- `cargo test` ✅
-- `cargo fmt --all --check` ✅
-- `git diff --check` ✅
-
-### 总结感悟
-- 这轮最有价值的收获不是“多了 3 个范例”,而是又把 direct example 方法往商业协同场景扩了一层:
-  - 报价台
-  - 管理层业务回顾
-  - 客户顾问委员会筹备
-- 另一条很重要的规律是:
-  - live backend 下,scenario 断言不能盲信截断版 `events.jsonl`
-  - worker 如果允许多行 line-style event,就更容易把 closing tag 写坏
-- 现在 batch-7 不只是静态文件齐了,而是真的在真实 Codex backend 下闭环通过了。
-
-## 2026-03-12 13:47:00 +0800 任务名称: batch-8 真实并行范例落地与 live E2E 验收
-
-### 任务内容
-- 新增第八批 3 个真实并行 example:
-  - `examples/parallel-regional-operating-review`
-  - `examples/parallel-renewal-risk-calibration`
-  - `examples/parallel-multi-region-pipeline-sync`
-- 为每个 example 补齐 direct example E2E scenario、共享注册点、中文文档入口和测试入口。
-- 完成 mermaid 校验、定向测试、3 条真实 Codex live E2E、仓库级 `cargo test` 与六文件收尾。
-
-### 完成过程
-- 先回读六文件和 batch-7 的验证规律,确认 batch-8 继续沿用已证明稳定的骨架:
-  - `prompt_file: "PROMPT.md"`
-  - 4 lane fanout
-  - 1 次 fan-in request
-  - 1 个 final topic
-  - coordinator 未收齐 ready 前保持静默
-  - 最终 payload 断言优先从去掉 `[hat#n:out:job=m]` 前缀后的 stdout out 行提取
-- 新增并接线:
-  - `crates/ralph-e2e/src/scenarios/parallel_regional_operating_review_example.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_renewal_risk_calibration_example.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_multi_region_pipeline_sync_example.rs`
-  - `crates/ralph-e2e/src/scenarios/mod.rs`
-  - `crates/ralph-e2e/src/lib.rs`
-  - `crates/ralph-e2e/src/main.rs`
-  - `crates/ralph-cli/tests/integration_examples.rs`
-- 中文入口同步到:
-  - `README.md`
-  - `crates/ralph-e2e/README.md`
-  - `docs/examples/parallel-real-world-examples.zh-CN.md`
-- 过程中修掉了 1 个真实 live E2E 才会暴露的问题:
-  - `renewal-risk-calibration` 的 `success_plan_reviewer` 首轮没有产出 `success.ready`,导致整个 fan-in 永远不触发
-- 为此补了 1 个稳定器:
-  - 把 `success_plan_reviewer` 从“单行 JSON 原则约束”进一步收紧成“唯一允许模板 + 固定值 `risk_playbooks_assigned`”
-
-### 验证结果
-- mermaid 校验:
-  - `sed -n '73,83p' specs/parallel-real-world-examples-batch-8.spec.md | beautiful-mermaid-rs --ascii` ✅
-  - `sed -n '89,107p' specs/parallel-real-world-examples-batch-8.spec.md | beautiful-mermaid-rs --ascii` ✅
-- 定向测试:
-  - `cargo test -p ralph-e2e parallel_regional_operating_review_example` ✅
-  - `cargo test -p ralph-e2e parallel_renewal_risk_calibration_example` ✅
-  - `cargo test -p ralph-e2e parallel_multi_region_pipeline_sync_example` ✅
-  - `cargo test -p ralph-cli --test integration_examples` ✅
-- live E2E:
-  - `cargo run -p ralph-e2e -- codex --filter parallel-regional-operating-review-example --skip-analysis --keep-workspace --verbose` ✅ `130.9s`
-  - `cargo run -p ralph-e2e -- codex --filter parallel-renewal-risk-calibration-example --skip-analysis --keep-workspace --verbose` 首轮 ❌ `240.1s`
-  - `cargo run -p ralph-e2e -- codex --filter parallel-renewal-risk-calibration-example --skip-analysis --keep-workspace --verbose` 修复后复跑 ✅ `172.9s`
-  - `cargo run -p ralph-e2e -- codex --filter parallel-multi-region-pipeline-sync-example --skip-analysis --keep-workspace --verbose` ✅ `216.9s`
-- `cargo fmt --all --check` ✅
-- `git diff --check -- <batch-8相关文件>` ✅
-- `cargo test` ✅
-
-### 总结感悟
-- batch-8 把真实并行 example 继续从“商业协同”推进到了“经营节奏与预测校准”。
-- 这轮最重要的新规律是:
-  - 有些看起来已经足够严格的 worker lane,在真实 backend 下仍然不够机械
-  - 对漂移风险更高的 lane,要直接给唯一允许模板,不要只给原则说明
-- 到 batch-8 为止,这套范例已经能同时覆盖:
-  - 单一区域经营周会
-  - 续费组合盘预测校准
-  - 多区域 pipeline 同步
-
-## [2026-03-12 14:47:00 +0800] 任务名称: 为“hat 回答回到请求方”协议拆出独立 OpenSpec change
-
-### 任务内容
-- 将“hat 的答案回流给请求方”从 `event-id-and-reply` 中独立出来
-- 新建独立 change 骨架,避免把事件关联语义和回答回传语义混在一起
-
-### 完成过程
-- 回读了现有 OpenSpec change 与 parallel runtime,确认 `reply` 目前只表达事件关联,不表达回送目标
-- 根据用户选择,执行 `openspec new change "hat-request-reply-channel"`
-- 确认新 change 使用 `spec-driven` workflow
-- 读取 `openspec status` 与 `openspec instructions proposal`,确认首个 artifact 是 `proposal`
-
-### 总结感悟
-- 把“事件关联”和“答案回流”拆成两个 change,后续协议边界会更稳定
-- explorer / researcher 类 hat 更适合显式 request-reply 语义,不适合被塞进“所有 hat 默认 final 回传”的全局规则
-
-## [2026-03-12 15:10:00 +0800] 任务名称: fast-forward 完成 `hat-request-reply-channel` 的 OpenSpec artifacts
-
-### 任务内容
-- 为 `hat-request-reply-channel` 一次性生成 `proposal`、`design`、`specs`、`tasks`
-- 将“hat 的答案回流给请求方”沉淀为独立 capability,达到 apply-ready 状态
-
-### 完成过程
-- 读取 `openspec status --change ... --json` 与每个 artifact 的 `openspec instructions ... --json`
-- 先落 proposal,确认 capability 采用新增 `hat-request-reply-channel`
-- 再落 design,把协议收敛为显式 `reply.hat.message` + 基于 `reply` 查原请求 `source_instance` 的 requester-return
-- 再落 spec,把显式 opt-in、回送目标、双通道并存、fail-closed、关联保留写成 MUST requirements
-- 最后落 tasks,拆成协议与路由、失败收口与可观测性、验证与示例 3 组实现任务
-- 使用 `beautiful-mermaid-rs` 校验 design 中的 flowchart 与 sequenceDiagram
-- 使用 `openspec validate hat-request-reply-channel --type change` 确认 change 有效
-
-### 总结感悟
-- 把“事件关联”与“答案回流”拆成两个 change 后,协议边界明显更稳了
-- `reply.hat.message` 这种显式 topic 比“让所有 reply 自动回送”更可控,也更适合未来做测试和诊断
-## [2026-03-18 18:02:00] [Session ID: 2d1fc46f-d36c-45b6-af3b-ab3318b8c122] 任务名称: explore 默认内嵌配置 / prompt / preset catalog 方向
-
-### 任务内容
-- 围绕“无 `PROMPT.md`、无 `ralph.yml` 也能工作”的目标,梳理 Ralph 当前配置、prompt、preset 与 embed 机制。
-- 评估将 presets/examples 编译期内嵌并首次释放到用户配置目录的设计空间。
-- 对比“运行前 selector 选 preset”与“运行中热切换 preset / 混编 hats”两类路线的复杂度与风险。
-
-### 完成过程
-- 回读六文件与 OpenSpec 状态,确认当前没有直接对应的活跃 change。
-- 盘点了 `ralph run`、`resolve_prompt_content()`、parallel idle_start、`ralph init`、embedded presets、`config/all_hat.md` 的代码路径。
-- 额外检查了 `presets/`、`presets/minimal/`、`scripts/sync-embedded-files.sh` 与 builtin preset 注册表之间的关系。
-- 用 `directories::ProjectDirs` 的文档确认了跨平台用户配置目录的标准做法,用于评估 `~/.ralph` 与系统规范路径的关系。
-- 最终得出建议: 把“Ralph 自主选择 preset”做成启动前 selector 阶段,而不是正式 run 中途热切换拓扑。
-
-### 总结感悟
-- 真正需要统一抽象的不是单个 `PROMPT.md` 文件,而是“任务输入从哪里来”这件事。
-- 资源 embed、资源 catalog、资源落盘、运行时拓扑选择,这 4 层必须拆开,否则后面会把简单需求做成一锅粥。
-- 多 preset 混编不是不能做,但应该建立在结构化 merge 规则之上,而不是直接拼 YAML 文本。
-## [2026-03-18 18:36:00] [Session ID: 2d1fc46f-d36c-45b6-af3b-ab3318b8c122] 任务名称: 起草 OpenSpec change `bootstrap-resource-catalog`
-
-### 任务内容
-- 按上一轮 explore 的“最佳方案”,把默认资源 catalog、用户目录释放、bootstrap selector 与结构化 preset 组合整理成正式 OpenSpec 变更。
-- 产出 proposal / design / tasks / delta spec,并验证 change 合法性。
-
-### 完成过程
-- 回读已有 OpenSpec change 的 proposal/design/tasks/spec 样式,对齐仓库写法。
-- 结合现有 `ralph run`、`ralph init`、embedded presets、`config/all_hat.md` 与 doctor/preset 文档现状,确定 change 名称为 `bootstrap-resource-catalog`。
-- 起草了 4 份 artifact:
-  - `openspec/changes/bootstrap-resource-catalog/proposal.md`
-  - `openspec/changes/bootstrap-resource-catalog/design.md`
-  - `openspec/changes/bootstrap-resource-catalog/tasks.md`
-  - `openspec/changes/bootstrap-resource-catalog/specs/resource-bootstrap/spec.md`
-- 使用 `openspec validate bootstrap-resource-catalog` 做校验,结果通过。
-
-### 总结感悟
-- 这类问题如果不先把“资源 catalog / 资源落盘 / 启动选择 / 真实 run”拆层,后续实现很容易互相污染。
-- OpenSpec 最有价值的地方,就是在动代码前先把这些边界钉死。
-
-## [2026-05-11 23:10:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 对比 ralph-orchestrator / oh-my-codex / hermes-agent
-
-### 任务内容
-- 只读分析当前项目 `ralph-orchestrator`、本地 `/Users/cuiluming/local_doc/l_dev/my/rust/oh-my-codex` 和公开 `https://github.com/NousResearch/hermes-agent` 的差异。
-- 覆盖 README、Cargo/package 入口、关键源码导出、项目长期记忆、Hermes 公开文档。
-
-### 完成过程
-- 读取本仓库上下文文件概况和 `EXPERIENCE.md`。
-- 查询长期记忆中与 `ralph-orchestrator` 运行图、Codex CLI 接入方式相关的记录。
-- 尝试使用 `omx explore` 做只读探索, 但该命令 120 秒超时并被 harness 终止。随后改用普通只读 shell 命令读取事实源。
-- 读取 `ralph-orchestrator` 的 `README.md`、`Cargo.toml`、`crates/ralph-core/src/lib.rs`、`crates/ralph-cli/src/main.rs`。
-- 读取 `oh-my-codex` 的 `README.md`、`package.json`、`Cargo.toml`、`src/index.ts`、`docs/adapt.md`、`src/adapt/hermes.ts`。
-- 通过公开 GitHub/官方文档查看 `hermes-agent` 的 README、architecture、skills、memory 和 pyproject 信息。
-
-### 总结感悟
-- 三者都使用 agent、skills、memory、orchestration 等词, 但它们不是同一层抽象。
-- Ralph 是可独立运行的 Rust orchestration framework, 关注 loop、hats、events、backpressure 和证据。
-- OMX 是 Codex CLI 的 workflow/runtime 外层, 关注 prompt/skill/AGENTS/hook/team/tmux/状态治理。
-- Hermes-Agent 是自学习 agent 应用栈, 关注跨平台入口、终端/消息网关、工具后端、记忆、技能和自动化任务。
-- 本轮没有发现需要写入 `EPIPHANY_LOG.md` 的架构级灾难点, 也没有需要新增到 `LATER_PLANS.md` 的延期事项。
-
-## [2026-05-12 17:32:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 重新审视 Ralph 演进方向优先级
-
-### 任务内容
-- 基于当前新增内容,重新判断 Ralph 现在最值得做的演进方向。
-- 只读查看工作区状态、OpenSpec 列表、核心 change proposal/tasks 和关键代码落点。
-
-### 完成过程
-- 查看 `git status --short` 与 `git diff --stat`,确认当前工作区覆盖多条并行改动线。
-- 查看 `openspec list`,识别 completed / open change 的分布。
-- 运行 `openspec validate --all --strict`,结果 21 passed, 0 failed。
-- 抽读 `agent-guidance-contracts`、`agent-guidance-catalog-cli`、`prompt-contract-runtime-alignment`、`state-operation-layer`、`startup-resource-bootstrap`、`runtime-capability-invocation`、`scoped-experience-system` 等 change 的 proposal/tasks。
-- 查看 `agent_guidance_manifest.rs`、`state_operations.rs`、`experience*.rs` 和 `main.rs` 中相关实现入口。
-- 查看 `.agent/tasks.jsonl`,确认 docs gate 仍有一个打开任务。
-
-### 总结感悟
-- 当前 Ralph 的新增内容已经从“想法”进入“多条基础设施并行落地”的阶段。
-- 现在最有价值的动作是收口、归档、契约化测试和主线排序,而不是继续增加新的 runtime 面。
-- `runtime evidence` 与 `adapter contract` 仍然值得做,但应作为可测边界推进,不要和 `startup-resource-bootstrap` / `runtime-capability-invocation` 混成一锅。
-
-## [2026-05-12 21:44:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 完成 adapter-contract-tests OpenSpec 实现
-
-### 任务内容
-- 按 OpenSpec `adapter-contract-tests` 补齐 stdout-only event parsing、prompt transport、event envelope、termination flush 的契约测试。
-- 修复 mock-cli replay 把 stderr cassette 记录错投到 stdout 的契约漂移。
-
-### 完成过程
-- 加强 `parallel_runner` stdout-only 测试,明确 stdout 事件仍会被解析,stderr 中的 `<event ...>` 不会进入默认 event parser 输入。
-- 新增 custom backend `prompt_mode=stdin` 测试,证明 prompt 走 stdin,不会追加为尾部 argv。
-- 修复 `ralph-e2e mock-cli` 回放逻辑,按 `TerminalWrite.stdout` 分别写入 stdout/stderr。
-- 新增 mock-mode runner 测试,固定 mock-cli custom backend 必须配置 `prompt_mode: stdin`。
-- 新增 `EventRecord` id/reply、`TerminalWrite.instance_id`、record-session critical sequence strict parse、drop 前 flush 等契约测试。
-- 更新 `openspec/changes/adapter-contract-tests/tasks.md`,所有任务已勾选完成。
+- 创建 Ralph context snapshot: `.omx/context/runtime-evidence-index-kernel-20260513T110024Z.md`。
+- 创建 OpenSpec change: `openspec/changes/runtime-evidence-index-kernel/`。
+- 写入 `proposal.md`, `design.md`, `specs/runtime-evidence-index-kernel/spec.md`, `tasks.md`, `test-plan.md`。
+- 修复 spec delta 格式,加入 `## ADDED Requirements`。
+- 对本轮文档做 anti-slop / boundary review,确认 Phase 1B CLI / doctor 只作为非目标和 guardrail 出现。
+- 因旧 `WORKLOG.md` 超过 1000 行,追加经验到 `EXPERIENCE.md` 并续档旧 WORKLOG。
 
 ### 验证证据
-- `cargo fmt --all --check`: 通过。
-- `parallel_runner::guardrail_tests::parallel_output_for_event_parsing_is_stdout_only`: 1 passed。
-- `cli_backend::tests::test_custom_backend_stdin_prompt_mode_keeps_prompt_off_argv`: 1 passed。
-- `mock_cli::tests::test_replay_terminal_write_records_preserves_stdout_stderr_streams`: 1 passed。
-- `runner::tests::test_configure_mock_mode_uses_stdin_prompt_mode_for_mock_cli`: 1 passed。
-- `event_logger::tests::test_event_record_preserves_id_and_reply`: 1 passed。
-- `ux_event::tests::test_terminal_write_instance_id_roundtrip`: 1 passed。
-- `event_logger::tests::test_runtime_durable_payloads_are_not_truncated`: 1 passed。
-- `session_recorder::tests::test_record_session_critical_sequence_strict_parseable_after_flush`: 1 passed。
-- `session_recorder::tests::test_critical_records_flush_to_file_before_recorder_drop`: 1 passed。
-- `session_recorder::tests::test_flush_policy_meta_and_bus_publish_flush`: 1 passed。
-- `session_recorder::tests::test_flush_policy_terminal_write_stdout_only`: 1 passed。
-- `beautiful-mermaid-rs --ascii`: 成功渲染 design Mermaid 图。
-- `openspec validate adapter-contract-tests --type change`: 通过。
-- `cargo test -p ralph-core smoke_runner`: 12 passed。
-- `openspec validate --all --strict`: 24 passed, 0 failed。
+- `git diff --cached --name-status`: 空。
+- `openspec validate runtime-evidence-index-kernel --type change`: valid。
+- `openspec validate --all --strict`: 25 passed,0 failed。
+- `openspec show runtime-evidence-index-kernel --json --deltas-only`: deltaCount=5。
+- `git diff --check`: 通过,无输出。
 
 ### 总结感悟
-- adapter contract 不是大重构,关键是把 stdout/stderr、prompt transport 和 evidence envelope 的边界变成明确失败的测试。
-- mock replay 必须尽量还原真实 stream,否则 cassette 会把本来在 stderr 的 prompt/log/event 示例升级成 stdout 语义输入。
+- Phase 1A 的价值在于把 artifact link 和 correlation contract 钉住,不要提前做 evidence CLI / doctor 平台化能力。
+- OpenSpec change 的 spec 文件必须使用 delta section,例如 `## ADDED Requirements`,否则 validate 会报 `No delta sections found`。
+- 写 Markdown 日志时必须继续使用 quoted heredoc 或安全写入方式,避免反引号触发 shell command substitution。
 
-## [2026-05-12 21:49:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 归档 adapter-contract-tests
 
-### 任务内容
-- 将刚完成的 OpenSpec change `adapter-contract-tests` 归档。
-- 同步新增主规格 `openspec/specs/adapter-contract-tests/spec.md`。
-
-### 完成过程
-- 运行 `openspec archive -y adapter-contract-tests`。
-- OpenSpec 自动创建主 spec,并移动 change 到 archive。
-- 随后运行全量 strict validate。
-
-### 验证证据
-- `openspec archive -y adapter-contract-tests`: 成功,创建 `openspec/specs/adapter-contract-tests/spec.md`,归档为 `2026-05-12-adapter-contract-tests`。
-- `openspec validate --all --strict`: 24 passed,0 failed。
-- `openspec list`: active changes 剩余 `runtime-capability-invocation`、`startup-resource-bootstrap`、`tui-mdfried-viewer`。
-
-### 总结感悟
-- 新增 contract change 完成后立即归档,能减少后续实施 `startup-resource-bootstrap` 时的 active change 噪音。
-
-## [2026-05-12 23:30:22] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Ralph 演进四步收口
+## [2026-05-13 22:10:12] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 任务名称: runtime-evidence-index-kernel Phase 1A 实现
 
 ### 任务内容
-- 按用户指定顺序完成:
-  - 收口 completed OpenSpec changes。
-  - 补 adapter contract tests。
-  - 推进并归档 `startup-resource-bootstrap v1`。
-  - 推进并归档 `runtime-capability-invocation v1`。
-- 本轮继续点主要覆盖第3、第4步:
-  - `crates/ralph-cli/src/startup_resources.rs`
-  - `crates/ralph-cli/src/capability.rs`
-  - `crates/ralph-core/src/capability.rs`
-  - `crates/ralph-cli/tests/integration_startup_resources.rs`
-  - `crates/ralph-cli/tests/integration_capability.rs`
-  - `docs/runbook/startup-resource-bootstrap.md`
-  - `docs/runbook/runtime-capabilities.md`
-  - OpenSpec archive / main spec sync。
+- 按 OpenSpec change `runtime-evidence-index-kernel` 实现 Phase 1A minimal evidence index kernel。
+- 保持边界: 不实现 evidence CLI / doctor UX,不改变 live topology。
 
 ### 完成过程
-- 修正 startup bootstrap 的 resolved config artifact 写出时机,确保写出的是 CLI override / validate / backend auto-detect 后的实际启动配置。
-- 增加 `cli_config_was_explicit()` 原始 argv 检测,避免显式 `--config ralph.yml` 被误当成默认缺失配置。
-- 让 startup resource resolver 的测试注入临时资源根目录,避免污染用户真实 `$HOME/.ralph/resources`。
-- 增加 startup CLI dry-run integration,验证无 `ralph.yml` / 无 `PROMPT.md` 时产出 `.ralph/bootstrap-selection.json` 与 `.ralph/resolved-config.yml`。
-- 增加 runtime capability metadata / invocation artifact 类型,以及 `ralph tools capability list|summaries|invoke` agent-facing 工具。
-- runtime capability v1 采用隔离 child dry-run / micro-run artifact,写 `.ralph/capability-invocations/<id>/` 与 `.ralph/events.jsonl`,不修改 parent topology。
-- 将 `startup-resource-bootstrap` 归档为 `openspec/changes/archive/2026-05-12-startup-resource-bootstrap/`,并同步 `openspec/specs/resource-bootstrap/spec.md`。
-- 将 `runtime-capability-invocation` 归档为 `openspec/changes/archive/2026-05-12-runtime-capability-invocation/`,并同步 `openspec/specs/capability-invocation/spec.md`。
+- 新增 `crates/ralph-core/src/evidence_index.rs`。
+- 在 `crates/ralph-core/src/lib.rs` 导出 evidence index public API。
+- 采用 JSONL 作为 v1 index storage,与 record-session / events evidence 流保持一致。
+- 实现最小类型:
+  - `EvidenceIndexEntry`
+  - `EvidenceArtifactKind`
+  - `EvidenceStatus`
+  - `EvidenceIndexWriter`
+  - `EvidenceIndexReader`
+  - `EvidenceLookup`
+  - `EvidenceIndexError`
+- 添加 7 个 contract tests,覆盖 schema、writer/reader、missing marker、parent-child link、record-session artifact、event-log artifact、runtime graph 非真相源 guardrail。
+- 更新 OpenSpec tasks,标记 implementation 和 verification 项完成。
 
 ### 验证证据
-- `cargo fmt --all --check`: 通过。
-- `cargo test -p ralph-cli --bin ralph startup_resources -- --nocapture`: 8 passed。
-- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 2 passed。
-- `cargo test -p ralph-core capability -- --nocapture`: 1 passed。
-- `cargo test -p ralph-cli --bin ralph capability -- --nocapture`: 3 passed。
-- `cargo test -p ralph-cli --test integration_capability -- --nocapture`: 2 passed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed。
-- `.venv/bin/mkdocs build --strict`: 退出码 0。
-- `openspec validate --all --strict`: 归档后 24 passed,0 failed。
-
-### 总结感悟
-- resolved artifact 必须代表真实将启动的配置,不能在 CLI override 之前提前写。
-- runtime capability 最稳的 v1 边界是“agent-facing tool + isolated artifact”,而不是把 capability 注入 live `HatRegistry` / `Supervisor`。
-- OpenSpec tasks 要和测试证据对齐;如果任务写得宽,应补齐覆盖再勾选。
-
-## [2026-05-12 23:43:10] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Ralph 演进四步最终收口验证
-
-### 任务内容
-- 接续上一轮没有留下最终退出状态的 `cargo test`。
-- 用当前会话重新补齐完成声明所需的验证证据。
-- 将用户指定的四步路线收口成可汇报状态。
-
-### 完成过程
-- 检查没有残留正在运行的 `cargo test` 进程后,重新执行全量 `cargo test`。
-- 补跑格式检查、replay smoke、OpenSpec strict validate 和 MkDocs strict build。
-- 确认 active OpenSpec changes 只剩 `tui-mdfried-viewer`,不属于本轮用户指定四步路线。
-- 追加更新 `task_plan.md`,把四步路线和最终门禁标记为完成。
-
-### 验证证据
-- `cargo test`: 退出码 0,日志 `/tmp/ralph-cargo-test-20260512-233917.log`。
-- `cargo fmt --all --check`: 退出码 0。
-- `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
-- `openspec validate --all --strict`: 24 passed,0 failed。
-- `.venv/bin/mkdocs build --strict`: 退出码 0。
-- `openspec list --json`: 只剩 `tui-mdfried-viewer` 13/15 in-progress。
-
-### 总结感悟
-- 这次继续点的核心不是再改代码,而是把“上一轮摘要”降级为线索,重新取得当前会话可证明的最终门禁。
-- `runtime capability` 和 `startup bootstrap` 的边界已经按用户要求落在隔离 artifact 和启动前 resolution 上,没有引入 live topology 热改。
-
-## [2026-05-13 13:01:39] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 提交前变更分组审查
-
-### 任务内容
-- 接续四步收口后的安全后续,审查当前 worktree 是否适合提交。
-- 不提交、不清理、不撤回任何非当前任务改动。
-
-### 完成过程
-- 读取上下文文件和记忆索引,确认上一轮完成点。
-- 运行 `git status --short`、`git diff --stat`、`git diff --name-status`、`git ls-files --others --exclude-standard`。
-- 用脚本按路径和主题分桶当前改动。
-- 运行 `git diff --check` 和 `git status --ignored -s`,检查 whitespace 与 ignored generated artifact 风险。
-- 抽查 `Cargo.toml` / `.envrc` / `.gitignore` / `main.rs` diff hunk header。
-
-### 验证证据
-- `git diff --check`: 无输出,未发现 whitespace error。
-- `git status --ignored -s`: `site/`、`target/`、`.ralph/`、`.omx/`、`.venv/` 等为 ignored。
-- `.agent/tasks.jsonl`: 当前查询未发现 open/pending/in_progress/todo 或 completed=false 条目。
-
-### 总结感悟
-- 当前工作区是多条已完成/在途线叠加,提交前必须拆组。
-- 对这批改动,最危险的动作是 `git add .` 后做一个大提交;这会把 OpenSpec、runtime graph、docs、TUI、context logs 和当前四步主线混在一起。
-
-## [2026-05-13 14:15:15] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 准备 adapter/evidence contract staged diff
-
-### 任务内容
-- 按前一轮分组建议,准备第一组 `adapter contract tests + evidence stream fixes` staged diff。
-- 避免把 runtime graph、startup bootstrap、runtime capability、TUI、docs site 等其他线混入第一组。
-
-### 完成过程
-- 执行 `git reset --quiet`,清空 index 中可能存在的历史 staged 状态。
-- stage adapter/evidence 相关文件与 `adapter-contract-tests` OpenSpec archive/spec。
-- 对 `crates/ralph-cli/src/parallel_runner.rs` 使用 `git add -p`,只 stage stdout-only parser guardrail test hunks。
-- 跳过同文件中的 runtime graph recorder、Codex escaped-event normalization、process env scrub 等其他主题 hunks。
-- 修复 `openspec/specs/adapter-contract-tests/spec.md` 末尾多余空行后重新 stage。
-
-### 验证证据
-- `git diff --cached --check`: 通过。
-- `cargo test --package ralph-adapters --lib cli_backend::tests::test_custom_backend_stdin_prompt_mode_keeps_prompt_off_argv -- --exact`: 1 passed。
-- `cargo test --package ralph-cli --bin ralph parallel_runner::guardrail_tests::parallel_output_for_event_parsing_is_stdout_only -- --exact`: 1 passed。
-- `cargo test --package ralph-core --lib event_logger::tests::test_event_record_preserves_id_and_reply -- --exact`: 1 passed。
+- `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed。
 - `cargo test --package ralph-core --lib event_logger::tests::test_runtime_durable_payloads_are_not_truncated -- --exact`: 1 passed。
 - `cargo test --package ralph-core --lib session_recorder::tests::test_record_session_critical_sequence_strict_parseable_after_flush -- --exact`: 1 passed。
 - `cargo test --package ralph-core --lib session_recorder::tests::test_critical_records_flush_to_file_before_recorder_drop -- --exact`: 1 passed。
-- `cargo test --package ralph-e2e --lib mock_cli::tests::test_replay_terminal_write_records_preserves_stdout_stderr_streams -- --exact`: 1 passed。
-- `cargo test --package ralph-proto --lib ux_event::tests::test_terminal_write_instance_id_roundtrip -- --exact`: 1 passed。
-- `openspec validate adapter-contract-tests --type spec`: valid。
+- `cargo test --package ralph-cli --bin ralph capability::tests::isolated_invocation_writes_auditable_artifacts_without_parent_topology_mutation -- --exact`: 1 passed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed in smoke runner unit tests; related filtered integration/doc targets completed with 0 failures。
+- `cargo test`: passed,包括 workspace unit tests 和 doctests。
+- `cargo fmt --all -- --check`: passed。
+- `git diff --check`: passed。
+- `openspec validate runtime-evidence-index-kernel --type change`: valid。
+- `openspec validate --all --strict`: 25 passed,0 failed。
+- `cargo clippy --all-targets --all-features`: exit code 0; 输出既有 warning,未发现本轮新增 `evidence_index.rs` warning。
 
 ### 总结感悟
-- 第一组不能直接按文件粗 stage,因为 `parallel_runner.rs` 已经混入多条线。
-- 对这种混线文件,patch staging 比路径 staging 更可靠。
+- Phase 1A 的实现应保持在 core module,而不是 CLI/doctor 层,这样才能避免 evidence 平台化。
+- JSONL writer/reader 与现有 evidence 流一致,足够支撑后续 request/reply 和 capability v2 的 artifact lookup。
+- 后续 Phase 2/3 接入时,应只调用 writer 登记 artifact link,不要让 index 接管原始证据内容。
+
+
+## [2026-05-13 22:20:17] [Session ID: omx-1778510695653-7pd7o2] 任务名称: runtime-evidence-index-kernel post-audit 收尾
+
+### 任务内容
+- 接续上轮 Phase 1A 实现后的 completion audit gate。
+- 复核审计文件、OpenSpec tasks 和核心实现,再重跑关键验证。
+
+### 完成过程
+- 读取 `.omx/audits/runtime-evidence-index-kernel-completion-audit.md`,确认审计覆盖 prompt、scope、artifact checklist、验证命令和 known gaps。
+- 读取 `openspec/changes/runtime-evidence-index-kernel/tasks.md`,确认任务全部完成。
+- 读取 `crates/ralph-core/src/evidence_index.rs` 与 `crates/ralph-core/src/lib.rs`,确认 public API 与 Phase 1A 边界一致。
+- 重跑 focused tests、smoke tests、全量测试、OpenSpec validate、format 和 diff gate。
+
+### 验证证据
+- `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed,0 failed。
+- `openspec validate runtime-evidence-index-kernel --type change`: valid。
+- `git diff --check`: exit 0。
+- `cargo fmt --all -- --check`: exit 0。
+- `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
+- `cargo test`: workspace unit tests 与 doctests 通过。
+- `openspec validate --all --strict`: 25 passed,0 failed。
+
+### 总结感悟
+- completion audit 不是文档装饰,而是 Ralph 闭环的一等 evidence artifact。
+- 未来类似实现收尾时,应先写审计,再重跑最小验证门,最后关闭 state。
+
+
+## [2026-05-13 22:31:33] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Ralph completion audit hook 兼容修正
+
+### 任务内容
+- 响应 Stop hook 的 `missing_completion_audit` 阻塞。
+- 将人类可读 Markdown audit 补为 hook 可解析的结构化 JSON audit。
+
+### 完成过程
+- 读取 hook 实现 `/Users/cuiluming/n/lib/node_modules/oh-my-codex/dist/ralph/completion-audit.js`。
+- 确认 hook 只接受 state 内联 audit object 或 repo-relative `.json` artifact。
+- 创建 `.omx/audits/runtime-evidence-index-kernel-completion-audit.json`。
+- 更新 Ralph state,将 completion audit path/evidence path 指向 JSON,并内联 `completion_audit` 对象。
+
+### 验证证据
+- `node --input-type=module ... evaluateRalphCompletionAuditEvidence(...)`: 返回 `complete=true`, `reason=completion_audit_passed`, `source=state`。
+- `omx state read --input '{"mode":"ralph"}' --json`: `active=false`, `current_phase=complete`, `completion_audit_gate=passed`。
+- `omx state list-active --json`: `active_modes=[]`。
+
+### 总结感悟
+- Ralph completion audit 给人看的 Markdown 不等于 hook 可解析 evidence。
+- Stop hook 的 completion audit 证据必须写成 JSON artifact 或内联 state object。
