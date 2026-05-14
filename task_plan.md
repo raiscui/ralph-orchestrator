@@ -941,3 +941,44 @@
   - 做本地 commit。
   - 提交后执行 OpenSpec archive 评估,若任务与验证满足条件则归档并再做验证/提交。
   - 最后只规划 Phase 2,不直接实现 Phase 2 代码。
+
+
+## [2026-05-14 11:08:36] [Session ID: omx-1778510695653-7pd7o2] 状态更新: Phase 1A 本地提交已完成,进入 OpenSpec archive 收口
+
+- 已完成本地提交: `cadefa8` / `Build evidence lookup before evidence UX`。
+- 提交前验证已经通过:
+  - `cargo fmt --all -- --check`
+  - `git diff --check`
+  - `openspec validate runtime-evidence-index-kernel --type change`
+  - `openspec validate --all --strict`
+  - `cargo test --package ralph-core --lib evidence_index::tests`
+  - `cargo test -p ralph-core smoke_runner`
+  - `cargo test`
+- 当前 archive 判断:
+  - `openspec status --change runtime-evidence-index-kernel --json` 显示 `isComplete=true`。
+  - `openspec list --json` 显示 21/21 tasks complete。
+  - 主 spec `openspec/specs/runtime-evidence-index-kernel/spec.md` 尚不存在,归档前需要同步 delta spec。
+- 即将执行:
+  - 读取 OpenSpec archive / sync 支持命令。
+  - 将 `runtime-evidence-index-kernel` delta 同步到主 spec。
+  - 归档 change 到 `openspec/changes/archive/<date>-runtime-evidence-index-kernel/`。
+  - 运行 `openspec validate --all --strict`。
+  - 若通过,做第二个本地提交。
+
+
+## [2026-05-14 11:12:36] [Session ID: omx-1778510695653-7pd7o2] 状态更新: OpenSpec archive 已执行,修正主 spec Purpose
+
+- `openspec archive runtime-evidence-index-kernel --yes` 已执行成功:
+  - 创建 `openspec/specs/runtime-evidence-index-kernel/spec.md`。
+  - 移动 change 到 `openspec/changes/archive/2026-05-14-runtime-evidence-index-kernel/`。
+- 已发现并处理归档后的文档质量问题:
+  - 归档工具生成的主 spec 包含 `Purpose TBD` 占位。
+  - 已替换为 runtime evidence index kernel 的真实 Purpose。
+- 终端出现 OpenSpec/PostHog telemetry flush error:
+  - 已确认 archive / validate 输出本身成功且退出码为 0。
+  - 当前按工具遥测网络噪声处理,不视为 OpenSpec 内容失败。
+- 即将执行:
+  - 重新运行 `openspec validate --all --strict`。
+  - 运行 `git diff --check`。
+  - stage archive 移动、主 spec 和 task_plan。
+  - 做第二个本地 commit。
