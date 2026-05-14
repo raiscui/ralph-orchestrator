@@ -118,3 +118,46 @@
 ### 总结感悟
 - Ralph completion audit 给人看的 Markdown 不等于 hook 可解析 evidence。
 - Stop hook 的 completion audit 证据必须写成 JSON artifact 或内联 state object。
+
+
+## [2026-05-14 11:22:42] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 1A 提交归档与 Phase 2 OpenSpec 准备
+
+### 任务内容
+- 按用户指定顺序继续:
+  - review 当前 diff。
+  - 做本地提交。
+  - archive OpenSpec change。
+  - 准备下一条产品演进线 Phase 2 request/reply answer return 最小闭环。
+
+### 完成过程
+- Review 了 Phase 1A diff,确认 `.omx/` audit/state 被 ignore,不会进入提交。
+- 做了本地提交 `cadefa8 Build evidence lookup before evidence UX`。
+- 执行 `openspec archive runtime-evidence-index-kernel --yes`,并修正归档生成的主 spec `Purpose TBD`。
+- 做了 archive 提交 `0e00eb7 Archive evidence index contract after kernel landing`。
+- 创建 Phase 2 OpenSpec change `request-reply-answer-evidence`,只产出 proposal/design/spec/tasks/test-plan,未实现代码。
+- 做了 Phase 2 规格提交 `e18536d Specify answer-return evidence before wiring runtime`。
+
+### 验证证据
+- Phase 1A 提交前:
+  - `cargo fmt --all -- --check`: passed。
+  - `git diff --check`: passed。
+  - `openspec validate runtime-evidence-index-kernel --type change`: valid。
+  - `openspec validate --all --strict`: 25 passed,0 failed。
+  - `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed,0 failed。
+  - `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
+  - `cargo test`: workspace unit tests and doctests passed。
+- Archive 后:
+  - `openspec validate --all --strict`: 25 passed,0 failed。
+  - `git diff --check`: passed。
+- Phase 2 OpenSpec:
+  - `openspec validate request-reply-answer-evidence --type change`: valid。
+  - `openspec validate --all --strict`: 26 passed,0 failed。
+  - `git diff --check`: passed。
+- 最终状态:
+  - `git status --short --untracked-files=all`: clean。
+  - active OpenSpec changes: `request-reply-answer-evidence` 和既有无关 `tui-mdfried-viewer`。
+
+### 总结感悟
+- Phase 1A 已完成并归档,后续实现应从 `openspec/specs/runtime-evidence-index-kernel/spec.md` 读取稳定 contract。
+- Phase 2 的正确切入点不是继续做 CLI UX,而是先把 `reply.hat.message` 的成功、失败、missing/timeout 证据写进 evidence index。
+- OpenSpec CLI 的 PostHog flush 网络错误会出现在 stderr,但本轮相关命令退出码为 0,内容验证通过;不要把遥测 flush 噪声误当规格失败。
