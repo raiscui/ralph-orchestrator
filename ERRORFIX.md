@@ -481,3 +481,19 @@
 
 ### 验证
 - 修复后会重新运行 `git diff --cached --check` 和 `openspec validate --all --strict`。
+
+## [2026-05-14 15:34:00] [Session ID: omx-1778510695653-7pd7o2] 错误修复: capability evidence 单元测试缺少 reader imports
+
+### 问题
+- `cargo test -p ralph-cli capability::tests -- --nocapture` 编译失败。
+- 报错为 `use of undeclared type EvidenceIndexReader` 和 `use of undeclared type EvidenceLookup`。
+
+### 原因
+- 新增 capability evidence 单元测试时,在 `#[cfg(test)] mod tests` 内使用了 evidence reader 类型,但只在模块外引入了 writer 和 entry 类型。
+- Rust 子模块不会自动继承未通过 `super::*` 可见的外部 use 名称。
+
+### 修复
+- 在测试模块中显式 `use ralph_core::{EvidenceIndexReader, EvidenceLookup};`。
+
+### 验证
+- 修复后重跑 `cargo test -p ralph-cli capability::tests -- --nocapture`。

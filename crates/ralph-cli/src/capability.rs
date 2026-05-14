@@ -8,8 +8,9 @@ use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{
     CapabilityChoice, CapabilityFailedRecord, CapabilityInvocationMode, CapabilityInvocationRecord,
-    CapabilityKind, CapabilityMetadata, CapabilityResultRecord, EventLogger, RalphConfig,
-    TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_INVOKE, TOPIC_CAPABILITY_RESULT,
+    CapabilityKind, CapabilityMetadata, CapabilityResultRecord, EventLogger, EvidenceArtifactKind,
+    EvidenceIndexEntry, EvidenceIndexWriter, EvidenceStatus, RalphConfig, TOPIC_CAPABILITY_FAILED,
+    TOPIC_CAPABILITY_INVOKE, TOPIC_CAPABILITY_RESULT,
 };
 use ralph_proto::Event;
 use serde::Serialize;
@@ -339,11 +340,21 @@ fn invoke_isolated_with_runner(
     let invocation_dir = workspace.join(INVOCATION_ROOT).join(&invocation_id);
     fs::create_dir_all(&invocation_dir)
         .with_context(|| format!("Failed to create {}", invocation_dir.display()))?;
+    let events_path = workspace.join(".ralph/events.jsonl");
+    let evidence_path = workspace.join(EvidenceIndexWriter::DEFAULT_PATH);
+    let mut evidence_writer = EvidenceIndexWriter::new(&evidence_path);
 
     let config = resolved_config_for_capability(&capability, input);
     let resolved_config_path = invocation_dir.join("resolved-config.yml");
     fs::write(&resolved_config_path, serde_yaml::to_string(&config)?)
         .with_context(|| format!("Failed to write {}", resolved_config_path.display()))?;
+    record_capability_evidence(
+        &mut evidence_writer,
+        &invocation_id,
+        EvidenceArtifactKind::ResolvedConfig,
+        &resolved_config_path,
+        EvidenceStatus::Success,
+    )?;
 
     let invocation = CapabilityInvocationRecord {
         invocation_id: invocation_id.clone(),
@@ -355,9 +366,24 @@ fn invoke_isolated_with_runner(
         resolved_config_path: resolved_config_path.display().to_string(),
         parent_topology_unchanged: true,
     };
-    write_json(&invocation_dir.join("invoke.json"), &invocation)?;
+    let invoke_path = invocation_dir.join("invoke.json");
+    write_json(&invoke_path, &invocation)?;
+    record_capability_evidence(
+        &mut evidence_writer,
+        &invocation_id,
+        EvidenceArtifactKind::CapabilityInvokeJson,
+        &invoke_path,
+        EvidenceStatus::Success,
+    )?;
 
     log_capability_event(workspace, TOPIC_CAPABILITY_INVOKE, &invocation)?;
+    record_capability_evidence(
+        &mut evidence_writer,
+        &invocation_id,
+        EvidenceArtifactKind::EventLogJsonl,
+        &events_path,
+        EvidenceStatus::Success,
+    )?;
 
     let child_output = runner(workspace, &resolved_config_path, input)?;
 
@@ -385,7 +411,15 @@ fn invoke_isolated_with_runner(
     };
 
     if child_output.success {
-        write_json(&invocation_dir.join("result.json"), &result)?;
+        let result_path = invocation_dir.join("result.json");
+        write_json(&result_path, &result)?;
+        record_capability_evidence(
+            &mut evidence_writer,
+            &result.invocation_id,
+            EvidenceArtifactKind::CapabilityResultJson,
+            &result_path,
+            EvidenceStatus::Success,
+        )?;
         log_capability_event(workspace, TOPIC_CAPABILITY_RESULT, &result)?;
     } else {
         let failed = CapabilityFailedRecord {
@@ -395,7 +429,15 @@ fn invoke_isolated_with_runner(
             error: result.stderr_summary.clone(),
             parent_topology_unchanged: true,
         };
-        write_json(&invocation_dir.join("failed.json"), &failed)?;
+        let failed_path = invocation_dir.join("failed.json");
+        write_json(&failed_path, &failed)?;
+        record_capability_evidence(
+            &mut evidence_writer,
+            &failed.invocation_id,
+            EvidenceArtifactKind::CapabilityFailedJson,
+            &failed_path,
+            EvidenceStatus::Failure,
+        )?;
         log_capability_event(workspace, TOPIC_CAPABILITY_FAILED, &failed)?;
     }
 
@@ -448,6 +490,30 @@ fn log_capability_event(workspace: &Path, topic: &str, value: &impl Serialize) -
     Ok(())
 }
 
+fn record_capability_evidence(
+    writer: &mut EvidenceIndexWriter,
+    invocation_id: &str,
+    artifact_kind: EvidenceArtifactKind,
+    artifact_path: &Path,
+    status: EvidenceStatus,
+) -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase 3 的关键边界:
+    // artifact 本身仍是真相源,evidence index 只保存可查询的路径链接。
+    // 因此调用方必须先写 artifact,再调用这个 helper 注册 evidence。
+    // ─────────────────────────────────────────────────────────────────────
+    let entry = EvidenceIndexEntry::new(
+        invocation_id,
+        artifact_kind,
+        artifact_path.display().to_string(),
+        "capability",
+        status,
+    );
+    writer
+        .record(&entry)
+        .with_context(|| format!("Failed to record evidence for {invocation_id}"))
+}
+
 fn summarize_output(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes).replace('\n', " ");
     let trimmed = text.trim();
@@ -472,6 +538,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ralph_core::{EvidenceIndexReader, EvidenceLookup};
     use tempfile::TempDir;
 
     #[test]
@@ -560,5 +627,122 @@ mod tests {
         let events = fs::read_to_string(temp.path().join(".ralph/events.jsonl")).unwrap();
         assert!(events.contains(TOPIC_CAPABILITY_INVOKE));
         assert!(events.contains(TOPIC_CAPABILITY_RESULT));
+
+        let evidence_lookup =
+            EvidenceIndexReader::new(temp.path().join(EvidenceIndexWriter::DEFAULT_PATH))
+                .find_by_correlation(&report.invocation.invocation_id)
+                .unwrap();
+        let evidence_entries = evidence_lookup.entries();
+        assert!(matches!(evidence_lookup, EvidenceLookup::Entries(_)));
+        assert!(evidence_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::CapabilityInvokeJson
+                && entry.status == EvidenceStatus::Success
+        }));
+        assert!(evidence_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::CapabilityResultJson
+                && entry.status == EvidenceStatus::Success
+        }));
+        assert!(evidence_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::ResolvedConfig
+                && entry.status == EvidenceStatus::Success
+        }));
+        assert!(evidence_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::EventLogJsonl
+                && entry.status == EvidenceStatus::Success
+        }));
+    }
+
+    #[test]
+    fn isolated_invocation_failure_writes_failed_artifact_for_parent_audit() {
+        let temp = TempDir::new().unwrap();
+        let capability = capability_catalog()
+            .into_iter()
+            .find(|capability| capability.kind == CapabilityKind::HatCapability)
+            .unwrap();
+        let choice = CapabilityChoice {
+            capability_id: capability.id.clone(),
+            reason: "test failure".to_string(),
+            chooser_version: CHOOSER_VERSION_V1.to_string(),
+        };
+
+        let report = invoke_isolated_with_runner(
+            temp.path(),
+            capability,
+            choice,
+            "review input",
+            |_workspace, resolved_config, _input| {
+                assert!(resolved_config.exists());
+                Ok(ChildRunOutput {
+                    success: false,
+                    exit_code: Some(77),
+                    stdout: Vec::new(),
+                    stderr: b"child failed".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+
+        assert!(report.invocation.parent_topology_unchanged);
+        assert!(report.result.parent_topology_unchanged);
+
+        let invocation_dir = temp
+            .path()
+            .join(INVOCATION_ROOT)
+            .join(&report.invocation.invocation_id);
+        assert!(invocation_dir.join("invoke.json").exists());
+        assert!(invocation_dir.join("failed.json").exists());
+        assert!(!invocation_dir.join("result.json").exists());
+
+        let events = fs::read_to_string(temp.path().join(".ralph/events.jsonl")).unwrap();
+        assert!(events.contains(TOPIC_CAPABILITY_INVOKE));
+        assert!(events.contains(TOPIC_CAPABILITY_FAILED));
+
+        let evidence_lookup =
+            EvidenceIndexReader::new(temp.path().join(EvidenceIndexWriter::DEFAULT_PATH))
+                .find_by_correlation(&report.invocation.invocation_id)
+                .unwrap();
+        let evidence_entries = evidence_lookup.entries();
+        assert!(matches!(evidence_lookup, EvidenceLookup::Entries(_)));
+        assert!(evidence_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::CapabilityFailedJson
+                && entry.status == EvidenceStatus::Failure
+                && entry.artifact_path.ends_with("failed.json")
+        }));
+        assert!(evidence_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::ResolvedConfig
+                && entry.status == EvidenceStatus::Success
+        }));
+    }
+
+    #[test]
+    fn isolated_invocation_fails_when_evidence_index_cannot_be_recorded() {
+        let temp = TempDir::new().unwrap();
+        let blocked_evidence_path = temp.path().join(EvidenceIndexWriter::DEFAULT_PATH);
+        fs::create_dir_all(&blocked_evidence_path).unwrap();
+        let capability = capability_catalog()
+            .into_iter()
+            .find(|capability| capability.kind == CapabilityKind::HatCapability)
+            .unwrap();
+        let choice = CapabilityChoice {
+            capability_id: capability.id.clone(),
+            reason: "test evidence failure".to_string(),
+            chooser_version: CHOOSER_VERSION_V1.to_string(),
+        };
+
+        let error = invoke_isolated_with_runner(
+            temp.path(),
+            capability,
+            choice,
+            "review input",
+            |_workspace, _resolved_config, _input| {
+                panic!("runner should not start after evidence index recording fails");
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("Failed to record evidence for"),
+            "unexpected error: {error:#}"
+        );
     }
 }

@@ -326,3 +326,51 @@
 - `AGENTS.md`: Project Knowledge Index 已指向 `EXPERIENCE.md` 与 `archive/manifests/`,无需新增长期文件索引;但需要在 manifest 里记录本轮归档批次。
 - `archive/manifests/`: 新增本轮 archive manifest。
 - 不提取新 skill: 本轮经验是 Ralph repo 的项目级演进口径,已有 `EXPERIENCE.md` 更合适。
+
+## [2026-05-14 15:10:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: Phase 3 capability invocation / child run evidence 现状
+
+## 来源
+
+### 来源1: `openspec/specs/capability-invocation/spec.md`
+- 要点:
+  - 现有稳定 spec 已要求 workflow capability 使用 isolated child execution。
+  - hat capability 使用 isolated transient execution / micro-run。
+  - 已要求记录 auditable invocation artifacts,但没有明确要求写入 evidence index。
+  - `Purpose` 仍是 archive 自动生成的 TBD,Phase 3 可顺手修正。
+
+### 来源2: `crates/ralph-cli/src/capability.rs`
+- 要点:
+  - `ralph tools capability invoke` 当前入口是 `invoke_capability()` -> `invoke_isolated()` -> `invoke_isolated_with_runner()`。
+  - 现有 artifact:
+    - `.ralph/capability-invocations/<id>/resolved-config.yml`
+    - `.ralph/capability-invocations/<id>/invoke.json`
+    - `.ralph/capability-invocations/<id>/result.json` 或 `failed.json`
+  - 现有 event:
+    - `.ralph/events.jsonl` 中的 `capability.invoke`
+    - `.ralph/events.jsonl` 中的 `capability.result` 或 `capability.failed`
+  - 缺口:
+    - 没有写 `.ralph/evidence-index.jsonl`。
+    - integration test 只断言 artifact 和 event,不查 evidence index。
+
+### 来源3: `crates/ralph-core/src/evidence_index.rs`
+- 要点:
+  - 已有 artifact kind:
+    - `CapabilityInvokeJson`
+    - `CapabilityResultJson`
+    - `CapabilityFailedJson`
+    - `ResolvedConfig`
+    - `EventLogJsonl`
+  - writer 默认路径为 `.ralph/evidence-index.jsonl`。
+  - 适合直接复用,不需要新增 evidence index kernel。
+
+## 综合发现
+
+### Phase 3 最小契约
+- 主假设:
+  - 在现有 isolated invocation artifact 写入点旁边补 evidence index registration,即可完成 Phase 3 最小真实串联。
+- 备选解释:
+  - 如果用户期待真正运行非 dry-run child run,那会扩大到 execution semantics;但当前项目既有 OpenSpec 和测试明确 v1 是 isolated child/micro-run artifact,且 runner 抽象已用于 deterministic 测试。
+- 推翻主假设的证据:
+  - 如果现有 spec 或测试要求 `capability invoke` 必须完成真实 LLM/backend run,而不是 child dry-run / micro-run artifact,则需要先扩 spec。
+- 当前结论:
+  - 先做 evidence wiring,不热改 topology,不新增 broker。

@@ -233,3 +233,71 @@
 - Phase 2 的价值点已经从 standalone evidence kernel 前进到真实 runtime dogfood: request/reply answer return 不再只是 core 单测,而是通过 CLI 运行产出 `.ralph/evidence-index.jsonl`、`.ralph/events.jsonl` 和 record-session 证据。
 - answer evidence 的单一真相源仍然是 durable JSONL event log; evidence index 是 lookup surface,不是替代事实源。
 - 下一条自然演进线可以进入 Phase 3: capability invocation / child run evidence 真实串联,但应继续避免热改 live topology。
+
+## [2026-05-14 15:52:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 3 capability child-run evidence 真实串联
+
+### 任务内容
+- 进入 Phase 3: capability invocation / child run evidence 真实串联。
+- 目标是在现有 isolated child/micro-run 路径上补 evidence index linkage,而不是新增第二套 runtime broker 或热改 live topology。
+
+### 完成过程
+- 新建 OpenSpec change `capability-child-run-evidence`,包含 proposal/design/delta spec/tasks/test-plan。
+- 阅读现有 capability invocation 实现后确认最小缺口:
+  - 已有 `invoke.json` / `result.json` / `failed.json` / `resolved-config.yml` / `.ralph/events.jsonl`。
+  - 缺少 `.ralph/evidence-index.jsonl` 中按 invocation id 可查的 durable linkage。
+- 扩展 `crates/ralph-cli/tests/integration_capability.rs`,让真实 `ralph tools capability invoke` 查询 evidence index。
+- 先跑红灯验证,确认测试失败在 evidence lookup 缺失。
+- 在 `crates/ralph-cli/src/capability.rs` 中复用现有 `invoke_isolated_with_runner()` 路径写 evidence index:
+  - `resolved-config.yml` -> `resolved_config`
+  - `invoke.json` -> `capability_invoke_json`
+  - `.ralph/events.jsonl` -> `event_log_jsonl`
+  - `result.json` -> `capability_result_json`
+  - `failed.json` -> `capability_failed_json` + failure status
+- 扩展 capability 单元测试覆盖成功和失败 evidence entries。
+- 更新 OpenSpec tasks 为完成状态。
+
+### 验证证据
+- 红灯:
+  - `cargo test -p ralph-cli --test integration_capability -- --nocapture` 曾失败在 `matches!(evidence_lookup, EvidenceLookup::Entries(_))`。
+- 绿灯:
+  - `cargo test -p ralph-cli capability::tests -- --nocapture`: 4 passed。
+  - `cargo test -p ralph-cli --test integration_capability -- --nocapture`: 2 passed。
+  - `cargo fmt --all -- --check`: passed。
+  - `cargo test -p ralph-cli capability::tests`: 4 passed。
+  - `cargo test -p ralph-cli --test integration_capability`: 2 passed。
+  - `cargo test -p ralph-core smoke_runner`: 12 passed。
+  - `openspec validate capability-child-run-evidence --type change`: valid。
+  - `openspec validate --all --strict`: 27 passed,0 failed。
+  - `git diff --check`: passed。
+  - `cargo test`: workspace tests and doctests passed。
+
+### 总结感悟
+- Phase 3 的正确落点是改良现有 invocation artifact writer,不是把 capability invocation 扩成新的 runtime 平台。
+- evidence index 仍然只保存 artifact link 和 correlation id; child artifact 与 event log 仍是真相源。
+- 失败路径同样要注册 evidence,否则 audit 会在最需要排查时断链。
+
+## [2026-05-14 16:21:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 3 OpenSpec archive 与最终验证
+
+### 任务内容
+- Phase 3 实现完成后归档 `capability-child-run-evidence` OpenSpec change。
+- 同步稳定 spec,修正 `capability-invocation` 历史遗留的 `Purpose TBD`。
+- 重新跑完整验证,准备本地提交。
+
+### 完成过程
+- 执行 `openspec archive capability-child-run-evidence --yes`。
+- archive 将 3 个 added requirements 合入 `openspec/specs/capability-invocation/spec.md`。
+- 修正 `openspec/specs/capability-invocation/spec.md` 的 Purpose,明确 capability invocation 的隔离 child/micro-run 与 evidence-index linkage 语义。
+- active OpenSpec changes 回到只有既有无关 `tui-mdfried-viewer`。
+
+### 验证证据
+- `cargo fmt --all -- --check`: passed。
+- `cargo test -p ralph-cli capability::tests`: 5 passed。
+- `cargo test -p ralph-cli --test integration_capability`: 2 passed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `cargo test`: workspace tests and doctests passed。
+- `openspec validate --all --strict`: 26 passed,0 failed。
+- `git diff --check`: passed。
+
+### 总结感悟
+- 对已经完成的 OpenSpec change,及时 archive 能避免 active changes 噪音。
+- archive 后要检查稳定 spec 的 Purpose,否则历史 `TBD` 会继续污染长期规格。
