@@ -497,3 +497,20 @@
 
 ### 验证
 - 修复后重跑 `cargo test -p ralph-cli capability::tests -- --nocapture`。
+
+## [2026-05-14 17:58:00] [Session ID: omx-1778510695653-7pd7o2] 错误修复: git commit hook 缺固定 OmX co-author trailer
+
+### 问题
+- Phase 3.1 本地提交第一次被 PreToolUse hook 拦截。
+- 第二次虽然补了 `Co-authored-by`,但邮箱写成 `omx@local`,仍不满足 hook。
+
+### 原因
+- 本仓库/OMX commit hook 要求固定 trailer:
+  - `Co-authored-by: OmX <omx@oh-my-codex.dev>`
+
+### 修复
+- 保留 Lore Commit Protocol trailers。
+- 使用正确固定 co-author trailer 重新提交。
+
+### 验证
+- 重新执行 `git commit` 时应通过 hook。

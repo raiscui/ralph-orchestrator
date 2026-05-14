@@ -374,3 +374,41 @@
   - 如果现有 spec 或测试要求 `capability invoke` 必须完成真实 LLM/backend run,而不是 child dry-run / micro-run artifact,则需要先扩 spec。
 - 当前结论:
   - 先做 evidence wiring,不热改 topology,不新增 broker。
+
+## [2026-05-14 16:54:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: Phase 3.1 evidence UX 入口探查
+
+## 来源
+
+### 来源1: `crates/ralph-cli/src/main.rs`
+- 当前顶层 CLI 没有 `ralph evidence` 子命令。
+- 顶层已有 `Tools(tools::ToolsArgs)`,并分发到 `tools::execute(...)`。
+
+### 来源2: `crates/ralph-cli/src/tools.rs`
+- `ralph tools` 当前包含 `memory`、`task`、`capability`。
+- `capability` 已经是 runtime capability 的稳定工具入口。
+
+### 来源3: `crates/ralph-cli/src/capability.rs`
+- `CapabilityCommands` 当前有 `list`、`summaries`、`invoke`。
+- `invoke` 已写 `.ralph/capability-invocations/<id>/...` 和 `.ralph/evidence-index.jsonl`。
+- 可以在同一模块内增加 `inspect`,复用 `EvidenceIndexReader::find_by_correlation`。
+
+### 来源4: `crates/ralph-core/src/evidence_index.rs`
+- Reader API 是 `read_all()` 和 `find_by_correlation(...)`。
+- `EvidenceLookup` 已区分 `Entries`、`Missing`、`NoEntry`。
+
+## 综合发现
+
+### 推荐 Phase 3.1 最小 UX
+- 做 `ralph tools capability inspect <invocation_id>`。
+- 默认从当前工作目录读取 `.ralph/evidence-index.jsonl`。
+- `--json` 输出机器可读对象,包含 invocation id、lookup status、entries、artifact paths。
+- human 输出展示 status、artifact kind、artifact path、producer/status/reason。
+- 找不到 id 时应返回非零,不要伪造空成功。
+
+### 暂不做的方向
+- 暂不新增泛化 `ralph evidence lookup` 顶层命令。
+- 原因: Phase 1A 已明确不要把 kernel 提前扩成完整 evidence UX/doctor;当前最小产品价值来自 capability invocation 调试闭环。
+
+### Phase 4 依赖关系
+- Phase 4 live runtime capability invocation 应依赖 Phase 3.1 inspect UX。
+- 否则 live 调用失败时只有 artifacts,没有稳定人为/agent 查询入口。

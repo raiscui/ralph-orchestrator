@@ -655,3 +655,148 @@
 当前状态:
 - 准备 stage 和本地提交。
 - 本轮没有新增需要写入 EPIPHANY_LOG.md 的架构级风险。
+
+## [2026-05-14 16:48:00] [Session ID: omx-1778510695653-7pd7o2] 新任务: Phase 3.1 capability invocation evidence UX + Phase 4 排期
+
+目标:
+- 先推进 Phase 3.1: 为 capability invocation evidence 增加用户/agent 可用的查询 UX。
+- 将 Phase 4: live runtime capability invocation 登记为依赖 Phase 3.1 的下一条演进线,避免和查询 UX 混成一个不可验证的大改动。
+
+执行边界:
+- Phase 3.1 优先复用现有 evidence index reader 和 capability invocation artifacts。
+- 不新增第二套 evidence store。
+- 不把 Phase 4 的 live runtime 调用语义提前塞进 Phase 3.1。
+- 仍遵循 OpenSpec: spec/test-plan 先行,实现后再 focused tests / smoke / cargo test / archive。
+
+当前待办列表:
+- [ ] 阶段1: 探查现有 CLI/evidence/capability 入口,确认最小 UX 落点。
+- [ ] 阶段2: 创建 Phase 3.1 OpenSpec change,写 proposal/spec/design/tasks/test-plan。
+- [ ] 阶段3: 跑 OpenSpec strict gate,用测试计划定义红灯。
+- [ ] 阶段4: 实现 Phase 3.1 查询 UX 与 focused tests。
+- [ ] 阶段5: 运行 fmt / focused tests / smoke / cargo test / OpenSpec / diff check。
+- [ ] 阶段6: archive Phase 3.1 change,本地提交。
+- [ ] 阶段7: 将 Phase 4 作为下一条 OpenSpec 候选登记到 LATER_PLANS.md。
+
+即将执行:
+- 使用 `omx explore` / `rg` 查现有 `evidence` CLI、`EvidenceIndexReader`、`capability invoke` 测试结构。
+
+## [2026-05-14 17:02:00] [Session ID: omx-1778510695653-7pd7o2] 阶段2完成: Phase 3.1 OpenSpec 已通过 gate
+
+已完成:
+- [x] 创建 OpenSpec change `capability-evidence-inspect-ux`。
+- [x] 写入 proposal/design/delta spec/tasks/test-plan。
+- [x] `openspec validate capability-evidence-inspect-ux --type change`: valid。
+- [x] `openspec validate --all --strict`: 27 passed,0 failed。
+
+当前待办列表:
+- [x] 阶段1: 探查现有 CLI/evidence/capability 入口,确认最小 UX 落点。
+- [x] 阶段2: 创建 Phase 3.1 OpenSpec change,写 proposal/spec/design/tasks/test-plan。
+- [x] 阶段3: 跑 OpenSpec strict gate,用测试计划定义红灯。
+- [ ] 阶段4: 实现 Phase 3.1 查询 UX 与 focused tests。
+- [ ] 阶段5: 运行 fmt / focused tests / smoke / cargo test / OpenSpec / diff check。
+- [ ] 阶段6: archive Phase 3.1 change,本地提交。
+- [ ] 阶段7: 将 Phase 4 作为下一条 OpenSpec 候选登记到 LATER_PLANS.md。
+
+即将执行:
+- 回读 `crates/ralph-cli/src/capability.rs` 和 integration test。
+- 先补 inspect integration 红灯,再实现 CLI。
+
+## [2026-05-14 17:15:00] [Session ID: omx-1778510695653-7pd7o2] 阶段4完成: capability inspect UX 已实现并 focused 通过
+
+已完成:
+- [x] 新增 `ralph tools capability inspect <invocation_id>`。
+- [x] `--json` 输出 `invocation_id`、`index_path`、lookup `status` 和 `entries`。
+- [x] human 输出展示 invocation、index path、status、artifact kind/path/producer/status。
+- [x] `NoEntry` 返回非零错误,错误消息包含 invocation id 和 `.ralph/evidence-index.jsonl`。
+- [x] explicit missing marker 保留为 `missing` lookup status。
+
+验证:
+- [x] 红灯: `cargo test -p ralph-cli --test integration_capability -- --nocapture` 失败于 `unrecognized subcommand 'inspect'`。
+- [x] 绿灯: `cargo test -p ralph-cli --test integration_capability -- --nocapture`: 4 passed。
+- [x] 绿灯: `cargo test -p ralph-cli capability::tests -- --nocapture`: 6 passed。
+
+当前待办列表:
+- [x] 阶段1: 探查现有 CLI/evidence/capability 入口,确认最小 UX 落点。
+- [x] 阶段2: 创建 Phase 3.1 OpenSpec change,写 proposal/spec/design/tasks/test-plan。
+- [x] 阶段3: 跑 OpenSpec strict gate,用测试计划定义红灯。
+- [x] 阶段4: 实现 Phase 3.1 查询 UX 与 focused tests。
+- [ ] 阶段5: 运行 fmt / focused tests / smoke / cargo test / OpenSpec / diff check。
+- [ ] 阶段6: archive Phase 3.1 change,本地提交。
+- [ ] 阶段7: 将 Phase 4 作为下一条 OpenSpec 候选登记到 LATER_PLANS.md。
+
+即将执行:
+- 完整验证链: fmt check, focused tests, smoke, cargo test, OpenSpec strict, diff check。
+
+## [2026-05-14 17:23:00] [Session ID: omx-1778510695653-7pd7o2] 阶段5进展: 第一批验证通过,继续全量测试与归档
+
+已完成验证:
+- [x] `cargo fmt --all -- --check`: passed。
+- [x] `cargo test -p ralph-cli --test integration_capability`: 4 passed。
+- [x] `cargo test -p ralph-cli capability::tests`: 6 passed。
+- [x] `cargo test -p ralph-core smoke_runner`: 12 passed。
+- [x] `openspec validate capability-evidence-inspect-ux --type change`: valid。
+- [x] `openspec validate --all --strict`: 27 passed,0 failed。
+- [x] `git diff --check`: passed。
+
+当前待办列表:
+- [x] 阶段1: 探查现有 CLI/evidence/capability 入口,确认最小 UX 落点。
+- [x] 阶段2: 创建 Phase 3.1 OpenSpec change,写 proposal/spec/design/tasks/test-plan。
+- [x] 阶段3: 跑 OpenSpec strict gate,用测试计划定义红灯。
+- [x] 阶段4: 实现 Phase 3.1 查询 UX 与 focused tests。
+- [ ] 阶段5: 运行全量 `cargo test`,然后更新 tasks 验证项。
+- [ ] 阶段6: archive Phase 3.1 change,本地提交。
+- [ ] 阶段7: 将 Phase 4 作为下一条 OpenSpec 候选登记到 LATER_PLANS.md。
+
+即将执行:
+- `cargo test`。
+- 如果通过,更新 OpenSpec tasks 和 WORKLOG。
+
+## [2026-05-14 17:40:00] [Session ID: omx-1778510695653-7pd7o2] 阶段6行动: 归档 Phase 3.1 OpenSpec change
+
+当前验证状态:
+- `cargo test` 已通过 workspace tests 和 doctests。
+- Phase 3.1 OpenSpec tasks 已全部勾选。
+- 当前准备执行 archive,并在 archive 后检查稳定 spec 与 OpenSpec strict gate。
+
+即将执行:
+- `openspec archive capability-evidence-inspect-ux --yes`。
+- 检查 `openspec/specs/capability-invocation/spec.md` 中新增 inspect UX requirement。
+- 运行 `openspec validate --all --strict` 和 `git diff --check`。
+
+## [2026-05-14 17:50:00] [Session ID: omx-1778510695653-7pd7o2] 阶段6/7完成: Phase 3.1 已归档并登记 Phase 4
+
+已完成:
+- [x] `openspec archive capability-evidence-inspect-ux --yes`。
+- [x] 稳定 spec `openspec/specs/capability-invocation/spec.md` 已新增 inspect UX requirements。
+- [x] `openspec validate --all --strict`: 26 passed,0 failed。
+- [x] `git diff --check`: passed。
+- [x] Phase 4 live runtime capability invocation 已写入 `LATER_PLANS.md`。
+- [x] 本轮交付已写入 `WORKLOG.md`。
+
+当前待办列表:
+- [x] 阶段1: 探查现有 CLI/evidence/capability 入口,确认最小 UX 落点。
+- [x] 阶段2: 创建 Phase 3.1 OpenSpec change,写 proposal/spec/design/tasks/test-plan。
+- [x] 阶段3: 跑 OpenSpec strict gate,用测试计划定义红灯。
+- [x] 阶段4: 实现 Phase 3.1 查询 UX 与 focused tests。
+- [x] 阶段5: 运行 fmt / focused tests / smoke / cargo test / OpenSpec / diff check。
+- [x] 阶段6: archive Phase 3.1 change。
+- [x] 阶段7: 将 Phase 4 作为下一条 OpenSpec 候选登记到 LATER_PLANS.md。
+
+即将执行:
+- 最终审查 diff/status。
+- 运行最终 `openspec validate --all --strict`、`git diff --check`、`git diff --cached --check`。
+- 本地提交,不 push。
+
+## [2026-05-14 17:58:00] [Session ID: omx-1778510695653-7pd7o2] 错误记录: commit hook 要求固定 OmX co-author trailer
+
+现象:
+- 第一次 `git commit` 被 PreToolUse hook 阻止。
+- 提示: `git commit is blocked until the inline commit message satisfies the Lore format and includes the required OmX co-author trailer`。
+- 第二次使用 `Co-authored-by: OmX <omx@local>` 仍被阻止。
+
+原因:
+- 本地 hook 需要固定 trailer: `Co-authored-by: OmX <omx@oh-my-codex.dev>`。
+
+处理:
+- 重新暂存本条记录。
+- 用正确 co-author trailer 重新提交。

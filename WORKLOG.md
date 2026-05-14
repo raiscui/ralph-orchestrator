@@ -301,3 +301,47 @@
 ### 总结感悟
 - 对已经完成的 OpenSpec change,及时 archive 能避免 active changes 噪音。
 - archive 后要检查稳定 spec 的 Purpose,否则历史 `TBD` 会继续污染长期规格。
+
+## [2026-05-14 17:49:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 3.1 capability invocation evidence UX
+
+### 任务内容
+- 为 Phase 3 的 capability invocation evidence 增加可用查询入口。
+- 选择 `ralph tools capability inspect <invocation_id>` 作为最小 UX,暂不扩成泛化 `ralph evidence lookup` 子系统。
+- 将 Phase 4 live runtime capability invocation 登记为后续独立演进线。
+
+### 完成过程
+- 创建并完成 OpenSpec change `capability-evidence-inspect-ux`。
+- 写入 proposal/design/delta spec/tasks/test-plan。
+- 先补 integration 红灯,证明当前 CLI 不支持 `inspect`。
+- 在 `crates/ralph-cli/src/capability.rs` 增加:
+  - `CapabilityCommands::Inspect`
+  - `CapabilityInspectArgs`
+  - `inspect_capability_evidence_report(...)`
+  - JSON/human 输出结构
+  - `NoEntry` 非零错误
+  - explicit missing marker 的 `missing` 状态保留
+- 扩展 `crates/ralph-cli/tests/integration_capability.rs`:
+  - inspect 真实 invocation id 的 JSON 输出
+  - inspect human 输出
+  - unknown invocation id failure
+- 增加 focused unit test 覆盖 missing marker。
+- Archive OpenSpec change 到 `openspec/changes/archive/2026-05-14-capability-evidence-inspect-ux/`。
+- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步 inspect UX requirement。
+
+### 验证证据
+- 红灯:
+  - `cargo test -p ralph-cli --test integration_capability -- --nocapture` 曾失败于 `unrecognized subcommand 'inspect'`。
+- 绿灯:
+  - `cargo fmt --all -- --check`: passed。
+  - `cargo test -p ralph-cli --test integration_capability`: 4 passed。
+  - `cargo test -p ralph-cli capability::tests`: 6 passed。
+  - `cargo test -p ralph-core smoke_runner`: 12 passed。
+  - `cargo test`: workspace tests and doctests passed。
+  - `openspec validate capability-evidence-inspect-ux --type change`: valid。
+  - `openspec validate --all --strict`: 26 passed,0 failed after archive。
+  - `git diff --check`: passed。
+
+### 总结感悟
+- Phase 3.1 的正确边界是给 capability invocation evidence 一个稳定 lookup UX,而不是把 evidence kernel 膨胀成新的 doctor/diagnostic 平台。
+- `--json` 是 agent/automation contract,human 输出只是阅读层。
+- Phase 4 进入 live runtime 调用前,先有 inspect UX 是值得的,否则 live path 失败时调试面会太散。

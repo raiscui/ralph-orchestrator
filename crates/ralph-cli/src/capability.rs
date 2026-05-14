@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{
     CapabilityChoice, CapabilityFailedRecord, CapabilityInvocationMode, CapabilityInvocationRecord,
     CapabilityKind, CapabilityMetadata, CapabilityResultRecord, EventLogger, EvidenceArtifactKind,
-    EvidenceIndexEntry, EvidenceIndexWriter, EvidenceStatus, RalphConfig, TOPIC_CAPABILITY_FAILED,
-    TOPIC_CAPABILITY_INVOKE, TOPIC_CAPABILITY_RESULT,
+    EvidenceIndexEntry, EvidenceIndexReader, EvidenceIndexWriter, EvidenceLookup, EvidenceStatus,
+    RalphConfig, TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_INVOKE, TOPIC_CAPABILITY_RESULT,
 };
 use ralph_proto::Event;
 use serde::Serialize;
@@ -39,6 +39,8 @@ pub enum CapabilityCommands {
     Summaries(CapabilitySummaryArgs),
     /// 调用一个 capability,生成隔离 child/micro-run artifact。
     Invoke(CapabilityInvokeArgs),
+    /// 按 invocation id 查看 capability evidence index 链接。
+    Inspect(CapabilityInspectArgs),
 }
 
 /// Capability 列表参数。
@@ -85,6 +87,21 @@ pub struct CapabilityInvokeArgs {
     pub json: bool,
 }
 
+/// Capability evidence inspect 参数。
+#[derive(Parser, Debug)]
+pub struct CapabilityInspectArgs {
+    /// Capability invocation id / correlation id。
+    pub invocation_id: String,
+
+    /// 工作区根目录,默认当前目录。
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
+
+    /// 输出 JSON。
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// CLI 用 capability kind。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "snake_case")]
@@ -109,6 +126,7 @@ pub fn execute(args: CapabilityArgs, _use_colors: bool) -> Result<()> {
         CapabilityCommands::List(args) => list_capabilities(args),
         CapabilityCommands::Summaries(args) => print_capability_summaries(args),
         CapabilityCommands::Invoke(args) => invoke_capability(args),
+        CapabilityCommands::Inspect(args) => inspect_capability_evidence(args),
     }
 }
 
@@ -217,6 +235,107 @@ fn invoke_capability(args: CapabilityInvokeArgs) -> Result<()> {
         println!("Result: {}", report.result.result_summary);
     }
     Ok(())
+}
+
+fn inspect_capability_evidence(args: CapabilityInspectArgs) -> Result<()> {
+    let workspace = args
+        .workspace
+        .unwrap_or(std::env::current_dir().context("Failed to resolve current directory")?);
+    let report = inspect_capability_evidence_report(&workspace, &args.invocation_id)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    print_capability_inspect_report(&report);
+    Ok(())
+}
+
+fn inspect_capability_evidence_report(
+    workspace: &Path,
+    invocation_id: &str,
+) -> Result<CapabilityInspectReport> {
+    let index_path = workspace.join(EvidenceIndexWriter::DEFAULT_PATH);
+    let lookup = EvidenceIndexReader::new(&index_path)
+        .find_by_correlation(invocation_id)
+        .with_context(|| format!("Failed to read evidence index at {}", index_path.display()))?;
+
+    let status = match lookup {
+        EvidenceLookup::Entries(entries) => CapabilityInspectStatus::Entries { entries },
+        EvidenceLookup::Missing(entries) => CapabilityInspectStatus::Missing { entries },
+        EvidenceLookup::NoEntry => bail!(
+            "No evidence entries for capability invocation id `{}` in {}",
+            invocation_id,
+            index_path.display()
+        ),
+    };
+
+    Ok(CapabilityInspectReport {
+        invocation_id: invocation_id.to_string(),
+        index_path: index_path.display().to_string(),
+        status,
+    })
+}
+
+fn print_capability_inspect_report(report: &CapabilityInspectReport) {
+    println!("Invocation: {}", report.invocation_id);
+    println!("Evidence index: {}", report.index_path);
+    println!("Status: {}", report.status.as_str());
+
+    for entry in report.entries() {
+        let artifact_kind = serde_json::to_value(entry.artifact_kind)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| format!("{:?}", entry.artifact_kind));
+        let status = serde_json::to_value(entry.status)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| format!("{:?}", entry.status));
+
+        println!("- {}", artifact_kind);
+        println!("  Path: {}", entry.artifact_path);
+        println!("  Producer: {}", entry.producer);
+        println!("  Status: {}", status);
+    }
+}
+
+/// `inspect` 的 JSON 契约。
+///
+/// 说明:
+/// - 这里复用 core 的 `EvidenceIndexEntry` 序列化,避免 CLI 再定义一套 artifact schema。
+/// - `status` 表达 lookup 分类,不是覆盖每条 entry 自己的 success/failure/missing 状态。
+#[derive(Debug, Clone, Serialize)]
+struct CapabilityInspectReport {
+    invocation_id: String,
+    index_path: String,
+    #[serde(flatten)]
+    status: CapabilityInspectStatus,
+}
+
+impl CapabilityInspectReport {
+    fn entries(&self) -> &[EvidenceIndexEntry] {
+        match &self.status {
+            CapabilityInspectStatus::Entries { entries }
+            | CapabilityInspectStatus::Missing { entries } => entries,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum CapabilityInspectStatus {
+    Entries { entries: Vec<EvidenceIndexEntry> },
+    Missing { entries: Vec<EvidenceIndexEntry> },
+}
+
+impl CapabilityInspectStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Entries { .. } => "entries",
+            Self::Missing { .. } => "missing",
+        }
+    }
 }
 
 fn filtered_capabilities(kind: Option<CapabilityKindArg>) -> Vec<CapabilityMetadata> {
@@ -744,5 +863,28 @@ mod tests {
             error.to_string().contains("Failed to record evidence for"),
             "unexpected error: {error:#}"
         );
+    }
+
+    #[test]
+    fn inspect_report_preserves_explicit_missing_evidence_markers() {
+        let temp = TempDir::new().unwrap();
+        let index_path = temp.path().join(EvidenceIndexWriter::DEFAULT_PATH);
+        let mut writer = EvidenceIndexWriter::new(&index_path);
+        writer
+            .record(&EvidenceIndexEntry::missing(
+                "cap-missing-1",
+                EvidenceArtifactKind::CapabilityResultJson,
+                ".ralph/capability-invocations/cap-missing-1/result.json",
+                "capability",
+            ))
+            .unwrap();
+
+        let report = inspect_capability_evidence_report(temp.path(), "cap-missing-1").unwrap();
+
+        assert!(matches!(
+            report.status,
+            CapabilityInspectStatus::Missing { .. }
+        ));
+        assert_eq!(report.entries()[0].status, EvidenceStatus::Missing);
     }
 }
