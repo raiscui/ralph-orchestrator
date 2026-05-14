@@ -101,3 +101,26 @@
 - 未来动作:
   - 实现前先读 `openspec/changes/runtime-evidence-index-kernel/design.md` 与 `test-plan.md`。
   - 先补 schema / writer-reader / missing marker / parent-child contract tests,再接现有 record-session、event logger、capability artifacts。
+
+### exp-20260514-request-reply-answer-evidence-boundary
+> Answer-return evidence 的正确入口是显式 `reply.hat.message` requester-return 分支。不要把普通 workflow event 的 `reply` 属性、human-visible reply、request broker、CLI evidence UX 或 live topology 热改混进 Phase 2 边界。
+<!-- scope: project | source_topics: request_reply_answer_evidence,task_plan_rollover_continuous_learning | source_hats: codex | status: active | confidence: high | created_at: 2026-05-14T13:55:00+08:00 | updated_at: 2026-05-14T13:55:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 继续 `request-reply-answer-evidence`、live runtime answer evidence dogfood,或 Phase 3 capability invocation / child run evidence 串联。
+  - 调试 `reply.hat.message` answer 是否可回到 requester,以及 evidence index 是否能按 request id / answer id 查到 durable artifact。
+- 已验证事实:
+  - `reply.hat.message` success 分支写入 request id 与 answer event id 两类 evidence index entry。
+  - fail-closed 分支写入 failure evidence;missing/timeout 通过显式 marker API 写入 missing evidence。
+  - evidence entry 指向 `.ralph/events.jsonl` 等 durable artifact;event log 仍是真相源。
+  - 普通 workflow event 即使带 `reply` 属性,也不能被归类成 answer-return evidence。
+  - 内部 `reply.hat.message` 不能自动合成 `reply.human.message`;面向人的最终答案仍必须是显式 workflow/event 决策。
+- 关键边界:
+  - `EvidenceIndexEntry.producer` 表示写入者身份,不要塞 failure reason。失败原因应留在原始 JSONL artifact payload 里。
+  - 不要为了最小 evidence 闭环新增 request broker 或热改 live topology。
+  - OpenSpec archive 后检查稳定 spec 的 `Purpose TBD`;Phase 1A 和 Phase 2 都出现过这个归档收尾点。
+- 验证锚点:
+  - `cargo test --package ralph-core --lib parallel::supervisor::routing_tests`
+  - `cargo test --package ralph-core --lib evidence_index::tests`
+  - `cargo test -p ralph-core smoke_runner`
+  - `openspec validate --all --strict`

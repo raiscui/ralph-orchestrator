@@ -260,3 +260,69 @@
   4. OpenSpec archive/spec sync 批次。
   5. 其他已存在支线: runtime graph、state/experience/guidance、docs site、TUI、parallel example、context logs。
 - 若要做精确 commit,需要用 `git add -p` 或按文件/目录 staged,不能直接 `git add .`。
+
+## [2026-05-14 13:53:00] [Session ID: codex-20260514-archive-learning] 笔记: task_plan 续档触发的 continuous-learning 六文件摘要
+
+## 来源
+
+### 来源1: 默认六文件当前版本
+
+- `task_plan.md`: 当前任务是 archive `request-reply-answer-evidence`, 做续档 continuous-learning, 再选择下一条演进线。
+- `WORKLOG.md`: 最新有效交付包括 Phase 1A evidence index kernel、Phase 2 answer-return evidence runtime wiring。
+- `LATER_PLANS.md`: 明确记录了 `task_plan.md` 超过 1000 行后需要在安全点做 continuous-learning。
+- `ERRORFIX.md`: 近期反复出现的可复用错误是 quoted heredoc、OpenSpec delta section、cargo test filter 位置、completion audit JSON contract。
+- `EPIPHANY_LOG.md`: 已有长期风险包括 `reply` 关联语义不等于答案回给请求方、bootstrap selector 不能热改 live topology、YAML 注释不是 runtime metadata contract。
+
+### 来源2: 默认历史版本
+
+- `task_plan_2026-05-14_phase1a_phase2_prev.md`:
+  - 覆盖 Phase 1A OpenSpec -> 实现 -> audit -> archive -> Phase 2 OpenSpec 草案。
+  - 关键边界是 staged diff 启动前必须为空,Phase 1A 不做 evidence CLI/doctor,Phase 2 不做 request broker 或 topology 热改。
+  - 该文件是本次续档触发对象,已被本次阅读分析覆盖,后续应移入 `archive/default_history/`。
+- `WORKLOG_2026-05-13_1937_prev.md`:
+  - 覆盖 3 月到 5 月多条 runtime graph、hat request/reply、OpenSpec、startup/capability/evidence 演进线。
+  - 文件已超过 1000 行且此前只是日期化保存,本次已被标题级扫读覆盖,应移入 `archive/default_history/`。
+
+### 来源3: 旧支线上下文组
+
+- `continuous_learning`:
+  - 已完成 2026-04-30 的分组、归档、长期知识写入。
+  - 后续仍留有迁移 archive 根层旧平铺文件的备忘。
+- `serial_tui_issues`:
+  - 已完成非 parallel Codex rollout 报错与 serial TUI 输出选择问题。
+- `rerun_runtime_graph_v2`:
+  - 已完成 V2 durable replay graph 代码、测试、OpenSpec archive 的多轮验证记录。
+- `oh_my_codex_learning`:
+  - 已完成 `specs/oh-my-codex-learning-analysis.md` 报告与指导治理后续建议。
+- `guidance_contract_governance`:
+  - 已完成 guidance schema、prompt contract、manifest、state operation、state CLI adapter 等多阶段治理线。
+- `experience_promotion_workaround`:
+  - 已完成 workaround fixture 文案审计修复。
+
+## 综合发现
+
+### 默认组
+
+- Phase 1A 的长期经验已经写入 `EXPERIENCE.md` 的 `exp-20260513-runtime-evidence-index-kernel-boundary`。
+- Phase 2 新增长期经验还没有沉淀: answer-return evidence 的正确边界是显式 `reply.hat.message` requester-return 分支,不是 CLI UX、request broker 或 human reply 自动合成。
+- OpenSpec archive 后要检查稳定 spec 的 `Purpose TBD`,这一点在 Phase 1A 和 Phase 2 都重复出现,适合沉淀成后续 archive 习惯。
+
+### 支线组活跃度判定
+
+- 当前默认六文件仍活跃,保留在根目录。
+- `task_plan_2026-05-14_phase1a_phase2_prev.md` 和 `WORKLOG_2026-05-13_1937_prev.md` 是默认历史版本,应归档到 `archive/default_history/`。
+- 本次列出的 `__continuous_learning`, `__serial_tui_issues`, `__rerun_runtime_graph_v2`, `__oh_my_codex_learning`, `__guidance_contract_governance`, `__experience_promotion_workaround` 均不是当天活跃支线,且有完成记录或非当前任务状态,应按主题归档到 `archive/branch_contexts/<topic>/`。
+
+## 可复用点候选
+
+1. Phase 2 answer-return evidence 的 producer 字段必须保持写入者身份,失败原因留在原始 JSONL artifact。
+2. `reply.hat.message` 是唯一显式 requester-return answer channel;普通 workflow event 里有 `reply` 属性不等于 answer-return。
+3. OpenSpec archive 自动生成稳定 spec 后,必须检查并修正 `Purpose TBD`。
+4. continuous-learning 触发于续档时,要先分组摘要再移动文件,不能只搬文件。
+
+## 最适合沉淀的位置
+
+- `EXPERIENCE.md`: 新增 Phase 2 answer-return evidence 边界经验。
+- `AGENTS.md`: Project Knowledge Index 已指向 `EXPERIENCE.md` 与 `archive/manifests/`,无需新增长期文件索引;但需要在 manifest 里记录本轮归档批次。
+- `archive/manifests/`: 新增本轮 archive manifest。
+- 不提取新 skill: 本轮经验是 Ralph repo 的项目级演进口径,已有 `EXPERIENCE.md` 更合适。

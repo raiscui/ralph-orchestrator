@@ -446,3 +446,38 @@
   - `evaluateRalphCompletionAuditEvidence(state, cwd)` 返回 `{"complete":true,"reason":"completion_audit_passed","source":"state"}`。
 - `omx state read --input '{"mode":"ralph"}' --json` 显示 `completion_audit_gate=passed`。
 - `omx state list-active --json` 显示 `{"active_modes":[]}`。
+
+## [2026-05-14 14:39:00] [Session ID: omx-1778510695653-7pd7o2] 错误修复: answer evidence dogfood 测试误用 reader API 与 EOF 空白
+
+### 问题
+- 新增 `integration_answer_evidence` 时,最初误用了不存在的 `EvidenceIndexReader::lookup` 方法,导致 focused test 编译失败。
+- continuous-learning 写入 `EXPERIENCE.md` 后,`git diff --check` 报 `EXPERIENCE.md:127: new blank line at EOF.`。
+
+### 原因
+- 对 `EvidenceIndexReader` 当前公开 API 的记忆不可靠,没有在写测试前先以代码为准确认方法名。
+- 追加 Markdown 时留下了文件末尾多余空白行。
+
+### 修复
+- 回读 `crates/ralph-core/src/evidence_index.rs`,把测试改为真实 API `find_by_correlation(...)`,并通过 `EvidenceLookup::Entries` 与 `entries()` 断言结果。
+- 删除 `EXPERIENCE.md` 文件末尾多余空白行。
+- 复核并补充测试中文注释,明确 `.ralph/events.jsonl` 是 durable truth, evidence index 只是 lookup surface。
+
+### 验证
+- `cargo test -p ralph-cli --test integration_answer_evidence`: 1 passed,0 failed。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
+- `git diff --check`: passed。
+
+## [2026-05-14 14:46:00] [Session ID: omx-1778510695653-7pd7o2] 错误修复: archived stable spec 末尾空白行
+
+### 问题
+- stage 后运行 `git diff --cached --check` 报 `openspec/specs/request-reply-answer-evidence/spec.md:91: new blank line at EOF.`。
+
+### 原因
+- 归档生成稳定 spec 后,末尾保留了多余空白行。此前只检查了 worktree diff,stage 后的最终检查暴露了这个文件的 EOF whitespace。
+
+### 修复
+- 使用 `python3` 将文件内容 `rstrip()` 后补一个标准换行,移除多余空白行。
+
+### 验证
+- 修复后会重新运行 `git diff --cached --check` 和 `openspec validate --all --strict`。

@@ -192,3 +192,44 @@
 - Phase 2 的关键不是新建 request broker,而是把已有 `reply.hat.message` requester-return 分支变成可查证的 evidence producer。
 - Evidence index 的 `producer` 字段必须保持写入者身份,失败原因应留在原始 JSONL artifact 里,不要借字段塞语义。
 - Missing/timeout 先用显式 marker API 收口,不要为了 Phase 2 最小闭环引入 broad lifecycle broker。
+
+## [2026-05-14 14:38:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Archive Phase 2 OpenSpec,收口 continuous-learning,并 dogfood answer evidence
+
+### 任务内容
+- 按用户指定顺序继续:
+  - archive `request-reply-answer-evidence` OpenSpec change。
+  - 执行 `task_plan` 续档触发的 continuous-learning 收口。
+  - 选择下一条演进线中的 `live runtime answer evidence dogfood`,证明 Phase 2 evidence index 已服务真实 runtime 链路。
+  - 本地提交,不 push。
+
+### 完成过程
+- 已将 `request-reply-answer-evidence` 从 active change 归档到 `openspec/changes/archive/2026-05-14-request-reply-answer-evidence/`。
+- 已生成稳定规格 `openspec/specs/request-reply-answer-evidence/spec.md`,并把 archive 默认生成的 `Purpose TBD` 改成可读的正式 Purpose。
+- 已执行 continuous-learning 收口:
+  - 在 `notes.md` 写入六文件摘要。
+  - 在 `EXPERIENCE.md` 新增 `exp-20260514-request-reply-answer-evidence-boundary`。
+  - 将已覆盖的默认历史文件移动到 `archive/default_history/`。
+  - 将已覆盖的旧支线六文件移动到 `archive/branch_contexts/<topic>/`。
+  - 新增 `archive/manifests/ARCHIVE_MANIFEST__task_plan_rollover_2026-05-14_1358.md`。
+  - 清理 `LATER_PLANS.md` 中已完成的 continuous-learning 待办。
+- 已新增 `crates/ralph-cli/tests/integration_answer_evidence.rs`:
+  - 通过真实 `ralph run --no-tui --record-session` 启动 parallel runtime。
+  - custom backend 按 `RALPH_HAT_INSTANCE_ID` 分流 `ralph#1` 和 `researcher#1`。
+  - 触发 `research.request` -> `reply.hat.message reply="req-dogfood-1"` -> `LOOP_COMPLETE`。
+  - 断言 `.ralph/evidence-index.jsonl` 可按 request id 和 answer id 查到 evidence。
+  - 断言 `.ralph/events.jsonl` 包含 delivered `routing.requester_return` 记录。
+  - 断言 record-session 包含 `_meta.termination` / `CompletionPromise`。
+
+### 验证证据
+- `cargo test`: workspace tests and doctests passed,exit 0。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test -p ralph-cli --test integration_answer_evidence`: 1 passed,0 failed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
+- `openspec validate --all --strict`: 26 passed,0 failed。
+- `git diff --check`: passed。
+- `git submodule status`: no submodules listed。
+
+### 总结感悟
+- Phase 2 的价值点已经从 standalone evidence kernel 前进到真实 runtime dogfood: request/reply answer return 不再只是 core 单测,而是通过 CLI 运行产出 `.ralph/evidence-index.jsonl`、`.ralph/events.jsonl` 和 record-session 证据。
+- answer evidence 的单一真相源仍然是 durable JSONL event log; evidence index 是 lookup surface,不是替代事实源。
+- 下一条自然演进线可以进入 Phase 3: capability invocation / child run evidence 真实串联,但应继续避免热改 live topology。
