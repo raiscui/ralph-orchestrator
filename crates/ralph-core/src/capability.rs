@@ -3,9 +3,15 @@
 //! 这个模块只定义结构化协议和可审计记录。
 //! 真实执行入口由 CLI / runtime layer 负责,并且 v1 必须保持隔离执行,不能热改父 run topology。
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ralph_proto::Event;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
+
+/// 控制面 topic: parent run 请求调用 capability。
+pub const TOPIC_CAPABILITY_REQUEST: &str = "capability.request";
 
 /// 控制面 topic: capability invocation 开始。
 pub const TOPIC_CAPABILITY_INVOKE: &str = "capability.invoke";
@@ -91,6 +97,142 @@ pub struct CapabilityChoice {
     pub chooser_version: String,
 }
 
+/// parent run 发出的 capability request。
+///
+/// 说明:
+/// - 这是 `ralph#1` 输出 `<event topic="capability.request">...</event>` 时的 payload 契约。
+/// - `request_id` 是 parent run 内的幂等键,运行时必须用它避免重复启动 isolated invocation。
+/// - `capability_id` 和 `input` 是 child/micro-run 的最小执行输入。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityRequestRecord {
+    pub request_id: String,
+    pub capability_id: String,
+    pub input: String,
+}
+
+impl CapabilityRequestRecord {
+    /// 解析并校验 `capability.request` payload。
+    ///
+    /// 说明:
+    /// - 不直接用 `serde_json::from_str::<CapabilityRequestRecord>` 的原因是:
+    ///   失败事件仍需要尽量带上 payload 里已经存在的 `request_id` / `capability_id`。
+    /// - 因此这里先读成 `Value`,再逐字段校验。
+    pub fn parse_payload(payload: &str) -> Result<Self, CapabilityRequestParseError> {
+        let value = serde_json::from_str::<Value>(payload).map_err(|error| {
+            CapabilityRequestParseError::new(None, None, format!("invalid JSON payload: {error}"))
+        })?;
+
+        let request_id = string_field(&value, "request_id");
+        let capability_id = string_field(&value, "capability_id");
+        let input = string_field(&value, "input");
+
+        let missing = [
+            ("request_id", request_id.as_deref()),
+            ("capability_id", capability_id.as_deref()),
+            ("input", input.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(field, value)| value.is_none_or(str::is_empty).then_some(field))
+        .collect::<Vec<_>>();
+
+        if !missing.is_empty() {
+            return Err(CapabilityRequestParseError::new(
+                request_id,
+                capability_id,
+                format!("missing or empty field(s): {}", missing.join(", ")),
+            ));
+        }
+
+        Ok(Self {
+            request_id: request_id.expect("validated request_id"),
+            capability_id: capability_id.expect("validated capability_id"),
+            input: input.expect("validated input"),
+        })
+    }
+}
+
+fn string_field(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// `capability.request` 解析失败时保留的上下文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityRequestParseError {
+    pub request_id: Option<String>,
+    pub capability_id: Option<String>,
+    pub error: String,
+}
+
+impl CapabilityRequestParseError {
+    fn new(request_id: Option<String>, capability_id: Option<String>, error: String) -> Self {
+        Self {
+            request_id,
+            capability_id,
+            error,
+        }
+    }
+}
+
+/// parent-facing result/failure event 中的 artifact 链接。
+///
+/// 说明:
+/// - 这里使用 invocation 产物路径,让 parent run 可以从 event 直接跳回 durable artifacts。
+/// - 真相源仍是 artifact 文件和 evidence index;这个结构只是 parent run 的跳转索引。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityParentArtifactPaths {
+    pub invoke_json: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_json: Option<String>,
+    pub resolved_config: String,
+    pub events_jsonl: String,
+    pub evidence_index: String,
+}
+
+/// parent run 可消费的 `capability.result` payload。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityParentResultRecord {
+    pub status: String,
+    pub request_id: String,
+    pub invocation_id: String,
+    pub capability_id: String,
+    pub result_summary: String,
+    pub artifacts: CapabilityParentArtifactPaths,
+    pub parent_topology_unchanged: bool,
+}
+
+/// parent run 可消费的 `capability.failed` payload。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityParentFailedRecord {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_id: Option<String>,
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<CapabilityParentArtifactPaths>,
+    pub parent_topology_unchanged: bool,
+}
+
+/// parent runtime capability request 的执行 adapter。
+///
+/// 说明:
+/// - core 只负责识别 runtime action 和路由 result/failure。
+/// - 真正的 isolated child/micro-run 由 CLI 或其他宿主注入,避免 core 反向依赖进程执行细节。
+#[async_trait]
+pub trait RuntimeCapabilityInvoker: Send + Sync {
+    async fn invoke(&self, request: CapabilityRequestRecord) -> anyhow::Result<Event>;
+}
+
 /// capability.invoke artifact。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInvocationRecord {
@@ -171,5 +313,28 @@ mod tests {
 
         assert!(json.contains("workflow_capability"));
         assert!(json.contains("isolated_child_run"));
+    }
+
+    #[test]
+    fn capability_request_payload_requires_structured_fields() {
+        let request = CapabilityRequestRecord::parse_payload(
+            r#"{"request_id":"req-1","capability_id":"hat:focused-reviewer","input":"review"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(request.request_id, "req-1");
+        assert_eq!(request.capability_id, "hat:focused-reviewer");
+        assert_eq!(request.input, "review");
+    }
+
+    #[test]
+    fn capability_request_parse_error_preserves_available_ids() {
+        let error =
+            CapabilityRequestRecord::parse_payload(r#"{"request_id":"req-1","input":"review"}"#)
+                .unwrap_err();
+
+        assert_eq!(error.request_id.as_deref(), Some("req-1"));
+        assert_eq!(error.capability_id, None);
+        assert!(error.error.contains("capability_id"));
     }
 }

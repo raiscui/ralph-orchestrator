@@ -800,3 +800,208 @@
 处理:
 - 重新暂存本条记录。
 - 用正确 co-author trailer 重新提交。
+
+## [2026-05-15 09:20:00] [Session ID: omx-1778510695653-7pd7o2] 新任务: Phase 4 live runtime capability invocation
+
+目标:
+- 按 `LATER_PLANS.md` 推进 Phase 4: 让真实 parent run 中的 `ralph#1` 能选择并触发 capability invocation。
+- capability 执行仍走 isolated child/micro-run。
+- result/failure artifact 要回传 parent run。
+- parent topology 不能热改。
+- dogfood 时必须用 Phase 3.1 的 `ralph tools capability inspect <invocation_id>` 查询证据链。
+
+执行边界:
+- 先创建 OpenSpec change 和测试计划,再实现。
+- 优先复用 Phase 3/3.1 的 `capability` module、artifact writer、evidence index、inspect UX。
+- 不新增第二套 runtime broker。
+- 不引入 live external LLM E2E;优先用 deterministic custom backend / dry-run path 做 dogfood。
+
+当前待办列表:
+- [ ] 阶段1: 创建 OpenSpec change `live-runtime-capability-invocation` 并写 proposal/design/spec/tasks/test-plan。
+- [ ] 阶段2: 探查 parent run / ralph#1 / event parsing / capability module 当前代码路径。
+- [ ] 阶段3: 实现 parent run 触发 isolated capability invocation 的最小闭环。
+- [ ] 阶段4: 用 integration dogfood 验证 parent event/result/evidence/inspect。
+- [ ] 阶段5: 跑 fmt / focused tests / smoke / cargo test / OpenSpec / diff checks。
+- [ ] 阶段6: archive OpenSpec change,本地提交。
+
+即将执行:
+- 创建 OpenSpec change `live-runtime-capability-invocation`。
+- 生成完整 OpenSpec artifacts 后再读 runtime 代码。
+
+## [2026-05-15 09:27:00] [Session ID: omx-1778510695653-7pd7o2] 工具异常记录: openspec status 输出 JSON 后未退出
+
+现象:
+- `openspec status --change live-runtime-capability-invocation --json` 已打印完整 JSON。
+- 但 Node 进程没有退出,导致 shell session 挂住。
+
+处理:
+- 清理匹配的 `openspec status` Node 进程。
+- 当前 OpenSpec scaffold 已存在,继续按已打印的 artifact 状态推进。
+
+状态:
+- `proposal` ready。
+- `design/specs/tasks` 依赖 proposal。
+
+## [2026-05-15 09:36:00] [Session ID: omx-1778510695653-7pd7o2] 阶段1完成: Phase 4 OpenSpec gate 已通过
+
+已完成:
+- [x] 创建 OpenSpec change `live-runtime-capability-invocation`。
+- [x] 写入 proposal/design/delta spec/tasks/test-plan。
+- [x] `openspec validate live-runtime-capability-invocation --type change`: valid。
+- [x] `openspec validate --all --strict`: 27 passed,0 failed。
+
+当前待办列表:
+- [x] 阶段1: 创建 OpenSpec change `live-runtime-capability-invocation` 并写 proposal/design/spec/tasks/test-plan。
+- [ ] 阶段2: 探查 parent run / ralph#1 / event parsing / capability module 当前代码路径。
+- [ ] 阶段3: 实现 parent run 触发 isolated capability invocation 的最小闭环。
+- [ ] 阶段4: 用 integration dogfood 验证 parent event/result/evidence/inspect。
+- [ ] 阶段5: 跑 fmt / focused tests / smoke / cargo test / OpenSpec / diff checks。
+- [ ] 阶段6: archive OpenSpec change,本地提交。
+
+即将执行:
+- 查 `loop_runner`、`parallel_runner`、`event_logger`、`EventParser` 和 integration run 测试。
+- 找一个最小可测试接入点。
+
+## [2026-05-15 10:56:22] [Session ID: omx-1778510695653-7pd7o2] 阶段2继续: Phase 4 实现前刷新上下文
+
+当前状态:
+- Phase 4 OpenSpec change `live-runtime-capability-invocation` 已存在且前一轮验证通过。
+- 当前继续从未完成的阶段2开始: 探查 parent run / `ralph#1` / event parsing / capability module 当前代码路径。
+
+当前待办列表:
+- [x] 阶段1: 创建 OpenSpec change `live-runtime-capability-invocation` 并写 proposal/design/spec/tasks/test-plan。
+- [ ] 阶段2: 探查 parent run / ralph#1 / event parsing / capability module 当前代码路径。
+- [ ] 阶段3: 实现 parent run 触发 isolated capability invocation 的最小闭环。
+- [ ] 阶段4: 用 integration dogfood 验证 parent event/result/evidence/inspect。
+- [ ] 阶段5: 跑 fmt / focused tests / smoke / cargo test / OpenSpec / diff checks。
+- [ ] 阶段6: archive OpenSpec change,本地提交。
+
+即将执行:
+- 读取 OpenSpec artifacts,确认实现边界。
+- 读取 `loop_runner` / `event_loop` / `capability` / integration tests,找到最小接入点。
+- 先写 focused integration dogfood 的失败测试,再实现。
+
+## [2026-05-15 11:18:09] [Session ID: omx-1778510695653-7pd7o2] 阶段2-4进展: Phase 4 最小闭环已通过 focused dogfood
+
+已完成:
+- [x] 阶段2: 探查 parent run / `ralph#1` / event parsing / capability module 当前代码路径。
+- [x] 阶段3: 实现 parent run 触发 isolated capability invocation 的最小闭环。
+- [x] 阶段4: 用 integration dogfood 验证 parent event/result/evidence/inspect。
+
+当前实现口径:
+- core `ParallelSupervisor` 只识别 `ralph#1` 输出的 `capability.request`。
+- CLI 注入 `RuntimeCapabilityInvoker`,复用现有 isolated child/micro-run invocation path。
+- parent result/failure 作为 `capability.result` / `capability.failed` event 回写 parent event log。
+- parent topology 不热改,adapter 只写 artifacts / evidence index。
+
+已运行验证:
+- `cargo check -p ralph-core -p ralph-cli`: passed。
+- `cargo test -p ralph-core capability_request -- --nocapture`: 5 passed。
+- `cargo test -p ralph-cli --test integration_live_capability -- --nocapture`: 1 passed。
+- `cargo test -p ralph-cli --test integration_capability -- --nocapture`: 4 passed。
+- `cargo test -p ralph-cli capability::tests -- --nocapture`: 6 passed。
+
+当前待办列表:
+- [x] 阶段1: 创建 OpenSpec change `live-runtime-capability-invocation` 并写 proposal/design/spec/tasks/test-plan。
+- [x] 阶段2: 探查 parent run / ralph#1 / event parsing / capability module 当前代码路径。
+- [x] 阶段3: 实现 parent run 触发 isolated capability invocation 的最小闭环。
+- [x] 阶段4: 用 integration dogfood 验证 parent event/result/evidence/inspect。
+- [ ] 阶段5: 跑 fmt / focused tests / smoke / cargo test / OpenSpec / diff checks。
+- [ ] 阶段6: archive OpenSpec change,本地提交。
+
+即将执行:
+- 更新 OpenSpec tasks 的实现/测试项。
+- 跑 smoke runner、全量 cargo test、OpenSpec 和 diff checks。
+
+## [2026-05-15 11:23:44] [Session ID: omx-1778510695653-7pd7o2] 阶段5完成: Phase 4 验证 gate 全部通过
+
+已完成验证:
+- [x] `openspec validate live-runtime-capability-invocation --type change`: valid。
+- [x] `openspec validate --all --strict`: 27 passed,0 failed。
+- [x] `cargo fmt --all -- --check`: passed。
+- [x] `cargo test -p ralph-cli --test integration_capability`: 4 passed。
+- [x] `cargo test -p ralph-cli --test integration_live_capability`: 1 passed。
+- [x] `cargo test -p ralph-cli capability::tests`: 6 passed。
+- [x] `cargo test -p ralph-core smoke_runner`: 12 passed。
+- [x] `cargo test`: passed workspace tests and doctests。
+- [x] `git diff --check` / `git diff --cached --check`: passed。
+
+当前待办列表:
+- [x] 阶段1: 创建 OpenSpec change `live-runtime-capability-invocation` 并写 proposal/design/spec/tasks/test-plan。
+- [x] 阶段2: 探查 parent run / ralph#1 / event parsing / capability module 当前代码路径。
+- [x] 阶段3: 实现 parent run 触发 isolated capability invocation 的最小闭环。
+- [x] 阶段4: 用 integration dogfood 验证 parent event/result/evidence/inspect。
+- [x] 阶段5: 跑 fmt / focused tests / smoke / cargo test / OpenSpec / diff checks。
+- [ ] 阶段6: archive OpenSpec change,本地提交。
+
+即将执行:
+- archive OpenSpec change `live-runtime-capability-invocation`。
+- archive 后重新跑 OpenSpec strict 和 diff check。
+- 审查 git diff/status,再本地提交。
+
+## [2026-05-15 11:28:04] [Session ID: omx-1778510695653-7pd7o2] 阶段6完成: Phase 4 已归档并准备提交
+
+已完成:
+- [x] `openspec archive live-runtime-capability-invocation --yes`。
+- [x] 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步 Phase 4 requirements。
+- [x] 已清理 `LATER_PLANS.md` 中 Phase 4 延期项,避免重复待办。
+- [x] archive 后 `openspec validate --all --strict`: 26 passed,0 failed。
+- [x] archive 后 `cargo fmt --all -- --check`: passed。
+- [x] archive 后 `git diff --check` / `git diff --cached --check`: passed。
+
+当前待办列表:
+- [x] 阶段1: 创建 OpenSpec change `live-runtime-capability-invocation` 并写 proposal/design/spec/tasks/test-plan。
+- [x] 阶段2: 探查 parent run / ralph#1 / event parsing / capability module 当前代码路径。
+- [x] 阶段3: 实现 parent run 触发 isolated capability invocation 的最小闭环。
+- [x] 阶段4: 用 integration dogfood 验证 parent event/result/evidence/inspect。
+- [x] 阶段5: 跑 fmt / focused tests / smoke / cargo test / OpenSpec / diff checks。
+- [x] 阶段6: archive OpenSpec change,本地提交准备。
+
+EPIPHANY_LOG 检查:
+- 本轮没有发现需要单独长期讨论的灾难级风险。
+- 已经把“child lifecycle result 与 parent-return result 同 topic,测试必须按 request_id 区分”的问题写入 `ERRORFIX.md`。
+
+即将执行:
+- `git status` 最终审查。
+- `git add` 本轮相关文件。
+- 本地提交,不 push。
+
+## [2026-05-15 11:40:00] [Session ID: omx-1778510695653-7pd7o2] 交接复核: Phase 4 完成态确认
+
+当前目标:
+- 复核上一轮交接中声称已完成的 Phase 4 live runtime capability invocation。
+- 重点确认 Git 工作区是否干净、最近提交是否为 Phase 4、本地是否未 push。
+
+当前待办列表:
+- [x] 阶段1: 创建并完成 OpenSpec change `live-runtime-capability-invocation`。
+- [x] 阶段2: 实现 parent `ralph#1` 触发 isolated child/micro-run invocation。
+- [x] 阶段3: 回传 `capability.result` / `capability.failed` artifact 到 parent run。
+- [x] 阶段4: 使用 Phase 3.1 inspect UX dogfood evidence chain。
+- [x] 阶段5: focused tests / smoke tests / cargo test / OpenSpec / diff checks。
+- [x] 阶段6: archive change 并本地提交。
+- [ ] 阶段7: 最终交接复核并向用户汇报。
+
+即将执行:
+- `git status --short --untracked-files=all`
+- `git log -1 --oneline`
+- `git show -1 --stat --format=fuller`
+
+## [2026-05-15 11:41:30] [Session ID: omx-1778510695653-7pd7o2] 阶段7完成: Phase 4 交接复核完成
+
+复核结果:
+- `git log -1 --oneline`: `ebb5c45 Let parent runs invoke isolated capabilities`。
+- 最近提交包含 Phase 4 core protocol、parallel supervisor runtime hook、CLI adapter、integration dogfood、OpenSpec archive、上下文记录。
+- 当前只有本次复核追加的 `task_plan.md` 记录是未提交变更。
+
+当前待办列表:
+- [x] 阶段1: 创建并完成 OpenSpec change `live-runtime-capability-invocation`。
+- [x] 阶段2: 实现 parent `ralph#1` 触发 isolated child/micro-run invocation。
+- [x] 阶段3: 回传 `capability.result` / `capability.failed` artifact 到 parent run。
+- [x] 阶段4: 使用 Phase 3.1 inspect UX dogfood evidence chain。
+- [x] 阶段5: focused tests / smoke tests / cargo test / OpenSpec / diff checks。
+- [x] 阶段6: archive change 并本地提交。
+- [x] 阶段7: 最终交接复核并向用户汇报。
+
+EPIPHANY_LOG 检查:
+- 本次复核没有发现新的架构级灾难风险。
+- Phase 4 的主要风险已经由提交中的 `Directive` 和 `ERRORFIX.md` 记录: 查询 `capability.result` 时必须用 `request_id` 区分 parent-return result。

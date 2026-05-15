@@ -4,19 +4,24 @@
 //! v1 只做规则选择 + 隔离 child/micro-run,不会热改当前 live topology。
 
 use anyhow::{Context, Result, anyhow, bail};
+use async_trait::async_trait;
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{
     CapabilityChoice, CapabilityFailedRecord, CapabilityInvocationMode, CapabilityInvocationRecord,
-    CapabilityKind, CapabilityMetadata, CapabilityResultRecord, EventLogger, EvidenceArtifactKind,
-    EvidenceIndexEntry, EvidenceIndexReader, EvidenceIndexWriter, EvidenceLookup, EvidenceStatus,
-    RalphConfig, TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_INVOKE, TOPIC_CAPABILITY_RESULT,
+    CapabilityKind, CapabilityMetadata, CapabilityParentArtifactPaths,
+    CapabilityParentFailedRecord, CapabilityParentResultRecord, CapabilityRequestRecord,
+    CapabilityResultRecord, EventLogger, EvidenceArtifactKind, EvidenceIndexEntry,
+    EvidenceIndexReader, EvidenceIndexWriter, EvidenceLookup, EvidenceStatus, RalphConfig,
+    RuntimeCapabilityInvoker, TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_INVOKE,
+    TOPIC_CAPABILITY_RESULT,
 };
 use ralph_proto::Event;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use crate::startup_resources::{self, ResourceKind};
 
@@ -237,6 +242,149 @@ fn invoke_capability(args: CapabilityInvokeArgs) -> Result<()> {
     Ok(())
 }
 
+/// 创建 CLI runtime capability invoker。
+///
+/// 说明:
+/// - 这是 parallel parent run 注入给 core supervisor 的 adapter。
+/// - adapter 只复用现有 isolated invocation path,不修改 parent config/topology。
+pub(crate) fn runtime_capability_invoker(workspace: PathBuf) -> Arc<dyn RuntimeCapabilityInvoker> {
+    Arc::new(CliRuntimeCapabilityInvoker { workspace })
+}
+
+struct CliRuntimeCapabilityInvoker {
+    workspace: PathBuf,
+}
+
+#[async_trait]
+impl RuntimeCapabilityInvoker for CliRuntimeCapabilityInvoker {
+    async fn invoke(&self, request: CapabilityRequestRecord) -> Result<Event> {
+        let workspace = self.workspace.clone();
+        tokio::task::spawn_blocking(move || invoke_parent_request(&workspace, request))
+            .await
+            .context("runtime capability invocation task panicked")?
+    }
+}
+
+fn invoke_parent_request(workspace: &Path, request: CapabilityRequestRecord) -> Result<Event> {
+    match invoke_capability_by_id(workspace, &request.capability_id, &request.input) {
+        Ok(report) if report.child_success => {
+            Ok(parent_result_event(workspace, &request, &report)?)
+        }
+        Ok(report) => Ok(parent_invocation_failed_event(
+            workspace, &request, &report,
+        )?),
+        Err(error) => Ok(parent_failed_event(workspace, &request, error)),
+    }
+}
+
+fn invoke_capability_by_id(
+    workspace: &Path,
+    capability_id: &str,
+    input: &str,
+) -> Result<CapabilityInvokeReport> {
+    let catalog = capability_catalog();
+    let choice = choose_capability(&catalog, Some(capability_id), input)?;
+    let capability = catalog
+        .iter()
+        .find(|candidate| candidate.id == choice.capability_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("Selected capability disappeared: {}", choice.capability_id))?;
+
+    invoke_isolated(workspace, capability, choice, input)
+}
+
+fn parent_result_event(
+    workspace: &Path,
+    request: &CapabilityRequestRecord,
+    report: &CapabilityInvokeReport,
+) -> Result<Event> {
+    let result = CapabilityParentResultRecord {
+        status: "result".to_string(),
+        request_id: request.request_id.clone(),
+        invocation_id: report.invocation.invocation_id.clone(),
+        capability_id: report.invocation.capability.id.clone(),
+        result_summary: report.result.result_summary.clone(),
+        artifacts: parent_artifact_paths(workspace, &report.invocation.invocation_id, true),
+        parent_topology_unchanged: report.invocation.parent_topology_unchanged
+            && report.result.parent_topology_unchanged,
+    };
+
+    Ok(Event::new(
+        TOPIC_CAPABILITY_RESULT,
+        serde_json::to_string(&result)?,
+    ))
+}
+
+fn parent_failed_event(
+    _workspace: &Path,
+    request: &CapabilityRequestRecord,
+    error: anyhow::Error,
+) -> Event {
+    let failed = CapabilityParentFailedRecord {
+        status: "failed".to_string(),
+        request_id: Some(request.request_id.clone()),
+        invocation_id: None,
+        capability_id: Some(request.capability_id.clone()),
+        error: format!("{error:#}"),
+        artifacts: None,
+        parent_topology_unchanged: true,
+    };
+
+    Event::new(
+        TOPIC_CAPABILITY_FAILED,
+        serde_json::to_string(&failed).expect("CapabilityParentFailedRecord serializes"),
+    )
+}
+
+fn parent_invocation_failed_event(
+    workspace: &Path,
+    request: &CapabilityRequestRecord,
+    report: &CapabilityInvokeReport,
+) -> Result<Event> {
+    let failed = CapabilityParentFailedRecord {
+        status: "failed".to_string(),
+        request_id: Some(request.request_id.clone()),
+        invocation_id: Some(report.invocation.invocation_id.clone()),
+        capability_id: Some(report.invocation.capability.id.clone()),
+        error: report.result.stderr_summary.clone(),
+        artifacts: Some(parent_artifact_paths(
+            workspace,
+            &report.invocation.invocation_id,
+            false,
+        )),
+        parent_topology_unchanged: report.invocation.parent_topology_unchanged
+            && report.result.parent_topology_unchanged,
+    };
+
+    Ok(Event::new(
+        TOPIC_CAPABILITY_FAILED,
+        serde_json::to_string(&failed)?,
+    ))
+}
+
+fn parent_artifact_paths(
+    workspace: &Path,
+    invocation_id: &str,
+    success: bool,
+) -> CapabilityParentArtifactPaths {
+    let invocation_dir = workspace.join(INVOCATION_ROOT).join(invocation_id);
+
+    CapabilityParentArtifactPaths {
+        invoke_json: invocation_dir.join("invoke.json").display().to_string(),
+        result_json: success.then(|| invocation_dir.join("result.json").display().to_string()),
+        failed_json: (!success).then(|| invocation_dir.join("failed.json").display().to_string()),
+        resolved_config: invocation_dir
+            .join("resolved-config.yml")
+            .display()
+            .to_string(),
+        events_jsonl: workspace.join(".ralph/events.jsonl").display().to_string(),
+        evidence_index: workspace
+            .join(EvidenceIndexWriter::DEFAULT_PATH)
+            .display()
+            .to_string(),
+    }
+}
+
 fn inspect_capability_evidence(args: CapabilityInspectArgs) -> Result<()> {
     let workspace = args
         .workspace
@@ -416,6 +564,8 @@ fn choose_capability(
 struct CapabilityInvokeReport {
     invocation: CapabilityInvocationRecord,
     result: CapabilityResultRecord,
+    #[serde(skip_serializing)]
+    child_success: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -529,7 +679,9 @@ fn invoke_isolated_with_runner(
         parent_topology_unchanged: true,
     };
 
-    if child_output.success {
+    let child_success = child_output.success;
+
+    if child_success {
         let result_path = invocation_dir.join("result.json");
         write_json(&result_path, &result)?;
         record_capability_evidence(
@@ -560,7 +712,11 @@ fn invoke_isolated_with_runner(
         log_capability_event(workspace, TOPIC_CAPABILITY_FAILED, &failed)?;
     }
 
-    Ok(CapabilityInvokeReport { invocation, result })
+    Ok(CapabilityInvokeReport {
+        invocation,
+        result,
+        child_success,
+    })
 }
 
 fn resolved_config_for_capability(capability: &CapabilityMetadata, input: &str) -> RalphConfig {

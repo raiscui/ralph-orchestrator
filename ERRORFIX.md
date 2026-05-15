@@ -514,3 +514,35 @@
 
 ### 验证
 - 重新执行 `git commit` 时应通过 hook。
+
+## [2026-05-15 11:18:09] [Session ID: omx-1778510695653-7pd7o2] 问题: Phase 4 dogfood 首次误抓 child capability.result
+
+### 现象
+- 新增 `integration_live_capability` 首次失败。
+- 断言 `payload["request_id"] == "cap-req-dogfood-1"` 时拿到 `Null`。
+
+### 原因
+- `.ralph/events.jsonl` 中存在两类同 topic `capability.result`:
+  - child isolated invocation lifecycle result,不带 `request_id`。
+  - parent-return result,带 `request_id` 和 `invocation_id`。
+- 测试错误地选取第一条 `capability.result`,导致抓到 child lifecycle result。
+
+### 修复
+- integration dogfood 改为筛选 `topic == "capability.result"` 且 payload 中 `request_id == "cap-req-dogfood-1"` 的 parent-return result。
+
+### 验证
+- `cargo test -p ralph-cli --test integration_live_capability -- --nocapture`: passed。
+
+## [2026-05-15 11:27:26] [Session ID: omx-1778510695653-7pd7o2] 问题: LATER_PLANS.md 末尾空白行导致 diff check 失败
+
+### 现象
+- final gate 中 `git diff --check` 报错: `LATER_PLANS.md:475: new blank line at EOF.`
+
+### 原因
+- 删除已完成的 Phase 4 延期计划块后,文件末尾留下了多余空白行。
+
+### 修复
+- 规范化 `LATER_PLANS.md` 文件末尾,保留单个最终换行,移除多余空白行。
+
+### 验证
+- 将重新运行 `git diff --check` / `git diff --cached --check`。

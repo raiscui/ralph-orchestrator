@@ -6,6 +6,7 @@
 //!   - 解析 `<event ...>` 并继续路由
 //! - 3.x 任务会把路由语义补齐到“可依赖”：显式 TopicContract + recipients 计算 + missing 分支 + 决策落盘。
 
+mod capability_runtime;
 mod gate;
 mod routing;
 #[cfg(test)]
@@ -23,7 +24,7 @@ use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
 use crate::{
     AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot, EventParser,
-    EventReader as FileEventReader, TerminationReason,
+    EventReader as FileEventReader, RuntimeCapabilityInvoker, TerminationReason,
 };
 use anyhow::Context;
 use ralph_proto::{
@@ -113,6 +114,12 @@ pub struct ParallelSupervisor {
     // Human gate 状态机（open gates + timeout）
     gates: gate::GateManager,
 
+    // parent-run capability invocation:
+    // - handled ids 是 parent run 进程内幂等表。
+    // - invoker 由 CLI 注入,core 不直接知道 child/micro-run 如何执行。
+    handled_capability_request_ids: HashSet<String>,
+    runtime_capability_invoker: Option<Arc<dyn RuntimeCapabilityInvoker>>,
+
     // Supervisor 自己生成的任务序号（用于 decider job 的稳定命名）
     next_decision_job_id: u64,
 
@@ -196,6 +203,8 @@ impl ParallelSupervisor {
             queue_decisions: HashMap::new(),
             request_reply_origins: HashMap::new(),
             gates: gate::GateManager::new(),
+            handled_capability_request_ids: HashSet::new(),
+            runtime_capability_invoker: None,
             next_decision_job_id: 1,
             pause_on_completion_promise: false,
             disable_dynamic_instance_reap: false,
@@ -237,6 +246,20 @@ impl ParallelSupervisor {
         observer: Arc<dyn Fn(&RuntimeDeliveryObservation) + Send + Sync>,
     ) -> Self {
         self.delivery_observer = Some(observer);
+        self
+    }
+
+    /// 设置 runtime capability invocation adapter。
+    ///
+    /// 说明:
+    /// - 这个 hook 只负责处理 `ralph#1` 在 parent run 中产出的 `capability.request`。
+    /// - adapter 必须自己保证 isolated child/micro-run 执行,不能热改 parent topology。
+    #[must_use]
+    pub fn with_runtime_capability_invoker(
+        mut self,
+        invoker: Arc<dyn RuntimeCapabilityInvoker>,
+    ) -> Self {
+        self.runtime_capability_invoker = Some(invoker);
         self
     }
 
@@ -474,6 +497,24 @@ impl ParallelSupervisor {
                                 let _ = self.event_logger.log_event(0, hat_id.as_str(), event, triggered);
                             }
 
+                            let capability_return_events = self
+                                .handle_parent_capability_requests(&hat_id, &events)
+                                .await?;
+                            for event in &capability_return_events {
+                                let triggered = self.registry.find_by_trigger(event.topic.as_str());
+                                let _ = self.event_logger.log_event(0, "capability", event, triggered);
+                            }
+                            let routable_events = if hat_id.as_str() == "ralph" {
+                                events
+                                    .into_iter()
+                                    .filter(|event| {
+                                        event.topic.as_str() != crate::TOPIC_CAPABILITY_REQUEST
+                                    })
+                                    .collect()
+                            } else {
+                                events
+                            };
+
                             // 完成判断：仅 Ralph 的输出可触发 completion promise（沿用现有规则）。
                             // 注意：不要在这里立刻 break（见上方 drain 说明）。
                             let completion_promise = hat_id.as_str() == "ralph"
@@ -520,7 +561,10 @@ impl ParallelSupervisor {
                             if !stop_spawning
                                 || (completion_promise && self.pause_on_completion_promise)
                             {
-                                self.route_events_batch(events).await?;
+                                self.route_events_batch(routable_events).await?;
+                                if !capability_return_events.is_empty() {
+                                    self.route_events_batch(capability_return_events).await?;
+                                }
                             }
 
                             // 迭代上限：以 ralph#1 的 job 完成次数为准（见上方说明）。

@@ -345,3 +345,31 @@
 - Phase 3.1 的正确边界是给 capability invocation evidence 一个稳定 lookup UX,而不是把 evidence kernel 膨胀成新的 doctor/diagnostic 平台。
 - `--json` 是 agent/automation contract,human 输出只是阅读层。
 - Phase 4 进入 live runtime 调用前,先有 inspect UX 是值得的,否则 live path 失败时调试面会太散。
+
+## [2026-05-15 11:23:44] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 4 live runtime capability invocation 实现与验证
+
+### 任务内容
+- 实现真实 parent run 中 `ralph#1` 通过 `capability.request` 触发 isolated capability invocation。
+- result/failure 通过 parent-visible `capability.result` / `capability.failed` event 回传。
+- 复用 Phase 3/3.1 capability invocation artifacts、evidence index 和 inspect UX。
+
+### 完成过程
+- 在 core 协议层新增 `capability.request` payload、parent result/failure payload 和 `RuntimeCapabilityInvoker` adapter trait。
+- 在 parallel supervisor 中只处理 `ralph#1` 输出的 `capability.request`,并按 `request_id` 幂等去重。
+- 在 CLI capability module 中注入 runtime invoker,复用现有 `invoke_isolated` child/micro-run path。
+- 新增 `integration_live_capability` dogfood,真实运行 parallel `ralph#1`,抽取 invocation id,并用 `ralph tools capability inspect <id> --json` 查询证据链。
+
+### 验证
+- `openspec validate live-runtime-capability-invocation --type change`: valid。
+- `openspec validate --all --strict`: 27 passed,0 failed。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test -p ralph-cli --test integration_capability`: passed。
+- `cargo test -p ralph-cli --test integration_live_capability`: passed。
+- `cargo test -p ralph-cli capability::tests`: passed。
+- `cargo test -p ralph-core smoke_runner`: passed。
+- `cargo test`: passed。
+- `git diff --check`: passed。
+
+### 总结感悟
+- Phase 4 最稳的边界是 core 只做 runtime action hook,CLI adapter 负责执行 child/micro-run。
+- `capability.result` 同时承载 child lifecycle 和 parent-return 语义,测试必须用 `request_id` 区分 parent-return result。

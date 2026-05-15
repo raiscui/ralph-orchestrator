@@ -3,6 +3,8 @@
 //! Logs all events to `.ralph/events.jsonl` as specified in the event-loop spec.
 //! The observer pattern allows hooking into the event bus without modifying routing.
 
+use crate::TOPIC_CAPABILITY_INVOKE;
+use crate::{TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_REQUEST, TOPIC_CAPABILITY_RESULT};
 use ralph_proto::{
     Event, HatId, QueueDecisionRecord, RuntimeDeliveryRecord, RuntimeLifecycleRecord,
     TOPIC_DISPATCH_DECISION, TOPIC_RUNTIME_DELIVERY, TOPIC_RUNTIME_LIFECYCLE,
@@ -120,7 +122,13 @@ impl EventRecord {
     fn should_truncate_payload(topic: &str) -> bool {
         !matches!(
             topic,
-            TOPIC_DISPATCH_DECISION | TOPIC_RUNTIME_DELIVERY | TOPIC_RUNTIME_LIFECYCLE
+            TOPIC_DISPATCH_DECISION
+                | TOPIC_RUNTIME_DELIVERY
+                | TOPIC_RUNTIME_LIFECYCLE
+                | TOPIC_CAPABILITY_INVOKE
+                | TOPIC_CAPABILITY_REQUEST
+                | TOPIC_CAPABILITY_RESULT
+                | TOPIC_CAPABILITY_FAILED
         )
     }
 

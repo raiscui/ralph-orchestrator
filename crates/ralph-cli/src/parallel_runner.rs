@@ -1317,10 +1317,19 @@ pub async fn run_parallel_loop_impl(
     }
 
     // Supervisor
+    //
+    // Phase 4: runtime capability invocation adapter。
+    // 说明:
+    // - core supervisor 只识别 `capability.request` 并回传 result/failure event。
+    // - 真正 isolated child/micro-run 仍由 CLI capability module 执行。
+    // - workspace_root 是 artifact 真相源根目录,不会热改 parent topology。
+    let runtime_capability_invoker =
+        crate::capability::runtime_capability_invoker(config.core.workspace_root.clone());
     let mut supervisor = ParallelSupervisor::new(config, prompt_content, executor)?
         .with_agents_snapshot_to_default_path()
         .with_output_observer(observer)
         .with_instance_state_observer(state_observer)
+        .with_runtime_capability_invoker(runtime_capability_invoker)
         // 并行 TUI：completion promise（LOOP_COMPLETE）进入“暂停”而不是“退出”，并禁用动态实例回收，
         // 这样 human message 可以在会话中持续驱动下一轮对话/工作，而不会被 done/回收打断。
         .with_pause_on_completion_promise(enable_tui)
