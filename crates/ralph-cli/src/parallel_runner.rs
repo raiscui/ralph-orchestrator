@@ -1323,9 +1323,11 @@ pub async fn run_parallel_loop_impl(
     // - core supervisor 只识别 `capability.request` 并回传 result/failure event。
     // - 真正 isolated child/micro-run 仍由 CLI capability module 执行。
     // - workspace_root 是 artifact 真相源根目录,不会热改 parent topology。
+    let runtime_capability_catalog = crate::capability::capability_catalog();
     let runtime_capability_invoker =
         crate::capability::runtime_capability_invoker(config.core.workspace_root.clone());
     let mut supervisor = ParallelSupervisor::new(config, prompt_content, executor)?
+        .with_runtime_capability_catalog(runtime_capability_catalog)
         .with_agents_snapshot_to_default_path()
         .with_output_observer(observer)
         .with_instance_state_observer(state_observer)

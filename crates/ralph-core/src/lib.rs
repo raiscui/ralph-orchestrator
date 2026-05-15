@@ -52,9 +52,9 @@ pub use capability::{
     CapabilityChoice, CapabilityFailedRecord, CapabilityInvocationMode, CapabilityInvocationRecord,
     CapabilityKind, CapabilityMetadata, CapabilityParentArtifactPaths,
     CapabilityParentFailedRecord, CapabilityParentResultRecord, CapabilityRequestParseError,
-    CapabilityRequestRecord, CapabilityResultRecord, RuntimeCapabilityInvoker,
-    TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_INVOKE, TOPIC_CAPABILITY_REQUEST,
-    TOPIC_CAPABILITY_RESULT,
+    CapabilityRequestRecord, CapabilityResultRecord, PARENT_CAPABILITY_CATALOG_HEADING,
+    RuntimeCapabilityInvoker, TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_INVOKE,
+    TOPIC_CAPABILITY_REQUEST, TOPIC_CAPABILITY_RESULT, render_parent_capability_catalog,
 };
 pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{

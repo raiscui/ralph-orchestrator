@@ -412,3 +412,32 @@
 ### Phase 4 依赖关系
 - Phase 4 live runtime capability invocation 应依赖 Phase 3.1 inspect UX。
 - 否则 live 调用失败时只有 artifacts,没有稳定人为/agent 查询入口。
+
+## [2026-05-15 12:14:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: Phase 4.1 注入点探查
+
+## 来源
+
+### 来源1: `crates/ralph-cli/src/capability.rs`
+- 已有 `capability_catalog() -> Vec<CapabilityMetadata>`。
+- catalog 来源是 structured startup resource metadata + 内嵌 `hat:focused-reviewer`。
+- 注释明确不读取 YAML 注释,也不把完整 instructions 注入摘要。
+
+### 来源2: `crates/ralph-core/src/parallel/supervisor.rs`
+- `build_ralph_coordinator_instructions()` 是 `ralph#1` / `ralph#2` coordinator 指令来源。
+- 这里已有 `event_loop.ralph_prompt` 的 Ralph-only 注入,说明它是合适的 coordinator-only context 注入点。
+
+### 来源3: `crates/ralph-core/src/parallel/instance.rs`
+- `prompt_prelude` 只给 `hat.id == "ralph"` 注入。
+- 但直接把 catalog 拼到 `prompt_prelude` 会把用户 objective 和 capability catalog 混在一起,不如作为 coordinator instructions 的独立 section 更清晰。
+
+## 综合发现
+
+### 推荐实现
+- 在 core `ParallelSupervisor` 增加 `runtime_capability_catalog: Vec<CapabilityMetadata>` 字段和 builder 方法。
+- 在 core `capability.rs` 增加 parent-visible catalog renderer,负责稳定 marker、`capability.request` contract、bounded metadata。
+- 在 `build_ralph_coordinator_instructions()` 中注入 renderer 输出,只给 `ralph#1` / `ralph#2`。
+- 在 CLI `parallel_runner` 用现有 `crate::capability::capability_catalog()` 注入 supervisor。
+
+### 不采用的方案
+- 不把 catalog 拼进 `prompt_prelude`,避免把 capability selection surface 与 top-level objective 混在一起。
+- 不让 core 直接调用 CLI catalog builder,避免反向依赖。

@@ -14,7 +14,8 @@ fn write_prompt(workspace: &Path) -> Result<()> {
 fn write_backend_script(path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 这个脚本模拟真实 parent coordinator。
-    // 第一轮 `ralph#1` 选择 capability 并发出结构化请求。
+    // 第一轮 `ralph#1` 先检查 stdin prompt 中是否存在 capability catalog selection UX,
+    // 再选择 `hat:focused-reviewer` 并发出结构化请求。
     // 第二轮它收敛退出。证据链由 event log / artifacts / inspect 断言。
     // ─────────────────────────────────────────────────────────────────────
     let script = r#"#!/bin/sh
@@ -23,6 +24,8 @@ mkdir -p .ralph/dogfood
 instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
 case "$instance" in
   ralph#1)
+    prompt_capture=".ralph/dogfood/ralph-prompt.txt"
+    cat > "$prompt_capture"
     count_file=".ralph/dogfood/ralph.count"
     count=0
     if [ -f "$count_file" ]; then
@@ -31,6 +34,11 @@ case "$instance" in
     count=$((count + 1))
     printf '%s\n' "$count" > "$count_file"
     if [ "$count" -eq 1 ]; then
+      grep -q '## Runtime Capability Catalog' "$prompt_capture"
+      grep -q 'capability.request' "$prompt_capture"
+      grep -q 'request_id' "$prompt_capture"
+      grep -q 'capability_id' "$prompt_capture"
+      grep -q 'hat:focused-reviewer' "$prompt_capture"
       printf '<event id="cap-req-event-1" topic="capability.request">{"request_id":"cap-req-dogfood-1","capability_id":"hat:focused-reviewer","input":"review this patch"}</event>\n'
     else
       printf 'LOOP_COMPLETE\n'
@@ -133,6 +141,23 @@ fn parallel_parent_run_triggers_live_capability_invocation_and_inspect_evidence(
         "live capability dogfood run should succeed.\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    let captured_prompt = fs::read_to_string(workspace.join(".ralph/dogfood/ralph-prompt.txt"))?;
+    assert!(
+        captured_prompt.contains("## Runtime Capability Catalog"),
+        "ralph#1 prompt should include capability catalog: {captured_prompt}"
+    );
+    assert!(
+        captured_prompt.contains("capability.request")
+            && captured_prompt.contains("request_id")
+            && captured_prompt.contains("capability_id")
+            && captured_prompt.contains("input"),
+        "ralph#1 prompt should include capability.request contract: {captured_prompt}"
+    );
+    assert!(
+        captured_prompt.contains("hat:focused-reviewer"),
+        "ralph#1 prompt should include focused reviewer capability id: {captured_prompt}"
     );
 
     let records = read_event_records(workspace)?;

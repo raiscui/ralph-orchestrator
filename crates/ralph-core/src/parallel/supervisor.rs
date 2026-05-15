@@ -23,8 +23,9 @@ use crate::hat_registry::HatRegistry;
 use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
 use crate::{
-    AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot, EventParser,
+    AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot, CapabilityMetadata, EventParser,
     EventReader as FileEventReader, RuntimeCapabilityInvoker, TerminationReason,
+    render_parent_capability_catalog,
 };
 use anyhow::Context;
 use ralph_proto::{
@@ -115,8 +116,10 @@ pub struct ParallelSupervisor {
     gates: gate::GateManager,
 
     // parent-run capability invocation:
+    // - catalog 是 parent-side selection UX,只注入给 coordinator prompt。
     // - handled ids 是 parent run 进程内幂等表。
     // - invoker 由 CLI 注入,core 不直接知道 child/micro-run 如何执行。
+    runtime_capability_catalog: Vec<CapabilityMetadata>,
     handled_capability_request_ids: HashSet<String>,
     runtime_capability_invoker: Option<Arc<dyn RuntimeCapabilityInvoker>>,
 
@@ -203,6 +206,7 @@ impl ParallelSupervisor {
             queue_decisions: HashMap::new(),
             request_reply_origins: HashMap::new(),
             gates: gate::GateManager::new(),
+            runtime_capability_catalog: Vec::new(),
             handled_capability_request_ids: HashSet::new(),
             runtime_capability_invoker: None,
             next_decision_job_id: 1,
@@ -246,6 +250,20 @@ impl ParallelSupervisor {
         observer: Arc<dyn Fn(&RuntimeDeliveryObservation) + Send + Sync>,
     ) -> Self {
         self.delivery_observer = Some(observer);
+        self
+    }
+
+    /// 设置 parent-visible runtime capability catalog。
+    ///
+    /// 说明:
+    /// - 这里只是 `ralph#1` 的选择 UX,不创建、不替换、不注入 live topology。
+    /// - 真正执行仍由 `with_runtime_capability_invoker()` 注入的 isolated adapter 完成。
+    #[must_use]
+    pub fn with_runtime_capability_catalog(
+        mut self,
+        catalog: impl IntoIterator<Item = CapabilityMetadata>,
+    ) -> Self {
+        self.runtime_capability_catalog = catalog.into_iter().collect();
         self
     }
 
@@ -1079,6 +1097,11 @@ impl ParallelSupervisor {
 	            "- You MAY publish events in-band (`<event ...>...</event>`) or out-of-band via `ralph emit` when command execution is available.\n",
 	        );
         out.push_str("- You MUST keep output short and action-oriented.\n\n");
+
+        if let Some(catalog) = render_parent_capability_catalog(&self.runtime_capability_catalog) {
+            out.push_str(&catalog);
+            out.push_str("\n");
+        }
 
         // =====================================================================
         // Ralph-only prompt 注入（config: event_loop.ralph_prompt）

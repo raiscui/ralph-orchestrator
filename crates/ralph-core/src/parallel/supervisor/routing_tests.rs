@@ -1191,6 +1191,43 @@ fn hat_config(name: &str, triggers: Vec<&str>, instances: usize) -> HatConfig {
     }
 }
 
+fn make_supervisor_with_catalog(
+    mut config: RalphConfig,
+    executor: Arc<dyn HatJobExecutor>,
+    events_path: PathBuf,
+    catalog: Vec<crate::CapabilityMetadata>,
+) -> ParallelSupervisor {
+    config.parallel.enabled = true;
+
+    let mut supervisor = ParallelSupervisor::new(config, "prompt".to_string(), executor)
+        .expect("ParallelSupervisor::new should succeed")
+        .with_runtime_capability_catalog(catalog);
+
+    // 写到临时文件，避免污染 repo 的 .ralph/events.jsonl
+    supervisor.event_logger = EventLogger::new(events_path);
+    supervisor.evidence_index_writer = EvidenceIndexWriter::new(
+        supervisor
+            .event_logger
+            .path()
+            .with_file_name("evidence-index.jsonl"),
+    );
+
+    // 初始化并行通道（spawn_instances 需要）
+    let (output_tx, mut output_rx) = mpsc::channel::<HatJobOutputChunk>(16);
+    let (instance_tx, mut instance_rx) = mpsc::channel::<crate::parallel::HatInstanceEvent>(16);
+    supervisor.output_tx = Some(output_tx);
+    supervisor.instance_tx = Some(instance_tx);
+
+    tokio::spawn(async move { while output_rx.recv().await.is_some() {} });
+    tokio::spawn(async move { while instance_rx.recv().await.is_some() {} });
+
+    supervisor
+        .spawn_instances()
+        .expect("spawn_instances should succeed");
+
+    supervisor
+}
+
 fn make_supervisor(
     mut config: RalphConfig,
     executor: Arc<dyn HatJobExecutor>,
@@ -2111,6 +2148,96 @@ async fn parallel_injects_event_loop_ralph_prompt_only_for_ralph() {
     assert!(
         writer_prompt.contains(&overlay_anchor),
         "writer#1 prompt should include all-hat overlay content"
+    );
+}
+
+#[tokio::test]
+async fn runtime_capability_catalog_is_injected_only_into_ralph_prompt() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = PromptCaptureExecutor {
+        prompts: Arc::clone(&prompts),
+        notify: Arc::clone(&notify),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.core = config.core.with_workspace_root(temp_dir.path());
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+
+    let catalog = vec![crate::CapabilityMetadata {
+        id: "hat:focused-reviewer".to_string(),
+        kind: crate::CapabilityKind::HatCapability,
+        summary: "Focused reviewer micro-run".to_string(),
+        goal: "Review a bounded input".to_string(),
+        when_to_use: "Use when ralph#1 needs a one-off review lens.".to_string(),
+        input_contract: "A bounded text or task description to review.".to_string(),
+        output_contract: "A short review summary.".to_string(),
+        invocation_mode: crate::CapabilityInvocationMode::IsolatedMicroRun,
+    }];
+    let mut supervisor =
+        make_supervisor_with_catalog(config, Arc::new(executor), events_path, catalog);
+
+    let ralph_event = Event::new("task.start", "top-level prompt")
+        .with_id("e-task-start-capability-catalog")
+        .with_target_instance(HatInstanceId::from_parts("ralph", "1"));
+    supervisor
+        .route_event(ralph_event)
+        .await
+        .expect("route_event (ralph) should succeed");
+
+    let writer_event = Event::new("build.task", "do it")
+        .with_id("e-build-task-capability-catalog")
+        .with_target_instance(HatInstanceId::from_parts("writer", "1"));
+    supervisor
+        .route_event(writer_event)
+        .await
+        .expect("route_event (writer) should succeed");
+
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for prompts to be captured");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let got = prompts.lock().await.clone();
+    let ralph_prompt = got
+        .get("ralph#1")
+        .expect("should have captured ralph#1 prompt");
+    let writer_prompt = got
+        .get("writer#1")
+        .expect("should have captured writer#1 prompt");
+
+    assert!(
+        ralph_prompt.contains(crate::PARENT_CAPABILITY_CATALOG_HEADING),
+        "ralph#1 prompt should contain runtime capability catalog"
+    );
+    assert!(
+        ralph_prompt.contains("capability.request"),
+        "ralph#1 prompt should include capability request contract"
+    );
+    assert!(
+        ralph_prompt.contains("hat:focused-reviewer"),
+        "ralph#1 prompt should include callable capability id"
+    );
+    assert!(
+        ralph_prompt.contains("request_id")
+            && ralph_prompt.contains("capability_id")
+            && ralph_prompt.contains("input"),
+        "ralph#1 prompt should include required request payload fields"
+    );
+    assert!(
+        !writer_prompt.contains(crate::PARENT_CAPABILITY_CATALOG_HEADING),
+        "writer#1 prompt should not contain parent capability catalog"
+    );
+    assert!(
+        !writer_prompt.contains("hat:focused-reviewer"),
+        "writer#1 prompt should not receive parent capability catalog entries"
     );
 }
 

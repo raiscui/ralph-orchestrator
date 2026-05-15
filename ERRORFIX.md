@@ -546,3 +546,38 @@
 
 ### 验证
 - 将重新运行 `git diff --check` / `git diff --cached --check`。
+
+## [2026-05-15 12:39:00] [Session ID: omx-1778510695653-7pd7o2] 问题: Phase 4.1 首次格式检查失败
+
+### 现象
+- 阶段6 focused gate 中 `cargo fmt --all -- --check` 输出 rustfmt diff。
+- 涉及新增的 `capability.rs`、`lib.rs`、`supervisor.rs`、`routing_tests.rs` 格式。
+
+### 原因
+- 手工插入 renderer、supervisor builder 和测试后,长字符串和函数调用未完全符合 rustfmt 排版。
+
+### 修复
+- 运行 `cargo fmt --all` 统一格式化。
+
+### 验证
+- 后续已重新运行 `cargo fmt --all -- --check`,需在最终 gate 中确认通过。
+
+## [2026-05-15 23:23:41] [Session ID: omx-1778510695653-7pd7o2] 问题: 未加引号 heredoc 触发命令替换污染 task_plan
+
+### 现象
+- 在追加 Phase 4.1 验证记录时,使用了未加引号的 heredoc。
+- Markdown 正文包含反引号命令,导致 shell 执行 command substitution。
+- `task_plan.md` 被写入大量测试输出,`git diff --check` 报 trailing whitespace。
+
+### 原因
+- 违反了项目规则: 向六文件追加包含反引号的 Markdown 时必须使用 `cat <<'EOF'`。
+- 这次错误没有修改业务代码,但污染了上下文文件。
+
+### 修复
+- 将 `task_plan.md` 截回污染前的有效 194 行。
+- 使用单引号 heredoc 重新追加干净的阶段6/阶段7记录。
+- 保留已完成的 OpenSpec archive 和稳定 spec 更新。
+
+### 验证
+- 后续重新运行 `git diff --check`。
+- 后续重新运行 archive 后 focused gates。

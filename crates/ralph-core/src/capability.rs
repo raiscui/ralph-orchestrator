@@ -10,6 +10,56 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
+/// parent coordinator prompt 中 runtime capability catalog 的稳定标题。
+///
+/// 说明:
+/// - 测试与 agent 都用这个 marker 判断 selection surface 是否存在。
+/// - 这里只是选择面,不是执行面;真正调用仍由 `capability.request` 触发 isolated run。
+pub const PARENT_CAPABILITY_CATALOG_HEADING: &str = "## Runtime Capability Catalog";
+
+/// 渲染 parent-visible capability catalog。
+///
+/// 说明:
+/// - 输入必须是结构化 `CapabilityMetadata`,不要从 YAML 注释提取。
+/// - 输出只包含 bounded summary / contract,不包含完整 workflow 或 hat instructions。
+/// - 这段文本注入给 `ralph#1` / secondary coordinator,帮助它选择 capability 并发出结构化请求。
+pub fn render_parent_capability_catalog(capabilities: &[CapabilityMetadata]) -> Option<String> {
+    if capabilities.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push_str(PARENT_CAPABILITY_CATALOG_HEADING);
+    out.push_str("\n");
+    out.push_str(
+        "You may invoke a listed runtime capability by emitting exactly one structured event.\n\n",
+    );
+    out.push_str("Event contract:\n");
+    out.push_str("<event topic=\"capability.request\">{\"request_id\":\"unique-request-id\",\"capability_id\":\"<capability id>\",\"input\":\"task-specific input\"}</event>\n\n");
+    out.push_str("Required payload fields: `request_id`, `capability_id`, `input`.\n");
+    out.push_str("Execution isolation: runtime will execute the selected capability as an isolated child or micro-run; do not mutate parent topology.\n\n");
+    out.push_str("Available capabilities:\n");
+
+    for capability in capabilities {
+        out.push_str(&format!(
+            "- id: `{}`\n  kind: `{}`\n  mode: `{}`\n  summary: {}\n  when_to_use: {}\n  input: {}\n  output: {}\n",
+            capability.id,
+            capability.kind,
+            capability.invocation_mode,
+            one_line(&capability.summary),
+            one_line(&capability.when_to_use),
+            one_line(&capability.input_contract),
+            one_line(&capability.output_contract)
+        ));
+    }
+
+    Some(out)
+}
+
+fn one_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// 控制面 topic: parent run 请求调用 capability。
 pub const TOPIC_CAPABILITY_REQUEST: &str = "capability.request";
 
@@ -336,5 +386,37 @@ mod tests {
         assert_eq!(error.request_id.as_deref(), Some("req-1"));
         assert_eq!(error.capability_id, None);
         assert!(error.error.contains("capability_id"));
+    }
+
+    #[test]
+    fn parent_capability_catalog_renderer_includes_request_contract_and_bounded_metadata() {
+        let catalog = vec![CapabilityMetadata {
+            id: "hat:focused-reviewer".to_string(),
+            kind: CapabilityKind::HatCapability,
+            summary: "Focused reviewer micro-run".to_string(),
+            goal: "Review a bounded input".to_string(),
+            when_to_use: "Use when ralph#1 needs a one-off review lens.".to_string(),
+            input_contract: "A bounded text or task description to review.".to_string(),
+            output_contract: "A short review summary.".to_string(),
+            invocation_mode: CapabilityInvocationMode::IsolatedMicroRun,
+        }];
+
+        let rendered =
+            render_parent_capability_catalog(&catalog).expect("non-empty catalog should render");
+
+        assert!(rendered.contains(PARENT_CAPABILITY_CATALOG_HEADING));
+        assert!(rendered.contains("capability.request"));
+        assert!(rendered.contains("request_id"));
+        assert!(rendered.contains("capability_id"));
+        assert!(rendered.contains("input"));
+        assert!(rendered.contains("hat:focused-reviewer"));
+        assert!(rendered.contains("hat_capability"));
+        assert!(rendered.contains("isolated_micro_run"));
+        assert!(rendered.contains("Focused reviewer micro-run"));
+    }
+
+    #[test]
+    fn parent_capability_catalog_renderer_omits_empty_catalog() {
+        assert!(render_parent_capability_catalog(&[]).is_none());
     }
 }

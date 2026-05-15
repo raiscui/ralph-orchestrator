@@ -373,3 +373,38 @@
 ### 总结感悟
 - Phase 4 最稳的边界是 core 只做 runtime action hook,CLI adapter 负责执行 child/micro-run。
 - `capability.result` 同时承载 child lifecycle 和 parent-return 语义,测试必须用 `request_id` 区分 parent-return result。
+
+## [2026-05-15 23:25:01] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 4.1 parent-side capability selection UX
+
+### 任务内容
+- 实现 Phase 4.1: parent-side capability policy / selection UX。
+- 让 `ralph#1` 基于 structured capability catalog / metadata 选择可调用能力,而不是靠硬编码隐藏知识。
+- 保持 Phase 4 不变量: parent topology 不热改,调用仍走 isolated child/micro-run。
+
+### 完成过程
+- 创建并完成 OpenSpec change `parent-capability-selection-ux`,随后归档到 `openspec/changes/archive/2026-05-15-parent-capability-selection-ux/`。
+- 在 core 新增 parent-visible capability catalog renderer,输出稳定 marker、`capability.request` contract 与 bounded metadata。
+- 在 `ParallelSupervisor` 增加 `with_runtime_capability_catalog(...)`,并把 catalog 注入到 Ralph coordinator instructions,不注入普通 worker prompt。
+- 在 CLI parallel runner 中复用已有 `capability_catalog()` 传入 supervisor。
+- 扩展 live capability dogfood: custom backend 必须先从 `ralph#1` stdin prompt 捕获到 catalog marker、request contract 和 `hat:focused-reviewer`,才发 `capability.request`。
+- 稳定 spec `openspec/specs/capability-invocation/spec.md` 新增 parent-side selection catalog、structured bounded metadata、topology isolation 3 条要求。
+
+### 验证证据
+- `openspec validate parent-capability-selection-ux --type change`: valid。
+- `openspec validate --all --strict`: archive 前 27 passed,0 failed;archive 后 26 passed,0 failed。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test -p ralph-core runtime_capability_catalog_is_injected_only_into_ralph_prompt`: 1 passed。
+- `cargo test -p ralph-core parent_capability_catalog_renderer`: 2 passed。
+- `cargo test -p ralph-cli --test integration_live_capability`: 1 passed。
+- `cargo test -p ralph-cli --test integration_capability`: 4 passed。
+- `cargo test -p ralph-cli capability::tests`: 6 passed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `cargo test`: workspace tests and doctests passed。
+- `git diff --check`: passed。
+- `git diff --cached --check`: passed。
+
+### 总结感悟
+- Phase 4.1 的正确落点是 parent-side selection surface,不是新的 invocation protocol。
+- catalog 的真相源必须是 `CapabilityMetadata` 这种结构化 metadata,不能依赖 YAML 注释或完整 prompt body。
+- catalog 注入必须发生在 `spawn_instances()` 前,否则 `ralph#1` prompt 已经定型。
+- prompt pollution 要继续严控: catalog 只给 coordinator,不进普通 hats。

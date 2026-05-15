@@ -124,3 +124,52 @@
   - `cargo test --package ralph-core --lib evidence_index::tests`
   - `cargo test -p ralph-core smoke_runner`
   - `openspec validate --all --strict`
+
+### exp-20260515-live-capability-invocation-boundary
+> Runtime capability invocation 的正确 Phase 4 边界是: parent `ralph#1` 发结构化 `capability.request`, supervisor 通过 adapter 触发 isolated child/micro-run,再把 `capability.result` / `capability.failed` 回传 parent。不要把被调用 capability 热注入 live parent topology。
+<!-- scope: project | source_topics: live_runtime_capability_invocation,capability_evidence_inspect_ux | source_hats: codex | status: active | confidence: high | created_at: 2026-05-15T11:52:00+08:00 | updated_at: 2026-05-15T11:52:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 继续 Phase 3/4 capability invocation、child run evidence、parent-side capability policy 或 catalog selection。
+  - 调试 parent run 为什么没有收到 child/micro-run result/failure。
+  - dogfood 时需要用 `ralph tools capability inspect <invocation_id> --json` 查证据链。
+- 已验证事实:
+  - `crates/ralph-core/src/parallel/supervisor/capability_runtime.rs` 是 parent runtime hook 的主要实现点。
+  - `crates/ralph-cli/src/capability.rs` 仍是 isolated invocation adapter 和 artifact 写入点。
+  - parent topology 必须保持 immutable; invocation evidence 落在 `.ralph/capability-invocations/<id>/...` 与 `.ralph/evidence-index.jsonl`。
+  - `capability.result` 有 child lifecycle result 与 parent-return result 两类语义;查 parent 回传必须用 `request_id` 区分。
+- 关键边界:
+  - core 负责协议与 hook surface,CLI adapter 负责执行 child/micro-run。
+  - failure 也必须 parent-visible,不能只留在 child artifact 里。
+  - 如果继续 Phase 4.1 parent-side selection UX,优先把可选能力作为 catalog/metadata 暴露给 `ralph#1`,而不是改 live `HatRegistry`。
+- 验证锚点:
+  - `cargo test -p ralph-cli --test integration_live_capability`
+  - `cargo test -p ralph-cli --test integration_capability`
+  - `cargo test -p ralph-core capability_request`
+  - `cargo test -p ralph-core smoke_runner`
+  - `openspec validate --all --strict`
+
+### exp-20260515-parent-capability-selection-catalog
+> Parent-side capability selection 的正确 Phase 4.1 边界是: 把 bounded `CapabilityMetadata` catalog 注入给 `ralph#1` coordinator,让它选择并发 `capability.request`。不要把 catalog 当作热改 parent topology 或普通 worker prompt 的理由。
+<!-- scope: project | source_topics: parent_capability_selection_ux,live_runtime_capability_invocation | source_hats: codex | status: active | confidence: high | created_at: 2026-05-15T23:25:52+08:00 | updated_at: 2026-05-15T23:25:52+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 继续 Phase 4.1 parent-side capability policy / selection UX。
+  - 调试 `ralph#1` 为什么不知道有哪些 capability 可调用。
+  - 设计 capability catalog、metadata、selection policy 或 future chooser。
+- 已验证事实:
+  - `render_parent_capability_catalog()` 是 parent-visible catalog 的稳定 renderer。
+  - `PARENT_CAPABILITY_CATALOG_HEADING` 是测试和 dogfood 使用的稳定 marker。
+  - `ParallelSupervisor::with_runtime_capability_catalog(...)` 必须在 `spawn_instances()` 前调用,否则 coordinator prompt 已经定型。
+  - CLI 侧用 `capability_catalog()` 传入 supervisor;core 不反向依赖 CLI catalog builder。
+  - live dogfood 已验证 custom backend 只有在 `ralph#1` stdin prompt 中看到 catalog marker、`capability.request` contract 和 `hat:focused-reviewer` 后才发 request。
+- 关键边界:
+  - catalog 来源必须是 structured `CapabilityMetadata`,不要读 YAML 注释或完整 prompt body。
+  - catalog 只注入 Ralph coordinator instructions,不要污染普通 hats。
+  - 选择 capability 后仍走 existing isolated child/micro-run invocation path。
+  - parent `ralph.yml` / live `HatRegistry` 必须保持不变。
+- 验证锚点:
+  - `cargo test -p ralph-core runtime_capability_catalog_is_injected_only_into_ralph_prompt`
+  - `cargo test -p ralph-core parent_capability_catalog_renderer`
+  - `cargo test -p ralph-cli --test integration_live_capability`
+  - `openspec validate --all --strict`
