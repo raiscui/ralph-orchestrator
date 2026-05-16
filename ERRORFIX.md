@@ -581,3 +581,26 @@
 ### 验证
 - 后续重新运行 `git diff --check`。
 - 后续重新运行 archive 后 focused gates。
+
+## [2026-05-16 17:41:00] [Session ID: omx-1778510695653-7pd7o2] 问题: commit -m 中的反引号触发命令替换噪音
+
+### 现象
+- 在创建 `answer-evidence-inspect-ux` 实现 commit 时,终端出现:
+  - `error: unrecognized subcommand 'evidence'`
+  - `command not found: Entries`
+  - `command not found: Missing`
+  - `command not found: NoEntry`
+- 但 `git commit` 最终仍成功创建了 commit。
+
+### 原因
+- `git commit -m "..."` 的消息正文里包含反引号。
+- shell 在命令行参数展开阶段触发 command substitution,执行了反引号中的文本。
+- 这是和六文件 heredoc 问题同类的 shell 引号错误,只是这次发生在 commit message 上。
+
+### 修复
+- 后续带反引号的 commit message 不再直接内联到 shell 命令里。
+- 改用单引号 heredoc 写入临时 message file,再通过 `git commit -F <file>` 或 amend 方式提交。
+
+### 验证
+- 先检查当前 commit message 是否被污染。
+- 若被污染,使用安全 message file 重新 amend。

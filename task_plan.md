@@ -825,3 +825,17 @@ dogfood 设计:
 
 状态:
 - **当前在阶段5** - 准备本地提交实现 diff。
+
+## [2026-05-16 17:45:00] [Session ID: omx-1778510695653-7pd7o2] 收尾动作: answer inspect 实现 commit 已完成,进入 OpenSpec archive
+
+已完成:
+- answer inspect UX 的实现 commit 已创建并修正 commit message 引号污染。
+
+即将执行:
+- `openspec archive answer-evidence-inspect-ux --yes`
+- 复核稳定 spec 更新
+- 跑 `openspec validate --all --strict` 与 `git diff --check`
+- 创建 archive 收尾 commit
+
+状态:
+- **当前在收尾阶段** - archive active change。
