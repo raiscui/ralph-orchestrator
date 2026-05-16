@@ -749,3 +749,17 @@ dogfood 设计:
 
 状态:
 - **完成** - 进入本地提交与 OpenSpec archive 收尾。
+
+## [2026-05-16 16:17:00] [Session ID: omx-1778510695653-7pd7o2] 收尾动作: 实现 commit 已完成,进入 OpenSpec archive
+
+已完成:
+- 本地实现 commit 已创建,包含 integration gate、OpenSpec change 与六文件记录。
+
+即将执行:
+- `openspec archive bootstrap-live-dogfood-gate --yes`
+- 复核稳定 spec 同步结果
+- 再跑 `openspec validate --all --strict` 与 `git diff --check`
+- 创建 archive 收尾 commit
+
+状态:
+- **当前在收尾阶段** - archive active change。
