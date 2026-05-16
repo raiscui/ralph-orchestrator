@@ -55,7 +55,6 @@ esac
     Ok(())
 }
 
-
 fn write_explicit_human_reply_backend_script(path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 这个脚本覆盖 B.1 的最小闭环:
@@ -316,7 +315,6 @@ fn answer_inspect_fails_for_unknown_correlation_id() -> Result<()> {
     Ok(())
 }
 
-
 #[test]
 fn parallel_run_dogfoods_explicit_human_facing_answer_after_internal_reply() -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
@@ -403,7 +401,13 @@ fn parallel_run_dogfoods_explicit_human_facing_answer_after_internal_reply() -> 
     );
 
     let inspect_output = Command::new(env!("CARGO_BIN_EXE_ralph"))
-        .args(["tools", "answer", "inspect", "req-human-dogfood-1", "--json"])
+        .args([
+            "tools",
+            "answer",
+            "inspect",
+            "req-human-dogfood-1",
+            "--json",
+        ])
         .current_dir(temp_path)
         .output()?;
     assert!(

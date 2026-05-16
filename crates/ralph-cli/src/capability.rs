@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{
-    CapabilityChoice, CapabilityFailedRecord, CapabilityInvocationMode, CapabilityInvocationRecord,
-    CapabilityKind, CapabilityMetadata, CapabilityParentArtifactPaths,
+    CapabilityChoice, CapabilityFailedRecord, CapabilityFailureClass, CapabilityInvocationMode,
+    CapabilityInvocationRecord, CapabilityKind, CapabilityMetadata, CapabilityParentArtifactPaths,
     CapabilityParentFailedRecord, CapabilityParentResultRecord, CapabilityRequestRecord,
     CapabilityResultRecord, EventLogger, EvidenceArtifactKind, EvidenceIndexEntry,
     EvidenceIndexReader, EvidenceIndexWriter, EvidenceLookup, EvidenceStatus, RalphConfig,
@@ -293,6 +293,15 @@ fn invoke_capability_by_id(
     invoke_isolated(workspace, capability, choice, input)
 }
 
+fn classify_capability_resolution_error(error: &anyhow::Error) -> CapabilityFailureClass {
+    let error_text = error.to_string();
+    if error_text.contains("Unknown capability id:") {
+        return CapabilityFailureClass::InvalidCapabilityId;
+    }
+
+    CapabilityFailureClass::Other
+}
+
 fn parent_result_event(
     workspace: &Path,
     request: &CapabilityRequestRecord,
@@ -322,6 +331,7 @@ fn parent_failed_event(
 ) -> Event {
     let failed = CapabilityParentFailedRecord {
         status: "failed".to_string(),
+        failure_class: classify_capability_resolution_error(&error),
         request_id: Some(request.request_id.clone()),
         invocation_id: None,
         capability_id: Some(request.capability_id.clone()),
@@ -343,6 +353,7 @@ fn parent_invocation_failed_event(
 ) -> Result<Event> {
     let failed = CapabilityParentFailedRecord {
         status: "failed".to_string(),
+        failure_class: CapabilityFailureClass::ChildRunFailed,
         request_id: Some(request.request_id.clone()),
         invocation_id: Some(report.invocation.invocation_id.clone()),
         capability_id: Some(report.invocation.capability.id.clone()),
@@ -697,6 +708,7 @@ fn invoke_isolated_with_runner(
             invocation_id: result.invocation_id.clone(),
             ts: Utc::now(),
             capability_id: capability.id.clone(),
+            failure_class: CapabilityFailureClass::ChildRunFailed,
             error: result.stderr_summary.clone(),
             parent_topology_unchanged: true,
         };
@@ -967,6 +979,10 @@ mod tests {
         assert!(invocation_dir.join("invoke.json").exists());
         assert!(invocation_dir.join("failed.json").exists());
         assert!(!invocation_dir.join("result.json").exists());
+        let failed_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(invocation_dir.join("failed.json")).unwrap())
+                .unwrap();
+        assert_eq!(failed_json["failure_class"], "child_run_failed");
 
         let events = fs::read_to_string(temp.path().join(".ralph/events.jsonl")).unwrap();
         assert!(events.contains(TOPIC_CAPABILITY_INVOKE));
@@ -1018,6 +1034,15 @@ mod tests {
         assert!(
             error.to_string().contains("Failed to record evidence for"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn resolution_error_is_classified_as_invalid_capability_id() {
+        let error = anyhow!("Unknown capability id: hat:missing-reviewer");
+        assert_eq!(
+            classify_capability_resolution_error(&error),
+            CapabilityFailureClass::InvalidCapabilityId
         );
     }
 

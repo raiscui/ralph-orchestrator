@@ -60,7 +60,6 @@ esac
     Ok(())
 }
 
-
 fn write_human_reply_backend_script(path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 这个脚本覆盖下一条产品线:
@@ -112,7 +111,6 @@ esac
     }
     Ok(())
 }
-
 
 fn write_multi_step_backend_script(path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
@@ -203,6 +201,7 @@ case "$instance" in
         ;;
       2)
         grep -q 'capability.failed' "$prompt_capture"
+        grep -q 'invalid_capability_id' "$prompt_capture"
         grep -q 'cap-fallback-step-1' "$prompt_capture"
         grep -q 'hat:missing-reviewer' "$prompt_capture"
         printf '<event id="cap-fallback-req-event-2" topic="capability.request">{"request_id":"cap-fallback-step-2","capability_id":"hat:focused-reviewer","input":"fallback review after failure"}</event>\n'
@@ -393,7 +392,6 @@ fn parallel_parent_run_triggers_live_capability_invocation_and_inspect_evidence(
     Ok(())
 }
 
-
 #[test]
 fn parallel_capability_result_can_become_explicit_human_reply() -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
@@ -439,11 +437,15 @@ fn parallel_capability_result_can_become_explicit_human_reply() -> Result<()> {
 
     let records = read_event_records(workspace)?;
     assert!(
-        records.iter().any(|record| record.topic == "capability.request"),
+        records
+            .iter()
+            .any(|record| record.topic == "capability.request"),
         "event log should preserve capability.request: {records:#?}"
     );
     assert!(
-        records.iter().any(|record| record.topic == "reply.human.message"),
+        records
+            .iter()
+            .any(|record| record.topic == "reply.human.message"),
         "event log should preserve explicit reply.human.message: {records:#?}"
     );
 
@@ -452,7 +454,9 @@ fn parallel_capability_result_can_become_explicit_human_reply() -> Result<()> {
         .filter(|record| record.topic == "capability.result")
         .filter_map(|record| payload_json(record).ok())
         .find(|payload| payload["request_id"] == "cap-human-req-1")
-        .context("parent event log should contain parent-visible capability.result for cap-human-req-1")?;
+        .context(
+            "parent event log should contain parent-visible capability.result for cap-human-req-1",
+        )?;
     let invocation_id = result_payload["invocation_id"]
         .as_str()
         .context("capability.result should include invocation_id")?;
@@ -482,7 +486,8 @@ fn parallel_capability_result_can_become_explicit_human_reply() -> Result<()> {
 
     let record_session = fs::read_to_string(&record_path)?;
     assert!(
-        record_session.contains("reply.human.message") && record_session.contains("_meta.termination"),
+        record_session.contains("reply.human.message")
+            && record_session.contains("_meta.termination"),
         "record-session should preserve explicit human-facing reply publication and termination: {record_session}"
     );
 
@@ -491,9 +496,9 @@ fn parallel_capability_result_can_become_explicit_human_reply() -> Result<()> {
     Ok(())
 }
 
-
 #[test]
-fn parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_human_reply() -> Result<()> {
+fn parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_human_reply()
+-> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 方向 B gate:
     // - 同一个 parent run 连续做两步 capability invocation。
@@ -537,8 +542,14 @@ fn parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_
     );
 
     let records = read_event_records(workspace)?;
-    let request_count = records.iter().filter(|record| record.topic == "capability.request").count();
-    assert_eq!(request_count, 2, "event log should contain exactly two capability requests: {records:#?}");
+    let request_count = records
+        .iter()
+        .filter(|record| record.topic == "capability.request")
+        .count();
+    assert_eq!(
+        request_count, 2,
+        "event log should contain exactly two capability requests: {records:#?}"
+    );
 
     let result_payload_1 = records
         .iter()
@@ -559,7 +570,10 @@ fn parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_
     let invocation_id_2 = result_payload_2["invocation_id"]
         .as_str()
         .context("capability.result for step2 should include invocation_id")?;
-    assert_ne!(invocation_id_1, invocation_id_2, "each capability step should produce a distinct invocation id");
+    assert_ne!(
+        invocation_id_1, invocation_id_2,
+        "each capability step should produce a distinct invocation id"
+    );
 
     let events = fs::read_to_string(workspace.join(".ralph/events.jsonl"))?;
     assert!(
@@ -587,7 +601,8 @@ fn parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_
 
     let record_session = fs::read_to_string(&record_path)?;
     assert!(
-        record_session.contains("reply.human.message") && record_session.contains("_meta.termination"),
+        record_session.contains("reply.human.message")
+            && record_session.contains("_meta.termination"),
         "record-session should preserve the final explicit human-facing reply and termination: {record_session}"
     );
 
@@ -649,6 +664,7 @@ fn parallel_parent_run_can_fallback_after_capability_failed_before_final_human_r
         .find(|payload| payload["request_id"] == "cap-fallback-step-1")
         .context("missing capability.failed for cap-fallback-step-1")?;
     assert_eq!(failed_payload["status"], "failed");
+    assert_eq!(failed_payload["failure_class"], "invalid_capability_id");
     assert_eq!(failed_payload["capability_id"], "hat:missing-reviewer");
     assert_eq!(failed_payload["parent_topology_unchanged"], true);
     assert!(

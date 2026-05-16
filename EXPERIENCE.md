@@ -173,3 +173,27 @@
   - `cargo test -p ralph-core parent_capability_catalog_renderer`
   - `cargo test -p ralph-cli --test integration_live_capability`
   - `openspec validate --all --strict`
+
+### exp-20260516-capability-failure-class-branching
+> Parent-side capability failure branching 的稳定输入是 `capability.failed.failure_class`,不是自由文本 `error`。继续 richer fallback policy 时,先扩结构化 class 和 gate,不要先做 retry engine、planner 或 live topology mutation。
+<!-- scope: project | source_topics: capability_failure_class_branching_policy,live_runtime_capability_invocation | source_hats: codex | status: active | confidence: high | created_at: 2026-05-16T23:31:00+08:00 | updated_at: 2026-05-16T23:31:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 继续 capability invocation failure / fallback / parent policy 这条线。
+  - 调试 parent 为什么根据失败原因选择了错误 fallback。
+  - 想新增 `capability.failed` 的失败类型或 richer branching policy。
+- 已验证事实:
+  - `CapabilityFailureClass` 是 runtime capability failure 的结构化分类,序列化为 snake_case。
+  - parent-visible `CapabilityParentFailedRecord` 与 child/micro-run `CapabilityFailedRecord` 都带 `failure_class`。
+  - invalid capability id 会变成 `invalid_capability_id`,并且 live parent fallback gate 已证明 parent 后续 prompt 能看到这个 class。
+  - child/micro-run 启动后失败写为 `child_run_failed`,用于区分“选择前失败”和“执行后失败”。
+- 关键边界:
+  - `error` 可以保留做人类诊断,但不能成为 parent policy 的唯一稳定信号。
+  - fallback success 和 final `reply.human.message` 仍然要作为独立事件审计。
+  - 不要因为引入 failure class 就顺手加通用 retry engine、planner 或 parent topology 热改。
+- 验证锚点:
+  - `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
+  - `cargo test -p ralph-cli capability::tests`
+  - `cargo test -p ralph-core capability::tests`
+  - `cargo test -p ralph-core smoke_runner`
+  - `openspec validate --all --strict`

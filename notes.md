@@ -768,3 +768,59 @@
 ### 结论
 - B.2 最适合继续走“窄 OpenSpec + focused integration gate”路线。
 - 当前先不扩成 retry engine、planner policy 或 failure broker。
+
+## [2026-05-16 23:14:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: task_plan 超过 1000 行后的轻量持续学习续档
+
+## 来源
+
+### 来源1: 默认六文件当前状态
+
+- `task_plan.md`: 1120 行,最新主线是 B.3 `failure_class` 收口。
+- `notes.md`: 770 行,已记录 B.1/B.2 的 answer/capability 边界。
+- `WORKLOG.md`: 674 行,已记录 B.1/B.2 的实现、OpenSpec archive 与验证证据。
+- `LATER_PLANS.md`: 474 行,没有直接阻塞 B.3 的活跃待办。
+- `ERRORFIX.md`: 606 行,没有需要立即改变 B.3 的错误修复结论。
+- `EPIPHANY_LOG.md`: 520 行,已有 bootstrap 不热切换拓扑等架构警戒,与 B.3 的“不热改 parent topology”一致。
+
+## 综合发现
+
+- 方向B这条线已经形成稳定节奏: 窄 OpenSpec change -> focused integration gate -> archive -> stable spec -> smoke/full test -> 本地 commit。
+- B.3 当前不应扩成 retry engine、planner 或 runtime topology mutation。
+- B.3 的复用知识还在形成中。等 `failure_class` archive 与验证完成后,再决定是否补 `EXPERIENCE.md`。
+
+## 续档动作
+
+- 原 `task_plan.md` 已复制到 `archive/default_history/task_plan_2026-05-16_2314_capability_b3_prev.md`。
+- 新 `task_plan.md` 只保留当前 B.3 收口上下文,避免继续在超过 1000 行的文件上追加。
+
+## [2026-05-16 23:31:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: B.3 structured capability failure class 收口结论
+
+## 来源
+
+### 来源1: runtime protocol and records
+
+- `crates/ralph-core/src/capability.rs` 新增 `CapabilityFailureClass`。
+- `CapabilityParentFailedRecord` 与 `CapabilityFailedRecord` 都新增 `failure_class`。
+- `serde(rename_all = "snake_case")` 让 event payload / artifact JSON 使用稳定小写下划线值。
+
+### 来源2: parent runtime hook
+
+- `crates/ralph-core/src/parallel/supervisor/capability_runtime.rs` 现在给 malformed request、invoker unavailable、generic invoker error 分别写入结构化 class。
+- malformed request focused test 已断言返回 payload 包含 `malformed_request`。
+
+### 来源3: CLI isolated invocation adapter
+
+- `crates/ralph-cli/src/capability.rs` 现在给 invalid capability id 分类为 `invalid_capability_id`。
+- 已启动 child/micro-run 后失败的路径写入 `child_run_failed`,并进入 `failed.json` artifact。
+
+### 来源4: live parent fallback gate
+
+- `crates/ralph-cli/tests/integration_live_capability.rs` 的 failure fallback backend 第二轮 prompt 必须能 grep 到 `invalid_capability_id` 才会继续发 fallback request。
+- 集成测试同时断言 `.ralph/events.jsonl` 中 `capability.failed` payload 的 `failure_class == "invalid_capability_id"`。
+
+## 综合发现
+
+- B.3 的核心价值不是新增 retry engine,而是把 parent branching policy 的输入从自由文本错误提升为结构化字段。
+- `error` 字段仍然保留,但用途是人类诊断,不是 policy 的唯一稳定信号。
+- 当前最小真实分支是 invalid capability id -> parent sees `invalid_capability_id` -> emits fallback capability request -> fallback success -> explicit `reply.human.message`。
+- child/micro-run 执行失败被单独分类为 `child_run_failed`,避免把“选择前失败”和“执行后失败”混在一起。

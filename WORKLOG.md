@@ -672,3 +672,39 @@
 ### 总结感悟
 - B.2 证明的不是“失败会发生”,而是“parent 已经有能力在 failure 之后继续做下一步产品决策”。
 - 下一条线更适合继续推进 `capability.failed` 之后的 richer branching policy,比如按失败类型选择不同 fallback,而不是回头去重造 capability failure transport。
+
+## [2026-05-16 23:31:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B.3 - structured failure classes for parent branching policy
+
+### 任务内容
+- 继续 capability invocation failure 演进线。
+- 为 parent-visible `capability.failed` 增加结构化 `failure_class`,让 parent policy 可以基于稳定字段分支。
+- 保持边界不变: 不做 retry engine,不做 planner,不热改 parent topology,最终 human-facing answer 仍必须显式发 `reply.human.message`。
+
+### 完成过程
+- 新增 `CapabilityFailureClass`,并同步到 parent failure event record 与 isolated invocation failure artifact。
+- 在 core parent runtime hook 中分类 malformed request、invoker unavailable 和 generic invoker failure。
+- 在 CLI adapter 中分类 invalid capability id 与 child/micro-run failed。
+- 强化 live failure fallback gate:
+  - parent 第二轮 prompt 必须包含 `invalid_capability_id`。
+  - event log 的 `capability.failed` payload 必须包含 `failure_class == "invalid_capability_id"`。
+  - fallback success 和最终 `reply.human.message` 仍保持独立可审计。
+- OpenSpec change `capability-failure-class-branching-policy` 已 archive 到 `openspec/changes/archive/2026-05-16-capability-failure-class-branching-policy/`。
+- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步新增 structured failure class requirements。
+- 因 `task_plan.md` 超过 1000 行,已执行轻量持续学习续档,并保存旧计划到 `archive/default_history/task_plan_2026-05-16_2314_capability_b3_prev.md`。
+
+### 验证证据
+- `openspec validate capability-failure-class-branching-policy --type change`
+- `cargo test -p ralph-core capability::tests -- --nocapture`
+- `cargo test -p ralph-cli capability::tests -- --nocapture`
+- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
+- `cargo test -p ralph-cli --test integration_live_capability`
+- `cargo test -p ralph-core smoke_runner`
+- `cargo fmt --all -- --check`
+- `git diff --check`
+- `openspec validate --all --strict`
+- `cargo test`
+- archive 后复跑: `openspec validate --all --strict`, `git diff --check`, `cargo test -p ralph-cli --test integration_live_capability`, `cargo test -p ralph-core smoke_runner`, `cargo test`
+
+### 总结感悟
+- parent policy 的稳定输入必须是结构化字段,不能让后续 orchestration 靠自由文本 `error` 猜测。
+- `capability.failed` 现在有了可扩展分类面,下一步可以自然演进 richer branching policy,但仍不需要热改 parent topology。

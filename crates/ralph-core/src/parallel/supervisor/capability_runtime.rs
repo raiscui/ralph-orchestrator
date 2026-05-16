@@ -7,8 +7,8 @@
 
 use super::ParallelSupervisor;
 use crate::{
-    CapabilityParentFailedRecord, CapabilityRequestRecord, TOPIC_CAPABILITY_FAILED,
-    TOPIC_CAPABILITY_REQUEST,
+    CapabilityFailureClass, CapabilityParentFailedRecord, CapabilityRequestRecord,
+    TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_REQUEST,
 };
 use ralph_proto::{Event, HatId, HatInstanceId};
 
@@ -41,6 +41,7 @@ impl ParallelSupervisor {
                         Some(event),
                         CapabilityParentFailedRecord {
                             status: "failed".to_string(),
+                            failure_class: CapabilityFailureClass::MalformedRequest,
                             request_id: error.request_id,
                             invocation_id: None,
                             capability_id: error.capability_id,
@@ -72,6 +73,7 @@ impl ParallelSupervisor {
                     Some(event),
                     CapabilityParentFailedRecord {
                         status: "failed".to_string(),
+                        failure_class: CapabilityFailureClass::InvokerUnavailable,
                         request_id: Some(request.request_id),
                         invocation_id: None,
                         capability_id: Some(request.capability_id),
@@ -92,6 +94,7 @@ impl ParallelSupervisor {
                     None,
                     CapabilityParentFailedRecord {
                         status: "failed".to_string(),
+                        failure_class: CapabilityFailureClass::Other,
                         request_id: Some(request_for_failure.request_id),
                         invocation_id: None,
                         capability_id: Some(request_for_failure.capability_id),
@@ -269,6 +272,7 @@ mod tests {
         assert_eq!(returned.len(), 1);
         assert_eq!(returned[0].topic.as_str(), TOPIC_CAPABILITY_FAILED);
         assert!(returned[0].payload.contains("capability_id"));
+        assert!(returned[0].payload.contains("malformed_request"));
         assert_eq!(
             returned[0]
                 .target_instance

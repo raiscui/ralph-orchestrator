@@ -50,8 +50,8 @@ pub mod workspace;
 
 pub use agents_snapshot::{AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot};
 pub use capability::{
-    CapabilityChoice, CapabilityFailedRecord, CapabilityInvocationMode, CapabilityInvocationRecord,
-    CapabilityKind, CapabilityMetadata, CapabilityParentArtifactPaths,
+    CapabilityChoice, CapabilityFailedRecord, CapabilityFailureClass, CapabilityInvocationMode,
+    CapabilityInvocationRecord, CapabilityKind, CapabilityMetadata, CapabilityParentArtifactPaths,
     CapabilityParentFailedRecord, CapabilityParentResultRecord, CapabilityRequestParseError,
     CapabilityRequestRecord, CapabilityResultRecord, PARENT_CAPABILITY_CATALOG_HEADING,
     RuntimeCapabilityInvoker, TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_INVOKE,

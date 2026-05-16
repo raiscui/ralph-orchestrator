@@ -72,6 +72,38 @@ pub const TOPIC_CAPABILITY_RESULT: &str = "capability.result";
 /// 控制面 topic: capability invocation 失败。
 pub const TOPIC_CAPABILITY_FAILED: &str = "capability.failed";
 
+/// parent-visible capability failure 的结构化分类。
+///
+/// 说明:
+/// - parent policy 应优先依赖这个字段做分支,而不是解析自由文本 error。
+/// - v1 先覆盖最常见的几类 runtime failure,后续可以继续扩。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityFailureClass {
+    /// capability id 本身无效,调用在真正 child/micro-run 启动前失败。
+    InvalidCapabilityId,
+    /// 请求 payload 缺字段或结构错误,无法形成有效 runtime invocation。
+    MalformedRequest,
+    /// child/micro-run 已经启动,但执行失败。
+    ChildRunFailed,
+    /// runtime 没有配置 capability invoker。
+    InvokerUnavailable,
+    /// 其他未单独建模的失败。
+    Other,
+}
+
+impl fmt::Display for CapabilityFailureClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCapabilityId => f.write_str("invalid_capability_id"),
+            Self::MalformedRequest => f.write_str("malformed_request"),
+            Self::ChildRunFailed => f.write_str("child_run_failed"),
+            Self::InvokerUnavailable => f.write_str("invoker_unavailable"),
+            Self::Other => f.write_str("other"),
+        }
+    }
+}
+
 /// Runtime capability 类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -261,6 +293,7 @@ pub struct CapabilityParentResultRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityParentFailedRecord {
     pub status: String,
+    pub failure_class: CapabilityFailureClass,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -336,6 +369,8 @@ pub struct CapabilityFailedRecord {
     pub ts: DateTime<Utc>,
     /// capability id。
     pub capability_id: String,
+    /// 结构化失败分类。
+    pub failure_class: CapabilityFailureClass,
     /// 错误摘要。
     pub error: String,
     /// 父 topology 是否保持稳定。
