@@ -920,3 +920,47 @@ dogfood 设计:
 
 状态:
 - **当前任务已完成** - B.1 已变成 repo-native gate + archived OpenSpec change。
+
+## [2026-05-16 18:44:00] [Session ID: omx-1778510695653-7pd7o2] 新任务启动: 下一条产品演进 - capability result 到 human-visible answer 闭环
+
+目标:
+- 在已完成 B.1 的基础上,继续把 live runtime capability invocation 串到 human-visible answer。
+- 钉死边界: capability child/micro-run 仍然只回 parent `capability.result` / `capability.failed`,真正面向人的最终答案仍由 parent `ralph#1` 显式发 `reply.human.message`。
+
+阶段计划:
+- [ ] 阶段1: 盘点现有 live capability invocation runtime、integration gate 和 human-facing answer contract 的交汇点
+- [ ] 阶段2: 写窄 OpenSpec change,明确 capability result -> explicit human reply 的边界与非目标
+- [ ] 阶段3: 判断是否能在现有 `integration_live_capability.rs` 上直接补 focused gate
+- [ ] 阶段4: 若边界清晰且实现面窄,进入实现与 focused 验证
+- [ ] 阶段5: 收口验证、归档与提交
+
+状态:
+- **目前在阶段1** - 先做只读勘查,确认是否已有可复用 runtime 链路。
+
+## [2026-05-16 18:52:00] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: capability result 到 explicit human reply 闭环已落地
+
+已完成:
+- 新建并完成 OpenSpec change `capability-result-human-reply-dogfood`,随后 archive。
+- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增 focused gate:
+  - `capability.request`
+  - parent-visible `capability.result`
+  - explicit `reply.human.message`
+- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步新增 2 条 requirement。
+
+验证证据:
+- `cargo test -p ralph-cli --test integration_live_capability -- --nocapture`
+- `openspec validate capability-result-human-reply-dogfood --type change`
+- `cargo test -p ralph-core smoke_runner`
+- `cargo test`
+- `openspec validate --all --strict`
+- `git diff --check`
+
+待办更新:
+- [x] 阶段1: 盘点现有 live capability invocation runtime、integration gate 和 human-facing answer contract 的交汇点
+- [x] 阶段2: 写窄 OpenSpec change,明确 capability result -> explicit human reply 的边界与非目标
+- [x] 阶段3: 判断是否能在现有 `integration_live_capability.rs` 上直接补 focused gate
+- [x] 阶段4: 若边界清晰且实现面窄,进入实现与 focused 验证
+- [x] 阶段5: 收口验证、归档与提交
+
+状态:
+- **当前任务已完成** - capability invocation 已接到 explicit human-visible answer 闭环。

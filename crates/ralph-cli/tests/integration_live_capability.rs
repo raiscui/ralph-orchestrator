@@ -60,6 +60,59 @@ esac
     Ok(())
 }
 
+
+fn write_human_reply_backend_script(path: &Path) -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 这个脚本覆盖下一条产品线:
+    // - 第一轮 `ralph#1` 触发 live capability invocation。
+    // - 第二轮它观察到 parent-visible `capability.result` 后,
+    //   再显式发 `reply.human.message` 给人看。
+    // ─────────────────────────────────────────────────────────────────────
+    let script = r#"#!/bin/sh
+set -eu
+mkdir -p .ralph/dogfood
+instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
+case "$instance" in
+  ralph#1)
+    count_file=".ralph/dogfood/ralph-human-reply.count"
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [ "$count" -eq 1 ]; then
+      prompt_capture=".ralph/dogfood/ralph-human-reply-turn1.prompt.txt"
+      cat > "$prompt_capture"
+      grep -q '## Runtime Capability Catalog' "$prompt_capture"
+      grep -q 'hat:focused-reviewer' "$prompt_capture"
+      printf '<event id="cap-human-req-event-1" topic="capability.request">{"request_id":"cap-human-req-1","capability_id":"hat:focused-reviewer","input":"review this patch for the human"}</event>\n'
+    else
+      prompt_capture=".ralph/dogfood/ralph-human-reply-turn2.prompt.txt"
+      cat > "$prompt_capture"
+      grep -q 'capability.result' "$prompt_capture"
+      grep -q 'cap-human-req-1' "$prompt_capture"
+      grep -q 'hat:focused-reviewer' "$prompt_capture"
+      printf '<event id="cap-human-reply-1" topic="reply.human.message">final human answer: focused review completed</event>\n'
+      printf 'LOOP_COMPLETE\n'
+    fi
+    ;;
+  *)
+    printf 'LOOP_COMPLETE\n'
+    ;;
+esac
+"#;
+    fs::write(path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
 fn write_config(path: &Path, script_path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 只启用 parallel runtime,不配置任何业务 hat。
@@ -215,6 +268,104 @@ fn parallel_parent_run_triggers_live_capability_invocation_and_inspect_evidence(
         record_session.contains("_meta.termination"),
         "record-session should capture termination: {record_session}"
     );
+
+    Ok(())
+}
+
+
+#[test]
+fn parallel_capability_result_can_become_explicit_human_reply() -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 这条 gate 把两条已经存在的产品线串起来:
+    // - Phase 4: parent run 触发 isolated capability invocation。
+    // - B.1: human-visible answer 仍必须靠显式 `reply.human.message`。
+    // ─────────────────────────────────────────────────────────────────────
+    let temp_dir = TempDir::new()?;
+    let workspace = temp_dir.path();
+    let script_path = workspace.join("live-capability-human-reply-backend.sh");
+    let config_path = workspace.join("ralph.yml");
+    let record_path = workspace.join("session.jsonl");
+
+    write_prompt(workspace)?;
+    write_human_reply_backend_script(&script_path)?;
+    write_config(&config_path, &script_path)?;
+    let config_before = fs::read_to_string(&config_path)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+            "--no-tui",
+            "--record-session",
+            record_path.to_string_lossy().as_ref(),
+        ])
+        .current_dir(workspace)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "capability-result -> human-reply dogfood run should succeed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("final human answer: focused review completed"),
+        "CLI output should expose the explicit human-facing reply: {stdout}"
+    );
+
+    let records = read_event_records(workspace)?;
+    assert!(
+        records.iter().any(|record| record.topic == "capability.request"),
+        "event log should preserve capability.request: {records:#?}"
+    );
+    assert!(
+        records.iter().any(|record| record.topic == "reply.human.message"),
+        "event log should preserve explicit reply.human.message: {records:#?}"
+    );
+
+    let result_payload = records
+        .iter()
+        .filter(|record| record.topic == "capability.result")
+        .filter_map(|record| payload_json(record).ok())
+        .find(|payload| payload["request_id"] == "cap-human-req-1")
+        .context("parent event log should contain parent-visible capability.result for cap-human-req-1")?;
+    let invocation_id = result_payload["invocation_id"]
+        .as_str()
+        .context("capability.result should include invocation_id")?;
+    assert_eq!(result_payload["capability_id"], "hat:focused-reviewer");
+    assert_eq!(result_payload["parent_topology_unchanged"], true);
+
+    let events = fs::read_to_string(workspace.join(".ralph/events.jsonl"))?;
+    assert!(
+        events.contains("\"topic\":\"capability.result\"")
+            && events.contains("\"topic\":\"reply.human.message\""),
+        "events.jsonl should preserve capability.result and explicit human reply separately: {events}"
+    );
+
+    let inspect_output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args(["tools", "capability", "inspect", invocation_id, "--json"])
+        .current_dir(workspace)
+        .output()?;
+    assert!(
+        inspect_output.status.success(),
+        "capability inspect should still succeed for invocation id.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect_output.stdout),
+        String::from_utf8_lossy(&inspect_output.stderr)
+    );
+    let inspect_report: Value = serde_json::from_slice(&inspect_output.stdout)?;
+    assert_eq!(inspect_report["invocation_id"], invocation_id);
+    assert_eq!(inspect_report["status"], "entries");
+
+    let record_session = fs::read_to_string(&record_path)?;
+    assert!(
+        record_session.contains("reply.human.message") && record_session.contains("_meta.termination"),
+        "record-session should preserve explicit human-facing reply publication and termination: {record_session}"
+    );
+
+    assert_eq!(fs::read_to_string(&config_path)?, config_before);
 
     Ok(())
 }

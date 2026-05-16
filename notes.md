@@ -655,3 +655,38 @@
 ### 当前尚缺的证据
 - 还没看到现有 CLI integration 已经覆盖这条完整闭环。
 - 还需要创建新 change,把 dogfood 的断言点和非目标写清楚。
+
+## [2026-05-16 18:52:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: capability.result 到 explicit human reply 的最小闭环
+
+## 来源
+
+### 来源1: `crates/ralph-cli/tests/integration_live_capability.rs`
+- 现有 gate 已证明:
+  - parent `ralph#1` 可发 `capability.request`
+  - runtime 会执行 isolated invocation
+  - parent event log 会收到 `capability.result`
+  - inspect UX 能按 invocation id 查 artifact 链
+- 现有缺口:
+  - 还没有证明 parent 如何把 `capability.result` 继续转成 human-visible answer。
+
+### 来源2: `openspec/specs/capability-invocation/spec.md`
+- 稳定 spec 已经覆盖 capability request / result / inspect / parent topology unchanged。
+- 但之前没有 requirement 明确: `capability.result` 本身不是 human-facing answer,真正面向人的输出仍需显式 `reply.human.message`。
+
+### 来源3: 已完成的 B.1 产物
+- `reply.human.message` 的显式边界已经被 repo-native gate 固定。
+- 因此本阶段最稳的推进不是再发明新通道,而是把 capability result 接到这条显式人类回复 contract 上。
+
+## 综合发现
+
+### 现象
+- 现有 live capability runtime 已经能把 child/micro-run result 回到 parent run。
+- 现有 human-facing answer contract 已经能在 repo-native gate 里单独成立。
+- 缺的是把两条链路放进同一条 run 的动态证据。
+
+### 结论
+- 最小可行推进是新增 focused live capability integration gate:
+  - turn1: `capability.request`
+  - turn2: 观察到 `capability.result`
+  - same parent run 显式发 `reply.human.message`
+- 实际实现时不需要新增 runtime 功能; 只是在现有测试 harness 上补一条更完整的产品链 gate。

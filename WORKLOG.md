@@ -594,3 +594,29 @@
 ### 总结感悟
 - 这条线最值钱的不是“新增了一个 reply 机制”,而是证明现有两条 reply 通道已经能在同一条 run 里正确协作。
 - 当方向B再往前走时,可以默认把这条 gate 当成 request/reply/human-visible answer 的基础回归门禁。
+
+## [2026-05-16 18:52:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: capability result 到 explicit human reply 的产品闭环
+
+### 任务内容
+- 继续产品演进,把 live runtime capability invocation 与 human-visible answer contract 接成一条真实运行链。
+- 保持边界不变:
+  - `capability.result` 是 parent-consumable runtime event
+  - `reply.human.message` 才是面向人的最终回复
+- 通过 repo-native gate 固定这条闭环。
+
+### 完成过程
+- 新建 OpenSpec change `capability-result-human-reply-dogfood`,并完成 proposal / design / delta spec / tasks / test-plan,随后 archive。
+- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增:
+  - `write_human_reply_backend_script(...)`
+  - `parallel_capability_result_can_become_explicit_human_reply()`
+- 新 gate 断言了:
+  - parent event log 保留 `capability.request`、`capability.result`、`reply.human.message`
+  - CLI stdout 出现最终 human-facing payload
+  - record-session 保留 `reply.human.message` 发布证据
+  - `ralph tools capability inspect <invocation_id> --json` 仍可查证据链
+  - parent config 保持不变
+- archive 后把 requirement 同步进 `openspec/specs/capability-invocation/spec.md`。
+
+### 总结感悟
+- 这条线证明 capability invocation 不只是“能调子流程”,而是已经能服务真实对人回答的产品链路。
+- 下一阶段如果再演进,更适合继续做“parent policy / multi-step orchestration / richer human answer shaping”,而不是回头重造 reply 机制。
