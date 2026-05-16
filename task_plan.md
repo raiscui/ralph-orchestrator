@@ -673,3 +673,79 @@ dogfood 设计:
 
 状态:
 - **当前在步骤5** - 只剩收尾提交与最终汇报。
+
+## [2026-05-16 15:02:00] [Session ID: omx-1778510695653-7pd7o2] 新任务启动: 将 startup bootstrap + 内置事件协议 live dogfood 固化为可重复 gate
+
+目标:
+- 把已经在 `/tmp/ralph-live-dogfood-73rELo` 验证过的真实链路,收敛成 repo 内可重复执行的测试门禁。
+- 让 gate 直接证明以下 runtime 事实,而不是只依赖六文件记录:
+  - 无 `ralph.yml` / 无 `PROMPT.md` 时可以 bootstrap 启动
+  - startup 产物默认 `parallel.enabled=true`
+  - live `ralph#1` prompt 含 `## RALPH EVENT EMISSION PROTOCOL`
+  - record-session 以 `parallel-cli` + `CompletionPromise` 收敛
+
+阶段计划:
+- [ ] 阶段1: 盘点现有 startup/bootstrap/live 测试与 dogfood 基础设施
+- [ ] 阶段2: 设计最稳的 gate 形态与 OpenSpec / 测试落点
+- [ ] 阶段3: 实现 gate
+- [ ] 阶段4: 运行 focused tests / smoke / 必要全量验证
+- [ ] 阶段5: 记录收口并准备本地提交
+
+关键问题:
+1. 应该补在现有 integration test 中,还是抽成专门的 live dogfood gate?
+2. 如何在不引入脆弱外部依赖的情况下,稳定断言 live `ralph#1` prompt 内容?
+3. 这条 gate 需要覆盖到什么程度,才能既证明真实链路,又不变成重型 E2E?
+
+状态:
+- **目前在阶段1** - 先盘点现有测试与脚手架,再决定最稳落点。
+
+## [2026-05-16 15:16:00] [Session ID: omx-1778510695653-7pd7o2] 阶段2完成: gate 边界与 OpenSpec 已对齐
+
+已完成:
+- 新建 OpenSpec change `bootstrap-live-dogfood-gate`。
+- 明确 gate 是“一条 repo-native 两段 runtime 流”,不是单次命令也不是新 E2E 框架。
+- 选定实现落点为 `crates/ralph-cli/tests/integration_startup_resources.rs`。
+
+即将执行:
+- 先跑 `openspec validate bootstrap-live-dogfood-gate --type change`。
+- 再跑 focused CLI integration test,尽快验证这条两段式 gate 是否可稳定通过。
+
+状态:
+- **目前在阶段3/4交界** - 已完成实现,开始 focused 验证。
+
+## [2026-05-16 15:19:00] [Session ID: omx-1778510695653-7pd7o2] 阶段4进展: focused gate 已通过
+
+已验证:
+- `openspec validate bootstrap-live-dogfood-gate --type change`
+- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`
+
+结果:
+- 新增 live gate `startup_bootstrap_live_gate_captures_real_coordinator_prompt_and_record_session` 已通过。
+- 说明两段式 runtime flow 与当前 startup/bootstrap 产品边界一致,没有引入额外 harness。
+
+即将执行:
+- 跑 `openspec validate --all --strict`
+- 跑 `cargo test -p ralph-core smoke_runner`
+- 跑 `cargo test`
+- 跑 `git diff --check`
+
+状态:
+- **目前在阶段4** - 从 focused gate 升级到仓库级完整验证。
+
+## [2026-05-16 16:13:00] [Session ID: omx-1778510695653-7pd7o2] 阶段5完成: gate 已实现并通过仓库级验证
+
+已完成:
+- OpenSpec change `bootstrap-live-dogfood-gate` 已补齐 proposal / tasks / test-plan / delta specs。
+- CLI integration gate 已落到 `crates/ralph-cli/tests/integration_startup_resources.rs`。
+- focused / smoke / 全量测试 / diff check 全部通过。
+- 已清理误落根目录的临时 record-session 文件 `...`。
+
+最终待办列表:
+- [x] 阶段1: 盘点现有 startup/bootstrap/live 测试与 dogfood 基础设施
+- [x] 阶段2: 设计最稳的 gate 形态与 OpenSpec / 测试落点
+- [x] 阶段3: 实现 gate
+- [x] 阶段4: 运行 focused tests / smoke / 必要全量验证
+- [x] 阶段5: 记录收口并准备本地提交
+
+状态:
+- **完成** - 进入本地提交与 OpenSpec archive 收尾。

@@ -552,3 +552,27 @@
 ### 边界确认
 - 这次 live dogfood 只替换了 resolved config 的 backend 执行器,没有热改 workflow、hat topology、prompt contract 或业务 payload schema。
 - 因此这条证据能证明的,是 startup bootstrap + 内置 prompt contract 的真实串联,而不是某个临时 example 特判。
+
+## [2026-05-16 15:08:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: bootstrap live gate 实现落点选择
+
+## 综合发现
+
+### 推荐落点
+- 新 gate 最适合落在 `crates/ralph-cli/tests/integration_startup_resources.rs`。
+- 原因不是它最省事,而是语义最对:
+  - 这条线的主真相源是 startup bootstrap
+  - live prompt capture 只是用来证明 bootstrap 产出的真实 coordinator prompt 已接上内置事件协议
+- 因此不应把它塞进 capability integration,避免测试语义再次漂移。
+
+### 推荐实现形态
+- 复用 `integration_live_capability` 的 custom backend 技法,但 backend 行为更窄:
+  - `ralph#1` 首轮把 stdin prompt 落盘
+  - 断言 prompt 中存在 startup bootstrap coordinator marker 与 event protocol marker
+  - 然后输出 `LOOP_COMPLETE`
+- 普通实例直接 `LOOP_COMPLETE`,避免演变成多 hat workflow。
+
+### 推荐断言集合
+- `.ralph/bootstrap-selection.json`
+- `.ralph/resolved-config.yml`
+- `.ralph/dogfood/ralph#1.prompt.txt`
+- `record-session` summary 或原始 JSONL 中的 `CompletionPromise`

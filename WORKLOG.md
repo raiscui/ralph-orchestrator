@@ -487,3 +487,36 @@
 ### 总结感悟
 - “默认并行模式”最稳的载体是 startup 产出的 resolved config,而不是要求用户维护一份容易过期的执行目录 `ralph.yml`。
 - “事件协议内置化”真正有价值的完成标准,不是 example 变短了,而是 live `ralph#1` prompt 在默认启动链路里已经带上同一份协议真相源。
+
+## [2026-05-16 16:12:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 将 startup bootstrap live dogfood 固化为可重复 gate
+
+### 任务内容
+- 把之前只存在于 `/tmp` 证据链里的 startup bootstrap + 内置事件协议 live dogfood,固化成 repo 内可重复执行的 CLI integration gate。
+- 让 gate 直接证明默认无配置启动、默认并行模式、live `ralph#1` prompt 协议注入、record-session 收敛这 4 个 runtime 事实。
+- 补齐对应 OpenSpec change `bootstrap-live-dogfood-gate`。
+
+### 完成过程
+- 新建 OpenSpec change,把边界明确成“一条 repo-native 两段 runtime 流”,而不是单次命令或新 E2E 框架。
+- 在 `crates/ralph-cli/tests/integration_startup_resources.rs` 中新增 live gate:
+  - 第一步执行真实 no-config/no-prompt bootstrap dry-run,生成 `.ralph/bootstrap-selection.json` 与 `.ralph/resolved-config.yml`
+  - 第二步只替换 resolved config 的 backend 执行表面,用 custom stdin backend 抓取 live `ralph#1` prompt
+- gate 断言了:
+  - bootstrap selection 资源选择事实
+  - resolved config 含 `parallel.enabled=true`
+  - live prompt 含 `Act as Ralph's startup bootstrap coordinator`
+  - live prompt 含 `## RALPH EVENT EMISSION PROTOCOL`
+  - live prompt 含 `reply.human.message`
+  - record-session 含 `parallel-cli` 与 `CompletionPromise`
+- 清理了误落在仓库根目录的临时 record-session 文件 `...`,避免污染提交。
+
+### 验证证据
+- `openspec validate bootstrap-live-dogfood-gate --type change`: passed。
+- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 3 passed。
+- `openspec validate --all --strict`: 27 passed, 0 failed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `cargo test`: passed。
+- `git diff --check`: passed。
+
+### 总结感悟
+- 这条 gate 的正确形态不是“再造一个大 E2E”,而是把已有 bootstrap artifact 和 live prompt capture 两种证据拼成一条窄而真的 runtime 链。
+- 当默认 bootstrap workflow 自带 builtin backend 时,测试要尊重产品边界: 先产出 resolved config,再切换执行表面,而不是硬逼单次命令完成全部证明。
