@@ -614,3 +614,17 @@
 
 状态:
 - **当前在步骤1** - 先恢复工作区事实,再继续收口。
+
+## [2026-05-16 14:16:00] [Session ID: omx-1778510695653-7pd7o2] 步骤3进展: archive 已执行
+
+已完成:
+- `openspec archive internalize-event-emission-protocol --yes`
+- archive 过程中已自动同步 `openspec/specs/prompt-contract-runtime-alignment/spec.md`
+
+即将执行:
+- 审查 archive 后 diff。
+- 跑 `openspec validate --all --strict` 和 `git diff --check`。
+- 将 archive diff 单独本地提交。
+
+状态:
+- **当前在步骤3** - 准备提交 archive 收口 diff。
