@@ -16,6 +16,7 @@ pub mod capability;
 mod cli_capture;
 mod config;
 pub mod diagnostics;
+mod event_emission_protocol;
 mod event_logger;
 mod event_loop;
 mod event_parser;
@@ -64,6 +65,7 @@ pub use config::{
     WorkspaceRuntimeConfig, WorkspaceStrategy,
 };
 pub use diagnostics::DiagnosticsCollector;
+pub use event_emission_protocol::EVENT_EMISSION_PROTOCOL_HEADING;
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{EventLoop, LoopState, TerminationReason};
 pub use event_parser::EventParser;

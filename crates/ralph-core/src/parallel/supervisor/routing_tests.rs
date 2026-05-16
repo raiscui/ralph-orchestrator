@@ -1952,12 +1952,16 @@ async fn busy_ralph_secondary_includes_coordinator_instructions_and_config_promp
         "ralph#2 should include official coordinator semantics section"
     );
     assert!(
-        prompt.contains("Out-of-band (ONLY if you can execute shell/tool commands)"),
-        "ralph#2 prompt should describe out-of-band `ralph emit` publishing"
+        prompt.contains(crate::EVENT_EMISSION_PROTOCOL_HEADING),
+        "ralph#2 prompt should include the built-in event emission protocol"
     );
     assert!(
-        prompt.contains("You MAY publish multiple"),
-        "ralph#2 prompt should allow multiple events in a single response"
+        prompt.contains("## OUT-OF-BAND EVENT INJECTION"),
+        "ralph#2 prompt should keep coordinator-only `ralph emit` guidance"
+    );
+    assert!(
+        prompt.contains("You may emit multiple complete"),
+        "ralph#2 prompt should allow multiple events through the shared protocol"
     );
     assert!(
         prompt.contains("reply.hat.message"),
@@ -1968,8 +1972,65 @@ async fn busy_ralph_secondary_includes_coordinator_instructions_and_config_promp
         "ralph#2 should include config ralph_prompt section"
     );
     assert!(
-        prompt.contains("RALPH_PROMPT_ANCHOR_FOR_TEST"),
-        "ralph#2 should include config.event_loop.ralph_prompt content"
+        prompt.contains("capability.request"),
+        "coordinator protocol topic list should include capability invocation request topic"
+    );
+}
+
+#[tokio::test]
+async fn ralph_coordinator_event_protocol_uses_shared_source_of_truth() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = PromptCaptureNotifyExecutor {
+        prompts: Arc::clone(&prompts),
+        notify: Arc::clone(&notify),
+        notify_on_instance: "ralph#1".to_string(),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.starting_event = Some("work.start".to_string());
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path);
+    supervisor
+        .route_event(Event::new("task.start", "top-level prompt").with_id("e-ralph-protocol"))
+        .await
+        .expect("route_event should start ralph#1");
+
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for ralph#1 prompt capture");
+
+    let prompt = {
+        let prompts = prompts.lock().await;
+        prompts
+            .get("ralph#1")
+            .cloned()
+            .expect("ralph#1 prompt should be captured")
+    };
+
+    assert!(
+        prompt.contains(crate::EVENT_EMISSION_PROTOCOL_HEADING),
+        "ralph#1 prompt should include the shared event protocol marker"
+    );
+    assert!(
+        prompt.contains("work.start"),
+        "coordinator protocol should list the configured starting event"
+    );
+    assert!(
+        prompt.contains("reply.human.message") && prompt.contains("reply.hat.message"),
+        "coordinator prompt should keep answer-return topics"
+    );
+    assert!(
+        prompt.contains("## OUT-OF-BAND EVENT INJECTION"),
+        "coordinator prompt should keep ralph emit guidance outside the shared protocol"
+    );
+    assert!(
+        !prompt.contains("## EMIT EVENTS (NO CODE FENCES)"),
+        "coordinator should not keep the old divergent event tutorial section"
     );
 }
 

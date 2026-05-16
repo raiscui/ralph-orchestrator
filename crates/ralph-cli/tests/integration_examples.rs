@@ -47,6 +47,48 @@ fn test_example_parallel_experimental_dev_engine_prompt_file_self_contained() {
 }
 
 #[test]
+fn test_example_parallel_experimental_dev_engine_uses_builtin_event_protocol() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config_path =
+        manifest_dir.join("../../examples/parallel-experimental-dev-engine/ralph.yml");
+    let config_content = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to read example config {}: {e}",
+            config_path.display()
+        );
+    });
+
+    for stale_tutorial in [
+        "## 发事件格式",
+        "发事件必须使用如下格式",
+        "&lt;event topic=",
+        "<event topic=",
+        "此处写完整",
+        "...payload...",
+    ] {
+        assert!(
+            !config_content.contains(stale_tutorial),
+            "example config {} should not duplicate generic event protocol tutorial `{stale_tutorial}`",
+            config_path.display()
+        );
+    }
+
+    for workflow_contract in [
+        "experiment.result 的 payload 必须包含",
+        "integration.applied 的 payload 必须包含",
+        "experiment.complete 的 payload 可审计",
+        "verification_evidence",
+        "commit",
+    ] {
+        assert!(
+            config_content.contains(workflow_contract),
+            "example config {} should keep workflow payload contract `{workflow_contract}`",
+            config_path.display()
+        );
+    }
+}
+
+#[test]
 fn test_example_parallel_pr_review_prompt_file_self_contained() {
     assert_prompt_file_example_is_self_contained("parallel-pr-review");
 }

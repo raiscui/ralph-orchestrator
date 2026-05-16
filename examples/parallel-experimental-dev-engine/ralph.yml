@@ -130,16 +130,10 @@ event_loop:
     - `experiment.task`: run_id, objective, experiment_id, title, implementation, verification
     - `integration.task`: run_id, objective, experiment_id, commit, final_verification
 
-    ## 发事件格式
+    ## 输出约束
 
     - 1 个 `experiment.task` = 1 个实验(1 个 experiment_id).
-    - 同一条输出里允许连续写多个 `&lt;event ...&gt;` block,Supervisor 会逐条解析并路由.
-    - 下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块.
-    - 严禁输出省略号式占位内容或 `TODO`；必须写完整字段。
-
-    &lt;event topic="experiment.task"&gt;
-    此处写完整的 experiment.task payload
-    &lt;/event&gt;
+    - 必须写完整字段,严禁输出省略号式占位内容或 `TODO`.
 
   prompt_file: "PROMPT.md"
 
@@ -228,18 +222,7 @@ hats:
       - 如果遇到外部依赖（例如数据库未启动）导致验证无法进行：
         - status 用 "blocked"
         - 在 verification_evidence 里写清楚“缺什么”和“如何恢复”
-      - `experiment.result` 必须直接出现在你最终 assistant 回复的 stdout 中
-        - 禁止通过 shell/tool/`cat`/`echo`/`printf`/`ralph emit`/写文件 来“间接发事件”
-        - 如果 `&lt;event ...&gt;` 只出现在 tool transcript、stderr 或文件内容里,Supervisor 不会把它当成回流事件
-      - 推荐做法:
-        - 先直接输出完整 `&lt;event topic="experiment.result" ...&gt;...&lt;/event&gt;`
-        - 需要补充说明时,把说明写在 event 前后都可以,但 event block 本身必须作为普通回答正文直接输出
-
-      发事件必须使用如下格式（下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块）：
-
-      &lt;event topic="experiment.result"&gt;
-      此处写完整的 experiment.result payload
-      &lt;/event&gt;
+      - `experiment.result` 必须作为你最终 assistant 回复的正常事件输出,不要放进工具 transcript、stderr 或文件内容里。
 
   experiment_auditor:
     name: "🧾 结果审计员"
@@ -281,11 +264,6 @@ hats:
       - 不要输出 LOOP_COMPLETE
       - 不要发除 experiment.reviewed 以外的任何事件
 
-      发事件必须使用如下格式（下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块）：
-
-      &lt;event topic="experiment.reviewed"&gt;
-      此处写完整的 experiment.reviewed payload
-      &lt;/event&gt;
 
   experiment_integrator:
     name: "🧩 集成验收员"
@@ -344,21 +322,3 @@ hats:
       - experiment_id
       - status: "blocked"
       - reason: |（缺依赖/权限/gate/环境问题）
-
-      发事件必须使用如下格式（下面是展示文本,真实输出时请还原成普通尖括号,不要使用代码块）：
-
-      &lt;event topic="integration.applied"&gt;
-      此处写完整的 integration.applied payload
-      &lt;/event&gt;
-
-      &lt;event topic="experiment.complete"&gt;
-      此处写完整的 experiment.complete payload
-      &lt;/event&gt;
-
-      &lt;event topic="integration.rejected"&gt;
-      此处写完整的 integration.rejected payload
-      &lt;/event&gt;
-
-      &lt;event topic="integration.blocked"&gt;
-      此处写完整的 integration.blocked payload
-      &lt;/event&gt;

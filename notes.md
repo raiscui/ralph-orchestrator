@@ -441,3 +441,74 @@
 ### 不采用的方案
 - 不把 catalog 拼进 `prompt_prelude`,避免把 capability selection surface 与 top-level objective 混在一起。
 - 不让 core 直接调用 CLI catalog builder,避免反向依赖。
+
+## [2026-05-16 12:24:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: ralph-example 事件发送格式内置化调查
+
+## 来源
+
+### 来源1: `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-example/ralph.yml`
+- `ralph_prompt`、`experiment_runner`、`experiment_auditor`、`experiment_integrator` 都重复写了 `发事件必须使用如下格式`。
+- 重复格式是 `<event topic="..."><payload></event>`。
+- 文件中也保留了 workflow-specific 规则,例如 `experiment.result` 必须带 `verification_evidence` 和 `commit`,这些仍应保留在 workflow 配置中。
+
+### 来源2: `crates/ralph-core/src/event_parser.rs`
+- 当前 parser 仍以 XML-style `<event ...>...</event>` 作为 in-band event envelope。
+- 支持属性包括 `id`、`reply`、`topic`、`target`、`target_instance`、`audience_instances`、`require_delivery`、`workspace_strategy`、`session_strategy`、`turn_action`、`spawn_instance`。
+- 支持同一输出里多个 event block,支持多行 opening tag,也支持 `<\/event>` 形式的 escaped close tag。
+- `LOOP_COMPLETE` 必须在 event 外独占一行才算 completion promise;event payload 里的 `LOOP_COMPLETE` 不应触发完成。
+
+### 来源3: `crates/ralph-core/src/parallel/instance.rs`
+- 并行 job 完成时使用 `EventParser::new().parse(&result.output_for_parsing)`。
+- `output_for_parsing` 是 stdout-only 链路,避免 stderr / tool transcript 造成假事件。
+- `build_prompt` 会把 Incoming Events 渲染成纯文本 `id=... topic=... payload=...`,避免把输入事件原样渲染成 `<event>` 再被模型复述。
+
+### 来源4: `config/all_hat.md` 与 `crates/ralph-core/src/prompt_overlay.rs`
+- `config/all_hat.md` 已经作为编译期内嵌 overlay 注入所有 hat prompt。
+- 这里已经包含“正常 workflow event 发射”的通用规则。
+- `prompt_overlay` 会把 overlay 中 raw `<event>` 示例转义为 `&lt;event`,避免共享 overlay 里的示例被模型复制成真实事件。
+
+## 综合发现
+
+### 当前格式是否正确
+- 是,`ralph-example/ralph.yml` 中 `<event topic="..."><payload></event>` 仍然是正确 event envelope。
+- 但它是不完整的最新协议说明,因为当前 runtime 还支持更多属性和 stdout-only / completion promise 等边界。
+
+### 是否应该继续写在执行目录 `ralph.yml`
+- 不应该把通用 envelope 教程继续散落在执行目录配置里。
+- 这些属于 runtime prompt contract,应该由 Ralph 内置 renderer / compiled prompt overlay 注入。
+- 执行目录 `ralph.yml` 应只写 workflow-specific 内容: topic、payload 字段、backpressure、收敛规则。
+
+### 推荐方案
+- 已创建 OpenSpec change `internalize-event-emission-protocol`。
+- 先实现 built-in event emission protocol renderer,再注入 publishing hat prompts 和 `ralph#1` coordinator prompt。
+- 通过测试后,再瘦身 `ralph-example/ralph.yml`,删除重复的 generic event-format blocks,保留业务 payload schema。
+
+### 不建议方案
+- 不建议直接手动删 `ralph-example/ralph.yml` 里的格式说明。
+- 如果内置 prompt contract 还没有测试锁住,直接删会让 example 依赖隐式知识,风险更高。
+
+## [2026-05-16 13:34:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: 内置事件发送协议实现证据
+
+## 来源
+
+### 来源1: `crates/ralph-core/src/event_emission_protocol.rs`
+- 新增 `EVENT_EMISSION_PROTOCOL_HEADING` 稳定 marker。
+- `render_event_emission_protocol(...)` 负责渲染 canonical envelope、stdout-only 规则、禁止 shell/file/stderr/tool transcript 作为 normal workflow event channel、`LOOP_COMPLETE` 边界、supported attributes 与当前角色可发布 topic 列表。
+
+### 来源2: `crates/ralph-core/src/parallel/instance.rs`
+- `build_prompt(...)` 现在基于 `hat.publishes` 渲染内置事件协议,再追加 Incoming Events。
+- publishing hat 的 workflow-specific payload 字段仍来自 hat instructions,不是 core renderer 推断。
+
+### 来源3: `crates/ralph-core/src/parallel/supervisor.rs`
+- `build_ralph_coordinator_instructions(...)` 改为复用同一个 renderer。
+- coordinator 额外保留 `## OUT-OF-BAND EVENT INJECTION`,只说明 `ralph emit` 是可执行命令通道,不再复制旧的 divergent in-band envelope 教程。
+
+### 来源4: example dogfood
+- repo 内 `examples/parallel-experimental-dev-engine/ralph.yml` 已移除 generic `发事件格式` / `<event topic=...>` 教程块。
+- 外部 `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-example/ralph.yml` 同步瘦身。
+- 两者仍保留 `experiment.result` / `integration.applied` / `experiment.complete` 的 payload 字段要求,例如 `verification_evidence` 与 `commit`。
+
+## 已跑的 focused 验证
+- `cargo test -p ralph-core event_emission_protocol`: 2 passed。
+- `cargo test -p ralph-core ralph_coordinator_event_protocol`: 1 passed。
+- `cargo test -p ralph-cli --test integration_examples test_example_parallel_experimental_dev_engine_uses_builtin_event_protocol`: 1 passed。

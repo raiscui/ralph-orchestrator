@@ -433,3 +433,184 @@
 - 显式 stage 本轮相关文件,不使用 `git add .`。
 - 运行 staged diff check。
 - 创建本地 commit,不 push。
+
+## [2026-05-16 12:10:00] [Session ID: omx-1778510695653-7pd7o2] 新任务启动: 事件发送格式内置化调查
+
+### 目标
+- 回答 `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-example/ralph.yml` 中反复写的事件发送格式是否仍符合当前 runtime contract。
+- 判断这些通用格式说明是否应该从执行目录 `ralph.yml` 中移出,改由 Ralph 内置资源/prompt contract 注入,避免 example 或用户配置过期。
+
+### 阶段
+- [ ] 阶段1: 只读核对 ralph-example 配置中所有事件格式说明。
+- [ ] 阶段2: 核对当前 EventParser / supervisor routing / prompt injection 的真实协议。
+- [ ] 阶段3: 给出判断: 哪些格式正确,哪些是应内置的通用协议,哪些仍应留在 workflow 配置。
+- [ ] 阶段4: 如果需要改代码,先产出 OpenSpec 和测试计划,未经确认不实现。
+
+### 当前边界
+- 先不改代码。
+- 先不直接修改 `ralph-example/ralph.yml`。
+- 如果要把协议内置,必须走 OpenSpec-first,并定义注入位置和回归测试。
+
+### 状态
+- **目前在阶段1** - 已读取目标 ralph-example 配置开头,继续读取完整文件和 parser/prompt 真实实现。
+
+## [2026-05-16 12:12:30] [Session ID: omx-1778510695653-7pd7o2] 阶段2行动: 收窄到事件解析和内置 prompt 注入
+
+已观察:
+- `ralph-example/ralph.yml` 中事件发送格式主要是 `<event topic="...">...payload...</event>`。
+- 这些格式说明出现在 ralph_prompt、runner、auditor、integrator 各自 instructions 中,确实是容易随 runtime contract 漂移的通用协议文本。
+
+即将执行:
+- 读取 `EventParser` 真实实现,确认 `<event>` envelope、多事件连续输出、payload 形态是否仍有效。
+- 读取 parallel instance / supervisor prompt 构建路径,确认是否已有内置 all-hat/common instruction 注入点。
+- 读取 `config/all_hat.md`,判断现有内置内容是否已经覆盖事件发送格式。
+
+## [2026-05-16 12:18:00] [Session ID: omx-1778510695653-7pd7o2] 阶段4行动: 产出 OpenSpec 与测试计划
+
+已确认:
+- 当前 `<event topic="...">...payload...</event>` envelope 仍是正确格式。
+- `EventParser` 支持 topic/id/reply/target/target_instance/audience_instances/require_delivery/workspace_strategy/session_strategy/turn_action/spawn_instance 等属性。
+- `config/all_hat.md` 已经作为编译期内嵌 overlay 注入所有 hat prompt,且会转义 overlay 里的 raw `<event>` 示例以避免误触发。
+- `ParallelSupervisor::build_ralph_coordinator_instructions()` 也已有 coordinator-only 的 raw event 发射格式说明。
+
+即将执行:
+- 创建 OpenSpec change `internalize-event-emission-protocol`。
+- 只写 proposal/design/spec/test-plan/tasks,不实现代码。
+- 验证 change 有效。
+
+## [2026-05-16 12:24:00] [Session ID: omx-1778510695653-7pd7o2] 阶段3完成: 判断与 OpenSpec 产出
+
+已完成:
+- 判断 `ralph-example/ralph.yml` 中 `<event topic="...">...payload...</event>` 当前仍正确。
+- 判断这些 generic event envelope 教程不应继续散落在执行目录 `ralph.yml`。
+- 创建 OpenSpec change `internalize-event-emission-protocol`。
+- 已写 proposal、design、delta spec、tasks、test-plan。
+- `openspec validate internalize-event-emission-protocol --type change`: valid。
+
+当前建议:
+- 先不要直接修改 `ralph-example/ralph.yml`。
+- 下一步若确认进入实现,应先做 built-in event emission protocol renderer 和 prompt tests。
+- 之后再瘦身一个 example 配置作为 dogfood。
+
+状态:
+- **目前在阶段4** - 已按边界停在 OpenSpec + 测试计划,等待确认是否进入实现。
+
+## [2026-05-16 12:27:30] [Session ID: omx-1778510695653-7pd7o2] 阶段4行动: 确认后进入实现
+
+已收到确认:
+- 用户确认进入实现 `internalize-event-emission-protocol`。
+
+即将执行:
+- 读取 OpenSpec apply instructions。
+- 实现 built-in event emission protocol renderer。
+- 注入 publishing hat prompts 与 `ralph#1` coordinator prompt。
+- 添加 focused tests。
+- 瘦身一个 example 配置作为 dogfood。
+- 跑 OpenSpec/fmt/focused/smoke/full gates。
+
+状态:
+- **目前在实现阶段** - 从 OpenSpec tasks 3.1 开始。
+
+## [2026-05-16 12:31:20] [Session ID: omx-1778510695653-7pd7o2] 实现进展: renderer 已新增,首次注入补丁需重试
+
+已完成:
+- 新增 `crates/ralph-core/src/event_emission_protocol.rs`。
+- 导出稳定 marker `EVENT_EMISSION_PROTOCOL_HEADING`。
+
+遇到问题:
+- 首次对 `parallel/instance.rs` 的字符串替换没有命中实际代码块。
+- `cargo fmt --all -- --check` 提示新文件格式需要 rustfmt。
+
+即将执行:
+- 读取实际 `instance.rs` / `supervisor.rs` 代码块。
+- 重新应用注入补丁。
+- 运行 `cargo fmt --all` 修正格式。
+
+## [2026-05-16 13:14:52] [Session ID: omx-1778510695653-7pd7o2] 实现接力行动: 注入内置事件发送协议
+
+当前目标:
+- 继续 OpenSpec change  的实现阶段。
+- 把事件发送格式从执行目录配置中收口为 Ralph 内置 prompt contract。
+
+即将执行:
+- 重新查看 git status 与当前 diff。
+- 读取 renderer、parallel instance prompt、supervisor coordinator prompt 的实际代码块。
+- 用同一个 renderer 注入 publishing hats 与  coordinator instructions。
+- 补 focused tests,再跑 formatter 和 focused test。
+
+状态:
+- **目前在实现阶段** - 从任务 3.2 / 3.3 继续。
+
+## [2026-05-16 13:15:10] [Session ID: omx-1778510695653-7pd7o2] 执行错误更正: heredoc 反引号误执行
+
+遇到错误:
+- 上一条 `task_plan.md` 追加使用了未加引号 heredoc。
+- 正文中的反引号触发了 shell 命令替换,终端出现 `command not found`。
+
+处理方式:
+- 后续所有包含反引号的 Markdown 追加都改用 `cat <<'EOF'`。
+- 这次错误没有修改代码文件,但需要作为过程错误记录,避免继续污染上下文。
+
+状态:
+- **继续实现阶段** - 现在重新读取被追加的计划尾部和代码块,再做补丁。
+
+## [2026-05-16 13:26:00] [Session ID: omx-1778510695653-7pd7o2] 阶段3.5行动: example dogfood 瘦身
+
+行动目的:
+- 用真实 example 验证执行目录配置不再需要重复写 generic event envelope 教程。
+- 保留 workflow-specific topic、payload 字段、backpressure 与收敛规则。
+
+即将执行:
+- 瘦身 repo 内 `examples/parallel-experimental-dev-engine/ralph.yml`,作为可提交 dogfood fixture。
+- 同步瘦身用户提到的 `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-example/ralph.yml`,作为外部执行目录 dogfood。
+- 用搜索确认 generic `发事件格式` / raw `<event topic=...>` 教程已经移除,但 payload 字段仍保留。
+
+状态:
+- **目前在阶段3.5** - 只做配置瘦身,不改变业务 topic 或 payload schema。
+
+## [2026-05-16 13:51:00] [Session ID: omx-1778510695653-7pd7o2] 阶段5完成: 验证与收口
+
+已完成:
+- renderer、publishing hat prompt、coordinator prompt、example dogfood 都已实现并测试覆盖。
+- OpenSpec tasks 已全部勾选。
+- full gates 已跑完。
+
+最终待办列表:
+- [x] 阶段1: 调查 `ralph-example/ralph.yml` 里的事件格式是否仍正确。
+- [x] 阶段2: 写 OpenSpec change 与测试计划。
+- [x] 阶段3: 实现内置 event emission protocol renderer 与 prompt 注入。
+- [x] 阶段4: 瘦身 example dogfood,保留 workflow payload contract。
+- [x] 阶段5: 运行 OpenSpec、fmt、focused、smoke、全量测试与 diff check。
+
+状态:
+- **完成** - 可进入 review / commit。当前不自动提交,等待用户明确要求或下一步指令。
+
+## [2026-05-16 14:05:00] [Session ID: omx-1778510695653-7pd7o2] 收口行动: diff review、commit、archive、live dogfood
+
+目标:
+- 先 review 当前 diff,确认实现 diff 范围干净。
+- 创建本地 commit,不 push。
+- archive `internalize-event-emission-protocol`,并验证 OpenSpec 全量状态。
+- 继续下一条线: 把内置 prompt contract 与默认并行启动结合,做一次真实 `ralph run` dogfood。
+
+执行顺序:
+- [ ] 1. Review 当前 diff 与状态。
+- [ ] 2. 显式 stage 本轮实现文件,做本地 commit。
+- [ ] 3. Archive OpenSpec change,验证并提交 archive diff。
+- [ ] 4. 设计并运行最小真实 `ralph run` dogfood,用记录证据证明内置 prompt contract 在默认并行链路中生效。
+
+状态:
+- **当前在步骤1** - 先审查 diff,再提交。
+
+## [2026-05-16 14:12:00] [Session ID: omx-1778510695653-7pd7o2] 中断恢复: 从 diff review 继续
+
+恢复点:
+- 上一轮被中断时,正在做当前 diff review。
+- 下一步仍然是: review -> 本地 commit -> archive -> live dogfood。
+
+即将执行:
+- 重新检查 git status / diff 范围 / active OpenSpec changes。
+- 确认没有中断导致的半执行状态。
+
+状态:
+- **当前在步骤1** - 先恢复工作区事实,再继续收口。

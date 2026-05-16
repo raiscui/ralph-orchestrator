@@ -13,6 +13,7 @@ use crate::config::{
     HatConfig, PermissionMode, PermissionsConfig, WorkspaceRuntimeConfig, WorkspaceStrategy,
     WorktreeBackend,
 };
+use crate::event_emission_protocol;
 use crate::event_parser::EventParser;
 use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
@@ -1530,10 +1531,20 @@ impl HatInstanceActor {
                 .build_custom_hat(&self.hat, &events_context)
         };
 
+        let publish_topics = self
+            .hat
+            .publishes
+            .iter()
+            .map(|topic| topic.as_str())
+            .collect::<Vec<_>>();
+        let event_protocol =
+            event_emission_protocol::render_event_emission_protocol(publish_topics);
+
         let prompt_body = format!(
-            "{prelude}\n\n{instructions}\n\n### Incoming Events\nWhen replying to a specific incoming event, include `reply=\"<event id>\"` on your emitted `<event>` tag.\n{events}\n",
+            "{prelude}\n\n{instructions}\n\n{event_protocol}\n\n### Incoming Events\nWhen replying to a specific incoming event, include `reply=\"<event id>\"` on your emitted `<event>` tag.\n{events}\n",
             prelude = prelude,
             instructions = hat_instructions,
+            event_protocol = event_protocol,
             events = events_context
         );
         // 在并行模式里,每个实例都注入自己的实例ID,便于运行时自识别。
@@ -2436,6 +2447,86 @@ mod tests {
         assert!(
             prompt.contains("topic=build.task"),
             "Prompt should include topic for incoming events"
+        );
+    }
+
+    #[test]
+    fn parallel_prompt_includes_event_emission_protocol_for_publishing_hat() {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let _ = cmd_tx;
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let (supervisor_tx, _supervisor_rx) = mpsc::channel(1);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let workflow_instructions = "Report build evidence with verification_evidence.";
+        let actor = HatInstanceActor {
+            instance_id: HatInstanceId::new("writer#1"),
+            hat: Hat::new("writer", "Writer")
+                .subscribe("build.task")
+                .with_publishes(vec![ralph_proto::Topic::new("build.done")])
+                .with_instructions(workflow_instructions),
+            hat_config: None,
+            workspace_runtime: WorkspaceRuntimeConfig::default(),
+            permissions: PermissionsConfig::default(),
+            gate_default_timeout_secs: 60,
+            job_timeout: None,
+            job_output_stale_timeout: None,
+            prompt_prelude: String::new(),
+            all_hat_prompt: None,
+            instruction_builder,
+            executor: Arc::new(NoopExecutor),
+            output_tx,
+            supervisor_tx,
+            job_semaphore: Arc::new(Semaphore::new(1)),
+            command_queue: Arc::new(CommandQueue::new()),
+            is_dynamic: false,
+            dynamic_idle_ttl: Duration::from_secs(30),
+            cmd_rx,
+            state: HatInstanceState::Idle,
+            pending: Vec::new(),
+            next_job_id: 1,
+            dynamic_idle_since: None,
+            session_locked_to: SessionStrategy::Exec,
+            pending_permission_gate: None,
+            worktree_override: None,
+            hooks_override: None,
+            running_workspace: None,
+            running: None,
+            running_session_strategy: None,
+            cancel_tx: None,
+            control_tx: None,
+            shutdown_requested: false,
+            shutdown_deadline: None,
+            completion_freeze_requested: Arc::new(AtomicBool::new(false)),
+            completion_freeze_applied: false,
+        };
+
+        let prompt = actor.build_prompt(&[Event::new("build.task", "hello")]);
+
+        assert!(
+            prompt.contains(crate::EVENT_EMISSION_PROTOCOL_HEADING),
+            "publishing hat prompt should include built-in event protocol marker"
+        );
+        assert!(
+            prompt.contains("build.done"),
+            "protocol should list the workflow-specific publish topic"
+        );
+        assert!(
+            prompt.contains(workflow_instructions),
+            "workflow-specific payload requirements should remain in hat instructions"
+        );
+        assert!(
+            prompt.contains("verification_evidence"),
+            "domain payload field should come from workflow instructions, not core protocol"
+        );
+        assert!(
+            prompt.contains("stdout") && prompt.contains("LOOP_COMPLETE"),
+            "protocol should document stdout-only event output and completion boundary"
         );
     }
 

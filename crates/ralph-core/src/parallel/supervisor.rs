@@ -17,6 +17,7 @@ use super::{
     HatJobOutputChunk, TopicContractStore,
 };
 use crate::config::{HatBackend, HatConfig, RalphConfig};
+use crate::event_emission_protocol;
 use crate::event_logger::EventLogger;
 use crate::evidence_index::EvidenceIndexWriter;
 use crate::hat_registry::HatRegistry;
@@ -265,6 +266,28 @@ impl ParallelSupervisor {
     ) -> Self {
         self.runtime_capability_catalog = catalog.into_iter().collect();
         self
+    }
+
+    fn coordinator_publish_topics(&self) -> Vec<String> {
+        let mut topics = self
+            .config
+            .hats
+            .values()
+            .flat_map(|hat| hat.triggers.iter().cloned())
+            .collect::<Vec<_>>();
+
+        topics.push("human.message".to_string());
+        topics.push("reply.human.message".to_string());
+        topics.push("reply.hat.message".to_string());
+        topics.push(crate::TOPIC_CAPABILITY_REQUEST.to_string());
+
+        if let Some(starting_event) = self.config.event_loop.starting_event.as_deref() {
+            topics.push(starting_event.to_string());
+        }
+
+        topics.sort();
+        topics.dedup();
+        topics
     }
 
     /// 设置 runtime capability invocation adapter。
@@ -1126,37 +1149,17 @@ impl ParallelSupervisor {
             "- The ONLY hard shutdown signal is the completion promise: `{completion_promise}`.\n\n"
         ));
 
-        out.push_str("## EMIT EVENTS (NO CODE FENCES)\n");
-        out.push_str("You have two valid ways to publish routing events:\n\n");
-        out.push_str(
-            "1) In-band: emit XML-style tags to stdout (parsed after the job completes):\n\n",
-        );
-        out.push_str("<event topic=\"work.start\">payload</event>\n\n");
-        out.push_str("Optional (parallel): target a specific instance:\n\n");
-        out.push_str(
-            "<event topic=\"build.task\" target_instance=\"builder#1\">payload</event>\n\n",
-        );
-        out.push_str("Optional: reply to a specific incoming event id (single value):\n\n");
-        out.push_str("<event topic=\"build.done\" reply=\"EVENT_ID\">done</event>\n\n");
-        out.push_str("2) Out-of-band (ONLY if you can execute shell/tool commands): run `ralph emit` (Supervisor polls external events continuously):\n\n");
-        out.push_str("ralph emit human.message \"your message\" --target-instance writer#1\n\n");
-        out.push_str("IMPORTANT:\n");
+        let coordinator_topics = self.coordinator_publish_topics();
+        out.push_str(&event_emission_protocol::render_event_emission_protocol(
+            coordinator_topics.iter().map(String::as_str),
+        ));
+        out.push_str("\n");
+        out.push_str("## OUT-OF-BAND EVENT INJECTION\n");
+        out.push_str("- If you can execute shell/tool commands, you MAY run `ralph emit` for out-of-band event injection.\n");
         out.push_str("- If you choose out-of-band `ralph emit`, you MUST actually execute the command. Do NOT print the command as plain text.\n");
-        out.push_str("- Out-of-band `ralph emit` does NOT require the current job/turn to finish; it can be used at any time (including in-flight steer/interrupt).\n");
-        out.push_str("- If you cannot execute commands, use in-band `<event ...>...</event>`.\n\n");
-        out.push_str("Notes:\n");
-        out.push_str(
-            "- You do NOT need to set `id` manually; runtime will assign one if missing.\n",
-        );
-        out.push_str("- When replying, use exactly ONE reply id (no multi-reply).\n\n");
-        out.push_str("- Every `<event ...>` MUST be a complete tag with a closing `</event>`.\n");
-        out.push_str("  - NEVER output an opening `<event ...>` without `</event>`.\n");
-        out.push_str(
-            "  - Prefer single-line events (no newlines inside a tag) to avoid parse failures.\n\n",
-        );
-        out.push_str(
-            "- You MAY publish multiple `<event ...>...</event>` tags in a single response.\n",
-        );
+        out.push_str("- Out-of-band `ralph emit` does NOT require the current job/turn to finish; it can be used at any time, including in-flight steer/interrupt.\n");
+        out.push_str("- If you cannot execute commands, use the in-band event protocol above.\n");
+        out.push_str("- Example command: `ralph emit human.message \"your message\" --target-instance writer#1`.\n\n");
         out.push_str("After publishing the required event(s), you MUST stop. The supervisor will route them and run the next job with fresh context.\n\n");
 
         out.push_str("## HUMAN CHAT (INPUT VS REPLY)\n");

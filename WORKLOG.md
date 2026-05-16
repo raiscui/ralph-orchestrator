@@ -437,3 +437,35 @@
 - 这个需求的正确切入点不是生成物理 `ralph.yml`,而是让 startup bootstrap 的 resolved config 承载“默认 ralph.yml”语义。
 - 并行模式应该是隐式无配置启动的默认运行形态,这样 `ralph#1` 能保持 coordinator 角色,并接上后续 capability catalog / runtime evidence 链路。
 - 显式配置路径仍是用户意图,不能因为文件不存在就悄悄改成默认 bootstrap。
+
+## [2026-05-16 13:50:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: internalize-event-emission-protocol
+
+### 任务内容
+- 将通用 `<event topic="...">payload</event>` 事件发送格式从执行目录配置收口为 Ralph 内置 prompt contract。
+- 保留执行目录 `ralph.yml` 的 workflow-specific topic、payload 字段、backpressure 与收敛规则。
+- 瘦身 repo 内 `examples/parallel-experimental-dev-engine/ralph.yml` 和外部 `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-example/ralph.yml` 的 generic event-format 教程块。
+
+### 完成过程
+- 新增 `crates/ralph-core/src/event_emission_protocol.rs`,用 `EVENT_EMISSION_PROTOCOL_HEADING` 作为稳定 marker。
+- `HatInstanceActor::build_prompt(...)` 现在按 `hat.publishes` 注入内置事件发送协议。
+- `ParallelSupervisor::build_ralph_coordinator_instructions(...)` 复用同一个 renderer,并把 `ralph emit` 放入独立 `## OUT-OF-BAND EVENT INJECTION` 段落。
+- 增加 focused tests: renderer、publishing hat prompt、ralph coordinator prompt、example dogfood。
+- 保持 `prompt_overlay` 对 shared all-hat overlay 示例的转义回归测试通过。
+
+### 验证证据
+- `cargo test -p ralph-core event_emission_protocol`: 2 passed。
+- `cargo test -p ralph-core ralph_coordinator_event_protocol`: 1 passed。
+- `cargo test -p ralph-cli --test integration_examples test_example_parallel_experimental_dev_engine_uses_builtin_event_protocol`: 1 passed。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test -p ralph-core event_parser::tests`: 35 passed。
+- `cargo test -p ralph-core prompt_overlay`: 8 passed。
+- `openspec validate internalize-event-emission-protocol --type change`: valid。
+- `openspec validate --all --strict`: 27 passed,0 failed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `cargo test`: workspace tests and doctests passed。
+- `git diff --check`: passed。
+
+### 总结感悟
+- 通用 runtime envelope 属于 Ralph 内置 prompt contract,不应该长期复制在执行目录 `ralph.yml`。
+- workflow 配置仍然必须保留业务 payload 字段,否则只知道如何发事件,不知道事件里应该带什么。
+- coordinator 的 out-of-band `ralph emit` 是特例通道,应与 in-band `<event>` 协议分段说明,避免两套 envelope 文案继续漂移。
