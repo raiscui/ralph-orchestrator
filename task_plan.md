@@ -628,3 +628,48 @@
 
 状态:
 - **当前在步骤3** - 准备提交 archive 收口 diff。
+
+## [2026-05-16 14:22:00] [Session ID: omx-1778510695653-7pd7o2] 步骤4行动: startup bootstrap + live run dogfood
+
+dogfood 设计:
+- 先在空工作区执行无配置 `ralph run --dry-run`,拿到 startup bootstrap 产出的 `.ralph/resolved-config.yml`。
+- 再只给这个 resolved config 注入可控 custom backend,保持 workflow / prompt / parallel topology 不变。
+- 最后用这个 startup 产物执行真实 `ralph run`,抓取 `ralph#1` prompt 与 record-session 证据。
+
+验证目标:
+- `.ralph/resolved-config.yml` 仍来自无配置 bootstrap,且 `parallel.enabled=true`。
+- 真实运行中 `ralph#1` prompt 含 `## RALPH EVENT EMISSION PROTOCOL`。
+- `record-session` 落盘,证明不是纯 dry-run 或纯单元测试。
+
+状态:
+- **当前在步骤4** - 开始构造最小 live dogfood。
+
+## [2026-05-16 14:50:00] [Session ID: omx-1778510695653-7pd7o2] 步骤4完成: live dogfood 证据已补齐
+
+已完成:
+- 核对工作区状态,确认代码 diff 已全部收口,当前只有六文件记录待追加。
+- 复核空工作区 startup bootstrap 产物,确认:
+  - `bootstrap-selection.json` 选择 `workflow:feature-minimal` 与 `prompt:bootstrap-default-task`
+  - `resolved-config.yml` 含 `parallel.enabled=true`
+- 复核 live `ralph#1` prompt,确认同时包含:
+  - `Act as Ralph's startup bootstrap coordinator`
+  - `## RALPH EVENT EMISSION PROTOCOL`
+  - `reply.human.message`
+- 复核 `record summary`,确认:
+  - `ux_mode: parallel-cli`
+  - `Termination: CompletionPromise`
+  - `current_exe` 指向当前 repo `target/debug/ralph`
+
+收口判断:
+- diff review、本地实现 commit、archive commit、live dogfood 都已完成。
+- 当前剩余动作是把这次六文件记录单独提交,让工作区回到 clean。
+
+最终待办列表:
+- [x] 1. Review 当前 diff 与状态。
+- [x] 2. 显式 stage 本轮实现文件,做本地 commit。
+- [x] 3. Archive OpenSpec change,验证并提交 archive diff。
+- [x] 4. 设计并运行最小真实 `ralph run` dogfood,用记录证据证明内置 prompt contract 在默认并行链路中生效。
+- [ ] 5. 将本轮六文件 evidence 记录单独本地提交,恢复 clean worktree。
+
+状态:
+- **当前在步骤5** - 只剩收尾提交与最终汇报。

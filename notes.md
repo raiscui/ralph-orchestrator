@@ -512,3 +512,43 @@
 - `cargo test -p ralph-core event_emission_protocol`: 2 passed。
 - `cargo test -p ralph-core ralph_coordinator_event_protocol`: 1 passed。
 - `cargo test -p ralph-cli --test integration_examples test_example_parallel_experimental_dev_engine_uses_builtin_event_protocol`: 1 passed。
+
+## [2026-05-16 14:48:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: startup bootstrap + live run dogfood 证据
+
+## 来源
+
+### 来源1: `/tmp/ralph-live-dogfood-73rELo/workspace/.ralph/bootstrap-selection.json`
+- 无 `ralph.yml` 且无 `PROMPT.md` 的空工作区启动后,bootstrap selector 选择了:
+  - `workflow:feature-minimal`
+  - `prompt:bootstrap-default-task`
+- `startup_only` 为 `true`,说明这是 startup bootstrap 阶段产物,不是执行目录静态配置文件。
+
+### 来源2: `/tmp/ralph-live-dogfood-73rELo/workspace/.ralph/resolved-config.yml`
+- resolved config 内联 prompt 含 `Act as Ralph's startup bootstrap coordinator`。
+- `parallel.enabled: true` 已落盘到 startup 产物,说明“默认并行模式”不是口头约定,而是可执行配置事实。
+
+### 来源3: `/tmp/ralph-live-dogfood-73rELo/workspace/.ralph/dogfood/ralph#1.prompt.txt`
+- live run 抓到的 `ralph#1` prompt 同时包含:
+  - `Act as Ralph's startup bootstrap coordinator`
+  - `## RALPH EVENT EMISSION PROTOCOL`
+  - `reply.human.message`
+- 这说明 startup bootstrap 产出的 coordinator prompt 已真实接上内置 event emission protocol,不是只在单元测试里成立。
+
+### 来源4: `target/debug/ralph record summary /tmp/ralph-live-dogfood-73rELo/live-session.jsonl`
+- `ux_mode: parallel-cli`
+- `Termination: CompletionPromise`
+- `current_exe: /Users/cuiluming/local_doc/l_dev/my/rust/ralph-orchestrator/target/debug/ralph`
+- stdout tail 为:
+  - `Startup bootstrap summary from live dogfood.`
+  - `LOOP_COMPLETE`
+
+## 综合发现
+
+### 已验证事实
+- 运行目录中没有 `ralph.yml`、也没有 `PROMPT.md` 时,`ralph run` 现在可以走 startup bootstrap 闭环。
+- 这条闭环默认启用并行模式,并且由 startup 产出的 resolved config 承载,不是要求用户在执行目录手写默认配置。
+- 内置 `## RALPH EVENT EMISSION PROTOCOL` 已真实进入 live `ralph#1` prompt,说明“事件协议内置化”不只是静态实现,已经接到了默认启动链路上。
+
+### 边界确认
+- 这次 live dogfood 只替换了 resolved config 的 backend 执行器,没有热改 workflow、hat topology、prompt contract 或业务 payload schema。
+- 因此这条证据能证明的,是 startup bootstrap + 内置 prompt contract 的真实串联,而不是某个临时 example 特判。

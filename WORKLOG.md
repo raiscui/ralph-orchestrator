@@ -469,3 +469,21 @@
 - 通用 runtime envelope 属于 Ralph 内置 prompt contract,不应该长期复制在执行目录 `ralph.yml`。
 - workflow 配置仍然必须保留业务 payload 字段,否则只知道如何发事件,不知道事件里应该带什么。
 - coordinator 的 out-of-band `ralph emit` 是特例通道,应与 in-band `<event>` 协议分段说明,避免两套 envelope 文案继续漂移。
+
+## [2026-05-16 14:49:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: startup bootstrap 与内置事件协议 live dogfood 收口
+
+### 任务内容
+- 对 `default-bootstrap-parallel-run` 与 `internalize-event-emission-protocol` 做真实运行收口。
+- 证明无配置启动时,默认并行模式与内置事件发送协议已经在 live `ralph run` 链路中真实生效。
+- 补齐六文件中的动态证据记录,避免只剩代码和测试结论。
+
+### 完成过程
+- 在空工作区先执行无配置 dry-run,读取 `.ralph/bootstrap-selection.json` 与 `.ralph/resolved-config.yml`。
+- 确认 startup selector 选择 `workflow:feature-minimal` 与 `prompt:bootstrap-default-task`,并且 resolved config 已落盘 `parallel.enabled=true`。
+- 基于 startup 产物执行真实 live run,抓取 `ralph#1` prompt 与 `record-session` summary。
+- 确认 live prompt 同时含 `Act as Ralph's startup bootstrap coordinator` 与 `## RALPH EVENT EMISSION PROTOCOL`。
+- 确认 `record summary` 为 `ux_mode: parallel-cli` 且 `Termination: CompletionPromise`。
+
+### 总结感悟
+- “默认并行模式”最稳的载体是 startup 产出的 resolved config,而不是要求用户维护一份容易过期的执行目录 `ralph.yml`。
+- “事件协议内置化”真正有价值的完成标准,不是 example 变短了,而是 live `ralph#1` prompt 在默认启动链路里已经带上同一份协议真相源。
