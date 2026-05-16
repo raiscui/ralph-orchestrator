@@ -408,3 +408,32 @@
 - catalog 的真相源必须是 `CapabilityMetadata` 这种结构化 metadata,不能依赖 YAML 注释或完整 prompt body。
 - catalog 注入必须发生在 `spawn_instances()` 前,否则 `ralph#1` prompt 已经定型。
 - prompt pollution 要继续严控: catalog 只给 coordinator,不进普通 hats。
+
+## [2026-05-16 11:53:20] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 无配置 `ralph run` 默认并行模式
+
+### 任务内容
+- 调整 startup resource bootstrap,让运行目录没有 `ralph.yml` 且没有 `PROMPT.md` 时,默认 resolved config 启用并行模式。
+- 保持显式 `--config` 语义不变: 用户明确传了配置路径时,缺失文件仍不被 bootstrap selector 吞掉。
+- 创建并归档 OpenSpec change `default-bootstrap-parallel-run`,同步稳定 spec `openspec/specs/resource-bootstrap/spec.md`。
+
+### 完成过程
+- 在 `resolve_workflow_with_prompt_template(...)` 的 startup-only 配置合成边界设置 `config.parallel.enabled = true`。
+- 补充 unit test,断言默认 bootstrap resolution 带 inline prompt 且 `parallel.enabled=true`。
+- 补充 integration test,在空 workspace dry-run 后读取 `.ralph/resolved-config.yml`,断言包含 `parallel.enabled=true`。
+- 归档 OpenSpec change 到 `openspec/changes/archive/2026-05-16-default-bootstrap-parallel-run/`。
+- 修正归档 proposal 的 OpenSpec 标准章节,避免留下 `## Why` / `## What Changes` warning。
+
+### 验证证据
+- `openspec validate default-bootstrap-parallel-run --type change`: valid。
+- `cargo test -p ralph-cli startup_resources::tests -- --nocapture`: 8 passed。
+- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 2 passed。
+- `cargo fmt --all -- --check`: passed。
+- `openspec validate --all --strict`: 26 passed,0 failed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `cargo test`: workspace tests and doctests passed。
+- `git diff --check`: passed。
+
+### 总结感悟
+- 这个需求的正确切入点不是生成物理 `ralph.yml`,而是让 startup bootstrap 的 resolved config 承载“默认 ralph.yml”语义。
+- 并行模式应该是隐式无配置启动的默认运行形态,这样 `ralph#1` 能保持 coordinator 角色,并接上后续 capability catalog / runtime evidence 链路。
+- 显式配置路径仍是用户意图,不能因为文件不存在就悄悄改成默认 bootstrap。

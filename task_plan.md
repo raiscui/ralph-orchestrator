@@ -295,3 +295,141 @@
 收口结论:
 - Phase 4.1 已完成并本地提交。
 - 当前只剩既有 active OpenSpec change `tui-mdfried-viewer`,与本轮无关。
+
+## [2026-05-16 11:39:54] [Session ID: omx-1778510695653-7pd7o2] 新任务启动: 无配置 `ralph run` 默认并行模式
+
+### 目标
+- 当运行目录没有 `ralph.yml` 且没有 `PROMPT.md` 时,`ralph run` 应通过 startup bootstrap 解析出默认配置,并默认进入并行模式。
+- 默认配置语义应接近“内置默认 ralph.yml”,而不是需要用户先生成本地文件。
+
+### 阶段
+- [ ] 阶段1: 重新审查 startup resource bootstrap 与默认 workflow metadata。
+- [ ] 阶段2: 写/调整测试,证明无配置无 prompt 时 resolved config 是并行模式。
+- [ ] 阶段3: 实现默认 bootstrap workflow 的并行配置修正。
+- [ ] 阶段4: 运行 focused tests、OpenSpec gate、diff checks。
+- [ ] 阶段5: 汇报结果,不自动 push。
+
+### 关键边界
+- 不热改 live topology;这里只改变 startup resolved config。
+- 不要求真实写出 workspace `ralph.yml`;可以继续写 `.ralph/resolved-config.yml` 作为 artifact。
+- 显式 `--config` 缺失仍不应被 bootstrap selector 吞掉。
+
+### 状态
+- **目前在阶段1** - 先读取 startup_resources 与相关测试,确认当前默认 workflow 是否并行。
+
+## [2026-05-16 11:42:39] [Session ID: omx-1778510695653-7pd7o2] 阶段2行动: 补齐 OpenSpec change
+
+已完成:
+- 创建 OpenSpec change `default-bootstrap-parallel-run`。
+- 规格定义: 无 `ralph.yml` / 无 `PROMPT.md` 的隐式默认 bootstrap resolved config 必须包含 `parallel.enabled=true`。
+- 明确非目标: 不写 workspace `ralph.yml`,不热改 runtime topology,不吞掉显式 `--config`。
+
+即将执行:
+- 验证 change。
+- 跑 focused unit/integration tests。
+- 跑 smoke/full gates。
+- archive change 并提交。
+
+## [2026-05-16 11:45:12] [Session ID: omx-1778510695653-7pd7o2] 阶段4行动: 完整验证已确认,准备 archive
+
+已确认:
+- 上一轮长命令已完整结束,`cargo test` workspace tests and doctests passed。
+- 之前已通过 focused tests、smoke tests、OpenSpec validate 和 diff check。
+
+即将执行:
+- 勾选 `openspec/changes/default-bootstrap-parallel-run/tasks.md` 的验证项。
+- 执行 `openspec archive default-bootstrap-parallel-run --yes`。
+- archive 后重新运行 OpenSpec/focused/smoke/diff gates。
+
+状态:
+- **目前在阶段4** - 验证链已完整,正在做 OpenSpec archive 前后收口。
+
+## [2026-05-16 11:46:03] [Session ID: omx-1778510695653-7pd7o2] 阶段4进展: OpenSpec tasks 已完成
+
+已完成:
+- `openspec/changes/default-bootstrap-parallel-run/tasks.md` 中 4.1 到 4.8 已按已验证结果勾选。
+- `openspec validate default-bootstrap-parallel-run --type change`: valid。
+
+即将执行:
+- `openspec archive default-bootstrap-parallel-run --yes`。
+- archive 后运行稳定 spec 全量校验与 focused gates。
+
+## [2026-05-16 11:47:18] [Session ID: omx-1778510695653-7pd7o2] 阶段4行动: archive 后验证
+
+已完成:
+- `openspec archive default-bootstrap-parallel-run --yes`。
+- 稳定 spec `openspec/specs/resource-bootstrap/spec.md` 已同步新增默认并行模式 requirement。
+
+即将执行:
+- `openspec validate --all --strict`。
+- `cargo fmt --all -- --check`。
+- `cargo test -p ralph-cli startup_resources::tests -- --nocapture`。
+- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`。
+- `cargo test -p ralph-core smoke_runner`。
+- `git diff --check`。
+
+## [2026-05-16 11:49:02] [Session ID: omx-1778510695653-7pd7o2] 阶段4进展: archive 后 focused gates 通过
+
+已完成验证:
+- `openspec validate --all --strict`: 26 passed,0 failed。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test -p ralph-cli startup_resources::tests -- --nocapture`: 8 passed。
+- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 2 passed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `git diff --check`: passed。
+
+即将执行:
+- 再运行一次 `cargo test`,作为 archive 后最终全量 gate。
+- 通过后写 `WORKLOG.md`,更新最终计划状态并本地提交。
+
+## [2026-05-16 11:50:37] [Session ID: omx-1778510695653-7pd7o2] 阶段4行动: 全量 gate 后最终审查
+
+已完成:
+- `cargo test`: workspace tests and doctests passed。
+
+即将执行:
+- 审查 startup bootstrap 相关调用范围,确认 `parallel.enabled=true` 只影响隐式 startup resource bootstrap,不吞掉显式配置。
+- 检查 archive proposal 的非阻塞 warning 是否需要修正文档。
+- 运行最终 diff checks 后进入 WORKLOG 与 commit。
+
+## [2026-05-16 11:52:10] [Session ID: omx-1778510695653-7pd7o2] 阶段4行动: 修正 archive proposal warning
+
+观察到:
+- `openspec archive default-bootstrap-parallel-run --yes` 输出非阻塞 warning: proposal 缺少 `## Why` 与 `## What Changes`。
+- change 已成功 archive,但归档文档结构可以更干净。
+
+即将执行:
+- 只修正归档 proposal 文档结构,不改代码和规格语义。
+- 复跑 `openspec validate --all --strict` 与 `git diff --check`。
+
+## [2026-05-16 11:53:20] [Session ID: omx-1778510695653-7pd7o2] 阶段5完成: 默认并行模式任务收口
+
+已完成:
+- startup bootstrap 默认 resolved config 现在启用 `parallel.enabled=true`。
+- OpenSpec change `default-bootstrap-parallel-run` 已归档。
+- 稳定 spec `openspec/specs/resource-bootstrap/spec.md` 已同步要求。
+- archive proposal 的 `## Why` / `## What Changes` 结构 warning 已修正。
+- archive 后 focused gates、smoke tests、全量 `cargo test` 和 diff check 已通过。
+
+最终待办列表:
+- [x] 阶段1: 重新审查 startup resource bootstrap 与默认 workflow metadata。
+- [x] 阶段2: 写/调整测试,证明无配置无 prompt 时 resolved config 是并行模式。
+- [x] 阶段3: 实现默认 bootstrap workflow 的并行配置修正。
+- [x] 阶段4: 运行 focused tests、OpenSpec gate、diff checks。
+- [x] 阶段5: 汇报结果,不自动 push。
+
+即将执行:
+- 显式 stage 本轮相关文件。
+- 运行 `git diff --cached --check`。
+- 创建本地 commit,不 push。
+
+## [2026-05-16 11:55:02] [Session ID: omx-1778510695653-7pd7o2] 阶段5行动: stage 与本地 commit
+
+行动目的:
+- 将无配置默认并行模式实现、测试、OpenSpec archive 和工作日志提交到本地 git。
+
+即将执行:
+- 检查 submodule 状态。
+- 显式 stage 本轮相关文件,不使用 `git add .`。
+- 运行 staged diff check。
+- 创建本地 commit,不 push。

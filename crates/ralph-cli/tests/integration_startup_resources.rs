@@ -53,6 +53,11 @@ fn missing_default_config_and_prompt_bootstraps_before_dry_run() -> Result<()> {
     let resolved_config = fs::read_to_string(resolved_config_path)?;
     assert!(resolved_config.contains("event_loop:"));
     assert!(resolved_config.contains("Act as Ralph's startup bootstrap coordinator"));
+    assert!(
+        resolved_config.contains("parallel:") && resolved_config.contains("enabled: true"),
+        "无配置启动生成的 resolved config 应默认启用并行模式,实际为:
+{resolved_config}"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

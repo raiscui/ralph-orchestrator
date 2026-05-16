@@ -398,6 +398,14 @@ fn resolve_workflow_with_prompt_template(
         config.event_loop.prompt_file.clear();
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // 无配置启动的产品契约:
+    // - 用户执行 `ralph run` 时,缺失 `ralph.yml` / `PROMPT.md` 不应退回串行旧默认。
+    // - bootstrap 产物等价于一份 startup-only 的默认 `ralph.yml`。
+    // - 默认运行模式必须是并行,这样 `ralph#1` 能作为协调者接收 catalog / hats 拓扑。
+    // ─────────────────────────────────────────────────────────────────────
+    config.parallel.enabled = true;
+
     Ok(config)
 }
 
@@ -550,6 +558,10 @@ mod tests {
 
         assert!(resolution.config.event_loop.prompt.is_some());
         assert!(resolution.config.event_loop.prompt_file.is_empty());
+        assert!(
+            resolution.config.parallel.enabled,
+            "无配置 bootstrap 应默认生成并行模式配置"
+        );
         assert_eq!(
             resolution.selection.selected_resources,
             vec![
