@@ -113,6 +113,67 @@ esac
     Ok(())
 }
 
+
+fn write_multi_step_backend_script(path: &Path) -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 这条脚本覆盖方向 B:
+    // - turn1 发 capability request A
+    // - turn2 看到 result A 后发 capability request B
+    // - turn3 看到 result B 后显式发最终 `reply.human.message`
+    // ─────────────────────────────────────────────────────────────────────
+    let script = r#"#!/bin/sh
+set -eu
+mkdir -p .ralph/dogfood
+instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
+case "$instance" in
+  ralph#1)
+    count_file=".ralph/dogfood/ralph-multi-step.count"
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    prompt_capture=".ralph/dogfood/ralph-multi-step-turn-${count}.prompt.txt"
+    cat > "$prompt_capture"
+    case "$count" in
+      1)
+        grep -q '## Runtime Capability Catalog' "$prompt_capture"
+        grep -q 'hat:focused-reviewer' "$prompt_capture"
+        printf '<event id="cap-multi-req-event-1" topic="capability.request">{"request_id":"cap-multi-step-1","capability_id":"hat:focused-reviewer","input":"step one review"}</event>\n'
+        ;;
+      2)
+        grep -q 'capability.result' "$prompt_capture"
+        grep -q 'cap-multi-step-1' "$prompt_capture"
+        printf '<event id="cap-multi-req-event-2" topic="capability.request">{"request_id":"cap-multi-step-2","capability_id":"hat:focused-reviewer","input":"step two review after step one"}</event>\n'
+        ;;
+      3)
+        grep -q 'capability.result' "$prompt_capture"
+        grep -q 'cap-multi-step-2' "$prompt_capture"
+        printf '<event id="cap-multi-human-reply-1" topic="reply.human.message">final human answer: two capability steps completed</event>\n'
+        printf 'LOOP_COMPLETE\n'
+        ;;
+      *)
+        printf 'LOOP_COMPLETE\n'
+        ;;
+    esac
+    ;;
+  *)
+    printf 'LOOP_COMPLETE\n'
+    ;;
+esac
+"#;
+    fs::write(path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
 fn write_config(path: &Path, script_path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 只启用 parallel runtime,不配置任何业务 hat。
@@ -363,6 +424,111 @@ fn parallel_capability_result_can_become_explicit_human_reply() -> Result<()> {
     assert!(
         record_session.contains("reply.human.message") && record_session.contains("_meta.termination"),
         "record-session should preserve explicit human-facing reply publication and termination: {record_session}"
+    );
+
+    assert_eq!(fs::read_to_string(&config_path)?, config_before);
+
+    Ok(())
+}
+
+
+#[test]
+fn parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_human_reply() -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 方向 B gate:
+    // - 同一个 parent run 连续做两步 capability invocation。
+    // - 每一步都等上一步 result 进入 parent context 后再继续。
+    // - 最终仍然只靠显式 `reply.human.message` 对人输出答案。
+    // ─────────────────────────────────────────────────────────────────────
+    let temp_dir = TempDir::new()?;
+    let workspace = temp_dir.path();
+    let script_path = workspace.join("live-capability-multi-step-backend.sh");
+    let config_path = workspace.join("ralph.yml");
+    let record_path = workspace.join("session.jsonl");
+
+    write_prompt(workspace)?;
+    write_multi_step_backend_script(&script_path)?;
+    write_config(&config_path, &script_path)?;
+    let config_before = fs::read_to_string(&config_path)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+            "--no-tui",
+            "--record-session",
+            record_path.to_string_lossy().as_ref(),
+        ])
+        .current_dir(workspace)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "multi-step capability orchestration run should succeed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("final human answer: two capability steps completed"),
+        "CLI output should only expose the final human-facing payload after both capability steps: {stdout}"
+    );
+
+    let records = read_event_records(workspace)?;
+    let request_count = records.iter().filter(|record| record.topic == "capability.request").count();
+    assert_eq!(request_count, 2, "event log should contain exactly two capability requests: {records:#?}");
+
+    let result_payload_1 = records
+        .iter()
+        .filter(|record| record.topic == "capability.result")
+        .filter_map(|record| payload_json(record).ok())
+        .find(|payload| payload["request_id"] == "cap-multi-step-1")
+        .context("missing capability.result for cap-multi-step-1")?;
+    let result_payload_2 = records
+        .iter()
+        .filter(|record| record.topic == "capability.result")
+        .filter_map(|record| payload_json(record).ok())
+        .find(|payload| payload["request_id"] == "cap-multi-step-2")
+        .context("missing capability.result for cap-multi-step-2")?;
+
+    let invocation_id_1 = result_payload_1["invocation_id"]
+        .as_str()
+        .context("capability.result for step1 should include invocation_id")?;
+    let invocation_id_2 = result_payload_2["invocation_id"]
+        .as_str()
+        .context("capability.result for step2 should include invocation_id")?;
+    assert_ne!(invocation_id_1, invocation_id_2, "each capability step should produce a distinct invocation id");
+
+    let events = fs::read_to_string(workspace.join(".ralph/events.jsonl"))?;
+    assert!(
+        events.contains("cap-multi-step-1")
+            && events.contains("cap-multi-step-2")
+            && events.contains("\"topic\":\"reply.human.message\""),
+        "events.jsonl should preserve both capability steps and the final explicit human reply: {events}"
+    );
+
+    for invocation_id in [invocation_id_1, invocation_id_2] {
+        let inspect_output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+            .args(["tools", "capability", "inspect", invocation_id, "--json"])
+            .current_dir(workspace)
+            .output()?;
+        assert!(
+            inspect_output.status.success(),
+            "capability inspect should succeed for {invocation_id}.\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&inspect_output.stdout),
+            String::from_utf8_lossy(&inspect_output.stderr)
+        );
+        let inspect_report: Value = serde_json::from_slice(&inspect_output.stdout)?;
+        assert_eq!(inspect_report["invocation_id"], invocation_id);
+        assert_eq!(inspect_report["status"], "entries");
+    }
+
+    let record_session = fs::read_to_string(&record_path)?;
+    assert!(
+        record_session.contains("reply.human.message") && record_session.contains("_meta.termination"),
+        "record-session should preserve the final explicit human-facing reply and termination: {record_session}"
     );
 
     assert_eq!(fs::read_to_string(&config_path)?, config_before);

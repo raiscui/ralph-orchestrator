@@ -690,3 +690,37 @@
   - turn2: 观察到 `capability.result`
   - same parent run 显式发 `reply.human.message`
 - 实际实现时不需要新增 runtime 功能; 只是在现有测试 harness 上补一条更完整的产品链 gate。
+## [2026-05-16 20:05:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: multi-step orchestration over capability results 的最小产品闭环
+
+## 来源
+
+### 来源1: `crates/ralph-cli/tests/integration_live_capability.rs`
+- 新增 `write_multi_step_backend_script(...)`。
+- turn1 由 parent `ralph#1` 发 `capability.request(step1)`。
+- turn2 只有在 prompt 已看到 `capability.result(step1)` 后,才继续发 `capability.request(step2)`。
+- turn3 只有在 prompt 已看到 `capability.result(step2)` 后,才显式发 `reply.human.message` 并 `LOOP_COMPLETE`。
+
+### 来源2: `openspec/specs/capability-invocation/spec.md`
+- 稳定 spec 这次新增了两条 multi-step requirement。
+- 第一条要求 parent run 可以跨多个 turn 发多个 `capability.request`,并基于前一步 `capability.result` 决定后一步。
+- 第二条要求最终 human-facing answer 仍必须显式 `reply.human.message`,中间 capability results 不能被误当成人类回复。
+
+### 来源3: archived change `openspec/changes/archive/2026-05-16-multi-step-capability-result-orchestration/`
+- archived change 已完整包含 proposal / design / delta spec / tasks / test-plan。
+- 说明这次不是临时补测试,而是已经完成 spec -> gate -> archive 的闭环。
+
+## 综合发现
+
+### 现象
+- 当前 runtime 已经自然支持 parent run 在多个 turn 内连续发多个不同 `request_id` 的 `capability.request`。
+- 每一步 capability invocation 都能回到 parent-visible `capability.result`,并保留各自独立 `invocation_id`。
+- 最终 human-facing answer 仍然只在最后一步通过显式 `reply.human.message` 暴露给用户。
+
+### 边界判断
+- 这不是 broker、planner engine 或 topology mutation。
+- 真正的 orchestrator 仍然是 parent `ralph#1` 自己。
+- capability execution path 仍然是 isolated child / micro-run,没有改变 parent topology。
+
+### 结论
+- 方向B已经从“单步 capability result -> human reply”演进到“多步 capability results -> final human reply”。
+- 这条链路现在有 repo-native focused gate,也有 OpenSpec requirement,后续可以在这个基础上继续做更丰富的 parent policy 或 failure branching。

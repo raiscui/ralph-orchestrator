@@ -620,3 +620,23 @@
 ### 总结感悟
 - 这条线证明 capability invocation 不只是“能调子流程”,而是已经能服务真实对人回答的产品链路。
 - 下一阶段如果再演进,更适合继续做“parent policy / multi-step orchestration / richer human answer shaping”,而不是回头重造 reply 机制。
+## [2026-05-16 20:05:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B - multi-step capability result orchestration gate
+
+### 任务内容
+- 继续 capability invocation 这条产品演进线。
+- 证明 parent run 不只会做单步 `capability.request -> capability.result -> reply.human.message`,还可以基于前一步结果继续发下一步 capability request。
+- 保持产品边界不变: parent topology 不热改,最终 human-facing answer 仍必须显式发 `reply.human.message`。
+
+### 完成过程
+- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增 `write_multi_step_backend_script(...)`。
+- 新增 focused gate `parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_human_reply()`。
+- gate 断言了:
+  - parent event log 中存在 2 条 `capability.request`
+  - 2 条 `capability.result` 分别对应 `cap-multi-step-1` 与 `cap-multi-step-2`
+  - 两步 invocation 各自拥有不同 `invocation_id`,且都能通过 `ralph tools capability inspect <id> --json` 查到证据链
+  - CLI stdout、`.ralph/events.jsonl` 与 record-session 都保留最终显式 `reply.human.message`
+- 已将 change archive 到 `openspec/changes/archive/2026-05-16-multi-step-capability-result-orchestration/`,并把 requirement 同步进 `openspec/specs/capability-invocation/spec.md`。
+
+### 总结感悟
+- 多步 orchestration 这次不需要新增 runtime 机制,只需要证明现有 parent run 已能用多个 `capability.result` 做连续决策。
+- 下一条线更适合继续做 richer answer shaping、`capability.failed` 分支策略,或受限的多步 parent policy,而不是回头重造 capability runtime。

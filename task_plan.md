@@ -964,3 +964,56 @@ dogfood 设计:
 
 状态:
 - **当前任务已完成** - capability invocation 已接到 explicit human-visible answer 闭环。
+
+## [2026-05-16 19:02:00] [Session ID: omx-1778510695653-7pd7o2] 新任务启动: 方向B - multi-step orchestration over capability results
+
+目标:
+- 在已完成的单步 `capability.request -> capability.result -> reply.human.message` 闭环基础上,继续推进 parent run 的多步 capability orchestration。
+- 钉死边界: 多步 orchestration 仍由 parent `ralph#1` 显式编排,每一步 capability 执行仍走 isolated child/micro-run,最终对人的答案仍显式发 `reply.human.message`。
+
+阶段计划:
+- [ ] 阶段1: 盘点现有 live capability runtime、单步 human-reply gate 与多步 orchestration 缺口
+- [ ] 阶段2: 写窄 OpenSpec change,定义 multi-step orchestration over capability results 的最小边界
+- [ ] 阶段3: 判断现有 `integration_live_capability.rs` 是否适合直接承载多步 gate
+- [ ] 阶段4: 若边界清晰且实现面窄,进入 focused implementation 与验证
+- [ ] 阶段5: 收口验证、归档与本地提交
+
+状态:
+- **目前在阶段1** - 先做只读勘查,确认最小产品闭环应该长什么样。
+## [2026-05-16 20:05:00] [Session ID: omx-1778510695653-7pd7o2] 阶段推进: 方向B multi-step gate 进入收口
+
+即将执行:
+- 复核 `integration_live_capability.rs`、稳定 spec 与 archived change 的实际 diff,确认当前改动只是在现有 capability contract 上补 multi-step gate。
+- 把 multi-step orchestration 的现象、边界、验证证据补写到 `notes.md` 与 `WORKLOG.md`。
+- 复跑 focused gate 与 spec 校验,随后做本地 commit。
+
+当前判断:
+- 这条线的价值不是新增 runtime 机制,而是证明 parent run 已能基于多个 `capability.result` 做连续编排,并最终显式发 `reply.human.message`。
+- 若复核过程中发现 gate 与 archived spec 不一致,优先修正文档或测试,不扩 scope。
+
+状态:
+- **目前在阶段4/5交界** - 先补齐项目记忆,再做最终验证与提交。
+## [2026-05-16 20:12:00] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: 方向B multi-step capability orchestration 已收口
+
+已完成:
+- 在 `integration_live_capability.rs` 落地 multi-step focused gate。
+- archived change `multi-step-capability-result-orchestration` 已进入 archive 目录。
+- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步 multi-step requirement。
+- 已补齐 `notes.md` / `WORKLOG.md` 的现象、边界、结论记录。
+
+验证证据:
+- `cargo test -p ralph-cli --test integration_live_capability`
+- `cargo test -p ralph-core smoke_runner`
+- `openspec validate --all --strict`
+- `cargo test`
+- `git diff --check`
+
+待办更新:
+- [x] 阶段1: 盘点现有 live capability runtime、单步 human-reply gate 与多步 orchestration 缺口
+- [x] 阶段2: 写窄 OpenSpec change,定义 multi-step orchestration over capability results 的最小边界
+- [x] 阶段3: 判断现有 `integration_live_capability.rs` 是否适合直接承载多步 gate
+- [x] 阶段4: 若边界清晰且实现面窄,进入 focused implementation 与验证
+- [x] 阶段5: 收口验证、归档与本地提交
+
+状态:
+- **当前任务已完成** - 进入本地提交与下一条产品线选择。
