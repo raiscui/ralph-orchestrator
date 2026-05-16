@@ -55,6 +55,52 @@ esac
     Ok(())
 }
 
+
+fn write_explicit_human_reply_backend_script(path: &Path) -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 这个脚本覆盖 B.1 的最小闭环:
+    // - researcher 用 `reply.hat.message` 把内部答案回给 requester。
+    // - ralph#1 收到内部答案后,再显式发 `reply.human.message` 给人看。
+    // ─────────────────────────────────────────────────────────────────────
+    let script = r#"#!/bin/sh
+set -eu
+mkdir -p .ralph/dogfood
+instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
+case "$instance" in
+  ralph#1)
+    count_file=".ralph/dogfood/ralph-human.count"
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [ "$count" -eq 1 ]; then
+      printf '<event id="req-human-dogfood-1" topic="research.request" target="researcher">summarize the internal answer for the human</event>\n'
+    else
+      printf '<event id="human-reply-dogfood-1" topic="reply.human.message">final answer for human: answer evidence is indexed</event>\n'
+      printf 'LOOP_COMPLETE\n'
+    fi
+    ;;
+  researcher#1)
+    printf '<event id="ans-human-dogfood-1" topic="reply.hat.message" reply="req-human-dogfood-1">answer evidence is indexed</event>\n'
+    ;;
+  *)
+    printf 'LOOP_COMPLETE\n'
+    ;;
+esac
+"#;
+    fs::write(path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
 fn write_config(path: &Path, script_path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 测试配置只打开 parallel runtime 和一个 researcher hat。
@@ -266,6 +312,108 @@ fn answer_inspect_fails_for_unknown_correlation_id() -> Result<()> {
         stderr.contains("unknown-answer-id") && stderr.contains(".ralph/evidence-index.jsonl"),
         "unknown answer inspect error should mention correlation id and index path: {stderr}"
     );
+
+    Ok(())
+}
+
+
+#[test]
+fn parallel_run_dogfoods_explicit_human_facing_answer_after_internal_reply() -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 这条 gate 专门证明方向 B.1:
+    // - 内部 `reply.hat.message` 先闭合 requester-return。
+    // - 面向人的最终答案仍然必须由协调者显式发 `reply.human.message`。
+    // ─────────────────────────────────────────────────────────────────────
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+    let script_path = temp_path.join("dogfood-human-backend.sh");
+    let config_path = temp_path.join("ralph.yml");
+    let record_path = temp_path.join("session.jsonl");
+
+    write_prompt(temp_path)?;
+    write_explicit_human_reply_backend_script(&script_path)?;
+    write_config(&config_path, &script_path)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+            "--no-tui",
+            "--record-session",
+            record_path.to_string_lossy().as_ref(),
+        ])
+        .current_dir(temp_path)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "explicit human-facing answer dogfood should succeed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("final answer for human: answer evidence is indexed"),
+        "CLI output should surface the final human-facing payload: {stdout}"
+    );
+
+    // ─────────────────────────────────────────────────────────────────
+    // 事件日志仍然是单一真相源。
+    // 这里要求 internal reply 和 human-facing reply 作为两条独立事件同时存在。
+    // ─────────────────────────────────────────────────────────────────
+    let events = fs::read_to_string(temp_path.join(".ralph/events.jsonl"))?;
+    assert!(
+        events.contains("\"topic\":\"reply.hat.message\"")
+            && events.contains("\"topic\":\"reply.human.message\""),
+        "event log should preserve both internal and human-facing reply events: {events}"
+    );
+    assert!(
+        events.contains("routing.requester_return") && events.contains("delivered"),
+        "event log should contain requester-return delivery evidence: {events}"
+    );
+
+    // ─────────────────────────────────────────────────────────────────
+    // record-session 证明这不是只看 stdout 的表面成功。
+    // 需要能看到 human-facing reply topic 真正被 runtime 记录下来。
+    // ─────────────────────────────────────────────────────────────────
+    let record = fs::read_to_string(&record_path)?;
+    assert!(
+        record.contains("reply.human.message") && record.contains("_meta.termination"),
+        "record-session should preserve human-facing reply publication and termination: {record}"
+    );
+
+    // ─────────────────────────────────────────────────────────────────
+    // internal answer-return evidence 仍然要可查。
+    // 这样可以证明 human-facing reply 没有取代内部 answer evidence contract。
+    // ─────────────────────────────────────────────────────────────────
+    let evidence_path = temp_path.join(".ralph/evidence-index.jsonl");
+    let request_lookup = EvidenceIndexReader::new(&evidence_path)
+        .find_by_correlation("req-human-dogfood-1")
+        .with_context(|| evidence_path.display().to_string())?;
+    let request_entries = request_lookup.entries();
+    assert!(matches!(request_lookup, EvidenceLookup::Entries(_)));
+    assert!(
+        request_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::ReplyEvent
+                && entry.child_correlation_id.as_deref() == Some("ans-human-dogfood-1")
+        }),
+        "internal request id should still resolve to reply_event evidence: {request_entries:#?}"
+    );
+
+    let inspect_output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args(["tools", "answer", "inspect", "req-human-dogfood-1", "--json"])
+        .current_dir(temp_path)
+        .output()?;
+    assert!(
+        inspect_output.status.success(),
+        "answer inspect should still work for the internal requester-return evidence.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect_output.stdout),
+        String::from_utf8_lossy(&inspect_output.stderr)
+    );
+    let inspect_report: Value = serde_json::from_slice(&inspect_output.stdout)?;
+    assert_eq!(inspect_report["status"], "entries");
 
     Ok(())
 }

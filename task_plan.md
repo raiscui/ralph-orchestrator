@@ -839,3 +839,84 @@ dogfood 设计:
 
 状态:
 - **当前在收尾阶段** - archive active change。
+
+## [2026-05-16 18:05:00] [Session ID: omx-1778510695653-7pd7o2] 新任务启动: 方向B.1 - human-facing answer return 最小闭环 dogfood
+
+目标:
+- 在已完成的 answer evidence inspect UX 基础上,继续验证并固化一条最小的 human-facing answer return 闭环。
+- 明确区分内部 `reply.hat.message` answer-return channel 与面向人的 `reply.human.message` 发布契约。
+- 若现有 runtime 已具备闭环,则补 dogfood gate 与 spec 收口; 若缺口存在,则先用 OpenSpec 把最小边界钉死后再实现。
+
+阶段计划:
+- [ ] 阶段1: 盘点现有 human-facing answer return 路径与 evidence contract
+- [ ] 阶段2: 形成候选边界,判断是纯 dogfood/gate 还是需要最小实现修补
+- [ ] 阶段3: 写 OpenSpec change 与测试计划
+- [ ] 阶段4: 视 spec 决定是否进入实现与 focused verification
+- [ ] 阶段5: 收口验证、记录、提交/归档
+
+关键问题:
+1. 现有 `reply.human.message` 是否已经能从显式 workflow 决策稳定产出,还是只有内部 `reply.hat.message` 已经闭环?
+2. 哪条最小 runtime 线路最适合作为 dogfood gate,既真实又稳定?
+3. 应该新增 inspect/query,还是先补 live gate 来证明已有 contract?
+
+状态:
+- **目前在阶段1** - 先做只读勘查,确认真实缺口与最小边界。
+
+## [2026-05-16 18:20:00] [Session ID: omx-1778510695653-7pd7o2] 阶段推进: B.1 的 OpenSpec 与测试计划已完成
+
+已完成:
+- 阶段1: 盘点现有 human-facing answer return 路径与 evidence contract。
+- 阶段2: 确认最小边界是 repo-native dogfood gate,不是新增 routing 功能。
+- 阶段3: 新建 OpenSpec change `human-facing-answer-return-dogfood`,并完成 proposal / design / delta spec / tasks / test-plan。
+- `openspec validate human-facing-answer-return-dogfood --type change` 已通过。
+
+当前结论:
+- 方向B.1最值得做的是: 证明 internal `reply.hat.message` 与 explicit `reply.human.message` 能在同一条 runtime run 里闭环。
+- 当前还没有证据显示必须先改 runtime 代码; 更合理的下一步是先实现 focused CLI integration gate。
+
+待办更新:
+- [x] 阶段1: 盘点现有 human-facing answer return 路径与 evidence contract
+- [x] 阶段2: 形成候选边界,判断是纯 dogfood/gate 还是需要最小实现修补
+- [x] 阶段3: 写 OpenSpec change 与测试计划
+- [ ] 阶段4: 视 spec 决定是否进入实现与 focused verification
+- [ ] 阶段5: 收口验证、记录、提交/归档
+
+状态:
+- **目前在阶段4前** - spec 已锁定,等待进入 focused implementation/gate。
+
+## [2026-05-16 18:26:00] [Session ID: omx-1778510695653-7pd7o2] 阶段4启动: 进入 focused implementation/gate
+
+即将执行:
+- 先在 `crates/ralph-cli/tests/integration_answer_evidence.rs` 增加一条 focused CLI integration gate。
+- 目标不是先改 runtime,而是先验证现有 runtime 能否自然通过 B.1 的最小闭环。
+- 若 gate 暴露失败,再按“显示层 / 耐久化 / workflow”三类做最小修补。
+
+状态:
+- **目前在阶段4** - 先做最小实现和 focused 验证。
+
+## [2026-05-16 18:34:00] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: B.1 实现、归档与验证完成
+
+已完成:
+- 在 `crates/ralph-cli/tests/integration_answer_evidence.rs` 新增 focused gate:
+  - internal `reply.hat.message` -> requester-return
+  - explicit `reply.human.message` -> human-visible answer
+- OpenSpec change `human-facing-answer-return-dogfood` 已 archive。
+- 稳定 spec `openspec/specs/request-reply-answer-evidence/spec.md` 已同步新增 2 条 requirement。
+
+验证证据:
+- `cargo test -p ralph-cli --test integration_answer_evidence -- --nocapture`
+- `openspec validate human-facing-answer-return-dogfood --type change`
+- `cargo test -p ralph-core smoke_runner`
+- `cargo test`
+- `openspec validate --all --strict`
+- `git diff --check`
+
+待办更新:
+- [x] 阶段1: 盘点现有 human-facing answer return 路径与 evidence contract
+- [x] 阶段2: 形成候选边界,判断是纯 dogfood/gate 还是需要最小实现修补
+- [x] 阶段3: 写 OpenSpec change 与测试计划
+- [x] 阶段4: 视 spec 决定是否进入实现与 focused verification
+- [x] 阶段5: 收口验证、记录、提交/归档
+
+状态:
+- **当前任务已完成** - B.1 已变成 repo-native gate + archived OpenSpec change。

@@ -594,3 +594,64 @@
 ### 测试策略
 - 扩 `integration_answer_evidence.rs`,直接在现有 live dogfood 后调用 `ralph tools answer inspect`。
 - 这样能证明 inspect UX 和真实 answer-return runtime evidence 用的是同一条 durable artifact 链。
+
+## [2026-05-16 18:12:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: 方向B.1 的现状盘点与最小边界
+
+## 来源
+
+### 来源1: `EXPERIENCE.md`
+- `exp-20260514-request-reply-answer-evidence-boundary`
+- 要点:
+  - `reply.hat.message` 是显式 requester-return answer channel。
+  - 内部 answer return 不能自动合成 `reply.human.message`。
+  - human-visible answer 必须保持显式 workflow / event 决策。
+
+### 来源2: `openspec/specs/request-reply-answer-evidence/spec.md`
+- 要点:
+  - 稳定 spec 已经锁定 `reply.hat.message` 与 `reply.human.message` 的职责边界。
+  - 现有稳定 spec 覆盖 answer-return evidence 和 answer inspect UX,但还没有一个“human-facing answer return dogfood”条目。
+
+### 来源3: `crates/ralph-core/src/parallel/supervisor/routing.rs`
+- 要点:
+  - `reply.human.message` 到达 supervisor 后只走 observer,不会再参与 hat 路由。
+  - `reply.hat.message` 则会按 `reply=<request_event_id>` 找回 requester instance 并定向投递。
+
+### 来源4: `crates/ralph-core/src/parallel/supervisor.rs`
+- 要点:
+  - live prompt 已明确要求: 观察到外部 `human.message` 时,必须显式发 `reply.human.message`。
+  - 同一段协议也明确要求: hat-to-hat answer return 必须走 `reply.hat.message`。
+
+### 来源5: 现有测试与场景
+- `crates/ralph-cli/tests/integration_answer_evidence.rs`
+  - 已证明内部 requester-return evidence 可闭环。
+  - 但没有覆盖最终 human-visible reply。
+- `crates/ralph-core/src/parallel/supervisor/routing_tests.rs`
+  - 已有 guardrail test 证明 `reply.hat.message` 不自动 synthesize `reply.human.message`。
+- `crates/ralph-e2e/src/scenarios/parallel/app_server_steer_live_reply_multi_turn.rs`
+  - 已存在 live “可见 answer” 场景,但它是 E2E 级、依赖真实 codex app-server,不适合作为 repo-native 最小 gate。
+
+## 综合发现
+
+### 现象
+- 仓库已经有 internal answer return 的 durable evidence contract。
+- 仓库也已经有 human-facing reply 的 prompt/display/record contract。
+- 但缺一条 repo-native、无外部模型依赖的最小动态证据,把这两层 contract 放进同一条 runtime run 里证明。
+
+### 候选假设
+- 当前方向B.1最值得做的不是新增 routing 功能。
+- 更像是新增一个 focused dogfood gate + 配套 OpenSpec 条目:
+  - 外部 `human.message` -> `ralph#1`
+  - `ralph#1` 发内部 request 给 worker
+  - worker 用 `reply.hat.message` 回答给 `ralph#1`
+  - `ralph#1` 再显式发 `reply.human.message`
+  - 断言 stdout / record-session / events.jsonl 都有可验证证据
+
+### 为什么这条边界最稳
+- 不会改 live topology。
+- 不会引入 request broker。
+- 不会破坏“human-visible answer 必须显式发布”的既有产品契约。
+- 可以直接复用前一条 `integration_answer_evidence` 的 test harness 风格。
+
+### 当前尚缺的证据
+- 还没看到现有 CLI integration 已经覆盖这条完整闭环。
+- 还需要创建新 change,把 dogfood 的断言点和非目标写清楚。

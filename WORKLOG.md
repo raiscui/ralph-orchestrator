@@ -549,3 +549,48 @@
 ### 总结感悟
 - 方向B当前最缺的不是再补一条 runtime gate,而是给已存在的 answer-return evidence 一个最小可查询面。
 - `Entries` / `Missing` / `NoEntry` 这三个 lookup 语义已经足够表达 answer evidence 的第一阶段产品面,没必要现在就扩成通用 evidence 平台。
+
+## [2026-05-16 18:20:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B.1 - human-facing answer return 最小闭环 dogfood 规格收口
+
+### 任务内容
+- 继续方向B,把“internal answer return 如何显式变成 human-visible answer”收束成一个窄 OpenSpec change。
+- 避免把 `reply.hat.message` 与 `reply.human.message` 混成同一个机制。
+- 为后续 focused gate 实现先锁定产品边界和验证口径。
+
+### 完成过程
+- 盘点了稳定 spec、项目经验、现有 CLI integration、routing guardrail tests 和 live E2E 场景。
+- 确认当前最小缺口不是新 routing 功能,而是一条 repo-native dogfood gate。
+- 新建 `openspec/changes/human-facing-answer-return-dogfood/`,并完成:
+  - `proposal.md`
+  - `design.md`
+  - `specs/request-reply-answer-evidence/spec.md`
+  - `tasks.md`
+  - `test-plan.md`
+- 用 `openspec validate human-facing-answer-return-dogfood --type change` 验证通过。
+
+### 总结感悟
+- B.1 最自然的做法不是再发明一条新 reply 通道,而是证明现有两条通道能在同一条 run 里各守其职。
+- 先把“显示层问题、耐久化问题、真正 workflow 问题”三类失败解释拆开,后面实现时就不容易误补丁。
+
+## [2026-05-16 18:34:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B.1 - human-facing answer return 最小闭环实现与归档
+
+### 任务内容
+- 为方向B.1补一条 repo-native focused gate,证明 internal `reply.hat.message` 与 explicit `reply.human.message` 能在同一条 runtime run 里闭环。
+- 保持边界不变: internal answer return 不自动 synthesize human reply。
+- 将该边界同步进稳定 spec 并 archive change。
+
+### 完成过程
+- 在 `crates/ralph-cli/tests/integration_answer_evidence.rs` 新增:
+  - `write_explicit_human_reply_backend_script(...)`
+  - `parallel_run_dogfoods_explicit_human_facing_answer_after_internal_reply()`
+- 新 gate 断言了:
+  - CLI stdout 出现最终 human-facing payload
+  - `.ralph/events.jsonl` 同时保留 `reply.hat.message` 与 `reply.human.message`
+  - record-session 保留 `reply.human.message` 发布证据
+  - answer inspect 仍可按 internal request id 查到内部 answer evidence
+- 完成 OpenSpec change `human-facing-answer-return-dogfood` 的 proposal / design / delta spec / tasks / test-plan。
+- archive 后把 requirement 同步进 `openspec/specs/request-reply-answer-evidence/spec.md`,并修掉 EOF 空白行格式问题。
+
+### 总结感悟
+- 这条线最值钱的不是“新增了一个 reply 机制”,而是证明现有两条 reply 通道已经能在同一条 run 里正确协作。
+- 当方向B再往前走时,可以默认把这条 gate 当成 request/reply/human-visible answer 的基础回归门禁。
