@@ -1017,3 +1017,66 @@ dogfood 设计:
 
 状态:
 - **当前任务已完成** - 进入本地提交与下一条产品线选择。
+## [2026-05-16 20:18:00] [Session ID: omx-1778510695653-7pd7o2] 新任务启动: 方向B.2 - capability.failed 后的 parent fallback orchestration
+
+目标:
+- 在已经完成的 success path 基础上,继续证明 parent run 在收到 `capability.failed` 后仍能继续做下一步编排,并最终显式发 `reply.human.message`。
+- 钉死边界: failure 仍然是 parent-visible runtime event,child/micro-run 仍隔离执行, parent topology 不热改,最终 human-facing answer 仍然必须显式发布。
+
+阶段计划:
+- [ ] 阶段1: 盘点 `capability.failed` 现有 contract、payload 形状与集成测试缺口
+- [ ] 阶段2: 写窄 OpenSpec change,定义 failure -> fallback -> explicit human reply 的最小边界
+- [ ] 阶段3: 判断现有 `integration_live_capability.rs` 是否可直接承载 failure fallback gate
+- [ ] 阶段4: 若边界清晰且实现面窄,进入 focused implementation 与验证
+- [ ] 阶段5: 收口验证、归档与本地提交
+
+当前假设:
+- 当前最值得做的不是新增 retry engine 或 planner。
+- 更像是补一条 repo-native gate,证明 parent `ralph#1` 收到 `capability.failed` 后可以选择 fallback capability 或直接形成最终 human reply。
+- 备选解释是: 现有 failure artifact / prompt context 不足以支撑 parent 做 deterministic fallback,那就需要先补 contract 而不是急着写 gate。
+
+推翻当前假设的证据:
+- 如果后续发现 parent prompt 中根本拿不到足够的 `capability.failed` 上下文,当前“只补 gate”假设就不成立。
+- 如果 failure event 已经存在但 inspect / events / record-session 中缺少稳定证据,则应先修 durability contract。
+
+状态:
+- **目前在阶段1** - 先做只读勘查,确认 failure path 的最小产品闭环。
+## [2026-05-16 20:31:00] [Session ID: omx-1778510695653-7pd7o2] 阶段推进: B.2 focused failure-fallback gate 已验证通过
+
+已确认结论:
+- `capability.failed` 不只是会回 parent event log,它也会进入后续 parent turn 的 prompt 上下文。
+- parent `ralph#1` 已能在看到 failure 后继续发 fallback `capability.request`。
+- 最终 human-facing answer 仍然只在显式 `reply.human.message` 时暴露。
+
+验证证据:
+- `openspec validate capability-failure-fallback-human-reply-dogfood --type change`
+- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
+
+状态:
+- **目前在阶段4** - 进入 archive、稳定 spec sync 与全量验证。
+## [2026-05-16 20:42:00] [Session ID: omx-1778510695653-7pd7o2] 阶段完成: 方向B.2 failure fallback orchestration 已收口
+
+已完成:
+- OpenSpec change `capability-failure-fallback-human-reply-dogfood` 已 archive。
+- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步 failure fallback requirement。
+- `integration_live_capability.rs` 已新增 failure -> fallback -> explicit human reply focused gate。
+- 已补齐 `notes.md` / `WORKLOG.md` 的调查与完成记录。
+
+验证证据:
+- `openspec validate capability-failure-fallback-human-reply-dogfood --type change`
+- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
+- `cargo test -p ralph-cli --test integration_live_capability`
+- `cargo test -p ralph-core smoke_runner`
+- `openspec validate --all --strict`
+- `cargo test`
+- `git diff --check`
+
+待办更新:
+- [x] 阶段1: 盘点 `capability.failed` 现有 contract、payload 形状与集成测试缺口
+- [x] 阶段2: 写窄 OpenSpec change,定义 failure -> fallback -> explicit human reply 的最小边界
+- [x] 阶段3: 判断现有 `integration_live_capability.rs` 是否可直接承载 failure fallback gate
+- [x] 阶段4: 若边界清晰且实现面窄,进入 focused implementation 与验证
+- [x] 阶段5: 收口验证、归档与本地提交
+
+状态:
+- **当前任务已完成** - 进入本地提交与下一条产品线选择。

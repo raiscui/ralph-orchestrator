@@ -640,3 +640,35 @@
 ### 总结感悟
 - 多步 orchestration 这次不需要新增 runtime 机制,只需要证明现有 parent run 已能用多个 `capability.result` 做连续决策。
 - 下一条线更适合继续做 richer answer shaping、`capability.failed` 分支策略,或受限的多步 parent policy,而不是回头重造 capability runtime。
+## [2026-05-16 20:42:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B.2 - capability.failed 后的 parent fallback orchestration
+
+### 任务内容
+- 继续 capability invocation 这条产品演进线。
+- 证明 parent run 在收到 `capability.failed` 后,仍然可以继续编排 fallback capability step。
+- 保持边界不变: `capability.failed` 仍然只是 parent-consumable runtime event, parent topology 不热改,最终 human-facing answer 仍必须显式发 `reply.human.message`。
+
+### 完成过程
+- 新建并 archive OpenSpec change `capability-failure-fallback-human-reply-dogfood`。
+- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增:
+  - `write_failure_fallback_backend_script(...)`
+  - `parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply()`
+- 新 gate 断言了:
+  - 第一步无效 `capability.request` 会生成 parent-visible `capability.failed`
+  - parent 后续 turn prompt 能看到 `capability.failed`、失败 `request_id` 和无效 `capability_id`
+  - parent 随后能发 fallback 有效 `capability.request`
+  - fallback `capability.result` 拥有可 inspect 的 `invocation_id`
+  - `.ralph/events.jsonl`、record-session、CLI stdout 都保留 failure -> fallback success -> final explicit human reply 的完整证据链
+- archive 后把 requirement 同步进 `openspec/specs/capability-invocation/spec.md`。
+
+### 验证证据
+- `openspec validate capability-failure-fallback-human-reply-dogfood --type change`
+- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
+- `cargo test -p ralph-cli --test integration_live_capability`
+- `cargo test -p ralph-core smoke_runner`
+- `openspec validate --all --strict`
+- `cargo test`
+- `git diff --check`
+
+### 总结感悟
+- B.2 证明的不是“失败会发生”,而是“parent 已经有能力在 failure 之后继续做下一步产品决策”。
+- 下一条线更适合继续推进 `capability.failed` 之后的 richer branching policy,比如按失败类型选择不同 fallback,而不是回头去重造 capability failure transport。

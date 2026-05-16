@@ -174,6 +174,66 @@ esac
     Ok(())
 }
 
+fn write_failure_fallback_backend_script(path: &Path) -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 这条脚本覆盖方向 B.2:
+    // - turn1 发一个无效 capability request,强制得到 parent-visible failure
+    // - turn2 看到 `capability.failed` 后发 fallback 有效 request
+    // - turn3 看到 fallback `capability.result` 后显式发最终 `reply.human.message`
+    // ─────────────────────────────────────────────────────────────────────
+    let script = r#"#!/bin/sh
+set -eu
+mkdir -p .ralph/dogfood
+instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
+case "$instance" in
+  ralph#1)
+    count_file=".ralph/dogfood/ralph-failure-fallback.count"
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    prompt_capture=".ralph/dogfood/ralph-failure-fallback-turn-${count}.prompt.txt"
+    cat > "$prompt_capture"
+    case "$count" in
+      1)
+        grep -q '## Runtime Capability Catalog' "$prompt_capture"
+        printf '<event id="cap-fallback-req-event-1" topic="capability.request">{"request_id":"cap-fallback-step-1","capability_id":"hat:missing-reviewer","input":"this request should fail first"}</event>\n'
+        ;;
+      2)
+        grep -q 'capability.failed' "$prompt_capture"
+        grep -q 'cap-fallback-step-1' "$prompt_capture"
+        grep -q 'hat:missing-reviewer' "$prompt_capture"
+        printf '<event id="cap-fallback-req-event-2" topic="capability.request">{"request_id":"cap-fallback-step-2","capability_id":"hat:focused-reviewer","input":"fallback review after failure"}</event>\n'
+        ;;
+      3)
+        grep -q 'capability.result' "$prompt_capture"
+        grep -q 'cap-fallback-step-2' "$prompt_capture"
+        printf '<event id="cap-fallback-human-reply-1" topic="reply.human.message">final human answer: fallback capability recovered after failure</event>\n'
+        printf 'LOOP_COMPLETE\n'
+        ;;
+      *)
+        printf 'LOOP_COMPLETE\n'
+        ;;
+    esac
+    ;;
+  *)
+    printf 'LOOP_COMPLETE\n'
+    ;;
+esac
+"#;
+    fs::write(path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
 fn write_config(path: &Path, script_path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 只启用 parallel runtime,不配置任何业务 hat。
@@ -529,6 +589,118 @@ fn parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_
     assert!(
         record_session.contains("reply.human.message") && record_session.contains("_meta.termination"),
         "record-session should preserve the final explicit human-facing reply and termination: {record_session}"
+    );
+
+    assert_eq!(fs::read_to_string(&config_path)?, config_before);
+
+    Ok(())
+}
+
+#[test]
+fn parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply() -> Result<()>
+{
+    // ─────────────────────────────────────────────────────────────────────
+    // 方向 B.2 gate:
+    // - 第一步 capability request 故意失败。
+    // - parent `ralph#1` 在看到 `capability.failed` 后继续发 fallback request。
+    // - 最终仍然只靠显式 `reply.human.message` 对人输出答案。
+    // ─────────────────────────────────────────────────────────────────────
+    let temp_dir = TempDir::new()?;
+    let workspace = temp_dir.path();
+    let script_path = workspace.join("live-capability-failure-fallback-backend.sh");
+    let config_path = workspace.join("ralph.yml");
+    let record_path = workspace.join("session.jsonl");
+
+    write_prompt(workspace)?;
+    write_failure_fallback_backend_script(&script_path)?;
+    write_config(&config_path, &script_path)?;
+    let config_before = fs::read_to_string(&config_path)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+            "--no-tui",
+            "--record-session",
+            record_path.to_string_lossy().as_ref(),
+        ])
+        .current_dir(workspace)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "failure fallback dogfood run should succeed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("final human answer: fallback capability recovered after failure"),
+        "CLI output should expose only the final explicit human-facing payload after fallback recovery: {stdout}"
+    );
+
+    let records = read_event_records(workspace)?;
+    let failed_payload = records
+        .iter()
+        .filter(|record| record.topic == "capability.failed")
+        .filter_map(|record| payload_json(record).ok())
+        .find(|payload| payload["request_id"] == "cap-fallback-step-1")
+        .context("missing capability.failed for cap-fallback-step-1")?;
+    assert_eq!(failed_payload["status"], "failed");
+    assert_eq!(failed_payload["capability_id"], "hat:missing-reviewer");
+    assert_eq!(failed_payload["parent_topology_unchanged"], true);
+    assert!(
+        failed_payload["invocation_id"].is_null(),
+        "invalid capability id path should fail before creating an invocation id: {failed_payload:#?}"
+    );
+
+    let fallback_result = records
+        .iter()
+        .filter(|record| record.topic == "capability.result")
+        .filter_map(|record| payload_json(record).ok())
+        .find(|payload| payload["request_id"] == "cap-fallback-step-2")
+        .context("missing fallback capability.result for cap-fallback-step-2")?;
+    let fallback_invocation_id = fallback_result["invocation_id"]
+        .as_str()
+        .context("fallback capability.result should include invocation_id")?;
+    assert_eq!(fallback_result["parent_topology_unchanged"], true);
+
+    let events = fs::read_to_string(workspace.join(".ralph/events.jsonl"))?;
+    assert!(
+        events.contains("\"topic\":\"capability.failed\"")
+            && events.contains("cap-fallback-step-2")
+            && events.contains("\"topic\":\"reply.human.message\""),
+        "events.jsonl should preserve failure, fallback success, and final explicit human reply separately: {events}"
+    );
+
+    let inspect_output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "tools",
+            "capability",
+            "inspect",
+            fallback_invocation_id,
+            "--json",
+        ])
+        .current_dir(workspace)
+        .output()?;
+    assert!(
+        inspect_output.status.success(),
+        "capability inspect should succeed for fallback invocation {fallback_invocation_id}.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect_output.stdout),
+        String::from_utf8_lossy(&inspect_output.stderr)
+    );
+    let inspect_report: Value = serde_json::from_slice(&inspect_output.stdout)?;
+    assert_eq!(inspect_report["invocation_id"], fallback_invocation_id);
+    assert_eq!(inspect_report["status"], "entries");
+
+    let record_session = fs::read_to_string(&record_path)?;
+    assert!(
+        record_session.contains("reply.human.message")
+            && record_session.contains("fallback capability recovered after failure")
+            && record_session.contains("_meta.termination"),
+        "record-session should preserve the final human-facing reply after failure fallback: {record_session}"
     );
 
     assert_eq!(fs::read_to_string(&config_path)?, config_before);

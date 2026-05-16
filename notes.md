@@ -724,3 +724,47 @@
 ### 结论
 - 方向B已经从“单步 capability result -> human reply”演进到“多步 capability results -> final human reply”。
 - 这条链路现在有 repo-native focused gate,也有 OpenSpec requirement,后续可以在这个基础上继续做更丰富的 parent policy 或 failure branching。
+## [2026-05-16 20:24:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: capability.failed 后的 parent fallback orchestration 最小边界
+
+## 来源
+
+### 来源1: `crates/ralph-cli/src/capability.rs`
+- `invoke_parent_request(...)` 有三条返回分支:
+  - child success -> `capability.result`
+  - child run 自身失败 -> `parent_invocation_failed_event(...)`
+  - capability id 无效等直接失败 -> `parent_failed_event(...)`
+- 如果是直接失败,返回的 `CapabilityParentFailedRecord` 会包含:
+  - `status = failed`
+  - `request_id`
+  - `capability_id`
+  - `invocation_id = None`
+  - `artifacts = None`
+  - `parent_topology_unchanged = true`
+
+### 来源2: `crates/ralph-core/src/parallel/supervisor/capability_runtime.rs`
+- `ParallelSupervisor` 只认 `ralph#1` 发出的 `capability.request`。
+- `capability.failed` 会像 `capability.result` 一样被回送到 parent run,并继续进入 parent event log / prompt 上下文。
+- 这说明 B.2 的关键问题不是 runtime 是否能回 failure,而是 parent 是否能基于 failure 继续编排。
+
+### 来源3: `openspec/specs/capability-invocation/spec.md`
+- 稳定 spec 已经要求 failed parent-triggered invocation 返回结构化 failure event。
+- 但还没有 requirement 明确: parent 在看到 `capability.failed` 后可以继续发 fallback capability request,并在后续显式对人回答。
+
+## 综合发现
+
+### 现象
+- `capability.failed` 的结构化 payload 已存在。
+- 失败事件回 parent run 的 runtime contract 已存在。
+- 现在缺的不是 failure transport,而是 failure 后 parent-side orchestration 的 repo-native 产品证明。
+
+### 当前主假设
+- 最小产品闭环可以用“无效 capability id -> parent-visible `capability.failed` -> fallback 有效 capability -> explicit `reply.human.message`”来证明。
+- 这样不需要新增 runtime 机制,也能验证 failure context 确实进入了 parent 后续 turn。
+
+### 最强备选解释
+- 也可能 prompt 中虽然有 `capability.failed`,但信息不够稳定,不足以让 parent 做 deterministic fallback。
+- 如果后续 focused gate 失败,优先检查 parent continuation prompt 是否确实包含 `capability.failed`、`request_id`、`capability_id`,而不是先改 runtime。
+
+### 结论
+- B.2 最适合继续走“窄 OpenSpec + focused integration gate”路线。
+- 当前先不扩成 retry engine、planner policy 或 failure broker。
