@@ -197,3 +197,26 @@
   - `cargo test -p ralph-core capability::tests`
   - `cargo test -p ralph-core smoke_runner`
   - `openspec validate --all --strict`
+
+### exp-20260517-capability-failure-branching-matrix
+> Richer parent capability failure policy 应优先做 class-specific dogfood matrix,不是做 retry engine。当前已验证 `invalid_capability_id -> fallback request` 与 `malformed_request -> diagnostic human reply without retry` 两条分支。
+<!-- scope: project | source_topics: capability_failure_branching_matrix,live_runtime_capability_invocation | source_hats: codex | status: active | confidence: high | created_at: 2026-05-17T00:05:00+08:00 | updated_at: 2026-05-17T00:05:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 继续 B.4/B.5 parent-side failure branching policy。
+  - 讨论是否需要 retry engine、planner 或 fallback matrix。
+  - 调试 malformed capability request 为什么没有进入人类可见诊断回复。
+- 已验证事实:
+  - `malformed_request` 会成为 parent-visible `capability.failed`,并能进入后续 parent turn prompt。
+  - parent 可以在看到 `malformed_request` 后显式发 `reply.human.message`,而不发 fallback `capability.request`。
+  - malformed branch 不创建 `.ralph/capability-invocations/<id>` artifact,因为它在 invocation 前失败。
+  - 既有 `invalid_capability_id` branch 仍可 fallback 到有效 capability request。
+- 关键边界:
+  - 不要把 `capability.failed` 自动转换成人类最终答案; human reply 仍必须显式发 `reply.human.message`。
+  - 不要为 malformed request 做盲目 retry。先 diagnostic,再由 parent/human 决定是否重新发结构正确的新 request。
+  - 不要为了测试 `child_run_failed` live branch 引入测试专用 runtime failure switch;应单独设计真实 child failure dogfood。
+- 验证锚点:
+  - `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry`
+  - `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
+  - `cargo test -p ralph-cli --test integration_live_capability`
+  - `openspec validate --all --strict`

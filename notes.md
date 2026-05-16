@@ -824,3 +824,33 @@
 - `error` 字段仍然保留,但用途是人类诊断,不是 policy 的唯一稳定信号。
 - 当前最小真实分支是 invalid capability id -> parent sees `invalid_capability_id` -> emits fallback capability request -> fallback success -> explicit `reply.human.message`。
 - child/micro-run 执行失败被单独分类为 `child_run_failed`,避免把“选择前失败”和“执行后失败”混在一起。
+
+## [2026-05-17 00:05:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: B.4 richer branching policy without retry engine 收口结论
+
+## 来源
+
+### 来源1: B.4 OpenSpec
+
+- Change: `capability-failure-branching-matrix`
+- Archive: `openspec/changes/archive/2026-05-16-capability-failure-branching-matrix/`
+- Stable spec: `openspec/specs/capability-invocation/spec.md`
+
+### 来源2: live integration gate
+
+- 新增脚本 helper: `write_malformed_request_diagnostic_backend_script(...)`
+- 新增测试: `parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry()`
+
+## 综合发现
+
+- B.4 不需要 runtime 代码改动。现有 supervisor 已经能把 malformed `capability.request` 变成 parent-visible `capability.failed`。
+- 这次固定了两类 class-specific policy:
+  - `invalid_capability_id` 可以走 explicit fallback capability request。
+  - `malformed_request` 可以走 explicit diagnostic `reply.human.message`,并且不要求 fallback `capability.result`。
+- 这证明 `failure_class` 已经开始服务真实 parent branching policy,而不是只作为日志标签。
+- `child_run_failed` 仍适合后续单独做,但不应该为了 B.4 引入测试专用 child failure injection 开关。
+
+## 验证结论
+
+- 新 gate 会先发缺少 `capability_id` 的 malformed request。
+- 第二轮 parent prompt 必须包含 `capability.failed`、`malformed_request` 和原 request id,否则脚本失败。
+- 事件日志必须同时包含 malformed failure 和 diagnostic human reply,并且不能包含 fallback `capability.result`。

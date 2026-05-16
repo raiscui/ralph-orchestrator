@@ -233,6 +233,61 @@ esac
     Ok(())
 }
 
+fn write_malformed_request_diagnostic_backend_script(path: &Path) -> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 这条脚本覆盖方向 B.4:
+    // - turn1 发一个结构错误的 capability.request,缺少 capability_id。
+    // - turn2 看到 `failure_class=malformed_request` 后,不重试、不 fallback,
+    //   而是显式发 diagnostic `reply.human.message`。
+    // ─────────────────────────────────────────────────────────────────────
+    let script = r#"#!/bin/sh
+set -eu
+mkdir -p .ralph/dogfood
+instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
+case "$instance" in
+  ralph#1)
+    count_file=".ralph/dogfood/ralph-malformed-diagnostic.count"
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    prompt_capture=".ralph/dogfood/ralph-malformed-diagnostic-turn-${count}.prompt.txt"
+    cat > "$prompt_capture"
+    case "$count" in
+      1)
+        grep -q '## Runtime Capability Catalog' "$prompt_capture"
+        printf '<event id="cap-malformed-req-event-1" topic="capability.request">{"request_id":"cap-malformed-step-1","input":"missing capability_id should become diagnostic"}</event>\n'
+        ;;
+      2)
+        grep -q 'capability.failed' "$prompt_capture"
+        grep -q 'malformed_request' "$prompt_capture"
+        grep -q 'cap-malformed-step-1' "$prompt_capture"
+        printf '<event id="cap-malformed-human-reply-1" topic="reply.human.message">final human answer: malformed capability request diagnostic without retry</event>\n'
+        printf 'LOOP_COMPLETE\n'
+        ;;
+      *)
+        printf 'LOOP_COMPLETE\n'
+        ;;
+    esac
+    ;;
+  *)
+    printf 'LOOP_COMPLETE\n'
+    ;;
+esac
+"#;
+    fs::write(path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
 fn write_config(path: &Path, script_path: &Path) -> Result<()> {
     // ─────────────────────────────────────────────────────────────────────
     // 只启用 parallel runtime,不配置任何业务 hat。
@@ -717,6 +772,122 @@ fn parallel_parent_run_can_fallback_after_capability_failed_before_final_human_r
             && record_session.contains("fallback capability recovered after failure")
             && record_session.contains("_meta.termination"),
         "record-session should preserve the final human-facing reply after failure fallback: {record_session}"
+    );
+
+    assert_eq!(fs::read_to_string(&config_path)?, config_before);
+
+    Ok(())
+}
+
+#[test]
+fn parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry()
+-> Result<()> {
+    // ─────────────────────────────────────────────────────────────────────
+    // 方向 B.4 gate:
+    // - `malformed_request` 不是 recoverable fallback 分支。
+    // - parent 看到结构化 class 后,显式发 diagnostic human reply。
+    // - 运行时不需要 retry engine,也不需要 fallback capability.result。
+    // ─────────────────────────────────────────────────────────────────────
+    let temp_dir = TempDir::new()?;
+    let workspace = temp_dir.path();
+    let script_path = workspace.join("live-capability-malformed-diagnostic-backend.sh");
+    let config_path = workspace.join("ralph.yml");
+    let record_path = workspace.join("session.jsonl");
+
+    write_prompt(workspace)?;
+    write_malformed_request_diagnostic_backend_script(&script_path)?;
+    write_config(&config_path, &script_path)?;
+    let config_before = fs::read_to_string(&config_path)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "run",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+            "--no-tui",
+            "--record-session",
+            record_path.to_string_lossy().as_ref(),
+        ])
+        .current_dir(workspace)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "malformed-request diagnostic branch should succeed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .contains("final human answer: malformed capability request diagnostic without retry"),
+        "CLI output should expose the explicit diagnostic human-facing reply: {stdout}"
+    );
+
+    let records = read_event_records(workspace)?;
+    let request_count = records
+        .iter()
+        .filter(|record| record.topic == "capability.request")
+        .count();
+    assert_eq!(
+        request_count, 1,
+        "malformed branch should not emit fallback capability requests: {records:#?}"
+    );
+
+    let failed_payload = records
+        .iter()
+        .filter(|record| record.topic == "capability.failed")
+        .filter_map(|record| payload_json(record).ok())
+        .find(|payload| payload["request_id"] == "cap-malformed-step-1")
+        .context("missing capability.failed for cap-malformed-step-1")?;
+    assert_eq!(failed_payload["status"], "failed");
+    assert_eq!(failed_payload["failure_class"], "malformed_request");
+    assert!(
+        failed_payload["capability_id"].is_null(),
+        "malformed request missing capability_id should not invent one: {failed_payload:#?}"
+    );
+    assert!(
+        failed_payload["invocation_id"].is_null(),
+        "malformed request should fail before creating an invocation id: {failed_payload:#?}"
+    );
+    assert_eq!(failed_payload["parent_topology_unchanged"], true);
+
+    assert!(
+        !records
+            .iter()
+            .any(|record| record.topic == "capability.result"),
+        "malformed diagnostic branch should not require fallback capability.result: {records:#?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.topic == "reply.human.message"),
+        "diagnostic branch must still emit explicit reply.human.message: {records:#?}"
+    );
+
+    let events = fs::read_to_string(workspace.join(".ralph/events.jsonl"))?;
+    assert!(
+        events.contains("\"topic\":\"capability.failed\"")
+            && events.contains("malformed_request")
+            && events.contains("\"topic\":\"reply.human.message\"")
+            && !events.contains("\"topic\":\"capability.result\""),
+        "events.jsonl should preserve malformed failure and diagnostic reply without fallback result: {events}"
+    );
+
+    let invocation_root = workspace.join(".ralph/capability-invocations");
+    assert!(
+        !invocation_root.exists(),
+        "malformed request should not create invocation artifacts: {}",
+        invocation_root.display()
+    );
+
+    let record_session = fs::read_to_string(&record_path)?;
+    assert!(
+        record_session.contains("reply.human.message")
+            && record_session.contains("malformed capability request diagnostic without retry")
+            && record_session.contains("_meta.termination"),
+        "record-session should preserve diagnostic human reply and termination: {record_session}"
     );
 
     assert_eq!(fs::read_to_string(&config_path)?, config_before);

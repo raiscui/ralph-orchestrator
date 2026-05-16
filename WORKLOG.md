@@ -708,3 +708,39 @@
 ### 总结感悟
 - parent policy 的稳定输入必须是结构化字段,不能让后续 orchestration 靠自由文本 `error` 猜测。
 - `capability.failed` 现在有了可扩展分类面,下一步可以自然演进 richer branching policy,但仍不需要热改 parent topology。
+
+## [2026-05-17 00:05:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: B.4 - richer branching policy without retry engine
+
+### 任务内容
+- 继续 B.3 的结构化 `failure_class` 演进。
+- 固定 parent 可以根据不同 failure class 选择不同后续策略。
+- 保持边界: 不做 retry engine,不做 planner,不热改 parent topology。
+
+### 完成过程
+- 新建并 archive OpenSpec change `capability-failure-branching-matrix`。
+- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步 class-specific branching requirements。
+- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增 malformed diagnostic backend script。
+- 新增 focused gate `parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry()`。
+- gate 断言:
+  - parent 后续 turn 能看到 `malformed_request`。
+  - diagnostic answer 必须显式走 `reply.human.message`。
+  - malformed branch 不需要 fallback capability request/result。
+  - malformed request 不会创建 invocation artifact。
+  - parent config/topology 保持不变。
+- 复用既有 B.3 gate 继续覆盖 `invalid_capability_id -> fallback capability.request` 分支。
+
+### 验证证据
+- `openspec validate capability-failure-branching-matrix --type change`
+- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry -- --nocapture`
+- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry`
+- `cargo test -p ralph-cli --test integration_live_capability`
+- `openspec validate --all --strict`
+- `cargo fmt --all -- --check`
+- `git diff --check`
+- `cargo test -p ralph-core smoke_runner`
+- `cargo test`
+- archive 后复跑: `openspec validate --all --strict`, `cargo test -p ralph-cli --test integration_live_capability`, `cargo test -p ralph-core smoke_runner`, `cargo test`
+
+### 总结感悟
+- B.4 的产品价值是“分支策略矩阵”,不是“自动重试”。
+- 对 malformed request 这类输入结构错误,最健康的默认策略是 diagnostic no-retry reply,不要让 runtime 盲目 fallback。
