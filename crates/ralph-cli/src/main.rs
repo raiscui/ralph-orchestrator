@@ -12,6 +12,7 @@
 //! - Code task generation via `ralph code-task`
 //! - Work item tracking via `ralph task`
 
+mod answer;
 mod autopilot;
 mod capability;
 mod codex_app_server_session;

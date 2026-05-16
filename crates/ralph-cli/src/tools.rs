@@ -11,6 +11,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::answer;
 use crate::capability;
 use crate::memory;
 use crate::task_cli;
@@ -32,6 +33,9 @@ pub enum ToolsCommands {
 
     /// List or invoke runtime capabilities (agent-facing)
     Capability(capability::CapabilityArgs),
+
+    /// Inspect answer-return evidence (agent-facing)
+    Answer(answer::AnswerArgs),
 }
 
 /// Execute a tools command.
@@ -42,5 +46,6 @@ pub fn execute(args: ToolsArgs, use_colors: bool) -> Result<()> {
         ToolsCommands::Capability(capability_args) => {
             capability::execute(capability_args, use_colors)
         }
+        ToolsCommands::Answer(answer_args) => answer::execute(answer_args, use_colors),
     }
 }

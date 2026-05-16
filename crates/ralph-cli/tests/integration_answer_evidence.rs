@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ralph_core::{EvidenceArtifactKind, EvidenceIndexReader, EvidenceLookup, EvidenceStatus};
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -191,6 +192,79 @@ fn parallel_run_dogfoods_answer_return_evidence_index() -> Result<()> {
     assert!(
         record.contains("_meta.termination") && record.contains("CompletionPromise"),
         "record-session should capture completion termination: {record}"
+    );
+
+    let inspect_request_output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args(["tools", "answer", "inspect", "req-dogfood-1", "--json"])
+        .current_dir(temp_path)
+        .output()?;
+    assert!(
+        inspect_request_output.status.success(),
+        "answer inspect json should succeed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect_request_output.stdout),
+        String::from_utf8_lossy(&inspect_request_output.stderr)
+    );
+    let inspect_request_report: Value = serde_json::from_slice(&inspect_request_output.stdout)?;
+    assert_eq!(inspect_request_report["correlation_id"], "req-dogfood-1");
+    assert_eq!(inspect_request_report["status"], "entries");
+    let inspect_request_entries = inspect_request_report["entries"]
+        .as_array()
+        .context("inspect request report should include entries array")?;
+    assert!(inspect_request_entries.iter().any(|entry| {
+        entry["artifact_kind"] == "reply_event" && entry["child_correlation_id"] == "ans-dogfood-1"
+    }));
+    assert!(inspect_request_entries.iter().any(|entry| {
+        entry["artifact_kind"] == "runtime_delivery_record"
+            && entry["child_correlation_id"] == "ans-dogfood-1"
+    }));
+
+    let inspect_answer_output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args(["tools", "answer", "inspect", "ans-dogfood-1"])
+        .current_dir(temp_path)
+        .output()?;
+    assert!(
+        inspect_answer_output.status.success(),
+        "answer inspect human output should succeed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect_answer_output.stdout),
+        String::from_utf8_lossy(&inspect_answer_output.stderr)
+    );
+    let inspect_answer_stdout = String::from_utf8_lossy(&inspect_answer_output.stdout);
+    assert!(
+        inspect_answer_stdout.contains("ans-dogfood-1"),
+        "human answer inspect output should include correlation id: {inspect_answer_stdout}"
+    );
+    assert!(
+        inspect_answer_stdout.contains("event_log_jsonl")
+            && inspect_answer_stdout.contains(".ralph/events.jsonl"),
+        "human answer inspect output should include durable event-log evidence path: {inspect_answer_stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn answer_inspect_fails_for_unknown_correlation_id() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+    fs::create_dir_all(temp_path.join(".ralph"))?;
+    fs::write(temp_path.join(".ralph/evidence-index.jsonl"), "")?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args(["tools", "answer", "inspect", "unknown-answer-id", "--json"])
+        .current_dir(temp_path)
+        .output()?;
+
+    assert!(
+        !output.status.success(),
+        "unknown correlation id should fail.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown-answer-id") && stderr.contains(".ralph/evidence-index.jsonl"),
+        "unknown answer inspect error should mention correlation id and index path: {stderr}"
     );
 
     Ok(())

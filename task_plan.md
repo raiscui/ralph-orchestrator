@@ -763,3 +763,65 @@ dogfood 设计:
 
 状态:
 - **当前在收尾阶段** - archive active change。
+
+## [2026-05-16 17:05:00] [Session ID: omx-1778510695653-7pd7o2] 新任务启动: 方向B继续 - 最小 answer evidence inspect UX
+
+目标:
+- 在现有 `reply.hat.message` answer-return runtime evidence 已经落盘、且已有 live gate 的基础上,补一个最小可查的 CLI 查询入口。
+- 让用户或 agent 可以不直接手搓 `EvidenceIndexReader`,而是通过稳定命令查看 `request_id` / `answer_id` 对应的 answer evidence 状态。
+
+阶段计划:
+- [ ] 阶段1: 盘点现有 capability inspect / answer evidence runtime / CLI tools 落点
+- [ ] 阶段2: 写 OpenSpec change,明确只做最小 inspect UX,不扩成泛化 evidence 子系统
+- [ ] 阶段3: 实现 answer evidence inspect 命令与 focused tests
+- [ ] 阶段4: 跑 focused tests / smoke / 全量验证
+- [ ] 阶段5: 本地提交并 archive OpenSpec change
+
+关键问题:
+1. 命令落点是 `ralph tools answer inspect` 还是别的更窄入口?
+2. 输出契约是否直接复用 capability inspect 的 `entries/missing/no_entry` 语义?
+3. 是否需要顺手读 event log 产出更强诊断,还是先保持 evidence-index-only 的 lookup surface?
+
+状态:
+- **目前在阶段1** - 先盘点现有 inspect surface 和 tools 结构。
+
+## [2026-05-16 17:24:00] [Session ID: omx-1778510695653-7pd7o2] 阶段3完成: answer inspect UX 已实现并通过 focused gate
+
+已完成:
+- 新建 OpenSpec change `answer-evidence-inspect-ux`。
+- 新增 `ralph tools answer inspect <correlation_id>`。
+- 扩 `integration_answer_evidence` 覆盖:
+  - request id JSON inspect
+  - answer id human inspect
+  - unknown correlation id failure
+- 新增 focused unit test,覆盖 explicit missing marker -> `missing` status 映射。
+
+已验证:
+- `openspec validate answer-evidence-inspect-ux --type change`
+- `cargo test -p ralph-cli --test integration_answer_evidence -- --nocapture`
+- `cargo test -p ralph-cli answer -- --nocapture`
+
+即将执行:
+- 跑 `openspec validate --all --strict`
+- 跑 `cargo test -p ralph-core smoke_runner`
+- 跑 `cargo test`
+- 跑 `git diff --check`
+
+状态:
+- **目前在阶段4** - 从 focused gate 升级到仓库级完整验证。
+
+## [2026-05-16 17:37:00] [Session ID: omx-1778510695653-7pd7o2] 阶段5准备: answer inspect UX 进入提交与 archive 收尾
+
+已完成:
+- `answer-evidence-inspect-ux` 的 OpenSpec、实现、focused tests、仓库级验证全部完成。
+- `ralph tools answer inspect <correlation_id>` 已可查询 request id / answer id 的 answer-return evidence。
+
+最终待办列表:
+- [x] 阶段1: 盘点现有 capability inspect / answer evidence runtime / CLI tools 落点
+- [x] 阶段2: 写 OpenSpec change,明确只做最小 inspect UX,不扩成泛化 evidence 子系统
+- [x] 阶段3: 实现 answer evidence inspect 命令与 focused tests
+- [x] 阶段4: 跑 focused tests / smoke / 全量验证
+- [ ] 阶段5: 本地提交并 archive OpenSpec change
+
+状态:
+- **当前在阶段5** - 准备本地提交实现 diff。

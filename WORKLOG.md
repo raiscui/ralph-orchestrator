@@ -520,3 +520,32 @@
 ### 总结感悟
 - 这条 gate 的正确形态不是“再造一个大 E2E”,而是把已有 bootstrap artifact 和 live prompt capture 两种证据拼成一条窄而真的 runtime 链。
 - 当默认 bootstrap workflow 自带 builtin backend 时,测试要尊重产品边界: 先产出 resolved config,再切换执行表面,而不是硬逼单次命令完成全部证明。
+
+## [2026-05-16 17:36:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B继续 - answer evidence inspect UX
+
+### 任务内容
+- 在已完成的 `reply.hat.message` answer-return runtime evidence 和 live dogfood 基础上,补一个最小 CLI 查询入口。
+- 让 request id / answer id 不再只能靠手动翻 `.ralph/evidence-index.jsonl` 才能查证。
+- 保持边界收敛: 不做泛化 evidence 子系统,不改 runtime routing 语义。
+
+### 完成过程
+- 新建 OpenSpec change `answer-evidence-inspect-ux`,明确命令落点为 `ralph tools answer inspect <correlation_id>`。
+- 新增 `crates/ralph-cli/src/answer.rs`,复用 `EvidenceIndexReader::find_by_correlation(...)`。
+- 在 `tools.rs` 挂接 `Answer` 子命令,在 `main.rs` 注册模块。
+- 扩展 `integration_answer_evidence.rs`,让现有 live dogfood 在同一工作区内继续调用:
+  - `ralph tools answer inspect req-dogfood-1 --json`
+  - `ralph tools answer inspect ans-dogfood-1`
+- 新增 focused unit test,覆盖 explicit missing answer marker 会被保留为 `missing` 而不是误判成失败或 no-entry。
+
+### 验证证据
+- `openspec validate answer-evidence-inspect-ux --type change`: passed。
+- `cargo test -p ralph-cli --test integration_answer_evidence -- --nocapture`: 2 passed。
+- `cargo test -p ralph-cli answer -- --nocapture`: passed。
+- `openspec validate --all --strict`: 27 passed, 0 failed。
+- `cargo test -p ralph-core smoke_runner`: 12 passed。
+- `cargo test`: passed。
+- `git diff --check`: passed。
+
+### 总结感悟
+- 方向B当前最缺的不是再补一条 runtime gate,而是给已存在的 answer-return evidence 一个最小可查询面。
+- `Entries` / `Missing` / `NoEntry` 这三个 lookup 语义已经足够表达 answer evidence 的第一阶段产品面,没必要现在就扩成通用 evidence 平台。

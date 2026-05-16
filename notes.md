@@ -576,3 +576,21 @@
 - `.ralph/resolved-config.yml`
 - `.ralph/dogfood/ralph#1.prompt.txt`
 - `record-session` summary 或原始 JSONL 中的 `CompletionPromise`
+
+## [2026-05-16 17:18:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: answer evidence inspect UX 实现策略
+
+## 综合发现
+
+### 命令落点
+- 采用 `ralph tools answer inspect <correlation_id>`。
+- 理由: answer-return evidence 已经有稳定 runtime 语义,现在缺的是最小 lookup surface,而不是新 evidence 子系统。
+
+### 实现策略
+- 新增 `crates/ralph-cli/src/answer.rs`,直接复用 `EvidenceIndexReader::find_by_correlation(...)`。
+- `Entries` 与 `Missing` 都视为成功查询结果。
+- `NoEntry` 视为命令失败。
+- JSON 作为稳定 automation contract,人类输出只保留简短摘要。
+
+### 测试策略
+- 扩 `integration_answer_evidence.rs`,直接在现有 live dogfood 后调用 `ralph tools answer inspect`。
+- 这样能证明 inspect UX 和真实 answer-return runtime evidence 用的是同一条 durable artifact 链。
