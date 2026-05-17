@@ -551,6 +551,7 @@ impl CliHatJobExecutor {
                 stderr_output.push_str(&line);
                 stderr_output.push('\n');
             }
+            OutputStream::Activity => {}
         }
 
         // JSON backend 的 stdout 是结构化负载, 不适合逐行原样透传.
@@ -583,6 +584,9 @@ impl CliHatJobExecutor {
                 // 因此：
                 // - stderr 仍然会通过 `output_tx` 传给 Supervisor 做可观测输出（`[hat#n:err] ...`）
                 // - 但不会进入 `HatJobResult.output`，以保证 event parsing 只基于 stdout（模型最终输出）
+            }
+            OutputStream::Activity => {
+                // Activity 是纯状态信号,不参与 event parsing。
             }
         }
     }
@@ -1099,7 +1103,7 @@ pub async fn run_parallel_loop_impl(
                 let offset_ms = recorder.elapsed().as_millis() as u64;
                 let mut line = chunk.line.clone();
                 line.push('\n');
-                let is_stdout = matches!(chunk.stream, OutputStream::Stdout);
+                let is_stdout = !matches!(chunk.stream, OutputStream::Stderr);
                 recorder.record_ux_event(&UxEvent::TerminalWrite(
                     TerminalWrite::new(line.as_bytes(), is_stdout, offset_ms)
                         .with_instance_id(chunk.instance_id.to_string()),
@@ -1164,7 +1168,7 @@ pub async fn run_parallel_loop_impl(
                 let offset_ms = recorder.elapsed().as_millis() as u64;
                 let mut line = chunk.line.clone();
                 line.push('\n');
-                let is_stdout = matches!(chunk.stream, OutputStream::Stdout);
+                let is_stdout = !matches!(chunk.stream, OutputStream::Stderr);
                 recorder.record_ux_event(&UxEvent::TerminalWrite(
                     TerminalWrite::new(line.as_bytes(), is_stdout, offset_ms)
                         .with_instance_id(chunk.instance_id.to_string()),
@@ -1200,6 +1204,7 @@ pub async fn run_parallel_loop_impl(
             let stream_tag = match chunk.stream {
                 OutputStream::Stdout => "out",
                 OutputStream::Stderr => "err",
+                OutputStream::Activity => "act",
             };
 
             let line = format!(

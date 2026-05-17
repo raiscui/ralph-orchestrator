@@ -10,6 +10,7 @@
 //! - Terminal capture for session recording
 //! - Benchmark task definitions and workspace isolation
 
+pub mod activity;
 pub mod agent_guidance_manifest;
 mod agents_snapshot;
 pub mod capability;
@@ -48,6 +49,7 @@ mod text;
 pub mod utils;
 pub mod workspace;
 
+pub use activity::{clean_activity_label, normalize_activity_label};
 pub use agents_snapshot::{AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot};
 pub use capability::{
     CapabilityChoice, CapabilityFailedRecord, CapabilityFailureClass, CapabilityInvocationMode,

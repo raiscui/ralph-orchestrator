@@ -98,6 +98,10 @@ pub fn render(f: &mut Frame, area: Rect) {
             Span::raw("      Toggle hat graph zoom"),
         ]),
         Line::from(vec![
+            Span::styled("  v", Style::default().fg(Color::Cyan)),
+            Span::raw("      Cycle output view (parallel)"),
+        ]),
+        Line::from(vec![
             Span::styled("  Tab", Style::default().fg(Color::Cyan)),
             Span::raw("    Switch focus (parallel)"),
         ]),

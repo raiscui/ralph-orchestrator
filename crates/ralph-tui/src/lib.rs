@@ -84,7 +84,8 @@ impl Tui {
         // - 默认是 Rendered（更易读）。
         // - CLI 传入 `--plain` 时会设置为 Plain（方便排障/复制粘贴/对齐旧行为）。
         if let Ok(mut state) = self.state.lock() {
-            state.parallel.output_render_mode = render_mode;
+            state.parallel.output_view_mode =
+                state::parallel::ParallelOutputViewMode::from_markdown_render_mode(render_mode);
         }
         self
     }

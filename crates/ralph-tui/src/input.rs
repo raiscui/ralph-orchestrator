@@ -38,6 +38,8 @@ pub enum Action {
     DismissHelp,
     /// 右上角 Hat Graph Radar：放大/还原（按键 `p` 切换）
     ToggleHatGraphZoom,
+    /// 并行 Output 视图切换（Rendered / Plain / Audit）。
+    ToggleParallelOutputView,
     /// Key not mapped to any action
     None,
 }
@@ -83,6 +85,8 @@ pub fn map_key(key: KeyEvent) -> Action {
 
         // Hat graph radar
         KeyCode::Char('p') => Action::ToggleHatGraphZoom,
+        // 并行 Output 视图
+        KeyCode::Char('v') => Action::ToggleParallelOutputView,
 
         // Unknown
         _ => Action::None,
@@ -182,6 +186,12 @@ mod tests {
     fn p_returns_toggle_hat_graph_zoom() {
         let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
         assert_eq!(map_key(key), Action::ToggleHatGraphZoom);
+    }
+
+    #[test]
+    fn v_returns_toggle_parallel_output_view() {
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::ToggleParallelOutputView);
     }
 
     // AC13: Vim l Next Iteration

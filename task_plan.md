@@ -411,3 +411,425 @@ fresh evidence:
 
 状态:
 - **提交收口阶段出现可修复门禁问题** - 正在 amend 本地 commit。
+
+## [2026-05-17 15:58:00] [Session ID: omx-1779004640353-blcixq] 新任务启动: TUI 与 Codex 直接输出差异排查
+
+目标:
+- 对照当前 Ralph TUI 输出路径和 Codex 直接输出路径,找出哪些信息被隐藏、压缩、改写或没有展示。
+- 给出“不遗漏信息”与“能看见当前正在做什么/状态是什么”的改良方案。
+- 本轮先以只读调查为主,除非证据明确且用户确认,先不改 runtime 行为。
+
+阶段计划:
+- [ ] 阶段1: 读取项目长期经验、相关 skill 与当前 TUI/输出代码路径。
+- [ ] 阶段2: 对照 Codex 直接输出信息种类与 Ralph TUI 当前展示模型。
+- [ ] 阶段3: 整理遗漏清单、状态字段缺口和最小改良方案。
+- [ ] 阶段4: 如需要,补一个可验证的设计/测试建议,但本轮不擅自落代码。
+
+现象:
+- 用户观察到 TUI 输出和 Codex 直接输出差别很大。
+- 用户怀疑“一些东西没有显示”。
+- 用户希望同时满足: 不遗漏信息,知道当前进行什么,状态是什么。
+
+当前假设:
+- 候选假设A: TUI 只展示经过 summary/filter 的 event 或 agent state,没有展示完整 stdout/stderr/token/tool call 流。
+- 候选假设B: 直接 Codex 输出包含 reasoning/status/tool/progress/error 等流式片段,但 Ralph TUI 只映射了部分 topic 或只显示最后消息。
+- 最强备选解释: 信息并非丢失,而是落在 record-session、diagnostics、events.jsonl 或 agents snapshot 中,只是 TUI 没有提供同屏可见入口。
+
+验证计划:
+- 先用代码路径和已有测试确认 TUI 数据源、渲染字段、过滤规则。
+- 再查 record-session/diagnostics/events/agent snapshot 是否保留了 TUI 未展示的信息。
+- 如果只有静态证据,结论标注为“候选缺口”; 如果找到测试或样例,再标注为“已验证缺口”。
+
+状态:
+- **目前在阶段1** - 开始只读排查相关代码和历史经验。
+
+## [2026-05-17 16:16:00] [Session ID: omx-1779004640353-blcixq] 阶段推进: TUI 差异排查结论已形成
+
+已完成:
+- [x] 阶段1: 读取项目长期经验、相关 skill 与当前 TUI/输出代码路径。
+- [x] 阶段2: 对照 Codex/CLI 直接输出信息种类与 Ralph TUI 当前展示模型。
+- [x] 阶段3: 整理遗漏清单、状态字段缺口和最小改良方案。
+- [ ] 阶段4: 如需要,补一个可验证的设计/测试建议,但本轮不擅自落代码。
+
+关键结论:
+- TUI 当前不是 stdout 等价镜像,而是一个筛选后的操作面。
+- CLI/log-mode 的审计信息更全,包含 per-instance/job 标签、state 行、final states。
+- TUI 目前最缺的是“当前进行什么”的 richer status: last_input、current job、last event、stderr 可见性、record-session/evidence 路径。
+- `Rendered` 模式为了阅读会隐藏部分原始控制符/event wrapper; 排障时需要 Plain/raw 视图。
+
+验证证据:
+- `cargo test --package ralph-cli --bin ralph parallel_runner::tests::parallel_tui_event_forwarding_filters_noise_without_source_or_instance -- --exact`: 1 passed。
+- `cargo test --package ralph-cli --bin ralph parallel_runner::tests::parallel_tui_event_forwarding_allows_events_with_source_instance -- --exact`: 1 passed。
+- `cargo test --package ralph-cli --bin ralph parallel_runner::guardrail_tests::parallel_output_for_event_parsing_is_stdout_only -- --exact`: 1 passed。
+- `cargo test --package ralph-adapters --lib stream_handler::tests::tui_stream_handler::markdown_rendered_mode_shows_reply_human_message_payload -- --exact`: 1 passed。
+- `cargo test --package ralph-adapters --lib stream_handler::tests::tui_stream_handler::pretty_plain_mode_keeps_reply_human_message_event_text -- --exact`: 1 passed。
+
+遇到错误:
+- 曾误跑 `cargo test --package ralph-cli --lib ... -- --exact`,结果为 0 tests。已回滚证据口径,改用 `--bin ralph` 重跑。
+
+状态:
+- **目前在阶段4** - 本轮只交付排查结论和改良建议,不擅自改代码。
+
+## [2026-05-17 16:18:10] [Session ID: omx-1779004640353-blcixq] 行动记录: 复核 TUI 输出差异证据并收口建议
+
+目的:
+- 复核上一轮关于 TUI 与 Codex/CLI 直接输出差异的静态证据和 focused test 证据。
+- 形成可执行的设计建议,说明如何做到不遗漏信息,同时让用户看见当前进行什么、状态是什么。
+
+即将执行:
+- 读取关键代码片段,确认输出过滤、stderr 可见性、Rendered/Plain 展示层改写和 agents snapshot 状态字段。
+- 运行上一轮列出的 focused tests,用当前会话重新建立动态证据。
+- 若没有代码改动,不跑全量 cargo test,只交付排查结论和建议。
+
+状态:
+- **目前在阶段4** - 复核证据,准备最终交付。
+
+
+## [2026-05-17 16:24:01] [Session ID: omx-1779004640353-blcixq] 阶段完成: TUI 差异排查收口
+
+已完成:
+- [x] 阶段1: 读取项目长期经验、相关 skill 与当前 TUI/输出代码路径。
+- [x] 阶段2: 对照 Codex/CLI 直接输出信息种类与 Ralph TUI 当前展示模型。
+- [x] 阶段3: 整理遗漏清单、状态字段缺口和最小改良方案。
+- [x] 阶段4: 补充可验证的设计/测试建议,本轮未改 runtime 代码。
+
+当前结论:
+- TUI 与 Codex/CLI 直出的差异来自“展示模型不同”: 直出是审计流,TUI 是筛选后的操作面。
+- 已通过 focused tests 复核事件过滤、stdout-only 事件解析和 Rendered/Plain 差异。
+- 推荐下一步按“状态摘要 + raw/audit 视图”改良 TUI,而不是简单复制 stdout 全量文本。
+
+状态:
+- **阶段4已完成** - 可以向用户交付排查结论、证据和后续实现建议。
+
+
+## [2026-05-17 16:26:24] [Session ID: omx-1779004640353-blcixq] 追加验证: hook 要求的新鲜证据
+
+目的:
+- 回应 stop hook 的要求,继续补一组新鲜验证证据后再结束。
+- 用更贴近 TUI 状态面的测试,确认当前结论没有被新证据推翻。
+
+即将执行:
+- 复查 Instances / header / snapshot 相关测试,优先验证“当前进行什么”和“状态是什么”的展示边界。
+- 如发现新缺口,再补充 notes 记录;如没有新缺口,直接收尾。
+
+状态:
+- **继续进行中** - 正在补新鲜验证证据。
+
+
+## [2026-05-17 16:29:49] [Session ID: omx-1779004640353-blcixq] 追加验证完成: hook 后新证据已收集
+
+已完成:
+- [x] 复查 ultrawork 收尾规则。
+- [x] 运行 agents 状态面集成测试。
+- [x] 运行并行 TUI full layout snapshot smoke。
+- [x] 将新证据写入 notes 和 WORKLOG。
+
+验证结果:
+- cargo test --package ralph-cli --test integration_agents test_agents_command_prints_table -- --exact: passed。
+- cargo test --package ralph-tui --test integration_snapshots test_parallel_full_layout_renders_instances_output_and_gates -- --exact: passed。
+
+状态:
+- **追加验证已完成** - 可以收尾交付。
+
+
+## [2026-05-17 16:32:58] [Session ID: omx-1779004640353-blcixq] 新阶段启动: TUI 状态增强最小实现
+
+目标:
+- 从当前 ultrawork planning 状态继续,把上一轮已经验证的缺口推进到一个最小代码改良。
+- 优先让 TUI 主画面能回答“当前在做什么、状态是什么”,同时避免把 TUI 退化成全量 stdout 镜像。
+
+阶段计划:
+- [ ] 阶段1: 读取现有 TUI state/widget 结构,确认已有状态真相源。
+- [ ] 阶段2: 设计最小展示改动,优先复用已有状态字段。
+- [ ] 阶段3: 修改现有 widget/state,补充测试。
+- [ ] 阶段4: 运行 focused tests 与必要 smoke,记录证据。
+
+约束:
+- 不改事件解析语义。
+- 不新增第二套状态真相源。
+- 不触碰用户已有的无关改动,当前已知 `PROMPT.md` 删除不是本轮产生。
+
+遇到错误:
+- 首次读取代码时误填工作目录 `/Users/cuiluming/local_doc/l_dev/my/rust/ralph/ralph-orchestrator`,命令因目录不存在失败。已纠正为当前仓库目录。
+
+状态:
+- **目前在阶段1** - 读取 TUI state/widget 结构。
+
+
+## [2026-05-17 16:40:39] [Session ID: omx-1779004640353-blcixq] 阶段推进: TUI 状态增强最小实现 - 结构确认完成
+
+已完成:
+- [x] 阶段1: 读取现有 TUI state/widget 结构,确认已有状态真相源。
+
+当前发现:
+- `ParallelTuiState` 已有 `selected_instance`、`current_job`、`output_render_mode`、`last_event` 等可复用状态。
+- `InstanceViewState` 已有 `state`、`last_output_at`、`jobs`、`current_job`,不需要新增第二套状态源。
+- `Output` 标题已经显示 selected instance 的 state/job,但 Instances 列表和 Footer 还没有把 job / last event / render mode 讲清楚。
+
+状态:
+- **目前在阶段2** - 设计最小展示改动,优先复用已有状态字段。
+
+
+## [2026-05-17 16:43:52] [Session ID: omx-1779004640353-blcixq] 阶段推进: TUI 状态增强代码已修改
+
+已完成:
+- [x] 阶段2: 设计最小展示改动,优先复用已有状态字段。
+- [x] 阶段3: 修改现有 widget/state,补充测试。
+
+代码变更:
+- `InstanceViewState` 增加 `current_job_summary()` helper。
+- `InstancesPane` 在实例行中显示 `job x/y`。
+- `Footer` 在并行模式下显示 selected instance、state、job summary、last event、render mode。
+- 新增 Instances 和 Footer 的 focused tests,锁定状态摘要可见性。
+
+遇到错误:
+- 查询状态结构时误把不存在的 `crates/ralph-tui/src/state/mod.rs` 放进 `rg` 参数,命令返回错误码 2。已改用真实文件 `state.rs`。
+- 第一次 footer patch 的测试上下文不匹配,`apply_patch` 未应用。已重新读取 footer 真实片段并按真实位置补丁成功。
+
+状态:
+- **目前在阶段4** - 运行格式化和 focused tests。
+
+
+## [2026-05-17 16:51:58] [Session ID: omx-1779004640353-blcixq] 阶段完成: TUI 状态增强最小实现
+
+已完成:
+- [x] 阶段1: 读取现有 TUI state/widget 结构,确认已有状态真相源。
+- [x] 阶段2: 设计最小展示改动,优先复用已有状态字段。
+- [x] 阶段3: 修改现有 widget/state,补充测试。
+- [x] 阶段4: 运行 focused tests、package tests、全量 tests 与 diff check。
+
+验证结果:
+- `cargo fmt --all -- --check`: passed。
+- `cargo test --package ralph-tui --lib widgets::instances::tests::instances_pane_shows_current_job_summary -- --exact`: passed。
+- `cargo test --package ralph-tui --lib widgets::footer::tests::footer_shows_parallel_status_summary -- --exact`: passed。
+- `cargo test --package ralph-tui --test integration_snapshots test_parallel_full_layout_renders_instances_output_and_gates -- --exact`: passed。
+- `cargo test --package ralph-tui`: passed。
+- `cargo test`: passed。
+- `git diff --check`: passed。
+
+遇到错误:
+- `cargo fmt --all -- --check` 首次失败,因为 rustfmt 要压缩 `spans.extend` 数组写法。已运行 `cargo fmt --all` 修复。
+- Footer 初版 verbose 摘要在 80 列下截断 last event。已改成紧凑摘要并通过测试。
+
+状态:
+- **TUI 状态增强最小实现已完成** - 可以收尾交付。
+
+
+## [2026-05-17 16:55:40] [Session ID: omx-1779004640353-blcixq] 维护记录: notes.md 超限续档与持续学习
+
+触发原因:
+- `notes.md` 达到 1166 行,超过 1000 行续档阈值。
+
+已完成:
+- [x] 回读默认六文件最新段落。
+- [x] 将旧 `notes.md` 移到 `archive/default_history/notes_2026-05-17_1655_tui_status_prev.md`。
+- [x] 创建新的 `notes.md` 续档入口。
+- [x] 将 TUI 状态摘要经验沉淀到 `EXPERIENCE.md`。
+- [x] 创建 archive manifest: `archive/manifests/ARCHIVE_MANIFEST__default_notes_rollover_2026-05-17_1655.md`。
+
+状态:
+- **持续学习续档已完成** - 回到最终收尾检查。
+
+## [2026-05-17 17:08:00] [Session ID: omx-1779004640353-blcixq] 快速核查: Codex 原生状态行与并行 TUI
+
+目标:
+- 回答用户关于 Codex 原生状态行 `Working...` / `Inspecting current code behavior...` 是否会在 `ralph run` 并行 TUI 中显示的问题。
+
+已观察静态路径:
+- 普通并行 backend 通过 `BufReader::lines()` 按换行读取 stdout/stderr。
+- TUI 默认接收 stderr chunk,除非显式 `--hide-stderr`。
+- Codex app-server 路径不显示 Codex 原生 TUI 状态条,而是把 app-server 事件映射为 stdout/stderr chunk。
+
+验证结果:
+- `cargo test --package ralph-cli --bin ralph tests::run_args_show_stderr_defaults_to_true -- --exact`: passed。
+- `cargo test --package ralph-tui --lib state::parallel::tests::parallel_output_stderr_markdown_rendering_matches_renderer_output -- --exact`: passed。
+
+遇到错误:
+- 追加计划时第一次误用未加引号 heredoc,反引号内容被 shell 当命令执行。已确认目标关键字没有写入 `task_plan.md`,并改用 `cat <<'EOF'` 方式追加。
+- 一次 `rg` 搜索把换行模式写进普通正则,返回用法错误。该输出不作为证据,已改用简单搜索。
+
+状态:
+- **快速核查完成** - 准备给出结论: stderr 行会显示,但 Codex 原生临时状态条不会稳定显示。
+
+## [2026-05-17 17:18:00] [Session ID: omx-1779004640353-blcixq] 新阶段启动: Codex 风格 current activity 状态显示
+
+目标:
+- 在 `ralph run` 并行 TUI 中稳定显示类似 Codex 的当前动作状态,例如 `Working (11s • esc to interrupt)` 和 `Inspecting current code behavior (29s • esc to interrupt)`。
+- 不依赖解析 Codex 私有 TTY 控制序列作为唯一真相源,而是复用 Ralph 已有并行状态与输出流。
+
+可选方向:
+1. 不惜代价最佳方案:
+   - 在 runtime 层新增结构化 `current_activity` update/event,由 Codex app-server lifecycle/reasoning event 和普通 backend 输出共同驱动。
+   - Footer/Instances/Output title 都从同一字段读取。
+   - 优点是语义最稳,缺点是跨 core/cli/tui 改动范围更大。
+2. 先能用,后面再优雅:
+   - 在 TUI state 内从已存在的 `HatJobOutputChunk` 和 job/state 时间戳派生 activity。
+   - 对 Codex app-server 的 reasoning stderr / task_started 生命周期映射成短 activity。
+   - 优点是复用已有 TUI update 和 output chunk,影响面小;缺点是普通 backend 的 TTY `\r` 状态仍不能完全捕获。
+
+当前决策:
+- 采用折中方案: 先在 TUI state 增加正式 `current_activity` 字段,由现有 chunk/lifecycle 驱动,并把 Codex app-server 的稳定事件映射为 activity 文案。
+- 暂不解析 `\r` 原地刷新控制序列作为状态真相源,避免版本漂移和误判。
+
+阶段计划:
+- [ ] 阶段1: 确认现有 TUI update / state / widget 路径。
+- [ ] 阶段2: 先补 focused tests,锁定 activity 文案可见性。
+- [ ] 阶段3: 实现 activity 更新与展示。
+- [ ] 阶段4: 跑 focused tests、package tests、必要 full gates。
+- [ ] 阶段5: 记录 notes / WORKLOG / 后续建议,收口交付。
+
+状态:
+- **目前在阶段1** - 正在读取 TUI update、parallel state 和 Codex app-server 输出路径。
+
+## [2026-05-17 17:38:00] [Session ID: omx-1779004640353-blcixq] 阶段推进: current activity 初版实现完成
+
+已完成:
+- [x] 阶段1: 确认现有 TUI update / state / widget 路径。
+- [x] 阶段2: 先补 focused tests,锁定 activity 文案可见性。
+- [x] 阶段3: 实现 activity 更新与展示。
+
+代码变更:
+- `ralph-core` 新增 activity 文本归一化 helper。
+- `OutputStream` 新增 `Activity` 变体,作为不参与正文解析的状态信号。
+- Codex app-server 在 `task_started` 发出 `Working`,在 reasoning summary 中识别 `Inspecting...` 类状态并发出 activity chunk。
+- TUI `InstanceViewState` 新增 `current_activity` 和 `state_since`。
+- Footer 显示 `Activity (Ns • Ctrl+C to interrupt)`、实例 id、state、job、render mode、last event。
+- Instances 行显示当前 activity 简短摘要。
+
+即将执行:
+- 运行 `cargo fmt --all`。
+- 运行 core/tui/cli focused tests,修复编译器指出的漏分支或格式问题。
+
+状态:
+- **目前在阶段4** - 进入验证与修补。
+
+## [2026-05-17 18:06:00] [Session ID: omx-1779004640353-blcixq] 接续验证: Codex 风格 current activity 状态显示
+
+接手状态:
+- 上一轮已经完成 activity 初版实现和 focused tests。
+- 按交接摘要,`cargo test -p ralph-cli` 可能仍在运行或刚结束,需要先确认。
+
+即将执行:
+- 检查是否存在仍在运行的 `cargo test -p ralph-cli` 进程。
+- 若没有可接续进程,重新运行必要验证命令,避免把不完整交接当作已验证结论。
+- 通过后继续跑 `cargo fmt --all -- --check`、`cargo test`、`git diff --check`。
+- 若失败,按错误文件/行号修复,并记录到 `ERRORFIX.md`。
+
+状态:
+- **目前在阶段4** - 接续验证,目标是拿到可复现的完整 gate 证据。
+
+## [2026-05-17 18:18:00] [Session ID: omx-1779004640353-blcixq] 阶段完成: current activity 验证通过
+
+已完成:
+- [x] 阶段1: 确认现有 TUI update / state / widget 路径。
+- [x] 阶段2: 先补 focused tests,锁定 activity 文案可见性。
+- [x] 阶段3: 实现 activity 更新与展示。
+- [x] 阶段4: 跑 focused tests、package tests、full gates。
+- [x] 阶段5: 记录 notes / WORKLOG / ERRORFIX / LATER_PLANS,收口交付。
+
+验证证据:
+- `cargo test -p ralph-cli`: passed, 173 bin unit tests plus CLI integration tests passed。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test`: passed, 包含 `ralph-tui` widget/state tests 与 `integration_snapshots`。
+- `git diff --check`: passed。
+
+状态:
+- **阶段5完成** - 可以向用户交付实现说明和验证结果。
+
+## [2026-05-17 18:32:00] [Session ID: omx-1779004640353-blcixq] 新阶段启动: 并行 TUI raw/audit 视图
+
+目标:
+- 给 `ralph run` 并行 TUI 增加 raw/audit 输出视图。
+- 在不丢失现有可读视图的前提下,允许用户切到接近 CLI/log-mode 的完整审计流。
+- 继续复用现有 `ParallelTuiState` / `JobViewState.raw_lines`,不另建第二套 runtime 真相源。
+
+可选方向:
+1. 不惜代价最佳方案:
+   - 新增正式 `ParallelOutputViewMode::{Rendered, Plain, Audit}`。
+   - 键盘操作在三态间循环,Footer/Output title 同步展示 mode。
+   - Audit 视图从 `raw_lines` 重建 `[instance:stream:job=n] line`。
+   - 优点: 状态模型清晰,以后可继续扩展 evidence/status 面板。
+2. 先能用,后面再优雅:
+   - 保留现有 Rendered/Plain,单独加一个临时 bool `audit_mode`。
+   - 优点: 改动小;缺点: mode 状态容易和 `MarkdownRenderMode` 分裂。
+
+当前决策:
+- 采用方向1的收敛版: 引入并行 Output 视图三态,但只改 TUI 展示层和相关测试,不改 runtime/event 协议。
+
+阶段计划:
+- [ ] 阶段1: 读取并梳理现有并行 output render / input shortcut / footer mode 路径。
+- [ ] 阶段2: 编写 spec 文档和图,用 `beautiful-mermaid-rs` 验证 Mermaid。
+- [ ] 阶段3: 先补 focused tests 锁定 audit 视图和 mode 切换。
+- [ ] 阶段4: 实现 raw/audit 视图。
+- [ ] 阶段5: 跑 focused tests、`cargo test -p ralph-tui`、必要 full gates。
+- [ ] 阶段6: 更新 notes / WORKLOG / LATER_PLANS / ERRORFIX,交付。
+
+状态:
+- **目前在阶段1** - 开始读取 TUI output、快捷键与 footer 路径。
+
+## [2026-05-17 18:40:00] [Session ID: omx-1779004640353-blcixq] 阶段推进: raw/audit 规格完成
+
+已完成:
+- [x] 阶段1: 读取并梳理现有并行 output render / input shortcut / footer mode 路径。
+- [x] 阶段2: 编写 spec 文档和图,用 `beautiful-mermaid-rs` 验证 Mermaid。
+
+产物:
+- `specs/parallel-tui-raw-audit-view.md`
+
+关键决策:
+- 新增三态输出视图: Rendered / Plain / Audit。
+- `v` 键循环切换视图。
+- Audit 视图复用 `raw_lines`,不新增第二套输出缓存。
+- Activity 在 Rendered/Plain 中仍不进正文,但在 Audit 中可见。
+
+状态:
+- **目前在阶段3** - 开始补 focused tests,预期先失败再实现。
+
+## [2026-05-17 19:05:00] [Session ID: omx-1779004640353-blcixq] 阶段完成: raw/audit 视图实现与验证通过
+
+已完成:
+- [x] 阶段3: 补 focused tests,覆盖 `v` 键、mode 循环、audit 输出、footer mode。
+- [x] 阶段4: 实现 raw/audit 视图,复用 `raw_lines` 单一真相源。
+- [x] 阶段5: 跑 focused tests、`cargo test -p ralph-tui`、全量 `cargo test`、格式和 diff 检查。
+- [x] 阶段6: 更新 notes / WORKLOG / LATER_PLANS,准备交付。
+
+验证证据:
+- `cargo test --package ralph-tui --lib`: passed, 223 tests。
+- `cargo test -p ralph-tui`: passed, 包含 integration snapshots。
+- `cargo test`: passed。
+- `cargo fmt --all -- --check`: passed。
+- `git diff --check`: passed。
+
+遇到错误:
+- 一次 focused test 命令误把多个 test name 同时传给 `cargo test`,Cargo 返回用法错误。已改用 `cargo test --package ralph-tui --lib` 覆盖。
+- `cargo fmt --all -- --check` 首次提示 app test 中两个 assert 需要换行。已运行 `cargo fmt --all` 修复并复验通过。
+
+状态:
+- **raw/audit 视图已完成** - 可以交付。
+
+## [2026-05-17 19:41:00] [Session ID: omx-1779004640353-blcixq] 最终复核: raw/audit 视图当前会话验证
+
+已复核:
+- `git diff --check`: passed, 没有 whitespace/error 输出。
+- `cargo test -p ralph-tui`: passed, 223 lib tests + 26 integration snapshot tests + 4 iteration boundary tests + doc-tests。
+- `WORKLOG.md` 当前 987 行,本轮不再追加,避免触发六文件续档阈值。
+
+状态:
+- **raw/audit 视图可以交付** - 当前会话已有轻量验证证据。
+
+## [2026-05-17 20:54:23] [Session ID: omx-1779004640353-blcixq] 新阶段启动: evidence/status 面板与 Output 内 activity 底栏
+
+目标:
+- 在并行 TUI 中增加 evidence/status 展示,把当前证据路径露出来,让用户知道 record-session / events / agents 等证据在哪里。
+- 把 `act` 从 Footer 挪到 Output 窗口最下方,让 Codex 风格的 `Working` / `Inspecting ...` 更接近正在阅读的输出区域。
+- 保持单一真相源: activity 仍来自已有 `current_activity`; evidence 路径优先来自已有 runtime/update/config,不在 widget 里推断第二套状态。
+
+阶段计划:
+- [ ] 阶段1: 读取现有并行 TUI state / app layout / footer / output renderer / external event writer 路径。
+- [ ] 阶段2: 设计 evidence/status 数据模型和 Output 内 activity 底栏,先补 focused tests。
+- [ ] 阶段3: 实现面板与 activity 位置调整。
+- [ ] 阶段4: 运行 focused tests、`cargo test -p ralph-tui`、格式和 diff 检查。
+- [ ] 阶段5: 更新 notes / WORKLOG / LATER_PLANS / ERRORFIX,注意 `WORKLOG.md` 接近 1000 行阈值。
+
+状态:
+- **目前在阶段1** - 先只读梳理现有实现,再改。

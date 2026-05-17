@@ -12,13 +12,14 @@ use crate::theme::MUTED_FG;
 use output::wrap_lines_to_width;
 use ralph_adapters::{MarkdownRenderMode, render_text_to_lines};
 use ralph_core::{HatJobOutputChunk, OutputStream};
+use ralph_core::{clean_activity_label, normalize_activity_label};
 use ralph_proto::{
     Event, GateRequest, GateResolve, GateTimeout, HatInstanceId, HatInstanceState,
     TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT,
 };
 use ratatui::text::{Line, Span};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -451,22 +452,144 @@ impl ChatEditorState {
 pub struct InstanceViewState {
     /// 实例运行态（Created/Idle/Running/Failed/Done）。
     pub state: HatInstanceState,
+    /// 当前状态开始时间（用于展示“已经运行了多久”）。
+    pub state_since: Option<Instant>,
     /// 最近一次收到输出的时间（用于 UI 列表展示“是否卡住”）。
     pub last_output_at: Option<Instant>,
+    /// 当前显式 activity（例如 "Working" / "Inspecting current code behavior"）。
+    pub current_activity: Option<InstanceActivityState>,
     /// 该实例的 job 历史（按 job_id 分段）。
     pub jobs: Vec<JobViewState>,
     /// 当前正在查看的 job 索引。
     pub current_job: usize,
 }
 
+/// 实例当前活动状态。
+#[derive(Debug)]
+pub struct InstanceActivityState {
+    /// 活动标签（不含时间后缀）。
+    pub label: String,
+    /// 活动开始时间。
+    pub started_at: Instant,
+}
+
 impl InstanceViewState {
     pub fn new(state: HatInstanceState) -> Self {
         Self {
             state,
+            state_since: Some(Instant::now()),
             last_output_at: None,
+            current_activity: None,
             jobs: Vec::new(),
             current_job: 0,
         }
+    }
+
+    pub fn set_state(&mut self, state: HatInstanceState, now: Instant) {
+        if self.state != state {
+            self.state_since = Some(now);
+        }
+
+        self.state = state;
+
+        if !matches!(state, HatInstanceState::Running) {
+            self.current_activity = None;
+        }
+    }
+
+    pub fn start_activity(&mut self, label: impl Into<String>, now: Instant) {
+        let label = clean_activity_label(&label.into());
+        if label.is_empty() {
+            return;
+        }
+
+        if self
+            .current_activity
+            .as_ref()
+            .is_some_and(|activity| activity.label == label)
+        {
+            return;
+        }
+
+        self.current_activity = Some(InstanceActivityState {
+            label,
+            started_at: now,
+        });
+    }
+
+    fn fallback_activity_label(&self) -> Option<&'static str> {
+        if self.state == HatInstanceState::Running {
+            Some("Working")
+        } else {
+            None
+        }
+    }
+
+    fn activity_started_at(&self) -> Option<Instant> {
+        self.current_activity
+            .as_ref()
+            .map(|activity| activity.started_at)
+            .or(self.state_since)
+    }
+
+    fn format_elapsed(elapsed: Duration) -> String {
+        let secs = elapsed.as_secs();
+        if secs < 60 {
+            format!("{secs}s")
+        } else {
+            format!("{}m {}s", secs / 60, secs % 60)
+        }
+    }
+
+    pub fn current_activity_summary(&self, now: Instant) -> Option<String> {
+        let label = self
+            .current_activity
+            .as_ref()
+            .map(|activity| activity.label.as_str())
+            .or_else(|| self.fallback_activity_label())?;
+        let started_at = self.activity_started_at().unwrap_or(now);
+        let elapsed = now.saturating_duration_since(started_at);
+
+        Some(format!(
+            "{label} ({} • Ctrl+C to interrupt)",
+            Self::format_elapsed(elapsed)
+        ))
+    }
+
+    pub fn current_activity_short_summary(&self, now: Instant) -> Option<String> {
+        let label = self
+            .current_activity
+            .as_ref()
+            .map(|activity| activity.label.as_str())
+            .or_else(|| self.fallback_activity_label())?;
+        let started_at = self.activity_started_at().unwrap_or(now);
+        let elapsed = now.saturating_duration_since(started_at);
+
+        Some(format!("{label} {}", Self::format_elapsed(elapsed)))
+    }
+
+    /// 返回当前 job 的人类可读摘要。
+    ///
+    /// 说明:
+    /// - `job 1/3` 这种表达比单纯的 state 更能回答“现在跑到哪一步”。
+    /// - 没有 job 时返回 `None`,由 widget 自己决定是否省略。
+    pub fn current_job_summary(&self) -> Option<String> {
+        let total = self.jobs.len();
+        if total == 0 {
+            return None;
+        }
+
+        Some(format!("job {}/{}", self.current_job + 1, total))
+    }
+
+    /// 返回 footer 等窄空间使用的紧凑 job 摘要。
+    pub fn current_job_short_summary(&self) -> Option<String> {
+        let total = self.jobs.len();
+        if total == 0 {
+            return None;
+        }
+
+        Some(format!("j{}/{}", self.current_job + 1, total))
     }
 
     /// 返回当前 job buffer（若不存在则 None）。
@@ -512,6 +635,68 @@ impl JobViewState {
             buffer: output::ParallelOutputBuffer::new(number),
             raw_lines: Vec::new(),
             first_output_at: None,
+        }
+    }
+}
+
+/// 并行 Output 面板的展示模式。
+///
+/// 设计说明:
+/// - `Rendered` / `Plain` 继续服务“阅读正文”的场景。
+/// - `Audit` 服务“核对真实到达流”的场景,会把 stream / job / instance 归因一起显示。
+/// - 这里把三态收敛到一个枚举,避免后续再出现 `render_mode + audit_mode` 的双真相源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelOutputViewMode {
+    /// Markdown 渲染后的可读视图。
+    Rendered,
+    /// 保留 Markdown 控制符的纯文本视图。
+    Plain,
+    /// 接近 CLI/log-mode 的审计视图。
+    Audit,
+}
+
+impl ParallelOutputViewMode {
+    /// 从旧的 Markdown 初始配置映射到并行 Output 视图。
+    pub fn from_markdown_render_mode(mode: MarkdownRenderMode) -> Self {
+        match mode {
+            MarkdownRenderMode::Rendered => Self::Rendered,
+            MarkdownRenderMode::Plain => Self::Plain,
+        }
+    }
+
+    /// 返回正文视图需要使用的 Markdown 渲染模式。
+    fn markdown_render_mode(self) -> Option<MarkdownRenderMode> {
+        match self {
+            Self::Rendered => Some(MarkdownRenderMode::Rendered),
+            Self::Plain => Some(MarkdownRenderMode::Plain),
+            Self::Audit => None,
+        }
+    }
+
+    /// 按用户可预期的顺序循环切换。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Rendered => Self::Plain,
+            Self::Plain => Self::Audit,
+            Self::Audit => Self::Rendered,
+        }
+    }
+
+    /// Footer 等窄空间使用的单字符标签。
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Rendered => "R",
+            Self::Plain => "P",
+            Self::Audit => "A",
+        }
+    }
+
+    /// Output 标题等较宽位置使用的人类可读标签。
+    pub fn title_label(self) -> &'static str {
+        match self {
+            Self::Rendered => "rendered",
+            Self::Plain => "plain",
+            Self::Audit => "audit",
         }
     }
 }
@@ -588,14 +773,14 @@ impl GateViewState {
 // - 彻底移除 Big Headers / 图片块等 `mdfried` 相关渲染特性。
 // - stderr 的区分由上游渲染器通过样式（灰色）完成，不再使用左侧前缀列。
 struct ParallelOutputRenderer {
-    mode: MarkdownRenderMode,
+    view_mode: ParallelOutputViewMode,
     width: u16,
 }
 
 impl ParallelOutputRenderer {
-    fn new(mode: MarkdownRenderMode, width: u16) -> Self {
+    fn new(view_mode: ParallelOutputViewMode, width: u16) -> Self {
         Self {
-            mode,
+            view_mode,
             width: width.max(1),
         }
     }
@@ -606,7 +791,15 @@ impl ParallelOutputRenderer {
     /// - 输出顺序以 raw_lines 的时间顺序为准（stdout/stderr 交错也能保持相对顺序）；
     /// - 以“连续 chunk”为单位渲染：stdout/stderr 分段渲染，降低跨流语义复杂度；
     /// - stderr 不再使用左侧前缀列，仅做灰色弱化。
-    fn render_job_output_document(&self, job: &JobViewState) -> Vec<Line<'static>> {
+    fn render_job_output_document(
+        &self,
+        instance_id: &HatInstanceId,
+        job: &JobViewState,
+    ) -> Vec<Line<'static>> {
+        if self.view_mode == ParallelOutputViewMode::Audit {
+            return self.render_audit_output_document(instance_id, job);
+        }
+
         let mut out: Vec<Line<'static>> = Vec::new();
 
         let mut stdout_chunk: Vec<String> = Vec::new();
@@ -628,6 +821,9 @@ impl ParallelOutputRenderer {
                     }
                     stderr_chunk.push(raw.line.clone());
                 }
+                OutputStream::Activity => {
+                    // Activity chunk 是状态信号，不属于 Output 正文。
+                }
             }
         }
 
@@ -639,6 +835,54 @@ impl ParallelOutputRenderer {
         }
 
         out
+    }
+
+    /// 渲染接近 CLI/log-mode 的审计视图。
+    ///
+    /// 这里故意从同一份 `raw_lines` 重建:
+    /// - stdout / stderr / activity 的相对顺序不会丢。
+    /// - instance / stream / job 的归因直接可见。
+    /// - 仍然不需要维护第二套输出缓存。
+    fn render_audit_output_document(
+        &self,
+        instance_id: &HatInstanceId,
+        job: &JobViewState,
+    ) -> Vec<Line<'static>> {
+        let mut rendered = Vec::new();
+
+        for raw in &job.raw_lines {
+            let stream_tag = match raw.stream {
+                OutputStream::Stdout => "out",
+                OutputStream::Stderr => "err",
+                OutputStream::Activity => "act",
+            };
+            let line = format!(
+                "[{instance_id}:{stream_tag}:job={}] {}",
+                job.job_id, raw.line
+            );
+
+            let mut lines = self.render_plain_lines(&line);
+            if raw.stream == OutputStream::Stderr && !raw.line.contains("\x1b[") {
+                lines = lines
+                    .into_iter()
+                    .map(|line| {
+                        let spans: Vec<Span<'static>> = line
+                            .spans
+                            .into_iter()
+                            .map(|span| Span::styled(span.content, span.style.fg(MUTED_FG)))
+                            .collect();
+                        Line::from(spans)
+                    })
+                    .collect();
+            }
+            rendered.extend(lines);
+        }
+
+        wrap_lines_to_width(rendered, self.width)
+    }
+
+    fn render_plain_lines(&self, text: &str) -> Vec<Line<'static>> {
+        render_text_to_lines(text, MarkdownRenderMode::Plain, self.width)
     }
 
     fn render_stream_chunk(&self, lines: &[String], muted: bool) -> Vec<Line<'static>> {
@@ -653,7 +897,13 @@ impl ParallelOutputRenderer {
         let mut rendered = if text.is_empty() {
             vec![Line::from(String::new())]
         } else {
-            render_text_to_lines(&text, self.mode, self.width)
+            render_text_to_lines(
+                &text,
+                self.view_mode
+                    .markdown_render_mode()
+                    .expect("body views must have a markdown render mode"),
+                self.width,
+            )
         };
 
         // 说明:
@@ -712,10 +962,11 @@ pub struct ParallelTuiState {
     /// 当前选中的 gate（用于展示 gate 详情与快捷 actions）。
     pub selected_gate: Option<String>,
 
-    /// 输出渲染模式：
+    /// 输出视图模式:
     /// - 默认 Rendered：更适合阅读 AI code agent 的 Markdown 输出。
-    /// - `--plain` 会切换为 Plain：便于排障/复制粘贴/对齐旧行为。
-    pub output_render_mode: MarkdownRenderMode,
+    /// - `--plain` 初始为 Plain：便于排障/复制粘贴/对齐旧行为。
+    /// - Audit：展示 instance / stream / job 归因,便于核对完整到达流。
+    pub output_view_mode: ParallelOutputViewMode,
 
     /// Markdown 语义换行宽度（仅用于 Rendered 模式下的 stdout 渲染）。
     ///
@@ -745,7 +996,7 @@ impl Default for ParallelTuiState {
             gates: HashMap::new(),
             gate_order: Vec::new(),
             selected_gate: None,
-            output_render_mode: MarkdownRenderMode::Rendered,
+            output_view_mode: ParallelOutputViewMode::Rendered,
             output_render_width: 80,
             max_buffer_lines: 10_000,
         }
@@ -772,15 +1023,34 @@ impl ParallelTuiState {
 
         self.output_render_width = width;
 
-        let max_buffer_lines = self.max_buffer_lines;
-        let mode = self.output_render_mode;
-        let width = self.output_render_width.max(1);
+        self.rerender_all_job_buffers();
+    }
 
+    /// 直接设置 Output 视图模式,并从原始输出重建所有 job buffer。
+    pub fn set_output_view_mode(&mut self, mode: ParallelOutputViewMode) {
+        if self.output_view_mode == mode {
+            return;
+        }
+
+        self.output_view_mode = mode;
+        self.rerender_all_job_buffers();
+        self.clear_output_selection();
+    }
+
+    /// 在 Rendered -> Plain -> Audit -> Rendered 之间循环。
+    pub fn cycle_output_view_mode(&mut self) {
+        self.set_output_view_mode(self.output_view_mode.next());
+    }
+
+    fn rerender_all_job_buffers(&mut self) {
+        let max_buffer_lines = self.max_buffer_lines;
+        let mode = self.output_view_mode;
+        let width = self.output_render_width.max(1);
         let renderer = ParallelOutputRenderer::new(mode, width);
 
-        for instance in self.instances.values_mut() {
+        for (instance_id, instance) in &mut self.instances {
             for job in &mut instance.jobs {
-                let lines = renderer.render_job_output_document(job);
+                let lines = renderer.render_job_output_document(instance_id, job);
                 job.buffer.replace_content_capped(lines, max_buffer_lines);
             }
         }
@@ -1022,6 +1292,7 @@ impl ParallelTuiState {
 
     /// 注册一个实例（若已存在则只做 best-effort 更新）。
     pub fn register_instance(&mut self, instance_id: HatInstanceId, state: HatInstanceState) {
+        let now = Instant::now();
         let exists = self.instances.contains_key(&instance_id);
         if !exists {
             self.instances
@@ -1030,7 +1301,7 @@ impl ParallelTuiState {
             self.instance_order
                 .sort_by(|a, b| a.as_str().cmp(b.as_str()));
         } else if let Some(s) = self.instances.get_mut(&instance_id) {
-            s.state = state;
+            s.set_state(state, now);
         }
 
         // 兜底：确保 selected 不越界
@@ -1042,11 +1313,12 @@ impl ParallelTuiState {
     pub fn set_instance_state(&mut self, instance_id: HatInstanceId, state: HatInstanceState) {
         self.register_instance(instance_id.clone(), state);
         if let Some(s) = self.instances.get_mut(&instance_id) {
-            s.state = state;
+            s.set_state(state, Instant::now());
         }
     }
 
     pub fn append_output(&mut self, chunk: &HatJobOutputChunk) {
+        let now = Instant::now();
         let instance_id = chunk.instance_id.clone();
         // 关键点：
         // - output chunk 可能先于 instance state 更新到达；
@@ -1057,14 +1329,14 @@ impl ParallelTuiState {
         }
 
         let max_buffer_lines = self.max_buffer_lines;
-        let mode = self.output_render_mode;
+        let mode = self.output_view_mode;
         let width = self.output_render_width.max(1);
 
         let Some(instance) = self.instances.get_mut(&instance_id) else {
             return;
         };
 
-        instance.last_output_at = Some(Instant::now());
+        instance.last_output_at = Some(now);
 
         // 根据 job_id 分段：最后一个 job 不同则新建
         let needs_new_job = instance
@@ -1079,9 +1351,22 @@ impl ParallelTuiState {
             instance.current_job = instance.jobs.len().saturating_sub(1);
         }
 
+        if chunk.stream == OutputStream::Activity {
+            instance.start_activity(chunk.line.clone(), now);
+            if let Some(job) = instance.jobs.last_mut()
+                && job.first_output_at.is_none()
+            {
+                job.first_output_at = Some(now);
+            }
+        }
+
+        if let Some(label) = normalize_activity_label(&chunk.line) {
+            instance.start_activity(label, now);
+        }
+
         if let Some(job) = instance.jobs.last_mut() {
             if job.first_output_at.is_none() {
-                job.first_output_at = Some(Instant::now());
+                job.first_output_at = Some(now);
             }
 
             // 特殊值：0 表示不保留输出（极端省内存/降噪）。
@@ -1094,6 +1379,9 @@ impl ParallelTuiState {
             }
 
             // 先保存原始行，再统一渲染（支持跨行 Markdown 语义，例如 fenced code block）。
+            // 说明:
+            // - Activity 也进入 raw_lines,这样 audit 视图才能完整核对真实到达流。
+            // - Rendered/Plain 渲染时仍会忽略 Activity,所以不会污染正文输出。
             job.raw_lines.push(JobOutputLine {
                 stream: chunk.stream,
                 line: chunk.line.clone(),
@@ -1107,7 +1395,7 @@ impl ParallelTuiState {
 
             // 重新渲染本 job 的所有可见输出（best-effort）。
             let renderer = ParallelOutputRenderer::new(mode, width);
-            let lines = renderer.render_job_output_document(job);
+            let lines = renderer.render_job_output_document(&instance_id, job);
             job.buffer.replace_content_capped(lines, max_buffer_lines);
         }
     }
@@ -1443,6 +1731,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parallel_activity_chunk_sets_current_activity() {
+        let mut state = ParallelTuiState::default();
+        let instance_id = HatInstanceId::from("builder#1");
+
+        state.set_instance_state(instance_id.clone(), HatInstanceState::Running);
+        state.append_output(&HatJobOutputChunk {
+            job_id: 1,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Activity,
+            line: "Inspecting current code behavior".to_string(),
+        });
+
+        let view = state
+            .instances
+            .get(&instance_id)
+            .expect("instance must exist");
+        let activity = view
+            .current_activity
+            .as_ref()
+            .expect("activity should be set");
+
+        assert_eq!(
+            activity.label, "Inspecting current code behavior",
+            "activity label should be preserved"
+        );
+        assert_eq!(
+            view.current_job_summary().as_deref(),
+            Some("job 1/1"),
+            "activity chunk should still create a visible job summary"
+        );
+    }
+
+    #[test]
+    fn parallel_activity_summary_uses_elapsed_and_interrupt_hint() {
+        let mut state = ParallelTuiState::default();
+        let instance_id = HatInstanceId::from("builder#1");
+
+        state.set_instance_state(instance_id.clone(), HatInstanceState::Running);
+        state.append_output(&HatJobOutputChunk {
+            job_id: 1,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "Working...".to_string(),
+        });
+
+        let view = state
+            .instances
+            .get_mut(&instance_id)
+            .expect("instance must exist");
+        let activity = view
+            .current_activity
+            .as_mut()
+            .expect("activity should be inferred from output");
+        activity.started_at = Instant::now()
+            .checked_sub(Duration::from_secs(11))
+            .expect("test clock should support subtraction");
+
+        let summary = view
+            .current_activity_summary(Instant::now())
+            .expect("summary should exist");
+        assert!(
+            summary.contains("Working"),
+            "summary should show the activity label: {summary}"
+        );
+        assert!(
+            summary.contains("11s"),
+            "summary should show elapsed seconds: {summary}"
+        );
+        assert!(
+            summary.contains("Ctrl+C to interrupt"),
+            "summary should show the interrupt hint: {summary}"
+        );
+    }
+
     // =========================================================================
     // Parallel Output Rendering: Markdown Rendered / Plain
     // =========================================================================
@@ -1464,7 +1827,7 @@ mod tests {
     #[test]
     fn parallel_output_rendered_hides_markdown_markers_best_effort() {
         let mut state = ParallelTuiState::default();
-        state.output_render_mode = MarkdownRenderMode::Rendered;
+        state.output_view_mode = ParallelOutputViewMode::Rendered;
 
         let instance_id = HatInstanceId::from("writer#1");
         let job_id = 1;
@@ -1546,7 +1909,7 @@ mod tests {
         // - Rendered 模式下,`termimad` 会把 `<event ...>` 当作 HTML 吞掉.
         // - 对 `reply.human.message` 我们必须显示 payload,否则用户体感为“无回复”.
         let mut state = ParallelTuiState::default();
-        state.output_render_mode = MarkdownRenderMode::Rendered;
+        state.output_view_mode = ParallelOutputViewMode::Rendered;
 
         let instance_id = HatInstanceId::from("ralph#1");
         let job_id = 1;
@@ -1577,7 +1940,7 @@ mod tests {
         //   但 Output 因为"逻辑行数"与"屏幕显示行数"不一致,仍卡在上面的包裹行里。
         // - 这里用一个很窄的 output 宽度复现该条件,锁死"到底后必须看见 reply"。
         let mut state = ParallelTuiState::default();
-        state.output_render_mode = MarkdownRenderMode::Rendered;
+        state.output_view_mode = ParallelOutputViewMode::Rendered;
         state.set_output_render_width(10);
 
         let instance_id = HatInstanceId::from("ralph#1");
@@ -1646,7 +2009,7 @@ mod tests {
         // - stderr 不应该在“正文”里被拼接任何前缀（例如 "[stderr]" / "E "）。
         // - 否则会破坏 Markdown 行首语义（标题/引用/列表等）。
         let mut state = ParallelTuiState::default();
-        state.output_render_mode = MarkdownRenderMode::Rendered;
+        state.output_view_mode = ParallelOutputViewMode::Rendered;
 
         let instance_id = HatInstanceId::from("writer#1");
         let job_id = 1;
@@ -1681,7 +2044,7 @@ mod tests {
     #[test]
     fn parallel_output_plain_keeps_markdown_control_symbols_visible() {
         let mut state = ParallelTuiState::default();
-        state.output_render_mode = MarkdownRenderMode::Plain;
+        state.output_view_mode = ParallelOutputViewMode::Plain;
 
         let instance_id = HatInstanceId::from("writer#1");
         let job_id = 1;
@@ -1734,7 +2097,7 @@ mod tests {
 
     #[test]
     fn parallel_output_stderr_with_ansi_is_not_force_muted() {
-        let renderer = ParallelOutputRenderer::new(MarkdownRenderMode::Plain, 120);
+        let renderer = ParallelOutputRenderer::new(ParallelOutputViewMode::Plain, 120);
 
         // stderr 上的 ANSI 色彩是“语义信息”(例如 prompt transcript),不能被 stderr-muted 强行覆盖掉。
         let rendered = renderer.render_stream_chunk(&["\x1b[31mRED\x1b[0m ok".to_string()], true);
@@ -1752,7 +2115,7 @@ mod tests {
     #[test]
     fn parallel_output_single_empty_stdout_line_is_preserved() {
         let mut state = ParallelTuiState::default();
-        state.output_render_mode = MarkdownRenderMode::Plain;
+        state.output_view_mode = ParallelOutputViewMode::Plain;
 
         let instance_id = HatInstanceId::from("writer#1");
         let job_id = 1;
@@ -1768,6 +2131,87 @@ mod tests {
         assert_eq!(
             text, "",
             "Single empty line should be preserved as empty text"
+        );
+    }
+
+    #[test]
+    fn parallel_output_audit_shows_stream_job_and_activity_lines() {
+        let mut state = ParallelTuiState::default();
+        state.output_view_mode = ParallelOutputViewMode::Audit;
+        state.set_output_render_width(160);
+
+        let instance_id = HatInstanceId::from("writer#1");
+        let job_id = 7;
+
+        for (stream, line) in [
+            (OutputStream::Stdout, "hello"),
+            (OutputStream::Stderr, "warning"),
+            (OutputStream::Activity, "Working"),
+        ] {
+            state.append_output(&HatJobOutputChunk {
+                job_id,
+                instance_id: instance_id.clone(),
+                stream,
+                line: line.to_string(),
+            });
+        }
+
+        let text = collect_latest_job_text(&state, &instance_id);
+        assert!(
+            text.contains("[writer#1:out:job=7] hello"),
+            "audit should show stdout attribution: {text}"
+        );
+        assert!(
+            text.contains("[writer#1:err:job=7] warning"),
+            "audit should show stderr attribution: {text}"
+        );
+        assert!(
+            text.contains("[writer#1:act:job=7] Working"),
+            "audit should show activity attribution: {text}"
+        );
+    }
+
+    #[test]
+    fn parallel_output_view_mode_switch_rerenders_existing_raw_lines() {
+        let mut state = ParallelTuiState::default();
+        state.output_view_mode = ParallelOutputViewMode::Rendered;
+        state.set_output_render_width(160);
+
+        let instance_id = HatInstanceId::from("writer#1");
+        let job_id = 8;
+
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Stdout,
+            line: "## Section Title".to_string(),
+        });
+        state.append_output(&HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Activity,
+            line: "Inspecting current code behavior".to_string(),
+        });
+
+        let rendered = collect_latest_job_text(&state, &instance_id);
+        assert!(
+            !rendered.contains("## Section Title"),
+            "rendered mode should not show markdown marker: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Inspecting current code behavior"),
+            "activity should not enter rendered body: {rendered}"
+        );
+
+        state.set_output_view_mode(ParallelOutputViewMode::Audit);
+        let audit = collect_latest_job_text(&state, &instance_id);
+        assert!(
+            audit.contains("[writer#1:out:job=8] ## Section Title"),
+            "audit mode should rebuild from raw lines: {audit}"
+        );
+        assert!(
+            audit.contains("[writer#1:act:job=8] Inspecting current code behavior"),
+            "audit mode should expose activity stream: {audit}"
         );
     }
 }

@@ -1317,6 +1317,11 @@ pub fn dispatch_action(action: Action, state: &mut TuiState, viewport_height: us
                 state.hat_graph_zoomed = !state.hat_graph_zoomed;
             }
         }
+        Action::ToggleParallelOutputView => {
+            if state.mode == TuiMode::Parallel {
+                state.parallel.cycle_output_view_mode();
+            }
+        }
         Action::None => {}
     }
     false
@@ -1857,6 +1862,12 @@ impl App {
                                                     }
                                                     continue;
                                                 }
+                                                if key.code == KeyCode::Char('v') {
+                                                    // `v`：在可读输出与审计输出之间切换。
+                                                    // 该动作只影响 TUI 展示,不改变 runtime / event parser。
+                                                    state.parallel.cycle_output_view_mode();
+                                                    continue;
+                                                }
                                                 if key.code == KeyCode::Char('q') {
                                                     // 并行模式：退出 TUI 时必须退出所有 worker CLI 子进程。
                                                     // 复用 interrupt_tx，让并行 runner 走 killpg(SIGTERM→SIGKILL) 的统一清理路径。
@@ -2388,15 +2399,27 @@ impl App {
                                         let total = instance.jobs.len();
                                         if total > 0 {
                                             let current = instance.current_job.saturating_add(1);
-                                            format!("Output ({id}) [{state_label}] [job {current}/{total}]")
+                                            format!(
+                                                "Output ({id}) [{state_label}] [job {current}/{total}] [{}]",
+                                                state.parallel.output_view_mode.title_label()
+                                            )
                                         } else {
-                                            format!("Output ({id}) [{state_label}]")
+                                            format!(
+                                                "Output ({id}) [{state_label}] [{}]",
+                                                state.parallel.output_view_mode.title_label()
+                                            )
                                         }
                                     } else {
-                                        format!("Output ({id})")
+                                        format!(
+                                            "Output ({id}) [{}]",
+                                            state.parallel.output_view_mode.title_label()
+                                        )
                                     }
                                 } else {
-                                    "Output".to_string()
+                                    format!(
+                                        "Output [{}]",
+                                        state.parallel.output_view_mode.title_label()
+                                    )
                                 };
                                 let block = panel_block(title, output_focused, &theme);
                                 let inner = block.inner(output_area);
@@ -3314,6 +3337,29 @@ mod tests {
 
         dispatch_action(Action::ToggleHatGraphZoom, &mut state, 10);
         assert!(!state.hat_graph_zoomed);
+    }
+
+    #[test]
+    fn dispatch_action_toggle_parallel_output_view_cycles_in_parallel_mode() {
+        use crate::state::parallel::ParallelOutputViewMode;
+
+        let mut state = TuiState::new_parallel();
+        assert_eq!(
+            state.parallel.output_view_mode,
+            ParallelOutputViewMode::Rendered
+        );
+
+        dispatch_action(Action::ToggleParallelOutputView, &mut state, 10);
+        assert_eq!(
+            state.parallel.output_view_mode,
+            ParallelOutputViewMode::Plain
+        );
+
+        dispatch_action(Action::ToggleParallelOutputView, &mut state, 10);
+        assert_eq!(
+            state.parallel.output_view_mode,
+            ParallelOutputViewMode::Audit
+        );
     }
 
     #[test]

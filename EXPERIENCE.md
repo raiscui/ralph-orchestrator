@@ -220,3 +220,21 @@
   - `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
   - `cargo test -p ralph-cli --test integration_live_capability`
   - `openspec validate --all --strict`
+
+
+### exp-20260517-parallel-tui-status-summary
+> 并行 TUI 信息缺失类问题先分清 runtime truth 与 display aggregation。优先复用 `ParallelTuiState` / `InstanceViewState` / `TuiState.last_event` 做状态摘要,不要为了显示“当前在做什么”再建第二套状态源。
+<!-- scope: project | source_topics: tui_status_summary,default_notes_rollover | source_hats: codex | status: active | confidence: high | created_at: 2026-05-17T16:55:40+08:00 | updated_at: 2026-05-17T16:55:40+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 用户反馈 TUI 和 Codex/CLI 直接输出差异很大,怀疑信息没有显示。
+  - 并行 TUI 需要让用户快速知道 selected instance、current job、last event、Rendered/Plain 模式。
+- 已验证事实:
+  - CLI/log-mode 偏审计流,TUI 偏操作面;差异不等于 runtime 丢信息。
+  - `should_forward_event_to_tui` 会过滤无 source/source_instance 的普通业务事件。
+  - `Output` 标题已经能显示 selected instance state/job;Instances 和 Footer 更适合补状态摘要。
+  - Footer 80 列空间有限,verbose label 会挤掉关键 event topic;紧凑格式 `writer#1 j1/1 m:P e:reply.human.message` 已通过测试。
+- 未来动作:
+  - 状态摘要优先用现有 state helper,例如 `InstanceViewState::current_job_summary()`。
+  - 如果要显示 stderr visible/hidden,先把 runner 的 `show_stderr` 明确传入 TUI state,不要在 widget 里猜。
+  - raw/audit 视图应作为下一层能力,不要把默认 TUI 退化成 stdout 全量镜像。

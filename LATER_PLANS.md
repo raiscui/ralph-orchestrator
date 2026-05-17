@@ -472,3 +472,35 @@
 - 特别提醒:
   - 不建议直接做“正式 run 中途热切换整套 `ralph.yml`”。
   - `examples/` 更像 bundle/template,未必都适合作为默认 selector catalog 的候选 workflow,最好单独分类。
+
+## [2026-05-17 16:16:00] [Session ID: omx-1779004640353-blcixq] 后续建议: 并行 TUI 剩余状态增强
+
+- 背景: 本轮排查发现 TUI 与 Codex/CLI 直接输出差异主要来自展示模型不同。TUI 当前偏操作面,CLI/log-mode 偏审计流。
+- 建议后续落地:
+  1. Instances 行补 `last_input.preview` / input topic / current job。
+  2. Header 或 Footer 补 selected instance、state、job、last event、stderr visible/hidden。
+  4. 增加一个小型 evidence/status 面板,显示 `.ralph/agents.json`、record-session、events.jsonl、evidence-index 的当前路径。
+- 验证建议:
+  - 给 TUI Rendered / TUI Plain / Pretty Rendered / Pretty Plain 加 2x2 regression。
+  - 用现有 `tui-validate` 或 ratatui TestBackend snapshot 验证 status 字段实际可见。
+
+
+## [2026-05-17 16:51:58] [Session ID: omx-1779004640353-blcixq] 后续计划更新: TUI 状态摘要已部分落地,剩余 stderr/evidence/last-input 视图
+
+- 已完成:
+  - Instances 行显示 `job x/y`。
+  - Footer 并行模式显示 selected instance、紧凑 job、render mode、last event。
+- 仍未完成,后续建议保留:
+  2. 明确显示 stderr visible/hidden,需要先把 `show_stderr` 从 runner 配置传入 TUI state。
+  3. 增加 evidence/status 面板,显示 record-session、events.jsonl、agents.json、evidence-index 路径。
+  4. 如果要显示 `last_input.preview`,应优先复用 `.ralph/agents.json` 或把 last input 作为正式 TUI update,不要在 widget 中另行推断。
+
+## [2026-05-17 18:18:00] [Session ID: omx-1779004640353-blcixq] 后续建议: TUI stderr 可见性与 evidence 面板仍可继续增强
+
+- 已完成:
+  - Codex 风格 `current_activity` 状态字段已经落地。
+  - Footer / Instances 已能显示当前正在做什么和持续时间。
+- 仍建议后续做:
+  2. 明确显示 stderr visible/hidden,需要先把 `show_stderr` 从 runner 配置传入 TUI state。
+  3. 增加 evidence/status 面板,显示 record-session、events.jsonl、agents.json、evidence-index 路径。
+  4. 如果要显示 `last_input.preview`,应优先复用 `.ralph/agents.json` 或把 last input 作为正式 TUI update。

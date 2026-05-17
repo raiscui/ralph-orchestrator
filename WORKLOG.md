@@ -830,3 +830,158 @@
 ### 总结感悟
 - 默认行为应该有一个可审计的 canonical source,不能让 bootstrap selector、项目根配置和 live dogfood gate 各自漂移。
 - OpenSpec delta 中,修改旧 requirement 要匹配 stable spec 标题; 新增 requirement 要放入 `ADDED Requirements`,否则 archive 自动同步会失败。
+
+
+## [2026-05-17 16:24:01] [Session ID: omx-1779004640353-blcixq] 任务名称: TUI 与 Codex 直接输出差异排查
+
+### 任务内容
+- 检查 Ralph TUI 输出与 Codex/CLI 直接输出差异。
+- 识别哪些信息被过滤、隐藏、改写或没有接入 TUI 主画面。
+- 给出“不遗漏信息”和“当前状态可见”的改良方向。
+
+### 完成过程
+- 复核 `parallel_runner` 的事件转发规则、stdout/stderr TUI observer、CLI/log-mode final states 输出。
+- 复核 TUI Instances 面板只显示 instance id、state、last output age。
+- 复核 `ralph agents` 已有 Last Input 状态字段,但并行 TUI 未完整接入。
+- 复核 Rendered/Plain 的展示层语义,确认 Rendered 会隐藏 `reply.human.message` event wrapper 并显示 payload。
+- 重新运行 focused tests 验证关键行为。
+
+### 验证证据
+- `cargo test --package ralph-cli --bin ralph parallel_runner::tests::parallel_tui_event_forwarding_filters_noise_without_source_or_instance -- --exact`: passed。
+- `cargo test --package ralph-cli --bin ralph parallel_runner::tests::parallel_tui_event_forwarding_allows_events_with_source_instance -- --exact`: passed。
+- `cargo test --package ralph-cli --bin ralph parallel_runner::guardrail_tests::parallel_output_for_event_parsing_is_stdout_only -- --exact`: passed。
+- `cargo test --package ralph-adapters --lib stream_handler::tests::tui_stream_handler::markdown_rendered_mode_shows_reply_human_message_payload -- --exact`: passed。
+- `cargo test --package ralph-adapters --lib stream_handler::tests::tui_stream_handler::pretty_plain_mode_keeps_reply_human_message_event_text -- --exact`: passed。
+- 意外触发的全量 `cargo test` 最终退出码为 0,未观察到 error 输出; 该证据仅作为额外健康信号。
+
+### 总结感悟
+- TUI 不应简单变成 stdout 镜像,否则会损失操作面可读性。
+- 更合适的方向是“双层展示”: 默认状态摘要足够清楚,同时提供 raw/audit 视图保证排障时不丢信息。
+- 当前最值得先补的是 selected instance 当前输入、job、last event、stderr 可见性和证据路径。
+
+
+## [2026-05-17 16:29:49] [Session ID: omx-1779004640353-blcixq] 任务名称: TUI 差异排查 hook 后追加验证
+
+### 任务内容
+- 响应 stop hook 要求,在收尾前补充新鲜验证证据。
+- 验证 agents 状态面和并行 TUI full layout 的当前行为。
+
+### 完成过程
+- 读取 ultrawork skill 的收尾规则,确认 direct ultrawork 只要求轻量 evidence。
+- 运行 agents 表格集成测试,确认 last input 信息在 agents 状态面可见。
+- 运行并行 TUI full layout snapshot smoke,确认 instances/output/gates 操作面仍可渲染。
+
+### 验证证据
+- cargo test --package ralph-cli --test integration_agents test_agents_command_prints_table -- --exact: passed。
+- cargo test --package ralph-tui --test integration_snapshots test_parallel_full_layout_renders_instances_output_and_gates -- --exact: passed。
+
+### 总结感悟
+- 新证据进一步支持“真相源存在,但 TUI 主画面聚合不足”的结论。
+- 后续实现时应优先复用 agents snapshot / parallel state,不要另建第二套状态真相源。
+
+
+## [2026-05-17 16:51:58] [Session ID: omx-1779004640353-blcixq] 任务名称: TUI 并行状态摘要最小实现
+
+### 任务内容
+- 将上一轮排查出的 TUI 状态缺口推进为最小代码改良。
+- 让用户在 TUI 主画面更容易看到当前实例、当前 job、最近事件和渲染模式。
+
+### 完成过程
+- 复用 `InstanceViewState.jobs/current_job`,新增 job 摘要 helper。
+- 在 Instances 面板实例行中显示 `job x/y`。
+- 在 Footer 并行模式下显示 selected instance、紧凑 job、render mode 和 last event。
+- 为 Instances 和 Footer 增加 focused tests。
+- 处理 footer 80 列宽度下事件名被截断的问题,将 verbose 摘要改成紧凑摘要。
+
+### 验证证据
+- `cargo fmt --all -- --check`: passed。
+- `cargo test --package ralph-tui --lib widgets::instances::tests::instances_pane_shows_current_job_summary -- --exact`: passed。
+- `cargo test --package ralph-tui --lib widgets::footer::tests::footer_shows_parallel_status_summary -- --exact`: passed。
+- `cargo test --package ralph-tui --test integration_snapshots test_parallel_full_layout_renders_instances_output_and_gates -- --exact`: passed。
+- `cargo test --package ralph-tui`: passed。
+- `cargo test`: passed。
+- `git diff --check`: passed。
+
+### 总结感悟
+- TUI 状态增强应该优先复用现有 state,避免为了展示再建状态真相源。
+- Footer 是窄空间,不适合塞完整英文标签;重要信息要前置并压缩。
+- 这次完成的是“状态摘要”层。raw/audit 视图仍是后续任务。
+
+
+## [2026-05-17 16:55:40] [Session ID: omx-1779004640353-blcixq] 任务名称: notes.md 超限续档与持续学习
+
+### 任务内容
+- 处理默认六文件中 `notes.md` 超过 1000 行的问题。
+- 执行最小 continuous-learning,沉淀 TUI 状态摘要经验。
+
+### 完成过程
+- 列出默认六文件候选并确认只有 `notes.md` 超限。
+- 回读默认六文件最新段落和 `EXPERIENCE.md` 现有 TUI 经验。
+- 将旧 `notes.md` 归档到 `archive/default_history/notes_2026-05-17_1655_tui_status_prev.md`。
+- 新建精简 `notes.md` 续档入口。
+- 追加 `EXPERIENCE.md` 条目 `exp-20260517-parallel-tui-status-summary`。
+- 创建归档 manifest `archive/manifests/ARCHIVE_MANIFEST__default_notes_rollover_2026-05-17_1655.md`。
+
+### 总结感悟
+- 六文件续档要在主任务结束前处理,否则下轮会继续读入超大上下文。
+- 当前场景没有新增 AGENTS 索引需求,因为 `EXPERIENCE.md` 已在 `AGENTS.md` Project Knowledge Index 中登记。
+
+## [2026-05-17 17:10:00] [Session ID: omx-1779004640353-blcixq] 任务名称: Codex 原生状态行是否进入并行 TUI核查
+
+### 任务内容
+- 核查 Codex 原生 `Working...` / `Inspecting current code behavior...` 这类临时状态信息是否会显示在 `ralph run` 并行 TUI 中。
+- 明确区分 stderr 普通行与 Codex TTY 状态条。
+
+### 完成过程
+- 读取普通并行 backend 的 stdout/stderr 读取路径。
+- 读取 Codex app-server runtime 的输出映射路径。
+- 读取并行 TUI 的 stderr 渲染与控制字符处理路径。
+- 运行 focused tests 验证 stderr 默认显示和 TUI stderr 渲染仍成立。
+
+### 验证证据
+- `cargo test --package ralph-cli --bin ralph tests::run_args_show_stderr_defaults_to_true -- --exact`: passed。
+- `cargo test --package ralph-tui --lib state::parallel::tests::parallel_output_stderr_markdown_rendering_matches_renderer_output -- --exact`: passed。
+
+### 总结感悟
+- “stderr 会显示”和“Codex 原生 TTY 状态条会显示”不是一回事。
+- 如果要让 TUI 像 Codex 一样显示当前动作,应设计正式的 `current_activity` / status 字段,而不是依赖解析临时终端控制序列。
+
+## [2026-05-17 18:18:00] [Session ID: omx-1779004640353-blcixq] 任务名称: Codex 风格 current activity 状态显示
+
+### 任务内容
+- 在 `ralph run` 并行 TUI 中显示类似 Codex 的当前活动状态。
+- 覆盖用户关心的 `Working` 和 `Inspecting current code behavior` 这类文案。
+- 保持信息不遗漏: activity 不进入正文,但作为状态字段稳定显示; stderr 普通行仍按原规则显示。
+
+### 完成过程
+- 新增 `ralph-core` activity 文本归一化 helper。
+- 给 `OutputStream` 增加 `Activity` 变体,作为纯状态流。
+- 在 Codex app-server 路径中把 `task_started` 映射为 `Working`,把 reasoning summary 中的活动文案映射为 activity。
+- 在 TUI parallel state 中维护 `current_activity` 与 `state_since`。
+- 在 Footer 显示 `Activity (Ns • Ctrl+C to interrupt)`。
+- 在 Instances 行显示当前 activity 短摘要。
+- 清理 `LATER_PLANS.md` 中已经完成的 current activity 待办,保留 raw/audit 等后续方向。
+
+### 验证证据
+- `cargo test -p ralph-cli`: passed。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test`: passed。
+- `git diff --check`: passed。
+
+### 总结感悟
+- Codex 原生 TTY 状态条不能当 Ralph 的稳定真相源。
+- 更稳的做法是把 app-server lifecycle / reasoning 信号提升为 Ralph 自己的状态流。
+- TUI 的“当前在做什么”应该是状态字段,不是输出正文的一部分。
+
+## [2026-05-17 19:05:00] [Session ID: omx-1779004640353-blcixq] 任务名称: 并行 TUI raw/audit 视图
+
+### 任务内容
+- 新增并行 TUI Output 三态视图: Rendered / Plain / Audit。
+- `v` 键循环切换,Footer 显示 `m:R/P/A`,Output 标题显示模式。
+- Audit 视图显示 `[instance:stream:job=n] line`,并包含 activity 流。
+
+### 验证证据
+- `cargo test -p ralph-tui`: passed。
+- `cargo test`: passed。
+- `cargo fmt --all -- --check`: passed。
+- `git diff --check`: passed。

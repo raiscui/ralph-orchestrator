@@ -12,7 +12,10 @@
 use crate::display::colors;
 use anyhow::{Context, Result};
 use ralph_adapters::{CliBackend, scrub_codex_parent_session_env_tokio};
-use ralph_core::{HatJob, HatJobControl, HatJobOutputChunk, HatJobResult, OutputStream};
+use ralph_core::{
+    HatJob, HatJobControl, HatJobOutputChunk, HatJobResult, OutputStream, clean_activity_label,
+    normalize_activity_label,
+};
 use ralph_proto::HatInstanceId;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -955,6 +958,62 @@ async fn emit_prompt_transcript(
     }
 }
 
+async fn emit_activity(
+    output_tx: &mpsc::Sender<HatJobOutputChunk>,
+    job_id: u64,
+    instance_id: &HatInstanceId,
+    label: &str,
+) {
+    let label = clean_activity_label(label);
+    if label.is_empty() {
+        return;
+    }
+
+    let _ = output_tx
+        .send(HatJobOutputChunk {
+            job_id,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Activity,
+            line: label,
+        })
+        .await;
+}
+
+async fn emit_activity_if_changed(
+    output_tx: &mpsc::Sender<HatJobOutputChunk>,
+    job_id: u64,
+    instance_id: &HatInstanceId,
+    current_activity_label: &mut Option<String>,
+    label: &str,
+) {
+    let label = clean_activity_label(label);
+    if label.is_empty() || current_activity_label.as_deref() == Some(label.as_str()) {
+        return;
+    }
+
+    *current_activity_label = Some(label.clone());
+    emit_activity(output_tx, job_id, instance_id, &label).await;
+}
+
+async fn emit_activity_from_text_if_changed(
+    output_tx: &mpsc::Sender<HatJobOutputChunk>,
+    job_id: u64,
+    instance_id: &HatInstanceId,
+    current_activity_label: &mut Option<String>,
+    text: &str,
+) {
+    if let Some(label) = normalize_activity_label(text) {
+        emit_activity_if_changed(
+            output_tx,
+            job_id,
+            instance_id,
+            current_activity_label,
+            &label,
+        )
+        .await;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CodexAppServerRuntime {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<CodexAppServerSession>>>>>,
@@ -1032,6 +1091,7 @@ impl CodexAppServerRuntime {
             let mut last_summary_index: Option<u64> = None;
             let mut thinking_pending = String::new();
             let mut thinking_last_summary_index: Option<u64> = None;
+            let mut current_activity_label: Option<String> = None;
             let mut last_output_changed_at = Instant::now();
 
             // 当输出/stderr 通道关闭时,recv 会立刻返回,可能导致 busy loop.
@@ -1300,6 +1360,14 @@ impl CodexAppServerRuntime {
 
                                     if ok {
                                         task_started = true;
+                                        emit_activity_if_changed(
+                                            &output_tx,
+                                            job.job_id,
+                                            &job.instance_id,
+                                            &mut current_activity_label,
+                                            "Working",
+                                        )
+                                        .await;
                                     }
                                 }
                                 "item/agentMessage/delta" => {
@@ -1320,6 +1388,14 @@ impl CodexAppServerRuntime {
 
                                         output.push_str(delta);
                                         stream_pending.push_str(delta);
+                                        emit_activity_from_text_if_changed(
+                                            &output_tx,
+                                            job.job_id,
+                                            &job.instance_id,
+                                            &mut current_activity_label,
+                                            delta,
+                                        )
+                                        .await;
                                         flush_pending_output(
                                             job.job_id,
                                             &job.instance_id,
@@ -1407,6 +1483,14 @@ impl CodexAppServerRuntime {
                                     // --------------------------------------------------------------
                                     if output_source == Some(CodexAppServerOutputSource::AgentMessageDelta) {
                                         thinking_pending.push_str(delta);
+                                        emit_activity_from_text_if_changed(
+                                            &output_tx,
+                                            job.job_id,
+                                            &job.instance_id,
+                                            &mut current_activity_label,
+                                            &thinking_pending,
+                                        )
+                                        .await;
                                         flush_pending_output(
                                             job.job_id,
                                             &job.instance_id,
@@ -1427,6 +1511,14 @@ impl CodexAppServerRuntime {
 
                                     output.push_str(delta);
                                     stream_pending.push_str(delta);
+                                    emit_activity_from_text_if_changed(
+                                        &output_tx,
+                                        job.job_id,
+                                        &job.instance_id,
+                                        &mut current_activity_label,
+                                        &output,
+                                    )
+                                    .await;
                                     flush_pending_output(
                                         job.job_id,
                                         &job.instance_id,
@@ -2005,6 +2097,157 @@ if __name__ == "__main__":
             result.exit_code,
             Some(1),
             "Expected exit_code=1 for fatal error: {result:?}"
+        );
+
+        runtime.shutdown_all().await;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn app_server_task_started_and_reasoning_summary_emit_activity_chunks() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        // ------------------------------------------------------------------
+        // 目标:
+        // - Codex app-server 的稳定 lifecycle / reasoning 信号应当进入 activity 流。
+        // - 这样并行 TUI 才能显示类似 Codex 的 `Working` / `Inspecting ...` 状态。
+        // ------------------------------------------------------------------
+
+        let dir = tempdir().context("Failed to create tempdir")?;
+        let fake_codex = dir.path().join("codex");
+
+        let script = r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(obj) -> None:
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+def run_app_server() -> int:
+    thread_id = "thread-1"
+    turn_id = "turn-1"
+
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+
+        method = msg.get("method")
+        msg_id = msg.get("id")
+        if msg_id is None or method is None:
+            continue
+
+        if method == "initialize":
+            send({"id": msg_id, "result": {}})
+            continue
+
+        if method == "thread/start":
+            send({"id": msg_id, "result": {}})
+            send({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
+            continue
+
+        if method == "turn/start":
+            send({"id": msg_id, "result": {}})
+            send({"method": "turn/started", "params": {"turn": {"id": turn_id}}})
+            send({"method": "codex/event/task_started", "params": {"msg": {"turn_id": turn_id}}})
+            send({"method": "item/reasoning/summaryTextDelta", "params": {"delta": "Inspecting current code behavior"}})
+            send({"method": "turn/completed", "params": {"turn": {"id": turn_id}}})
+            continue
+
+        if method in ("turn/interrupt", "turn/steer"):
+            send({"id": msg_id, "result": {}})
+            continue
+
+        send({"id": msg_id, "result": {}})
+
+    return 0
+
+def main() -> int:
+    argv = sys.argv
+    if len(argv) >= 2 and argv[1] == "app-server":
+        return run_app_server()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#;
+
+        std::fs::write(&fake_codex, script).context("Failed to write fake codex script")?;
+        let mut perms = std::fs::metadata(&fake_codex)
+            .context("Failed to stat fake codex script")?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_codex, perms)
+            .context("Failed to chmod fake codex script")?;
+
+        let runtime =
+            CodexAppServerRuntime::new_with_command(false, fake_codex.display().to_string());
+
+        let job = HatJob {
+            job_id: 1,
+            instance_id: HatInstanceId::from("writer#1"),
+            hat_id: HatId::new("writer"),
+            prompt: "hello".to_string(),
+            continuation_prompt: Some("continue".to_string()),
+            backend: ralph_core::JobBackend::Default,
+            session_strategy: SessionStrategy::AppServer,
+            timeout: Some(Duration::from_secs(2)),
+            output_stale_timeout: Some(Duration::from_secs(2)),
+            workdir: None,
+        };
+
+        let backend = CliBackend {
+            command: "codex".to_string(),
+            args: vec![],
+            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_flag: None,
+            output_format: ralph_adapters::OutputFormat::Text,
+        };
+
+        let (output_tx, mut output_rx) = mpsc::channel::<HatJobOutputChunk>(128);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (_control_tx, control_rx) = mpsc::channel::<HatJobControl>(1);
+
+        let collector = tokio::spawn(async move {
+            let mut chunks = Vec::<HatJobOutputChunk>::new();
+            while let Some(chunk) = output_rx.recv().await {
+                chunks.push(chunk);
+            }
+            chunks
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.execute_job(&job, &backend, output_tx, cancel_rx, control_rx),
+        )
+        .await
+        .expect("execute_job should not hang")?;
+
+        let chunks = collector.await.expect("collector task should not panic");
+
+        assert!(
+            result.success,
+            "Expected successful fake app-server job: {result:?}"
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.stream == OutputStream::Activity && c.line == "Working"),
+            "Expected working activity chunk: {chunks:?}"
+        );
+        assert!(
+            chunks.iter().any(|c| {
+                c.stream == OutputStream::Activity && c.line == "Inspecting current code behavior"
+            }),
+            "Expected reasoning summary activity chunk: {chunks:?}"
         );
 
         runtime.shutdown_all().await;

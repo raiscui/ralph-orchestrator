@@ -9,6 +9,8 @@ use std::time::Duration;
 pub enum OutputStream {
     Stdout,
     Stderr,
+    /// 纯状态输出，不参与正文解析。
+    Activity,
 }
 
 /// 执行输出的最小流式单位（按行）。

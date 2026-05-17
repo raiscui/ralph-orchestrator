@@ -1,4 +1,4 @@
-use crate::state::TuiState;
+use crate::state::{TuiMode, TuiState};
 use crate::theme::{EXABIND_BORDER_SET, TuiTheme};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
+use std::time::Instant;
 
 /// Footer widget that adapts to terminal width.
 pub struct Footer<'a> {
@@ -68,8 +69,8 @@ impl Widget for Footer<'_> {
             return;
         }
 
-        // Default footer with flexible layout
-        // Build left content: optional alert + elapsed time
+        // Default footer with flexible layout.
+        // Build left content: optional alert + elapsed time / activity summary.
         let mut left_spans = vec![Span::raw(" ")];
 
         // Show new iteration alert when viewing history and a new iteration arrived
@@ -83,16 +84,17 @@ impl Widget for Footer<'_> {
             left_spans.push(Span::raw("│ "));
         }
 
-        // Show total elapsed time (default to 00:00 if loop hasn't started)
-        let elapsed_display = if let Some(elapsed) = self.state.get_loop_elapsed() {
-            let total_secs = elapsed.as_secs();
-            let mins = total_secs / 60;
-            let secs = total_secs % 60;
-            format!("Total Time Elapsed: {mins:02}:{secs:02}")
-        } else {
-            "Total Time Elapsed: 00:00".to_string()
-        };
-        left_spans.push(Span::raw(elapsed_display));
+        if self.state.mode != TuiMode::Parallel {
+            let elapsed_display = if let Some(elapsed) = self.state.get_loop_elapsed() {
+                let total_secs = elapsed.as_secs();
+                let mins = total_secs / 60;
+                let secs = total_secs % 60;
+                format!("Total Time Elapsed: {mins:02}:{secs:02}")
+            } else {
+                "Total Time Elapsed: 00:00".to_string()
+            };
+            left_spans.push(Span::raw(elapsed_display));
+        }
 
         if let Some(status) = &self.state.serial_output_status {
             left_spans.push(Span::raw(" │ "));
@@ -100,6 +102,74 @@ impl Widget for Footer<'_> {
                 status.clone(),
                 Style::default().fg(self.theme.colors().sky),
             ));
+        }
+
+        // 并行模式下,footer 直接展示“当前在做什么/当前看的是哪个实例/哪个 job/最近事件/渲染模式”。
+        // 这些字段都来自现有 TUI state,避免为了展示层再维护第二套状态真相源。
+        if self.state.mode == TuiMode::Parallel {
+            let now = Instant::now();
+            if let Some(instance) = self.state.parallel.selected_instance() {
+                if let Some(activity) = instance.current_activity_summary(now) {
+                    left_spans.push(Span::styled(
+                        activity,
+                        Style::default().fg(self.theme.colors().green),
+                    ));
+                } else {
+                    let elapsed_display = if let Some(elapsed) = self.state.get_loop_elapsed() {
+                        let total_secs = elapsed.as_secs();
+                        let mins = total_secs / 60;
+                        let secs = total_secs % 60;
+                        format!("Total Time Elapsed: {mins:02}:{secs:02}")
+                    } else {
+                        "Total Time Elapsed: 00:00".to_string()
+                    };
+                    left_spans.push(Span::raw(elapsed_display));
+                }
+
+                left_spans.push(Span::raw(" │ "));
+                left_spans.push(Span::styled(
+                    self.state
+                        .parallel
+                        .selected_instance_id()
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    Style::default().fg(self.theme.colors().sky),
+                ));
+                left_spans.push(Span::raw(" "));
+                left_spans.push(Span::styled(
+                    instance.state.to_string(),
+                    Style::default().fg(self.theme.colors().sky),
+                ));
+
+                if let Some(job) = instance.current_job_short_summary() {
+                    left_spans.push(Span::raw(" "));
+                    left_spans.push(Span::styled(job, self.theme.muted()));
+                }
+            } else {
+                let elapsed_display = if let Some(elapsed) = self.state.get_loop_elapsed() {
+                    let total_secs = elapsed.as_secs();
+                    let mins = total_secs / 60;
+                    let secs = total_secs % 60;
+                    format!("Total Time Elapsed: {mins:02}:{secs:02}")
+                } else {
+                    "Total Time Elapsed: 00:00".to_string()
+                };
+                left_spans.push(Span::raw(elapsed_display));
+            }
+
+            left_spans.push(Span::raw(" "));
+            left_spans.push(Span::styled(
+                format!("m:{}", self.state.parallel.output_view_mode.short_label()),
+                Style::default().fg(self.theme.colors().yellow),
+            ));
+
+            if let Some(last_event) = &self.state.last_event {
+                left_spans.push(Span::raw(" "));
+                left_spans.push(Span::styled(
+                    format!("e:{last_event}"),
+                    Style::default().fg(self.theme.colors().sky),
+                ));
+            }
         }
 
         let indicator_text = if self.state.loop_completed {
@@ -276,6 +346,129 @@ mod tests {
             text.contains("1/2"),
             "should show match position, got: {}",
             text
+        );
+    }
+
+    #[test]
+    fn footer_shows_parallel_status_summary() {
+        use crate::state::TuiUpdate;
+        use ralph_core::{HatJobOutputChunk, OutputStream};
+        use ralph_proto::{Event, HatInstanceId, HatInstanceState};
+
+        let mut state = TuiState::new_parallel();
+        let instance_id = HatInstanceId::from("writer#1");
+
+        state.apply_update(TuiUpdate::ParallelRegisterInstance {
+            instance_id: instance_id.clone(),
+            state: HatInstanceState::Running,
+        });
+        state.apply_update(TuiUpdate::ParallelOutputChunk(HatJobOutputChunk {
+            job_id: 7,
+            instance_id,
+            stream: OutputStream::Stdout,
+            line: "hello".to_string(),
+        }));
+        state.apply_update(TuiUpdate::ParallelEvent(
+            Event::new("reply.human.message", "done").with_source_instance("writer#1"),
+        ));
+        state.parallel.output_view_mode = crate::state::parallel::ParallelOutputViewMode::Plain;
+
+        let text = render_to_string_with_width(&state, 140);
+
+        assert!(
+            text.contains("writer#1"),
+            "should show selected instance, got: {}",
+            text
+        );
+        assert!(
+            text.contains("running"),
+            "should show instance state, got: {}",
+            text
+        );
+        assert!(
+            text.contains("j1/1"),
+            "should show job summary, got: {}",
+            text
+        );
+        assert!(
+            text.contains("Working") && text.contains("Ctrl+C to interrupt"),
+            "should show current activity summary, got: {}",
+            text
+        );
+        assert!(
+            text.contains("e:reply.human.message"),
+            "should show last event, got: {}",
+            text
+        );
+        assert!(
+            text.contains("m:P"),
+            "should show render mode, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn footer_shows_codex_style_parallel_activity() {
+        use crate::state::TuiUpdate;
+        use ralph_core::{HatJobOutputChunk, OutputStream};
+        use ralph_proto::{HatInstanceId, HatInstanceState};
+
+        let mut state = TuiState::new_parallel();
+        let instance_id = HatInstanceId::from("coder#1");
+
+        state.apply_update(TuiUpdate::ParallelRegisterInstance {
+            instance_id: instance_id.clone(),
+            state: HatInstanceState::Running,
+        });
+        state.apply_update(TuiUpdate::ParallelOutputChunk(HatJobOutputChunk {
+            job_id: 9,
+            instance_id: instance_id.clone(),
+            stream: OutputStream::Activity,
+            line: "Inspecting current code behavior".to_string(),
+        }));
+
+        let view = state
+            .parallel
+            .instances
+            .get_mut(&instance_id)
+            .expect("instance should exist");
+        let activity = view
+            .current_activity
+            .as_mut()
+            .expect("activity should be set");
+        activity.started_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(29))
+            .expect("test clock should support subtraction");
+
+        let text = render_to_string_with_width(&state, 140);
+
+        assert!(
+            text.contains("Inspecting current code behavior"),
+            "should show Codex-style activity label, got: {}",
+            text
+        );
+        assert!(
+            text.contains("29s"),
+            "should show activity elapsed time, got: {}",
+            text
+        );
+        assert!(
+            text.contains("Ctrl+C to interrupt"),
+            "should show the real Ralph interrupt hint, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn footer_shows_audit_parallel_output_mode() {
+        let mut state = TuiState::new_parallel();
+        state.parallel.output_view_mode = crate::state::parallel::ParallelOutputViewMode::Audit;
+
+        let text = render_to_string_with_width(&state, 120);
+
+        assert!(
+            text.contains("m:A"),
+            "audit mode should be visible in footer, got: {text}"
         );
     }
 

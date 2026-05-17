@@ -673,3 +673,68 @@
 - 待运行: `git diff --check`。
 - 待运行: `git diff --cached --check`。
 - 待运行: `openspec validate --all --strict`。
+
+## [2026-05-17 16:21:06] [Session ID: omx-1779004640353-blcixq] 问题: 追加 task_plan.md 时未加引号 heredoc 再次触发命令替换
+
+### 现象
+- 在追加 `task_plan.md` 阶段4行动记录时,正文包含反引号包裹的 `cargo test`。
+- 因误用未加引号 heredoc,Shell 把反引号内容当作 command substitution 执行,意外启动了全量测试。
+- 命令替换输出被插入 `task_plan.md`,造成计划文件污染。
+
+### 原因
+- 没有遵守项目规则: 向 Markdown 文件追加包含反引号的正文时,必须使用 `cat <<'EOF'` 单引号 heredoc。
+- 这是此前已经记录过的错误类型,本轮再次触发,说明在写入计划前没有足够警觉。
+
+### 修复
+- 使用 Python 定位污染段,将从 `- 若没有代码改动,不跑全量` 到 `只交付排查结论和建议。` 之间的测试输出替换为干净单行。
+- 后续凡是写入 Markdown 且内容可能包含反引号,统一使用 `cat <<'EOF'` 或 Python 写入,避免 shell 展开。
+
+### 验证
+- `wc -l task_plan.md`: 已从污染后的 2596 行恢复为 485 行。
+- `sed -n '470,490p' task_plan.md`: 已确认阶段4行动记录恢复为干净文本。
+- 意外触发的全量 `cargo test` 最终退出码为 0,没有观察到 error 输出。
+
+
+## [2026-05-17 16:51:58] [Session ID: omx-1779004640353-blcixq] 问题: Footer 并行状态摘要在 80 列下截断 last event
+
+### 现象
+- 新增 `footer_shows_parallel_status_summary` 测试后失败。
+- 失败输出显示 footer 只渲染到 `last:` 或 `reply.human.messa`,完整 `reply.human.message` 被右侧 `ACTIVE` 指示挤掉。
+
+### 原因
+- 初版 footer 状态摘要太长,把 selected instance、state、job、last event、render mode 都用 verbose label 放在一行。
+- 80 列终端内,左侧状态内容和右侧 active indicator 竞争空间,导致关键 event topic 被截断。
+
+### 修复
+- 去掉冗余 `Parallel` 前缀和 state 重复字段。
+- Footer 使用紧凑格式: selected instance + `jX/Y` + `m:R/P` + `e:<topic>`。
+- Instances 和 Output title 继续承担 state/job 的更完整展示。
+
+### 验证
+- `cargo test --package ralph-tui --lib widgets::footer::tests::footer_shows_parallel_status_summary -- --exact`: passed。
+- `cargo test --package ralph-tui`: passed。
+- `cargo test`: passed。
+
+## [2026-05-17 18:18:00] [Session ID: omx-1779004640353-blcixq] 问题: 并行 TUI 无法稳定显示 Codex 风格当前活动状态
+
+### 现象
+- 用户在 `ralph run` 并行 TUI 中看不到类似 Codex 的 `Working (11s • esc to interrupt)`、`Inspecting current code behavior (29s • esc to interrupt)` 这类当前动作状态。
+- 之前只能确认 stderr 普通文本默认可见,但 Codex 原生 TTY 临时状态条不会稳定进入 Ralph TUI。
+
+### 原因
+- 旧路径只有 stdout/stderr 正文输出,没有一个专门表示“当前 activity”的结构化状态流。
+- Codex app-server 的 `task_started` / reasoning summary 信号没有提升为 TUI 可消费的状态。
+- 直接解析 Codex 私有 TTY 控制序列不稳定,不适合作为唯一真相源。
+
+### 修复
+- 新增 activity 文本归一化 helper。
+- 新增 `OutputStream::Activity`,明确它是纯状态信号。
+- Codex app-server 将 `task_started` 映射为 `Working`,将 reasoning summary 中可识别的活动文案映射为 activity。
+- 并行 TUI state 维护 `current_activity` 和 elapsed 时间。
+- Footer / Instances 展示当前 activity,但不把 activity 写入正文 output buffer,也不让它参与 event parser。
+
+### 验证
+- `cargo test -p ralph-cli`: passed。
+- `cargo fmt --all -- --check`: passed。
+- `cargo test`: passed。
+- `git diff --check`: passed。
