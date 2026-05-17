@@ -16,6 +16,10 @@
 
 ## Decisions
 
+### mem-1779022785-b72f
+> git 收口时如果 worktree 已经 clean, 先核对 HEAD 最近一次提交是否已包含用户确认的改动,不要为了完成提交流程而做空提交; 本次证据是 git log -1 显示 1e4b761c 已包含 D PROMPT.md, 且 git diff --check / --cached --check 为空
+<!-- tags: git, commit, workflow | created: 2026-05-17 -->
+
 ### mem-1777474824-397d
 > docs-site: kept MkDocs Material as the GitHub Pages static stack, rebuilt nav/core pages from specs and code evidence, excluded legacy docs from strict build instead of deleting them because the worktree had unrelated docs edits. Evidence: mkdocs build --strict pass; mermaid validation pass; workflow action tags verified.
 <!-- tags: docs, github-pages, verification | created: 2026-04-29 -->
