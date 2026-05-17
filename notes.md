@@ -854,3 +854,114 @@
 - 新 gate 会先发缺少 `capability_id` 的 malformed request。
 - 第二轮 parent prompt 必须包含 `capability.failed`、`malformed_request` 和原 request id,否则脚本失败。
 - 事件日志必须同时包含 malformed failure 和 diagnostic human reply,并且不能包含 fallback `capability.result`。
+
+## [2026-05-17 00:37:29] [Session ID: omx-1778510695653-7pd7o2] 笔记: startup bootstrap resolved config 与项目根 ralph.yml 不一致
+
+## 来源
+
+### 来源1: rustdog runtime artifacts
+
+- 路径: `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/.ralph/bootstrap-selection.json`
+- 要点:
+  - `reason` 是 `missing default ralph.yml and no explicit prompt; selected v1 rule default`。
+  - `selected_resources` 是 `workflow:feature-minimal` 和 `prompt:bootstrap-default-task`。
+
+- 路径: `/Users/cuiluming/local_doc/l_dev/my/rust/rustdog/.ralph/resolved-config.yml`
+- 要点:
+  - `cli.backend` 是 `claude`。
+  - `cli.command` 是 `null`。
+  - `parallel.enabled` 是 `true`。
+
+### 来源2: Ralph startup bootstrap 源码
+
+- 路径: `crates/ralph-cli/src/startup_resources.rs`
+- 要点:
+  - `DEFAULT_CONFIG_FILE` 是 `ralph.yml`。
+  - `DEFAULT_BOOTSTRAP_WORKFLOW_ID` 是 `workflow:feature-minimal`。
+  - `resolve_default_bootstrap()` 会选择该 workflow 与 `prompt:bootstrap-default-task`。
+  - `resolve_workflow_with_prompt_template()` 从 workflow content 解析 `RalphConfig`,再注入 prompt,最后只强制 `config.parallel.enabled = true`。
+
+### 来源3: 当前 default preset 与项目根配置
+
+- 路径: `crates/ralph-cli/presets/feature-minimal.yml`
+- 要点:
+  - `cli.backend` 是 `claude`。
+
+- 路径: `ralph.yml`
+- 要点:
+  - `cli.backend` 是 `custom`。
+  - `cli.command` 是 `codex`。
+  - `cli.args` 是 `exec --sandbox danger-full-access`。
+  - `parallel.enabled` 是 `true`,但 `autoscale.max_running_jobs` 是 `7`,不同于 generated artifact 的默认 `4`。
+
+## 综合发现
+
+- 当前 no-config startup bootstrap 的真相源不是项目根 `ralph.yml`。
+- 它的真相源是 embedded catalog 中的 `workflow:feature-minimal`。
+- 因为 `feature-minimal.yml` 本身只配置了 `cli.backend: claude`,所以 generated artifact 保留了 Claude backend,并从结构体默认值补齐 `command: null`、`prompt_mode: arg` 等字段。
+- 如果当前产品契约要求 no-config artifact 等同项目维护的 canonical `ralph.yml`,则要把 canonical default config 纳入 embedded resource 或改 selector 指向新的 default parallel/codex preset。
+
+## [2026-05-17 10:36:48] [Session ID: omx-1778510695653-7pd7o2] 笔记: canonical-default-bootstrap-config OpenSpec review
+
+## 综合发现
+
+### 优点
+- proposal 把问题本体收得比较准: 不是 rustdog 目录读取错误,而是 default bootstrap canonical source 漂移。
+- design 的大方向是对的: canonical source 应该是 embedded startup resource,而不是运行时直接依赖仓库根 `ralph.yml`。
+- spec 已经把“不是字节级一致,而是核心运行语义一致”说清楚,这能避免后面被 YAML 展开字段卡死。
+
+### 需要收紧的点
+- spec 现在把 `cli.args=["exec","--sandbox","danger-full-access"]` 和 `parallel.autoscale.max_running_jobs=7` 写死了,这有把 repo 当前默认值直接抬成长期协议的风险。
+- 如果这些值未来出于平台、sandbox 或产品策略调整,每次都要改 stable spec,会让 `resource-bootstrap` 规格过度绑定当前实现细节。
+- 更稳的写法应该区分:
+  - 哪些是“必须对齐 canonical source 的字段集合”
+  - 哪些只是“当前 canonical source 的实例值”,更适合由 focused/live gate 锁住而不是写进长期 spec。
+
+### 建议调整方向
+- stable spec 保持在字段级 contract:
+  - resolved config MUST match canonical startup resource for user-visible bootstrap runtime fields
+  - 至少覆盖 `cli.backend`、`cli.command`、`cli.prompt_mode`、`cli.args`、`parallel.enabled`
+- 对 `max_running_jobs=7` 这类更像 repo 当前默认策略的值,建议下沉到 change design / tasks / focused test,而不是长期 stable spec 常量。
+- 再补一个更明确的 drift gate 语义:
+  - repo-maintained `ralph.yml` 和 canonical embedded resource 的关键字段必须通过同一 helper / 同一 fixture / 同一 assertion surface 比较
+  - 避免只是口头说“要同步”而没有机械 gate。
+
+### review 结论
+- 这组草案方向正确,可以继续。
+- 但我建议在进入实现前先把 spec 从“值级硬编码”收窄成“字段级 contract + gate-level concrete values”,这样更稳。
+
+## [2026-05-17 15:25:00] [Session ID: omx-1778510695653-7pd7o2] 笔记: canonical-default-bootstrap-config 实现与归档收口
+
+## 来源
+
+### 来源1: startup resource 实现
+
+- 路径: `crates/ralph-cli/src/startup_resources.rs`
+- 要点:
+  - 默认 workflow ID 已从 `workflow:feature-minimal` 切到 `workflow:default-parallel`。
+  - canonical bootstrap resource 使用 `include_str!("../../../ralph.yml")` 编译期嵌入仓库根默认配置。
+  - 旧 `workflow:feature-minimal` 仍保留可物化,但 `selector_eligible=false`,避免继续参与隐式默认选择。
+
+### 来源2: integration drift gate
+
+- 路径: `crates/ralph-cli/tests/integration_startup_resources.rs`
+- 要点:
+  - dry-run bootstrap gate 断言 selector 选择 `workflow:default-parallel`。
+  - gate 比较 root `ralph.yml`、materialized `resources/workflows/default-parallel.yml` 和 `.ralph/resolved-config.yml`。
+  - 比较字段覆盖 `cli.backend`、`cli.command`、`cli.prompt_mode`、`cli.args`、`parallel.enabled`、`parallel.autoscale.max_running_jobs`。
+  - live gate 也断言真实 run 前的 resolved config 与 repository default config 对齐。
+
+### 来源3: OpenSpec archive
+
+- Archive: `openspec/changes/archive/2026-05-17-canonical-default-bootstrap-config/`
+- Stable spec: `openspec/specs/resource-bootstrap/spec.md`
+- 要点:
+  - `Default startup bootstrap MUST resolve to parallel mode` 已扩展为 canonical source 字段级 contract。
+  - 新增 `Startup bootstrap MUST keep one canonical source for default resource semantics` requirement。
+
+## 综合发现
+
+- 这次修复没有把运行时补丁散落在 resolver 中,而是把默认 selector 的源头切到 canonical startup resource。
+- 因为 canonical resource 直接编译期嵌入 root `ralph.yml`,仓库维护入口和二进制内置资源之间不再需要手工复制 YAML。
+- resolved config 不追求字节级相等,但用户可见的 backend/command/prompt_mode/args/parallel 字段已经由 focused/live gate 锁住。
+- archive 过程中暴露了一个 OpenSpec delta 写法问题: 修改旧 requirement 时标题必须匹配 stable spec; 新 requirement 应放在 `ADDED Requirements`。

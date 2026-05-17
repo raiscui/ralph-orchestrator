@@ -12,7 +12,20 @@ use std::path::{Path, PathBuf};
 pub(crate) const DEFAULT_CONFIG_FILE: &str = "ralph.yml";
 
 /// v1 规则 selector 选用的默认 workflow。
-pub(crate) const DEFAULT_BOOTSTRAP_WORKFLOW_ID: &str = "workflow:feature-minimal";
+///
+/// 说明:
+/// - 这是无配置启动的 canonical bootstrap resource。
+/// - 内容来自仓库根 `ralph.yml` 的编译期嵌入,避免再复制一份 YAML。
+pub(crate) const DEFAULT_BOOTSTRAP_WORKFLOW_ID: &str = "workflow:default-parallel";
+
+/// 默认 bootstrap workflow 在用户资源目录中的物化位置。
+const DEFAULT_BOOTSTRAP_WORKFLOW_RELATIVE_PATH: &str = "workflows/default-parallel.yml";
+
+/// legacy 最小 feature workflow,保留为可物化资源,但不再作为默认 selector 输出。
+const LEGACY_FEATURE_MINIMAL_WORKFLOW_ID: &str = "workflow:feature-minimal";
+
+/// canonical bootstrap 配置内容。
+const CANONICAL_DEFAULT_BOOTSTRAP_CONFIG: &str = include_str!("../../../ralph.yml");
 
 /// v1 规则 selector 选用的默认 prompt template。
 pub(crate) const DEFAULT_BOOTSTRAP_PROMPT_ID: &str = "prompt:bootstrap-default-task";
@@ -165,9 +178,21 @@ pub(crate) fn embedded_catalog() -> &'static [StartupResource] {
         StartupResource {
             id: DEFAULT_BOOTSTRAP_WORKFLOW_ID,
             kind: ResourceKind::WorkflowPreset,
-            summary: "Minimal feature workflow with builder/reviewer hats",
-            goal: "Provide a safe default workflow when no workspace config exists",
+            summary: "Canonical default parallel bootstrap workflow",
+            goal: "Provide the repository default custom+codex+parallel runtime semantics when no workspace config exists",
             selector_eligible: true,
+            materialize_on_sync: true,
+            composition_role: CompositionRole::Workflow,
+            prompt_mode: ResourcePromptMode::RequiresTaskInput,
+            relative_path: DEFAULT_BOOTSTRAP_WORKFLOW_RELATIVE_PATH,
+            content: Some(CANONICAL_DEFAULT_BOOTSTRAP_CONFIG),
+        },
+        StartupResource {
+            id: LEGACY_FEATURE_MINIMAL_WORKFLOW_ID,
+            kind: ResourceKind::WorkflowPreset,
+            summary: "Minimal feature workflow with builder/reviewer hats",
+            goal: "Remain available as an explicit materialized workflow, but no longer define the implicit default bootstrap runtime",
+            selector_eligible: false,
             materialize_on_sync: true,
             composition_role: CompositionRole::Workflow,
             prompt_mode: ResourcePromptMode::RequiresTaskInput,
@@ -520,6 +545,9 @@ mod tests {
                 .iter()
                 .any(|entry| entry.id == DEFAULT_BOOTSTRAP_WORKFLOW_ID && entry.selector_eligible)
         );
+        assert!(catalog.iter().any(
+            |entry| entry.id == LEGACY_FEATURE_MINIMAL_WORKFLOW_ID && !entry.selector_eligible
+        ));
         assert!(
             catalog
                 .iter()
@@ -536,7 +564,7 @@ mod tests {
         assert!(first.created > 0);
         assert!(temp.path().join("catalog-manifest.json").exists());
 
-        let workflow_path = temp.path().join("workflows/feature-minimal.yml");
+        let workflow_path = temp.path().join(DEFAULT_BOOTSTRAP_WORKFLOW_RELATIVE_PATH);
         std::fs::write(&workflow_path, "user-edited").unwrap();
 
         let second = sync_embedded_resources(temp.path(), catalog).unwrap();
@@ -544,6 +572,23 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&workflow_path).unwrap(),
             "user-edited"
+        );
+    }
+
+    fn repository_default_config() -> RalphConfig {
+        RalphConfig::parse_yaml(CANONICAL_DEFAULT_BOOTSTRAP_CONFIG)
+            .expect("repository default ralph.yml should parse")
+    }
+
+    fn assert_bootstrap_runtime_fields_match(actual: &RalphConfig, expected: &RalphConfig) {
+        assert_eq!(actual.cli.backend, expected.cli.backend);
+        assert_eq!(actual.cli.command, expected.cli.command);
+        assert_eq!(actual.cli.prompt_mode, expected.cli.prompt_mode);
+        assert_eq!(actual.cli.args, expected.cli.args);
+        assert_eq!(actual.parallel.enabled, expected.parallel.enabled);
+        assert_eq!(
+            actual.parallel.autoscale.max_running_jobs,
+            expected.parallel.autoscale.max_running_jobs
         );
     }
 
@@ -558,10 +603,17 @@ mod tests {
 
         assert!(resolution.config.event_loop.prompt.is_some());
         assert!(resolution.config.event_loop.prompt_file.is_empty());
+        let repository_config = repository_default_config();
+        assert_bootstrap_runtime_fields_match(&resolution.config, &repository_config);
         assert!(
             resolution.config.parallel.enabled,
             "无配置 bootstrap 应默认生成并行模式配置"
         );
+        assert_eq!(
+            resolution.config.parallel.autoscale.max_running_jobs, 7,
+            "当前 canonical 默认并行安全刹车应和仓库根 ralph.yml 保持一致"
+        );
+        assert!(resolution.config.validate().is_ok());
         assert_eq!(
             resolution.selection.selected_resources,
             vec![

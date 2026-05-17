@@ -6,6 +6,10 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
+const CANONICAL_BOOTSTRAP_WORKFLOW_ID: &str = "workflow:default-parallel";
+const CANONICAL_BOOTSTRAP_RESOURCE_PATH: &str = "resources/workflows/default-parallel.yml";
+const REPOSITORY_DEFAULT_CONFIG: &str = include_str!("../../../ralph.yml");
+
 fn record_has_termination_reason(path: &Path, expected_reason: &str) -> Result<bool> {
     let content = fs::read_to_string(path).with_context(|| path.display().to_string())?;
     for (i, line) in content.lines().enumerate() {
@@ -56,6 +60,57 @@ fn record_has_loop_start_ux_mode(path: &Path, expected_ux_mode: &str) -> Result<
     }
 
     Ok(false)
+}
+
+fn yaml_at<'a>(root: &'a YamlValue, path: &[&str]) -> Result<&'a YamlValue> {
+    let mut current = root;
+    for segment in path {
+        current = current
+            .as_mapping()
+            .and_then(|mapping| mapping.get(YamlValue::String((*segment).to_string())))
+            .with_context(|| format!("YAML path {} is missing", path.join(".")))?;
+    }
+    Ok(current)
+}
+
+fn assert_yaml_path_eq(actual: &YamlValue, expected: &YamlValue, path: &[&str]) -> Result<()> {
+    let actual_value = yaml_at(actual, path)?;
+    let expected_value = yaml_at(expected, path)?;
+    assert_eq!(
+        actual_value,
+        expected_value,
+        "YAML path {} should match canonical bootstrap source",
+        path.join(".")
+    );
+    Ok(())
+}
+
+fn assert_bootstrap_runtime_fields_match(
+    actual: &YamlValue,
+    expected: &YamlValue,
+    label: &str,
+) -> Result<()> {
+    for path in [
+        &["cli", "backend"][..],
+        &["cli", "command"][..],
+        &["cli", "prompt_mode"][..],
+        &["cli", "args"][..],
+        &["parallel", "enabled"][..],
+        &["parallel", "autoscale", "max_running_jobs"][..],
+    ] {
+        assert_yaml_path_eq(actual, expected, path)
+            .with_context(|| format!("{label} drifted at {}", path.join(".")))?;
+    }
+    Ok(())
+}
+
+fn parse_yaml_file(path: &Path) -> Result<YamlValue> {
+    let raw = fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    serde_yaml::from_str(&raw).with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+fn parse_repository_default_config() -> Result<YamlValue> {
+    serde_yaml::from_str(REPOSITORY_DEFAULT_CONFIG).context("Failed to parse repository ralph.yml")
 }
 
 fn write_live_prompt_capture_backend(path: &Path) -> Result<()> {
@@ -129,6 +184,10 @@ fn inject_custom_backend_into_resolved_config(
         YamlValue::String("prompt_mode".to_string()),
         YamlValue::String("stdin".to_string()),
     );
+    cli_map.insert(
+        YamlValue::String("args".to_string()),
+        YamlValue::Sequence(Vec::new()),
+    );
 
     let rendered = serde_yaml::to_string(&root)?;
     fs::write(resolved_config_path, rendered)
@@ -175,7 +234,7 @@ fn missing_default_config_and_prompt_bootstraps_before_dry_run() -> Result<()> {
     assert_eq!(selection["resource_root_source"], "RALPH_HOME");
     assert_eq!(
         selection["selected_resources"][0],
-        "workflow:feature-minimal"
+        CANONICAL_BOOTSTRAP_WORKFLOW_ID
     );
     assert_eq!(
         selection["selected_resources"][1],
@@ -190,6 +249,28 @@ fn missing_default_config_and_prompt_bootstraps_before_dry_run() -> Result<()> {
         "无配置启动生成的 resolved config 应默认启用并行模式,实际为:
 {resolved_config}"
     );
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Drift gate:
+    // - root ralph.yml 是仓库维护的默认配置入口。
+    // - materialized canonical resource 是二进制分发后的默认资源。
+    // - resolved config 是真实 no-config bootstrap 产物。
+    // 三者的用户可见 bootstrap runtime 字段必须保持一致。
+    // ─────────────────────────────────────────────────────────────────────
+    let repository_default = parse_repository_default_config()?;
+    let materialized_canonical =
+        parse_yaml_file(&ralph_home.join(CANONICAL_BOOTSTRAP_RESOURCE_PATH))?;
+    let resolved_yaml: YamlValue = serde_yaml::from_str(&resolved_config)?;
+    assert_bootstrap_runtime_fields_match(
+        &materialized_canonical,
+        &repository_default,
+        "materialized canonical resource",
+    )?;
+    assert_bootstrap_runtime_fields_match(
+        &resolved_yaml,
+        &materialized_canonical,
+        "resolved bootstrap config",
+    )?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -236,7 +317,7 @@ fn startup_bootstrap_live_gate_captures_real_coordinator_prompt_and_record_sessi
     assert_eq!(selection["startup_only"], true);
     assert_eq!(
         selection["selected_resources"][0],
-        "workflow:feature-minimal"
+        CANONICAL_BOOTSTRAP_WORKFLOW_ID
     );
     assert_eq!(
         selection["selected_resources"][1],
@@ -253,6 +334,13 @@ fn startup_bootstrap_live_gate_captures_real_coordinator_prompt_and_record_sessi
             && resolved_before_live.contains("enabled: true"),
         "bootstrap resolved config should enable parallel mode by default: {resolved_before_live}"
     );
+    let repository_default = parse_repository_default_config()?;
+    let resolved_yaml: YamlValue = serde_yaml::from_str(&resolved_before_live)?;
+    assert_bootstrap_runtime_fields_match(
+        &resolved_yaml,
+        &repository_default,
+        "live gate resolved bootstrap config",
+    )?;
 
     inject_custom_backend_into_resolved_config(&resolved_config_path, &script_path)?;
 

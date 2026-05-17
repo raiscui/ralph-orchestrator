@@ -744,3 +744,89 @@
 ### 总结感悟
 - B.4 的产品价值是“分支策略矩阵”,不是“自动重试”。
 - 对 malformed request 这类输入结构错误,最健康的默认策略是 diagnostic no-retry reply,不要让 runtime 盲目 fallback。
+
+
+## [2026-05-17 00:44:57] [Session ID: omx-1778510695653-7pd7o2] 任务名称: startup bootstrap resolved config 默认源头调查
+
+### 任务内容
+- 调查 rustdog 无配置启动时 `.ralph/resolved-config.yml` 为什么没有等同项目根 `ralph.yml`。
+- 对比 runtime artifact、startup bootstrap 源码、内置 preset、稳定 OpenSpec 和 focused/integration tests。
+
+### 完成过程
+- 确认 rustdog 根目录没有 `ralph.yml`。
+- 确认 `.ralph/bootstrap-selection.json` 选择的是 `workflow:feature-minimal` 与 `prompt:bootstrap-default-task`。
+- 确认 `crates/ralph-cli/src/startup_resources.rs` 中 `DEFAULT_BOOTSTRAP_WORKFLOW_ID` 仍是 `workflow:feature-minimal`。
+- 确认 `crates/ralph-cli/presets/feature-minimal.yml` 的 `cli.backend` 是 `claude`。
+- 确认项目根 `ralph.yml` 的 `cli.backend` 是 `custom`, `command` 是 `codex`。
+- 复核稳定 spec: 当前只要求无配置 bootstrap 和 `parallel.enabled=true`,没有要求 artifact 等同项目根 `ralph.yml`。
+
+### 验证证据
+- `cargo test -p ralph-cli startup_resources -- --nocapture`: 8 passed。
+- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 3 passed。
+
+### 总结感悟
+- 当前行为是默认资源契约漂移: 实现和测试仍锁定旧 `feature-minimal`,而产品期望已经演进为 canonical `custom + codex + parallel` 默认配置。
+- 修复时不应让安装后的二进制依赖源码仓库根 `ralph.yml`,而应把 canonical default config 做成内置 startup resource,并让项目根 `ralph.yml` 与它保持同步。
+
+## [2026-05-17 10:32:05] [Session ID: omx-1778510695653-7pd7o2] 任务名称: canonical-default-bootstrap-config OpenSpec 草案
+
+### 任务内容
+- 将“startup bootstrap 默认配置应与 canonical default config 对齐”落成新的 OpenSpec change。
+- 保持边界: 只产出 proposal / design / specs / tasks,不进入代码实现。
+
+### 完成过程
+- 创建 change: `openspec/changes/canonical-default-bootstrap-config/`。
+- proposal 明确问题本体是默认 bootstrap canonical source 漂移,不是 rustdog 目录读取错误。
+- design 固定技术方向:
+  - canonical source 必须是 embedded startup resource
+  - selector 默认 workflow 要从旧 `feature-minimal` 切走
+  - 对齐 contract 锁定关键 `cli` / `parallel` 字段,不是追求字节级 YAML 一致
+- delta spec 修改 `resource-bootstrap`,把 canonical `custom + codex + parallel` 语义写成 requirement。
+- tasks 将实现拆成 canonical resource、selector 更新、focused/live gate 更新三组。
+
+### 验证证据
+- `openspec validate canonical-default-bootstrap-config --type change`: passed。
+- `openspec status --change canonical-default-bootstrap-config`: 4/4 artifacts complete。
+
+### 总结感悟
+- 这次最重要的是把“默认行为谁说了算”从隐含实现细节提升成正式契约。
+- 只要 canonical source 没钉住,bootstrap、项目根 `ralph.yml` 和 live dogfood gate 就会继续各自漂移。
+
+## [2026-05-17 15:25:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: canonical-default-bootstrap-config 实现与归档
+
+### 任务内容
+- 落地 OpenSpec change `canonical-default-bootstrap-config`。
+- 修复 no-config startup bootstrap 默认 resolved config 仍来自旧 `feature-minimal` / `claude` 的源头漂移。
+- 将默认 bootstrap selector 对齐 canonical `custom + codex + parallel` 默认配置语义。
+
+### 完成过程
+- 在 `crates/ralph-cli/src/startup_resources.rs` 中将默认 workflow 改为 `workflow:default-parallel`。
+- 用编译期嵌入的仓库根 `ralph.yml` 作为 canonical default bootstrap resource 内容。
+- 保留 legacy `workflow:feature-minimal`,但将其设为 `selector_eligible=false`,避免隐式默认选择继续漂回旧源。
+- 强化 unit test,断言 default bootstrap resolved config 的关键字段与 canonical config 一致,并锁住当前 `max_running_jobs=7` gate。
+- 强化 `integration_startup_resources` live gate,比较 root `ralph.yml`、materialized canonical resource 和 `.ralph/resolved-config.yml` 的用户可见 runtime 字段。
+- 修复 OpenSpec delta 分类错误后,成功 archive 到 `openspec/changes/archive/2026-05-17-canonical-default-bootstrap-config/`。
+- 稳定 spec `openspec/specs/resource-bootstrap/spec.md` 已同步 canonical source requirement。
+
+### 验证证据
+- archive 前:
+  - `cargo fmt --all -- --check`
+  - `openspec validate --all --strict`: 27 passed。
+  - `git diff --check`
+  - `cargo test -p ralph-cli startup_resources -- --nocapture`: 8 passed。
+  - `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 3 passed。
+  - `cargo test -p ralph-core smoke_runner`: 12 passed。
+  - `cargo test`: passed。
+- archive 后:
+  - `openspec archive canonical-default-bootstrap-config --yes`: archived as `2026-05-17-canonical-default-bootstrap-config`。
+  - `openspec validate --all --strict`: 26 passed。
+  - `cargo fmt --all -- --check`
+  - `git diff --check`
+  - `cargo test -p ralph-cli startup_resources -- --nocapture`: 8 passed。
+  - `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 3 passed。
+  - `cargo test -p ralph-core smoke_runner`: 12 passed。
+  - `cargo test`: passed。
+
+### 总结感悟
+- 默认行为应该有一个可审计的 canonical source,不能让 bootstrap selector、项目根配置和 live dogfood gate 各自漂移。
+- OpenSpec delta 中,修改旧 requirement 要匹配 stable spec 标题; 新增 requirement 要放入 `ADDED Requirements`,否则 archive 自动同步会失败。

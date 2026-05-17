@@ -604,3 +604,72 @@
 ### 验证
 - 先检查当前 commit message 是否被污染。
 - 若被污染,使用安全 message file 重新 amend。
+
+## [2026-05-17 00:44:57] [Session ID: omx-1778510695653-7pd7o2] 错误修复: Markdown 追加时未加引号 heredoc 触发命令替换
+
+### 问题
+- 在向 `task_plan.md` / `WORKLOG.md` 追加包含反引号的 Markdown 内容时,误用了未加引号 heredoc。
+- shell 将反引号中的路径和命令当作 command substitution 执行,导致日志内容缺失,并把 `cargo test` 输出污染进 Markdown 文件。
+
+### 原因
+- 没有遵守项目规则: 正文包含反引号时必须使用 `cat <<'EOF'` 或其他不会触发 shell 展开的写入方式。
+
+### 修复
+- 使用 Python 读取文件,移除本轮污染的尾部记录,重新写入干净记录。
+- 后续包含 Markdown 反引号的追加统一使用单引号 heredoc 或 Python 文件写入。
+
+### 验证
+- 后续执行 `git diff --check` 验证 Markdown 文件无 trailing whitespace。
+
+## [2026-05-17 15:12:00] [Session ID: omx-1778510695653-7pd7o2] 问题: canonical-default-bootstrap-config archive 找不到 MODIFIED Requirement 标题
+
+### 现象
+- 执行 `openspec archive canonical-default-bootstrap-config --yes` 失败。
+- 报错: `resource-bootstrap MODIFIED failed for header "### Requirement: Default startup bootstrap MUST resolve to canonical default parallel mode" - not found`。
+- 命令输出同时说明 `Aborted. No files were changed.`。
+
+### 候选原因
+- delta spec 把 Requirement 写成了新标题,但 stable spec 中对应 requirement 仍是旧标题。
+- OpenSpec 的 `MODIFIED` 合并按标题匹配,标题不一致时无法自动应用。
+
+### 修复计划
+- 先读取 stable spec,确认现有 Requirement 标题。
+- 再让 stable spec 和 delta spec 在同一 Requirement 标题下表达 canonical default bootstrap contract。
+- 修完后复跑 OpenSpec validate 和 archive。
+
+### 验证
+- 待运行: `openspec validate canonical-default-bootstrap-config --type change`。
+- 待运行: `openspec archive canonical-default-bootstrap-config --yes`。
+
+### 修复
+- 将 delta spec 中第一条 requirement 标题改回 stable spec 已存在的 `Default startup bootstrap MUST resolve to parallel mode`,让 `MODIFIED Requirements` 能按标题匹配。
+- 将新 requirement `Startup bootstrap MUST keep one canonical source for default resource semantics` 移入 `ADDED Requirements`。
+- 重新运行 change/all OpenSpec validate 后再 archive。
+
+### 验证
+- `openspec validate canonical-default-bootstrap-config --type change`: passed。
+- `openspec validate --all --strict`: passed。
+- `openspec archive canonical-default-bootstrap-config --yes`: archived as `2026-05-17-canonical-default-bootstrap-config`。
+- archive 后 `openspec validate --all --strict`: 26 passed。
+
+## [2026-05-17 15:28:00] [Session ID: omx-1778510695653-7pd7o2] 问题: commit 前 staged diff check 报 archive design trailing whitespace
+
+### 现象
+- 本地 commit 前执行 `git diff --cached --check` 时输出了 3 行 trailing whitespace。
+- 位置在 `openspec/changes/archive/2026-05-17-canonical-default-bootstrap-config/design.md` 的 Risk 列表行。
+- 因该 shell 命令没有启用 `set -e`,commit 仍然创建成功。
+
+### 原因
+- archive 目录中的 design 文档保留了 Markdown 硬换行的两个尾随空格。
+- 提交流程没有在 staged diff check 失败后自动中断。
+
+### 修复
+- 移除 archive design 文档所有行尾空白。
+- 将修复记录加入 `ERRORFIX.md`。
+- 重新运行 `git diff --check` 和 `git diff --cached --check`。
+- 使用 `git commit --amend` 修正刚创建的本地 commit。
+
+### 验证
+- 待运行: `git diff --check`。
+- 待运行: `git diff --cached --check`。
+- 待运行: `openspec validate --all --strict`。
