@@ -238,3 +238,144 @@
   - 状态摘要优先用现有 state helper,例如 `InstanceViewState::current_job_summary()`。
   - 如果要显示 stderr visible/hidden,先把 runner 的 `show_stderr` 明确传入 TUI state,不要在 widget 里猜。
   - raw/audit 视图应作为下一层能力,不要把默认 TUI 退化成 stdout 全量镜像。
+
+### exp-20260518-role-aware-cli-args-for-coordinator-hooks
+> Coordinator-only backend 行为不要放进全局 `cli.args`。当 Ralph coordinator 与 worker hats 需要不同 CLI 参数时,优先使用 role-aware overlay,顺序保持 `role_args -> custom_args -> reasoning_effort defaults`。
+<!-- scope: project | source_topics: parallel_rec_analysis,coordinator_only_codex_hooks | source_hats: codex | status: active | confidence: high | created_at: 2026-05-18T23:03:00+08:00 | updated_at: 2026-05-18T23:03:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 需要让 `ralph#1` / coordinator 使用某个 Codex CLI override,但普通 hats 不能继承。
+  - 讨论 `features.hooks=false`、reasoning effort、backend argv 隔离或 clean backend profile。
+- 已验证事实:
+  - `cli.role_args.coordinator` 可以承载 `-c features.hooks=false`。
+  - `cli.role_args.worker` 保持空数组时,worker hats 不会收到 coordinator-only hooks override。
+  - parallel path 当前用 `job.hat_id == "ralph"` 判定 coordinator;serial path 用 `display_hat == "ralph"` 判定 coordinator。
+  - `hat:*` capability direct backend path 应按 worker role 执行。
+- 关键边界:
+  - 不要把 coordinator-only 参数塞进全局 `cli.args`。
+  - 不要用独立 `CODEX_HOME` 作为默认方案;它能隔离,但复杂度过高。
+  - 如果未来出现多个 coordinator id,应升级为显式 role metadata,不要继续扩散字符串判断。
+- 验证锚点:
+  - `cargo test -p ralph-core cli_role_args -- --nocapture`
+  - `cargo test -p ralph-adapters role_args -- --nocapture`
+  - `cargo test -p ralph-cli parallel_runner::tests::parallel_role_backend_overlays_apply_coordinator_hooks_only -- --exact --nocapture`
+  - `cargo test -p ralph-cli autopilot::tests::analysis_config_preserves_cli_role_args -- --exact --nocapture`
+  - `cargo test --quiet`
+
+### exp-20260519-parallel-output-status-strip-viewport
+> 并行 TUI Output 底部如果加入 `evidence:` / `act:` status strip,正文滚动、选择、复制和 autoscroll 必须统一使用 content viewport,不能再用完整 `output_inner` 高度。
+<!-- scope: project | source_topics: display_info_evidence,parallel_output_status_strip | source_hats: codex | status: active | confidence: high | created_at: 2026-05-19T07:58:00+08:00 | updated_at: 2026-05-19T07:58:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 修改 `crates/ralph-tui/src/widgets/parallel_output.rs` 的 Output status strip。
+  - 调试用户反馈“Output 底部状态遮挡输出 / 最后几行看不到 / act 状态压住正文”。
+  - 改动并行 TUI 的 output selection、copy、autoscroll 或测试 harness。
+- 已验证事实:
+  - status strip 是 display-only 区域,不属于 stdout/stderr 正文 viewport。
+  - `split_parallel_output_areas(inner)` 是正文区与 status 区的单一几何入口。
+  - autoscroll 预计算必须使用 `content_area.height`,否则 `scroll_offset` 会少滚 status strip 的行数。
+  - 鼠标选择、拖拽、复制和键盘扩展选择也必须使用 `output_content_area`。
+- 关键边界:
+  - 不要让 `output_inner.height` 直接进入正文滚动计算。
+  - 点击 status area 可以聚焦 Output,但不能创建正文 selection anchor。
+  - 测试 harness 必须复用同一 split helper,不要复制一套独立 status height 公式。
+- 验证锚点:
+  - `cargo test -p ralph-tui --lib split_parallel_output_areas_reserves_bottom_status_rows -- --nocapture`
+  - `cargo test -p ralph-tui --lib app::tests::mouse_click_output_status_area_focuses_output_without_starting_selection -- --exact --nocapture`
+  - `cargo test -p ralph-tui --quiet`
+  - `cargo test --quiet`
+
+### exp-20260520-topology-spawn-result-ack-guardrail
+> `topology.spawn.result` 是 parent-visible group spawn 的 acknowledgement,不是再次 delegate 的触发器。收到 result 后不要重发 `delivery_topic`,也不要把 `audience_instances` 当 replay 机制。
+<!-- scope: project | source_topics: parallel_rec_analysis,parent_visible_topology_spawn | source_hats: codex | status: active | confidence: high | created_at: 2026-05-20T07:55:00+08:00 | updated_at: 2026-05-20T07:55:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 调试 "event 已发出,父级 TUI 里没有按预期出现/运行实例"。
+  - 修改 `topology.spawn_group`、`topology.spawn.result`、coordinator prompt 或 dynamic instance delivery。
+  - 看到 coordinator 在 spawn 成功后又发出同一个 `delivery_topic`。
+- 已验证事实:
+  - `topology.spawn_group` 会创建真实 parent-visible dynamic instances,并对每个 spawned instance 做 direct delivery。
+  - `topology.spawn.result` 回到 `ralph#1` 时,spawned instances 已经收到 `delivery_topic`。
+  - live dogfood `/tmp/ralph-topology-dogfood-guardrail-record.jsonl` 验证: `analysis.task` 总数为 3,且 `topology.spawn.result` 之后 `analysis_task_after_spawn_result=0`。
+  - `capability.request` 仍是 isolated child/micro-run,不能用来表达父级可见新实例。
+- 关键边界:
+  - `topology.spawn.result` 只能触发等待 worker results 或处理 `failed` 成员,不能 replay 原始任务。
+  - `audience_instances` 不是实例创建机制,也不是 spawn result 后的重放机制。
+  - 如果 `topology.spawn.failed` 出现,应报告或修正失败,不能伪造实例存在。
+  - dogfood worker `MaxRuntime` 是 worker 收敛问题,不要误判成 topology spawn redelivery 回归。
+- 验证锚点:
+  - `cargo test -p ralph-core --lib parallel::supervisor::routing_tests::runtime_capability_catalog_is_injected_only_into_ralph_prompt -- --exact --nocapture`
+  - `cargo test -p ralph-core --lib parallel::supervisor::routing_tests::topology_spawn_group_creates_three_dynamic_instances_and_delivers_direct -- --exact --nocapture`
+  - `cargo test -p ralph-core topology_spawn_group -- --nocapture`
+  - `git diff --check && cargo test --quiet`
+  - `target/debug/ralph record summary <record-session.jsonl>` 并检查 `topology.spawn.result` 之后没有新增 `delivery_topic`。
+
+### exp-20260520-multi-agent-collaboration-evidence-layers
+> Ralph 的 multi-agent collaboration 证据要分层表达: core routing/fanout/queue/dynamic-spawn 单测证明机械协议,E2E scenario registration 证明入口存在,live Codex E2E 才能证明真实模型协作稳定性。
+<!-- scope: project | source_topics: multi_agent_collab_evidence,parallel_hat_instances | source_hats: codex | status: active | confidence: high | created_at: 2026-05-20T07:55:00+08:00 | updated_at: 2026-05-20T07:55:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 用户问 "多智能体协作到底怎么测试" 或 "有没有真实协作案例"。
+  - 审查 `crates/ralph-core/src/parallel/*`、`crates/ralph-e2e/src/scenarios/parallel*` 或 `examples/parallel-*`。
+- 已验证事实:
+  - 当前仓库的真实协作 runtime 是 `parallel hat instances`,核心链路是 event topic -> routing -> instance delivery -> runtime delivery / agents snapshot。
+  - core focused tests 能验证 fanout、queue、dynamic spawn 会写 runtime delivery。
+  - `ralph-e2e -- --list` 能证明 parallel scenarios 已注册,但这不是 live model 稳定性证明。
+- 关键边界:
+  - 不要把协议/状态机测试说成 live LLM 协作已经稳定。
+  - 如果要证明真实模型协作,需要单独跑 `ralph-e2e` live Codex scenario,并保留 record-session / report 证据。
+  - 静态 evidence、focused tests、live E2E 的结论层级必须分开写。
+- 验证锚点:
+  - `cargo test --package ralph-core --lib parallel::supervisor::routing_tests::fanout_delivery_writes_one_runtime_delivery_record_per_recipient -- --exact`
+  - `cargo test --package ralph-core --lib parallel::supervisor::routing_tests::queue_delivery_writes_runtime_delivery_record -- --exact`
+  - `cargo test --package ralph-core --lib parallel::supervisor::routing_tests::spawn_instance_forces_new_dynamic_instance_and_delivers_direct -- --exact`
+  - `cargo run -p ralph-e2e -- --list | rg 'parallel-hat-instances|parallel-trigger-routing|parallel-human-approval-gate|parallel-emit-spawn-instance'`
+
+### exp-20260522-clean-live-dogfood-record-session-vs-agents-snapshot
+> Clean live dogfood 要用专门临时 config 收窄拓扑,并以 record-session 的 Evidence Inspect 作为历史真相源; `.ralph/agents.json` 只是 current registry sidecar,动态实例被 TTL 回收后可能不再显示。
+<!-- scope: project | source_topics: clean_live_dogfood,task_derived_role_contract,parent_visible_spawn,agents_snapshot_ttl | source_hats: codex | status: active | confidence: high | created_at: 2026-05-22T12:12:00+08:00 | updated_at: 2026-05-22T12:12:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - live dogfood 需要验证 parent-visible `topology.spawn_group`、task-derived dynamic role contract、worker result topic 和自然收敛。
+  - 默认 `ralph.yml` 中存在 confessor / confession_handler 或目标 hat publishes 与 dogfood 期望 topic 不一致。
+  - `record summary --agents-file .ralph/agents.json` 中 Agents Snapshot 与 Result Topics 看起来不一致。
+- 已验证事实:
+  - 临时 clean config 移除 confessor / confession_handler,并让 `builder.publishes` 包含 `analysis.done`,可把 3-worker dogfood 收敛到 49.620 秒。
+  - coordinator 可通过 `cli.role_args.coordinator = ["-c", "features.hooks=false"]` 禁用 hooks,同时保持 `cli.role_args.worker = []` 让 worker 正常带 hooks。
+  - `record-session` 的 Evidence Inspect 能证明 `topology.spawn_group: 1`, `topology.spawn.result: 1`, `parent_topology_unchanged=false`, `topology.spawn.failed: 0`, `analysis.done: 3 source_instances=builder#2,builder#3,builder#4`, `Termination.reason=CompletionPromise`。
+  - `.ralph/agents.json` 来自当前 `self.instances` registry。动态实例进入 `Done` 后会被 `unregister_dynamic_instance()` 移除,所以最终 sidecar 可能缺少最早完成并已被 TTL 回收的 instance。
+- 关键边界:
+  - 不要把 `.ralph/agents.json` 少了某个 completed dynamic instance 直接解释成“实例没跑”。先看 record-session / Result Topics / topology.spawn.result。
+  - Clean dogfood 不要修改长期 `ralph.yml`;优先用 `/tmp/*.yml` 和 `/tmp/*.prompt.md`。
+  - 如果移除所有会 publish `workflow.complete` 的 hat,就不要保留 `event_loop.complete_publishes: workflow.complete`,否则 config validator 会正确 fail closed。
+- 验证锚点:
+  - `/tmp/ralph-clean-task-derived-role-contract-dogfood-20260522-114604.jsonl`
+  - `/tmp/ralph-clean-task-derived-role-contract-dogfood-20260522-114604.summary.txt`
+  - `./target/debug/ralph record summary /tmp/ralph-clean-task-derived-role-contract-dogfood-20260522-114604.jsonl --agents-file .ralph/agents.json`
+
+### exp-20260526-runtime-evidence-closure-and-dynamic-role-index
+> Dynamic hats 的完成证据要形成 closure: protocol SSOT、role contract summary、record-session summary、agents snapshot/tombstone、evidence-index correlation 和 preserved dogfood artifacts 必须能互相指回,但 evidence-index 仍只能是导航索引,不能变成第二套事实源。
+<!-- scope: project | source_topics: clean_current_runtime_evidence,dynamic_role_contract,evidence_index,topology_spawn_group | source_hats: codex | status: active | confidence: high | created_at: 2026-05-26T00:10:00+08:00 | updated_at: 2026-05-26T00:10:00+08:00 | supersedes: exp-20260513-runtime-evidence-index-kernel-boundary -->
+
+- 触发条件:
+  - 修改 `topology.spawn_group`、task-derived dynamic role contract、record summary / Evidence Inspect、agents snapshot 或 `.ralph/evidence-index.jsonl`。
+  - 用户要验证“父级 TUI 里新增 hat instance 是否是真实实例”或“dynamic worker 结果是否真的闭环”。
+  - OpenSpec 需要声明 runtime/evidence lane 的 release-fast gate。
+- 已验证事实:
+  - `topology.spawn_group` 真实运行路径应写入 request id -> child instance,role hash -> event log / agents snapshot + result topic 的 evidence-index links。
+  - `EvidenceIndexEntry.result_topic` 只能保存 produced / expected topic 名称,不能保存 result payload 或完整 role contract。
+  - `find_by_correlation` 需要能匹配 primary / parent / child / result_topic,否则 lookup by spawn request id 看不到 lineage 上的 missing marker。
+  - `record summary --agents-file` 应区分 current registry、completed dynamic tombstones、record-session semantic termination 和 dynamic result coverage。
+  - Preserved dogfood 证据位置: `/tmp/ralph-runtime-evidence-lane-dogfood-20260525-140000/{session.jsonl,.ralph/events.jsonl,.ralph/agents.json,.ralph/evidence-index.jsonl,summary.txt}`。
+- 关键边界:
+  - evidence-index 是 artifact correlation kernel,不是 record-session / events / agents snapshot 的替代真相源。
+  - 不要从 `topology.spawn.result`、stdout tail、TUI display 或 wrapper exit status 推断 semantic completion;优先 record-session `_meta.termination`。
+  - macOS 临时目录可能出现 `/var` 与 `/private/var` 文本差异,测试 artifact path 时优先断言稳定后缀或 canonicalized path。
+  - `agent-cli-recoverable-failure-retry` 已在 2026-05-28 归档;不要继续沿用旧的 `no-delta change` 阻断判断。若 `openspec validate --all --strict` 再失败,应按当前输出重新定位具体 change/spec,不要把失败默认归因到 recoverable retry 主线。
+- 验证锚点:
+  - `cargo test -p ralph-core evidence_index --lib --quiet`
+  - `cargo test -p ralph-cli --test integration_topology_spawn parallel_parent_visible_spawn_materializes_dynamic_agents_without_redelivery --quiet`
+  - `cargo test -p ralph-cli --test integration_answer_evidence --quiet`
+  - `cargo test -p ralph-core smoke_runner --quiet`
+  - `openspec validate clean-current-runtime-evidence-and-dynamic-role-contract --type change --strict`
+  - `ralph record summary <session.jsonl> --agents-file <agents.json>` 并检查 `topology.spawn_group: 1`,`topology.spawn.result: 1`,`topology.spawn.failed: 0`,`analysis.done: 3`,`reason: CompletionPromise`。

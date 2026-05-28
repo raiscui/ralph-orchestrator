@@ -24,6 +24,7 @@
 - `agent-guidance-manifest.toml`: Machine-readable manifest for core agent guidance assets; update it with new long-term guidance files so verifier tests catch drift.
 - `specs/oh-my-codex-learning-analysis.md`: Learning report for `/Users/cuiluming/local_doc/l_dev/my/rust/oh-my-codex`; read section 4 when continuing guidance-governance adoption.
 - `.codex/skills/self-learning.rust-utf8-safe-string-truncation/SKILL.md`: Rust UTF-8 safe truncation playbook; use when a panic says `byte index ... is not a char boundary`, or when code mixes character budgets with byte slicing.
+- `.codex/skills/self-learning.ralph-agent-cli-recoverable-failure-retry/SKILL.md`: Recoverable agent CLI failure retry playbook; use when debugging 429 / `exceeded retry limit`, `.ralph/recoverable-failures.jsonl`, manual continue, agents snapshot, record summary, or Evidence Inspect recoverable lifecycle states.
 - `archive/manifests/`: Archive batch manifests for six-file context moves; read the relevant manifest before reopening an archived branch context under `archive/branch_contexts/<topic>/`.
 
 ## Anti-Patterns
