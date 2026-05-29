@@ -54,6 +54,18 @@ impl ParallelSupervisor {
         }
 
         // ---------------------------------------------------------------------
+        // recoverable.continue: external human control action.
+        //
+        // 说明:
+        // - 这是 Supervisor 消费的控制面事件,不是普通 workflow topic。
+        // - 必须在 TopicContract / strict target 之前处理,避免被当作业务事件投递给 hat。
+        // ---------------------------------------------------------------------
+        if event.topic.as_str() == crate::TOPIC_RECOVERABLE_CONTINUE {
+            self.handle_recoverable_continue_event(&event).await?;
+            return Ok(());
+        }
+
+        // ---------------------------------------------------------------------
         // reply.hat.message 语义收口:
         // - 这是 hat -> hat 的显式答案回流 topic。
         // - 它不是普通 workflow event,也不应该落回 TopicContract / triggers 路由。
@@ -1576,6 +1588,8 @@ Candidates:\n\
             instance_tx,
             Arc::clone(&self.job_semaphore),
             Arc::clone(&self.command_queue),
+            self.config.agent_cli_recoverable_failures.clone(),
+            self.recoverable_failure_ledger.clone(),
             is_dynamic,
             dynamic_idle_ttl,
         );
@@ -1608,7 +1622,7 @@ Candidates:\n\
         Ok(())
     }
 
-    async fn escalate_delivery_failure(
+    pub(super) async fn escalate_delivery_failure(
         &mut self,
         event: &Event,
         summary: String,

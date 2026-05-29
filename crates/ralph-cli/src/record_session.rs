@@ -6,10 +6,11 @@
 //! - 错误可读: 一旦 JSONL 非法,尽量定位到第一个坏行(line number)便于排障.
 
 use anyhow::{Context, Result};
-use ralph_core::{Record, SessionPlayer};
+use ralph_core::{AgentsSnapshot, Record, SessionPlayer};
 use ralph_proto::{Event, TerminalWrite};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write as _;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::path::Path;
@@ -57,6 +58,25 @@ pub(crate) struct RecordSessionAggregate {
     pub topic_counts: BTreeMap<String, usize>,
     pub topic_timeline: Vec<String>,
     pub stdout_tail: String,
+}
+
+/// agents sidecar 的加载状态。
+///
+/// 说明:
+/// - `record-session` 是主证据,`.ralph/agents.json` 是并行运行态 sidecar。
+/// - record summary 显式区分 loaded / missing / invalid,避免观察面缺失时静默跳过。
+pub(crate) enum AgentsSnapshotInspect<'a> {
+    Loaded {
+        path: &'a str,
+        snapshot: &'a AgentsSnapshot,
+    },
+    Missing {
+        searched: Vec<String>,
+    },
+    Invalid {
+        path: &'a str,
+        error: &'a str,
+    },
 }
 
 pub(crate) fn load_session_player_strict(path: &Path) -> Result<SessionPlayer> {
@@ -153,6 +173,136 @@ pub(crate) fn aggregate_record_session(player: &SessionPlayer) -> Result<RecordS
 
     out.stdout_tail = tail_chunks.into_iter().collect::<Vec<_>>().join("");
     Ok(out)
+}
+
+/// 渲染 record summary 的 agents sidecar 证据区。
+///
+/// 当前 recoverable retry 主线只依赖 `AgentInstanceSnapshot.recoverable_failures`。
+/// 因此这里保持最小观察面,不把 dynamic topology / child-run 的其它支线混进本提交。
+pub(crate) fn render_evidence_inspect(
+    _aggregate: &RecordSessionAggregate,
+    agents: AgentsSnapshotInspect<'_>,
+) -> Result<String> {
+    let mut out = String::new();
+
+    writeln!(out, "Evidence Inspect")?;
+    render_agents_snapshot(&mut out, agents)?;
+
+    Ok(out)
+}
+
+fn render_agents_snapshot(out: &mut String, agents: AgentsSnapshotInspect<'_>) -> Result<()> {
+    writeln!(out, "  Agents Snapshot")?;
+    match agents {
+        AgentsSnapshotInspect::Loaded { path, snapshot } => {
+            writeln!(out, "    path: {path}")?;
+            writeln!(out, "    generated_at: {}", snapshot.generated_at)?;
+            writeln!(
+                out,
+                "    instances: {} (current registry)",
+                snapshot.instances.len()
+            )?;
+            if snapshot.instances.is_empty() {
+                writeln!(out, "      <none>")?;
+            }
+            for instance in &snapshot.instances {
+                let dynamic = if instance.is_dynamic {
+                    "dynamic"
+                } else {
+                    "static"
+                };
+                let last_topic = instance
+                    .last_input
+                    .as_ref()
+                    .map(|input| input.topic.as_str())
+                    .unwrap_or("-");
+                writeln!(
+                    out,
+                    "      - {} hat={} state={} kind={} last_input={}",
+                    instance.instance_id,
+                    instance.hat_id,
+                    instance.state.as_str(),
+                    dynamic,
+                    last_topic
+                )?;
+            }
+
+            render_recoverable_failures(out, snapshot)?;
+        }
+        AgentsSnapshotInspect::Missing { searched } => {
+            writeln!(out, "    <missing>")?;
+            if !searched.is_empty() {
+                writeln!(out, "    searched: {}", searched.join(", "))?;
+            }
+            writeln!(out, "  Recoverable Failures")?;
+            writeln!(
+                out,
+                "    recoverable_failures: <unknown: agents snapshot missing>"
+            )?;
+        }
+        AgentsSnapshotInspect::Invalid { path, error } => {
+            writeln!(out, "    <invalid> path={path} error={}", one_line(error))?;
+            writeln!(out, "  Recoverable Failures")?;
+            writeln!(
+                out,
+                "    recoverable_failures: <unknown: agents snapshot invalid>"
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn render_recoverable_failures(out: &mut String, snapshot: &AgentsSnapshot) -> Result<()> {
+    writeln!(out, "  Recoverable Failures")?;
+
+    let failures = snapshot
+        .instances
+        .iter()
+        .flat_map(|instance| {
+            instance
+                .recoverable_failures
+                .iter()
+                .map(move |failure| (instance.instance_id.as_str(), failure))
+        })
+        .collect::<Vec<_>>();
+
+    writeln!(out, "    recoverable_failures: {}", failures.len())?;
+    if failures.is_empty() {
+        writeln!(out, "      <none>")?;
+        return Ok(());
+    }
+
+    for (instance_id, failure) in failures {
+        writeln!(
+            out,
+            "      - failure_id={} instance={} job_id={} status={} kind={} attempt={}/{} retry_after_ms={} next_retry_at={} ledger={} stderr={}",
+            failure.failure_id,
+            instance_id,
+            failure.job_id,
+            failure.status,
+            failure.failure_kind,
+            failure.attempt,
+            failure.max_attempts,
+            failure
+                .retry_after_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            failure.next_retry_at.as_deref().unwrap_or("-"),
+            failure.ledger_path,
+            failure
+                .stderr_preview
+                .as_deref()
+                .map(one_line)
+                .unwrap_or_else(|| "-".to_string())
+        )?;
+    }
+
+    Ok(())
+}
+
+fn one_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub(crate) fn write_record_session_latest_pointer(
@@ -311,6 +461,76 @@ mod tests {
             agg.stdout_tail.contains("hello"),
             "stdout tail should include terminal output"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_inspect_renders_recoverable_failures_from_agents_snapshot() -> Result<()> {
+        let snapshot = AgentsSnapshot {
+            generated_at: "2026-05-28T00:00:00Z".to_string(),
+            instances: vec![ralph_core::AgentInstanceSnapshot {
+                instance_id: "writer#1".to_string(),
+                hat_id: "writer".to_string(),
+                state: ralph_proto::HatInstanceState::Idle,
+                is_dynamic: false,
+                last_input: Some(ralph_core::AgentLastInput {
+                    ts: "2026-05-28T00:00:00Z".to_string(),
+                    topic: "build.task".to_string(),
+                    preview: "retryable job".to_string(),
+                }),
+                recoverable_failures: vec![
+                    ralph_core::AgentRecoverableFailureSummary {
+                        failure_id: "failure-scheduled".to_string(),
+                        job_id: 7,
+                        status: "retry_scheduled".to_string(),
+                        failure_kind: "retry_limit_exceeded".to_string(),
+                        attempt: 1,
+                        max_attempts: 3,
+                        retry_after_ms: Some(30_000),
+                        next_retry_at: Some("2026-05-28T00:00:30Z".to_string()),
+                        ledger_path: ".ralph/recoverable-failures.jsonl".to_string(),
+                        stderr_preview: Some(
+                            "ERROR: exceeded retry limit, last status: 429".to_string(),
+                        ),
+                    },
+                    ralph_core::AgentRecoverableFailureSummary {
+                        failure_id: "failure-exhausted".to_string(),
+                        job_id: 8,
+                        status: "exhausted".to_string(),
+                        failure_kind: "retry_limit_exceeded".to_string(),
+                        attempt: 3,
+                        max_attempts: 3,
+                        retry_after_ms: None,
+                        next_retry_at: None,
+                        ledger_path: ".ralph/recoverable-failures.jsonl".to_string(),
+                        stderr_preview: Some("recoverable attempts exhausted".to_string()),
+                    },
+                ],
+            }],
+        };
+
+        let rendered = render_evidence_inspect(
+            &RecordSessionAggregate::default(),
+            AgentsSnapshotInspect::Loaded {
+                path: ".ralph/agents.json",
+                snapshot: &snapshot,
+            },
+        )?;
+
+        assert!(rendered.contains("Evidence Inspect"));
+        assert!(rendered.contains("Agents Snapshot"));
+        assert!(rendered.contains("instances: 1 (current registry)"));
+        assert!(rendered.contains("Recoverable Failures"));
+        assert!(rendered.contains("recoverable_failures: 2"));
+        assert!(rendered.contains("failure_id=failure-scheduled"));
+        assert!(rendered.contains("status=retry_scheduled"));
+        assert!(rendered.contains("attempt=1/3"));
+        assert!(rendered.contains("next_retry_at=2026-05-28T00:00:30Z"));
+        assert!(rendered.contains("ledger=.ralph/recoverable-failures.jsonl"));
+        assert!(rendered.contains("ERROR: exceeded retry limit, last status: 429"));
+        assert!(rendered.contains("failure_id=failure-exhausted"));
+        assert!(rendered.contains("status=exhausted"));
+
         Ok(())
     }
 }

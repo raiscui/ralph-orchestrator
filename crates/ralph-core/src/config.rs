@@ -3,6 +3,7 @@
 //! This module supports both v1.x flat configuration format and v2.0 nested format.
 //! Users can switch from Python v1.x to Rust v2.0 with zero config changes.
 
+use crate::{AgentCliRecoverableFailuresConfig, DEFAULT_RECOVERABLE_FAILURE_LEDGER_PATH};
 pub use ralph_proto::WorkspaceStrategy;
 use ralph_proto::{Topic, TopicContract};
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,14 @@ pub struct RalphConfig {
     /// 默认关闭（保持现有“单执行者串行”行为）。
     #[serde(default)]
     pub parallel: ParallelConfig,
+
+    /// Agent CLI 可恢复失败 retry 配置。
+    ///
+    /// 说明:
+    /// - 该配置是顶层 runtime policy,不归属于某个具体 hat 或 adapter。
+    /// - `.ralph/recoverable-failures.jsonl` 路径仍由 `CoreConfig` 统一解析,这里不提供第二个路径字段。
+    #[serde(default)]
+    pub agent_cli_recoverable_failures: AgentCliRecoverableFailuresConfig,
 
     // ─────────────────────────────────────────────────────────────────────────
     // V1 COMPATIBILITY FIELDS (flat format)
@@ -299,6 +308,7 @@ impl Default for RalphConfig {
             hats: HashMap::new(),
             events: HashMap::new(),
             parallel: ParallelConfig::default(),
+            agent_cli_recoverable_failures: AgentCliRecoverableFailuresConfig::default(),
             // V1 compatibility fields
             agent: None,
             agent_priority: vec![],
@@ -614,6 +624,43 @@ impl RalphConfig {
                     });
                 }
             }
+        }
+
+        // Agent CLI recoverable retry policy 必须保持有界且可解释。
+        //
+        // 说明：
+        // - 即使 `enabled=false`,配置文件中出现的非法数值也应该尽早暴露。
+        // - 后续 runtime wiring 可以直接信任这里的基本不变量。
+        let recoverable = &self.agent_cli_recoverable_failures;
+        if recoverable.max_attempts == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "agent_cli_recoverable_failures.max_attempts".to_string(),
+                message: "must be at least 1".to_string(),
+            });
+        }
+        if recoverable.initial_delay_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "agent_cli_recoverable_failures.initial_delay_ms".to_string(),
+                message: "must be greater than 0".to_string(),
+            });
+        }
+        if recoverable.max_delay_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "agent_cli_recoverable_failures.max_delay_ms".to_string(),
+                message: "must be greater than 0".to_string(),
+            });
+        }
+        if recoverable.max_delay_ms < recoverable.initial_delay_ms {
+            return Err(ConfigError::InvalidValue {
+                field: "agent_cli_recoverable_failures.max_delay_ms".to_string(),
+                message: "must be greater than or equal to initial_delay_ms".to_string(),
+            });
+        }
+        if !recoverable.backoff_multiplier.is_finite() || recoverable.backoff_multiplier < 1.0 {
+            return Err(ConfigError::InvalidValue {
+                field: "agent_cli_recoverable_failures.backoff_multiplier".to_string(),
+                message: "must be finite and greater than or equal to 1.0".to_string(),
+            });
         }
 
         // Check for deferred features
@@ -1040,6 +1087,16 @@ impl CoreConfig {
     ) -> std::path::PathBuf {
         self.resolve_instance_context_dir(instance_id)
             .join(file_name)
+    }
+
+    /// Resolves the append-only recoverable agent CLI failure ledger path.
+    ///
+    /// 说明：
+    /// - 这是 `.ralph/recoverable-failures.jsonl` 的唯一路径解析入口。
+    /// - 其它 runtime 代码应调用这个方法,不要手写相同路径。
+    #[must_use]
+    pub fn resolve_recoverable_failures_ledger_path(&self) -> std::path::PathBuf {
+        self.resolve_path(DEFAULT_RECOVERABLE_FAILURE_LEDGER_PATH)
     }
 }
 
@@ -1527,6 +1584,17 @@ mod tests {
         assert!(config.hats.is_empty());
         assert_eq!(config.event_loop.max_iterations, 100);
         assert!(!config.verbose);
+        assert!(config.agent_cli_recoverable_failures.enabled);
+        assert_eq!(config.agent_cli_recoverable_failures.max_attempts, 3);
+        assert_eq!(
+            config.agent_cli_recoverable_failures.initial_delay_ms,
+            30_000
+        );
+        assert_eq!(
+            config.agent_cli_recoverable_failures.backoff_multiplier,
+            2.0
+        );
+        assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 300_000);
     }
 
     #[test]
@@ -2115,6 +2183,124 @@ core:
             core.resolve_instance_context_path("writer#1", "WORKLOG.md"),
             std::path::PathBuf::from("/tmp/ralph-scoped-experience/.ralph/log/writer#1/WORKLOG.md")
         );
+        assert_eq!(
+            core.resolve_recoverable_failures_ledger_path(),
+            std::path::PathBuf::from(
+                "/tmp/ralph-scoped-experience/.ralph/recoverable-failures.jsonl"
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_agent_cli_recoverable_failures_policy_override() {
+        let yaml = r"
+agent_cli_recoverable_failures:
+  enabled: false
+  max_attempts: 5
+  initial_delay_ms: 1000
+  backoff_multiplier: 1.5
+  max_delay_ms: 60000
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(!config.agent_cli_recoverable_failures.enabled);
+        assert_eq!(config.agent_cli_recoverable_failures.max_attempts, 5);
+        assert_eq!(config.agent_cli_recoverable_failures.initial_delay_ms, 1000);
+        assert_eq!(
+            config.agent_cli_recoverable_failures.backoff_multiplier,
+            1.5
+        );
+        assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 60_000);
+        assert!(
+            config.validate().is_ok(),
+            "custom bounded recoverable policy should validate"
+        );
+    }
+
+    #[test]
+    fn test_agent_cli_recoverable_failures_partial_override_keeps_defaults() {
+        let yaml = r"
+agent_cli_recoverable_failures:
+  max_attempts: 4
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(config.agent_cli_recoverable_failures.enabled);
+        assert_eq!(config.agent_cli_recoverable_failures.max_attempts, 4);
+        assert_eq!(
+            config.agent_cli_recoverable_failures.initial_delay_ms,
+            30_000
+        );
+        assert_eq!(
+            config.agent_cli_recoverable_failures.backoff_multiplier,
+            2.0
+        );
+        assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 300_000);
+    }
+
+    #[test]
+    fn test_validate_recoverable_failures_policy_rejects_zero_attempts() {
+        let yaml = r"
+agent_cli_recoverable_failures:
+  max_attempts: 0
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { field, .. })
+                if field == "agent_cli_recoverable_failures.max_attempts"
+        ));
+    }
+
+    #[test]
+    fn test_validate_recoverable_failures_policy_rejects_zero_initial_delay() {
+        let yaml = r"
+agent_cli_recoverable_failures:
+  initial_delay_ms: 0
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { field, .. })
+                if field == "agent_cli_recoverable_failures.initial_delay_ms"
+        ));
+    }
+
+    #[test]
+    fn test_validate_recoverable_failures_policy_rejects_max_delay_below_initial() {
+        let yaml = r"
+agent_cli_recoverable_failures:
+  initial_delay_ms: 30000
+  max_delay_ms: 10000
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { field, .. })
+                if field == "agent_cli_recoverable_failures.max_delay_ms"
+        ));
+    }
+
+    #[test]
+    fn test_validate_recoverable_failures_policy_rejects_backoff_below_one() {
+        let yaml = r"
+agent_cli_recoverable_failures:
+  backoff_multiplier: 0.5
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { field, .. })
+                if field == "agent_cli_recoverable_failures.backoff_multiplier"
+        ));
     }
 
     #[test]

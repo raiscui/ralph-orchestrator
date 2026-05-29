@@ -37,6 +37,7 @@ pub mod memory_parser;
 mod memory_store;
 mod parallel;
 mod prompt_overlay;
+mod recoverable_failure;
 mod session_player;
 mod session_recorder;
 pub mod state_operations;
@@ -50,7 +51,9 @@ pub mod utils;
 pub mod workspace;
 
 pub use activity::{clean_activity_label, normalize_activity_label};
-pub use agents_snapshot::{AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot};
+pub use agents_snapshot::{
+    AgentInstanceSnapshot, AgentLastInput, AgentRecoverableFailureSummary, AgentsSnapshot,
+};
 pub use capability::{
     CapabilityChoice, CapabilityFailedRecord, CapabilityFailureClass, CapabilityInvocationMode,
     CapabilityInvocationRecord, CapabilityKind, CapabilityMetadata, CapabilityParentArtifactPaths,
@@ -104,6 +107,15 @@ pub use parallel::{
     HatInstanceCommand, HatInstanceEvent, HatInstanceHandle, HatJob, HatJobControl, HatJobExecutor,
     HatJobOutputChunk, HatJobResult, JobBackend, OutputStream, ParallelRunResult,
     ParallelSupervisor, RuntimeDeliveryMode, RuntimeDeliveryObservation, TopicContractStore,
+};
+pub use recoverable_failure::{
+    AgentCliRecoverableFailuresConfig, DEFAULT_RECOVERABLE_FAILURE_LEDGER_PATH,
+    DEFAULT_RECOVERABLE_FAILURE_MAX_ATTEMPTS, RECOVERABLE_FAILURE_LEDGER_SCHEMA_VERSION,
+    RecoverableFailureClassification, RecoverableFailureInput, RecoverableFailureKind,
+    RecoverableFailureLedger, RecoverableFailureLedgerError, RecoverableFailureSnapshot,
+    RecoverableFailureStatus, RecoverableFailureTransition, TOPIC_RECOVERABLE_CONTINUE,
+    bounded_stderr_excerpt, classify_hat_job_result, classify_recoverable_failure,
+    recoverable_retry_delay_ms, stable_recoverable_failure_id,
 };
 pub use session_player::{PlayerConfig, ReplayMode, SessionPlayer, TimestampedRecord};
 pub use session_recorder::{Record, SessionRecorder};

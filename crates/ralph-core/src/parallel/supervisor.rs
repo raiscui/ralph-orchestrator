@@ -24,9 +24,10 @@ use crate::hat_registry::HatRegistry;
 use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
 use crate::{
-    AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot, CapabilityMetadata, EventParser,
-    EventReader as FileEventReader, RuntimeCapabilityInvoker, TerminationReason,
-    render_parent_capability_catalog,
+    AgentInstanceSnapshot, AgentLastInput, AgentRecoverableFailureSummary, AgentsSnapshot,
+    CapabilityMetadata, EventParser, EventReader as FileEventReader, RecoverableFailureLedger,
+    RecoverableFailureSnapshot, RecoverableFailureStatus, RecoverableFailureTransition,
+    RuntimeCapabilityInvoker, TerminationReason, render_parent_capability_catalog,
 };
 use anyhow::Context;
 use ralph_proto::{
@@ -60,6 +61,12 @@ pub struct RuntimeDeliveryObservation {
     pub mode: RuntimeDeliveryMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecoverableContinueResolution {
+    Accepted(String),
+    Rejected(String),
+}
+
 /// 并行调度器。
 pub struct ParallelSupervisor {
     config: RalphConfig,
@@ -71,6 +78,7 @@ pub struct ParallelSupervisor {
     contracts: TopicContractStore,
     event_logger: EventLogger,
     evidence_index_writer: EvidenceIndexWriter,
+    recoverable_failure_ledger: RecoverableFailureLedger,
 
     // 运行态
     instances: HashMap<HatInstanceId, HatInstanceHandle>,
@@ -84,6 +92,7 @@ pub struct ParallelSupervisor {
     // - 只有在 ralph-cli 显式启用时才会落盘,避免测试/库用法污染工作区。
     agents_snapshot_path: Option<std::path::PathBuf>,
     agents_last_inputs: HashMap<HatInstanceId, AgentLastInput>,
+    recoverable_failures: HashMap<String, RecoverableFailureSnapshot>,
 
     // 路由批次内的“乐观运行态”：
     // - 在同一个 job 输出里可能一次解析出多条事件。
@@ -179,6 +188,8 @@ impl ParallelSupervisor {
             .context("failed to load configured all-hat overlay")?;
 
         let evidence_index_path = config.core.resolve_path(EvidenceIndexWriter::DEFAULT_PATH);
+        let recoverable_failure_ledger =
+            RecoverableFailureLedger::new(config.core.resolve_recoverable_failures_ledger_path());
 
         Ok(Self {
             config,
@@ -190,12 +201,14 @@ impl ParallelSupervisor {
             contracts,
             event_logger: EventLogger::default_path(),
             evidence_index_writer: EvidenceIndexWriter::new(evidence_index_path),
+            recoverable_failure_ledger,
             instances: HashMap::new(),
             instances_by_hat: HashMap::new(),
             instance_states: HashMap::new(),
             rr_cursor_by_topic: HashMap::new(),
             agents_snapshot_path: None,
             agents_last_inputs: HashMap::new(),
+            recoverable_failures: HashMap::new(),
             routing_batch_depth: 0,
             routing_inflight_instances: HashSet::new(),
             dynamic_instances: HashSet::new(),
@@ -530,7 +543,30 @@ impl ParallelSupervisor {
                             // 状态变化属于最关键的可观测信号：及时刷新 agents 快照。
                             self.write_agents_snapshot_best_effort();
                         }
-                        HatInstanceEvent::JobCompleted { instance_id, hat_id, result, events } => {
+                        HatInstanceEvent::RecoverableFailureTransition { instance_id, transition } => {
+                            let transition_status = transition.status;
+                            self.record_recoverable_failure_transition(&instance_id, transition);
+                            if Self::is_pending_recoverable_status(transition_status) {
+                                if matches!(termination, Some(TerminationReason::CompletionPromise)) {
+                                    tracing::info!(
+                                        instance = %instance_id,
+                                        "Recoverable failure appeared during completion drain; reopening supervisor loop"
+                                    );
+                                    termination = None;
+                                    completion_promise_seen_at = None;
+                                }
+                                if completion_lockdown {
+                                    completion_lockdown = false;
+                                    if !max_runtime_disabled {
+                                        max_runtime_started_at = std::time::Instant::now();
+                                        max_runtime_counting = false;
+                                        max_runtime_waiting_for_running = true;
+                                    }
+                                }
+                            }
+                            self.write_agents_snapshot_best_effort();
+                        }
+                        HatInstanceEvent::JobCompleted { job_id: _, instance_id, hat_id, result, events } => {
                             // 记录：把解析到的事件写入 debug events.jsonl（方便排查）
                             // 注意：这里先用 iteration=0（并行模式下“迭代”语义后续再收敛）。
                             for event in &events {
@@ -564,7 +600,12 @@ impl ParallelSupervisor {
                                     &self.config.event_loop.completion_promise,
                                 );
 
-                            if completion_promise {
+                            if completion_promise && self.has_pending_recoverable_failures() {
+                                tracing::info!(
+                                    pending_recoverable_failures = self.pending_recoverable_failure_count(),
+                                    "Completion promise ignored while recoverable failures are pending"
+                                );
+                            } else if completion_promise {
                                 if self.pause_on_completion_promise {
                                     // TUI：进入暂停态（但不退出）。
                                     completion_lockdown = true;
@@ -914,6 +955,8 @@ impl ParallelSupervisor {
                     instance_tx.clone(),
                     Arc::clone(&self.job_semaphore),
                     Arc::clone(&self.command_queue),
+                    self.config.agent_cli_recoverable_failures.clone(),
+                    self.recoverable_failure_ledger.clone(),
                     false,
                     dynamic_idle_ttl,
                 );
@@ -963,6 +1006,8 @@ impl ParallelSupervisor {
             instance_tx,
             Arc::clone(&self.job_semaphore),
             Arc::clone(&self.command_queue),
+            self.config.agent_cli_recoverable_failures.clone(),
+            self.recoverable_failure_ledger.clone(),
             false,
             dynamic_idle_ttl,
         );
@@ -1355,6 +1400,7 @@ impl ParallelSupervisor {
                     .unwrap_or(HatInstanceState::Created);
                 let is_dynamic = self.dynamic_instances.contains(&instance_id);
                 let last_input = self.agents_last_inputs.get(&instance_id).cloned();
+                let recoverable_failures = self.recoverable_summaries_for_instance(&instance_id);
 
                 AgentInstanceSnapshot {
                     instance_id: instance_id.to_string(),
@@ -1362,6 +1408,7 @@ impl ParallelSupervisor {
                     state,
                     is_dynamic,
                     last_input,
+                    recoverable_failures,
                 }
             })
             .collect::<Vec<_>>();
@@ -1370,6 +1417,226 @@ impl ParallelSupervisor {
             generated_at: chrono::Utc::now().to_rfc3339(),
             instances,
         }
+    }
+
+    fn record_recoverable_failure_transition(
+        &mut self,
+        instance_id: &HatInstanceId,
+        transition: RecoverableFailureTransition,
+    ) {
+        tracing::info!(
+            instance = %instance_id,
+            failure_id = %transition.failure_id,
+            status = ?transition.status,
+            attempt = transition.attempt,
+            "Observed recoverable failure transition"
+        );
+        self.recoverable_failures
+            .insert(transition.failure_id.clone(), transition.to_snapshot());
+    }
+
+    async fn handle_recoverable_continue_event(&mut self, event: &Event) -> anyhow::Result<()> {
+        if let Some(observer) = &self.event_observer {
+            observer(event);
+        }
+
+        let failure_id = event.payload.trim();
+        let resolution = if failure_id.is_empty() {
+            self.resolve_bare_recoverable_continue(event.target_instance.as_ref())
+        } else {
+            self.resolve_explicit_recoverable_continue(failure_id)
+        };
+
+        let failure_id = match resolution {
+            RecoverableContinueResolution::Accepted(failure_id) => failure_id,
+            RecoverableContinueResolution::Rejected(reason) => {
+                self.escalate_delivery_failure(event, reason, &[], &[])
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let snapshot = self
+            .recoverable_failures
+            .get(&failure_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("accepted recoverable failure disappeared"))?;
+        let instance_id = HatInstanceId::new(snapshot.instance_id.clone());
+        let Some(cmd_tx) = self
+            .instances
+            .get(&instance_id)
+            .map(|handle| handle.cmd_tx.clone())
+        else {
+            self.escalate_delivery_failure(
+                event,
+                format!(
+                    "recoverable continue rejected: instance {} for failure {} is not live",
+                    snapshot.instance_id, snapshot.failure_id
+                ),
+                &[],
+                &[],
+            )
+            .await?;
+            return Ok(());
+        };
+
+        cmd_tx
+            .send(HatInstanceCommand::ContinueRecoverableFailure {
+                failure_id: failure_id.clone(),
+            })
+            .await
+            .with_context(|| {
+                format!("Failed to send recoverable continue for {failure_id} to {instance_id}")
+            })?;
+
+        tracing::info!(
+            failure_id,
+            instance = %instance_id,
+            "Accepted recoverable continue control"
+        );
+        Ok(())
+    }
+
+    fn resolve_explicit_recoverable_continue(
+        &self,
+        failure_id: &str,
+    ) -> RecoverableContinueResolution {
+        let Some(snapshot) = self.recoverable_failures.get(failure_id) else {
+            return RecoverableContinueResolution::Rejected(format!(
+                "recoverable continue rejected: unknown failure_id {failure_id}"
+            ));
+        };
+
+        if !Self::is_manual_continueable_recoverable_status(snapshot.status) {
+            return RecoverableContinueResolution::Rejected(format!(
+                "recoverable continue rejected: failure_id {failure_id} is not awaiting continue; status={:?}",
+                snapshot.status
+            ));
+        }
+
+        RecoverableContinueResolution::Accepted(snapshot.failure_id.clone())
+    }
+
+    fn resolve_bare_recoverable_continue(
+        &self,
+        selected_instance: Option<&HatInstanceId>,
+    ) -> RecoverableContinueResolution {
+        let all_pending = self
+            .recoverable_failures
+            .values()
+            .filter(|snapshot| Self::is_manual_continueable_recoverable_status(snapshot.status))
+            .collect::<Vec<_>>();
+
+        if let Some(selected_instance) = selected_instance {
+            let selected_pending = all_pending
+                .iter()
+                .copied()
+                .filter(|snapshot| snapshot.instance_id == selected_instance.as_str())
+                .collect::<Vec<_>>();
+
+            match selected_pending.as_slice() {
+                [snapshot] => {
+                    return RecoverableContinueResolution::Accepted(snapshot.failure_id.clone());
+                }
+                pending if pending.len() > 1 => {
+                    let ids = pending
+                        .iter()
+                        .map(|snapshot| snapshot.failure_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return RecoverableContinueResolution::Rejected(format!(
+                        "recoverable continue rejected: selected instance {selected_instance} has ambiguous pending recoverable failures [{ids}]; use !continue <failure_id>"
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        match all_pending.as_slice() {
+            [] => RecoverableContinueResolution::Rejected(
+                "recoverable continue rejected: no pending recoverable failure".to_string(),
+            ),
+            [snapshot] => RecoverableContinueResolution::Accepted(snapshot.failure_id.clone()),
+            _ => {
+                let ids = all_pending
+                    .iter()
+                    .map(|snapshot| snapshot.failure_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                RecoverableContinueResolution::Rejected(format!(
+                    "recoverable continue rejected: ambiguous pending recoverable failures [{ids}]; use !continue <failure_id>"
+                ))
+            }
+        }
+    }
+
+    fn has_pending_recoverable_failures(&self) -> bool {
+        self.recoverable_failures
+            .values()
+            .any(|snapshot| Self::is_pending_recoverable_status(snapshot.status))
+    }
+
+    fn pending_recoverable_failure_count(&self) -> usize {
+        self.recoverable_failures
+            .values()
+            .filter(|snapshot| Self::is_pending_recoverable_status(snapshot.status))
+            .count()
+    }
+
+    fn is_pending_recoverable_status(status: RecoverableFailureStatus) -> bool {
+        matches!(
+            status,
+            RecoverableFailureStatus::RetryScheduled
+                | RecoverableFailureStatus::PausedRecoverable
+                | RecoverableFailureStatus::Retrying
+                | RecoverableFailureStatus::ContinuedByHuman
+        )
+    }
+
+    fn is_manual_continueable_recoverable_status(status: RecoverableFailureStatus) -> bool {
+        matches!(
+            status,
+            RecoverableFailureStatus::RetryScheduled
+                | RecoverableFailureStatus::PausedRecoverable
+                | RecoverableFailureStatus::ContinuedByHuman
+        )
+    }
+
+    fn recoverable_summaries_for_instance(
+        &self,
+        instance_id: &HatInstanceId,
+    ) -> Vec<AgentRecoverableFailureSummary> {
+        let mut summaries = self
+            .recoverable_failures
+            .values()
+            .filter(|snapshot| snapshot.instance_id == instance_id.as_str())
+            .map(|snapshot| AgentRecoverableFailureSummary {
+                failure_id: snapshot.failure_id.clone(),
+                job_id: snapshot.job_id,
+                status: recoverable_status_label(snapshot.status).to_string(),
+                failure_kind: snapshot.failure_kind.as_str().to_string(),
+                attempt: snapshot.attempt,
+                max_attempts: snapshot.max_attempts,
+                retry_after_ms: snapshot.retry_after_ms,
+                next_retry_at: snapshot.next_retry_at.clone(),
+                ledger_path: self.recoverable_failure_ledger.path().display().to_string(),
+                stderr_preview: if snapshot.stderr_excerpt.trim().is_empty() {
+                    None
+                } else {
+                    Some(crate::truncate_with_ellipsis(
+                        &snapshot
+                            .stderr_excerpt
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        160,
+                    ))
+                },
+            })
+            .collect::<Vec<_>>();
+
+        summaries.sort_by(|a, b| a.failure_id.cmp(&b.failure_id));
+        summaries
     }
 
     fn write_agents_snapshot_best_effort(&self) {
@@ -1519,6 +1786,7 @@ impl ParallelSupervisor {
                             // 收尾阶段只关心状态收敛。JobCompleted/Published 等事件不再继续路由，
                             // 避免“已决定退出却又被新事件拉起”。
                             HatInstanceEvent::JobCompleted { .. } | HatInstanceEvent::Published { .. } => {}
+                            HatInstanceEvent::RecoverableFailureTransition { .. } => {}
                         },
                         None => instance_closed = true,
                     }
@@ -1534,6 +1802,17 @@ impl ParallelSupervisor {
                 Some(HatInstanceState::Done | HatInstanceState::Failed)
             )
         })
+    }
+}
+
+fn recoverable_status_label(status: RecoverableFailureStatus) -> &'static str {
+    match status {
+        RecoverableFailureStatus::RetryScheduled => "retry_scheduled",
+        RecoverableFailureStatus::PausedRecoverable => "paused_recoverable",
+        RecoverableFailureStatus::Retrying => "retrying",
+        RecoverableFailureStatus::Recovered => "recovered",
+        RecoverableFailureStatus::Exhausted => "exhausted",
+        RecoverableFailureStatus::ContinuedByHuman => "continued_by_human",
     }
 }
 

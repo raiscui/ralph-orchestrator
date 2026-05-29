@@ -5,7 +5,6 @@
 //! - 通过 Fake HatJobExecutor 验证：并行、missing 行为、require_delivery escalate、queue 决策 replay。
 
 use super::ParallelSupervisor;
-use crate::TerminationReason;
 use crate::config::{
     CoreConfig, HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig,
 };
@@ -16,6 +15,9 @@ use crate::evidence_index::{
 use crate::parallel::{
     HatInstanceCommand, HatInstanceHandle, HatJob, HatJobControl, HatJobExecutor,
     HatJobOutputChunk, HatJobResult,
+};
+use crate::{
+    RecoverableFailureKind, RecoverableFailureSnapshot, RecoverableFailureStatus, TerminationReason,
 };
 use anyhow::Context;
 use ralph_proto::{
@@ -1172,6 +1174,258 @@ fn base_parallel_config() -> ParallelConfig {
         enabled: true,
         ..Default::default()
     }
+}
+
+fn recoverable_snapshot(status: RecoverableFailureStatus) -> RecoverableFailureSnapshot {
+    RecoverableFailureSnapshot {
+        failure_id: format!("failure-{status:?}"),
+        job_id: 1,
+        instance_id: "writer#1".to_string(),
+        hat_id: "writer".to_string(),
+        backend_kind: "codex".to_string(),
+        failure_kind: RecoverableFailureKind::RetryLimitExceeded,
+        status,
+        attempt: 1,
+        max_attempts: 3,
+        retry_after_ms: Some(10),
+        next_retry_at: Some("2026-05-28T00:00:10Z".to_string()),
+        exit_code: Some(1),
+        timed_out: false,
+        canceled: false,
+        stderr_excerpt: "ERROR: exceeded retry limit, last status: 429 Too Many Requests"
+            .to_string(),
+        updated_at: "2026-05-28T00:00:00Z".to_string(),
+        source_event_ids: vec!["evt-1".to_string()],
+    }
+}
+
+#[test]
+fn pending_recoverable_failures_block_completion_gate() {
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let (tx, _rx) = mpsc::channel::<String>(1);
+    let mut supervisor = ParallelSupervisor::new(
+        config,
+        "prompt".to_string(),
+        Arc::new(test_executors::TestExecutor::new(tx)),
+    )
+    .expect("ParallelSupervisor::new should succeed");
+
+    assert!(
+        !supervisor.has_pending_recoverable_failures(),
+        "fresh supervisor should not block completion"
+    );
+
+    for status in [
+        RecoverableFailureStatus::RetryScheduled,
+        RecoverableFailureStatus::PausedRecoverable,
+        RecoverableFailureStatus::Retrying,
+        RecoverableFailureStatus::ContinuedByHuman,
+    ] {
+        supervisor
+            .recoverable_failures
+            .insert(format!("failure-{status:?}"), recoverable_snapshot(status));
+        assert!(
+            supervisor.has_pending_recoverable_failures(),
+            "{status:?} must block coordinator-controlled completion"
+        );
+        supervisor.recoverable_failures.clear();
+    }
+
+    for status in [
+        RecoverableFailureStatus::Recovered,
+        RecoverableFailureStatus::Exhausted,
+    ] {
+        supervisor
+            .recoverable_failures
+            .insert(format!("failure-{status:?}"), recoverable_snapshot(status));
+        assert!(
+            !supervisor.has_pending_recoverable_failures(),
+            "{status:?} is terminal and must not block completion"
+        );
+        supervisor.recoverable_failures.clear();
+    }
+}
+
+#[test]
+fn explicit_recoverable_continue_accepts_only_waiting_failures() {
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let (tx, _rx) = mpsc::channel::<String>(1);
+    let mut supervisor = ParallelSupervisor::new(
+        config,
+        "prompt".to_string(),
+        Arc::new(test_executors::TestExecutor::new(tx)),
+    )
+    .expect("ParallelSupervisor::new should succeed");
+
+    let mut scheduled = recoverable_snapshot(RecoverableFailureStatus::RetryScheduled);
+    scheduled.failure_id = "failure-scheduled".to_string();
+    supervisor
+        .recoverable_failures
+        .insert(scheduled.failure_id.clone(), scheduled);
+    assert_eq!(
+        supervisor.resolve_explicit_recoverable_continue("failure-scheduled"),
+        super::RecoverableContinueResolution::Accepted("failure-scheduled".to_string())
+    );
+
+    let mut recovered = recoverable_snapshot(RecoverableFailureStatus::Recovered);
+    recovered.failure_id = "failure-recovered".to_string();
+    supervisor
+        .recoverable_failures
+        .insert(recovered.failure_id.clone(), recovered);
+    assert!(matches!(
+        supervisor.resolve_explicit_recoverable_continue("failure-recovered"),
+        super::RecoverableContinueResolution::Rejected(reason)
+            if reason.contains("not awaiting continue")
+    ));
+
+    assert!(matches!(
+        supervisor.resolve_explicit_recoverable_continue("missing"),
+        super::RecoverableContinueResolution::Rejected(reason)
+            if reason.contains("unknown failure_id missing")
+    ));
+}
+
+#[test]
+fn bare_recoverable_continue_uses_selected_instance_to_disambiguate() {
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let (tx, _rx) = mpsc::channel::<String>(1);
+    let mut supervisor = ParallelSupervisor::new(
+        config,
+        "prompt".to_string(),
+        Arc::new(test_executors::TestExecutor::new(tx)),
+    )
+    .expect("ParallelSupervisor::new should succeed");
+
+    let mut writer_failure = recoverable_snapshot(RecoverableFailureStatus::RetryScheduled);
+    writer_failure.failure_id = "failure-writer".to_string();
+    writer_failure.instance_id = "writer#1".to_string();
+    let mut tester_failure = recoverable_snapshot(RecoverableFailureStatus::PausedRecoverable);
+    tester_failure.failure_id = "failure-tester".to_string();
+    tester_failure.instance_id = "tester#1".to_string();
+
+    supervisor
+        .recoverable_failures
+        .insert(writer_failure.failure_id.clone(), writer_failure);
+    supervisor
+        .recoverable_failures
+        .insert(tester_failure.failure_id.clone(), tester_failure);
+
+    assert!(matches!(
+        supervisor.resolve_bare_recoverable_continue(None),
+        super::RecoverableContinueResolution::Rejected(reason)
+            if reason.contains("ambiguous pending recoverable failures")
+    ));
+
+    assert_eq!(
+        supervisor.resolve_bare_recoverable_continue(Some(&HatInstanceId::new("writer#1"))),
+        super::RecoverableContinueResolution::Accepted("failure-writer".to_string())
+    );
+
+    assert!(matches!(
+        supervisor.resolve_bare_recoverable_continue(Some(&HatInstanceId::new("reviewer#1"))),
+        super::RecoverableContinueResolution::Rejected(reason)
+            if reason.contains("ambiguous pending recoverable failures")
+    ));
+}
+
+#[test]
+fn bare_recoverable_continue_falls_back_to_global_unique_when_selected_has_no_failure() {
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let (tx, _rx) = mpsc::channel::<String>(1);
+    let mut supervisor = ParallelSupervisor::new(
+        config,
+        "prompt".to_string(),
+        Arc::new(test_executors::TestExecutor::new(tx)),
+    )
+    .expect("ParallelSupervisor::new should succeed");
+
+    let mut writer_failure = recoverable_snapshot(RecoverableFailureStatus::RetryScheduled);
+    writer_failure.failure_id = "failure-writer".to_string();
+    writer_failure.instance_id = "writer#1".to_string();
+    supervisor
+        .recoverable_failures
+        .insert(writer_failure.failure_id.clone(), writer_failure);
+
+    assert_eq!(
+        supervisor.resolve_bare_recoverable_continue(Some(&HatInstanceId::new("ralph#1"))),
+        super::RecoverableContinueResolution::Accepted("failure-writer".to_string())
+    );
+}
+
+#[test]
+fn agents_snapshot_includes_recoverable_failure_summaries() {
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let (tx, _rx) = mpsc::channel::<String>(1);
+    let mut supervisor = ParallelSupervisor::new(
+        config,
+        "prompt".to_string(),
+        Arc::new(test_executors::TestExecutor::new(tx)),
+    )
+    .expect("ParallelSupervisor::new should succeed");
+
+    let instance_id = HatInstanceId::new("writer#1");
+    supervisor.instances.insert(
+        instance_id.clone(),
+        HatInstanceHandle::from_cmd_tx(mpsc::channel(1).0),
+    );
+    supervisor
+        .instance_states
+        .insert(instance_id.clone(), HatInstanceState::Idle);
+
+    let mut scheduled = recoverable_snapshot(RecoverableFailureStatus::RetryScheduled);
+    scheduled.failure_id = "failure-scheduled".to_string();
+    scheduled.instance_id = "writer#1".to_string();
+    scheduled.next_retry_at = Some("2026-05-28T00:00:10Z".to_string());
+    let mut exhausted = recoverable_snapshot(RecoverableFailureStatus::Exhausted);
+    exhausted.failure_id = "failure-exhausted".to_string();
+    exhausted.instance_id = "writer#1".to_string();
+    exhausted.attempt = 3;
+
+    supervisor
+        .recoverable_failures
+        .insert(scheduled.failure_id.clone(), scheduled);
+    supervisor
+        .recoverable_failures
+        .insert(exhausted.failure_id.clone(), exhausted);
+
+    let snapshot = supervisor.build_agents_snapshot();
+    let writer = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == "writer#1")
+        .expect("writer#1 should be present");
+
+    assert_eq!(writer.recoverable_failures.len(), 2);
+    assert!(
+        writer
+            .recoverable_failures
+            .iter()
+            .any(|failure| failure.failure_id == "failure-scheduled"
+                && failure.status == "retry_scheduled"
+                && failure.attempt == 1
+                && failure.max_attempts == 3
+                && failure.next_retry_at.as_deref() == Some("2026-05-28T00:00:10Z")
+                && failure
+                    .ledger_path
+                    .ends_with(".ralph/recoverable-failures.jsonl")),
+        "scheduled failure summary should include retry metadata and ledger pointer: {:?}",
+        writer.recoverable_failures
+    );
+    assert!(
+        writer
+            .recoverable_failures
+            .iter()
+            .any(|failure| failure.failure_id == "failure-exhausted"
+                && failure.status == "exhausted"
+                && failure.attempt == 3),
+        "exhausted failure summary should remain visible: {:?}",
+        writer.recoverable_failures
+    );
 }
 
 fn hat_config(name: &str, triggers: Vec<&str>, instances: usize) -> HatConfig {

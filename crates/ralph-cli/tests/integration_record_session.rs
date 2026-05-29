@@ -1,4 +1,9 @@
 use anyhow::{Context, Result};
+use ralph_core::{
+    AgentInstanceSnapshot, AgentLastInput, AgentRecoverableFailureSummary, AgentsSnapshot, Record,
+    SessionRecorder,
+};
+use ralph_proto::HatInstanceState;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -206,20 +211,37 @@ fn record_watch_auto_locates_latest_pointer_and_streams_lines() -> Result<()> {
     let nested = temp_path.join("a/b/c");
     fs::create_dir_all(&nested)?;
 
+    let stdout_path = temp_path.join("watch.stdout");
+    let stdout_file = fs::File::create(&stdout_path)?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_ralph"))
         .args(["record", "watch", "--from-start", "--interval-ms", "50"])
         .current_dir(&nested)
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(stdout_file))
         .spawn()?;
 
-    std::thread::sleep(Duration::from_millis(200));
-    let _ = child.kill();
-    let output = child.wait_with_output()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let captured_stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
+        if captured_stdout.contains("_meta.session_start") {
+            break;
+        }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(status) = child.try_wait()? {
+            panic!(
+                "watch process exited before streaming expected line: status={status}, stdout={captured_stdout}"
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = child.kill();
+    let _status = child.wait()?;
+
+    let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
     assert!(
         stdout.contains("_meta.session_start"),
-        "watch should stream existing lines"
+        "watch should stream existing lines, got: {stdout}"
     );
 
     Ok(())
@@ -296,6 +318,89 @@ fn record_watch_timeout_exits_two_in_quiet_mode() -> Result<()> {
         Some(2),
         "watch should exit code 2 on timeout (agent automation contract)"
     );
+
+    Ok(())
+}
+
+#[test]
+fn record_summary_agents_file_shows_recoverable_failure_evidence() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+    let ralph_dir = temp_path.join(".ralph");
+    fs::create_dir_all(&ralph_dir)?;
+
+    let record_path = temp_path.join("session.jsonl");
+    let file = fs::File::create(&record_path)?;
+    let recorder = SessionRecorder::new(std::io::BufWriter::new(file));
+    let argv = vec!["ralph".to_string(), "run".to_string()];
+    recorder.record_meta(Record::meta_session_start(
+        Some(temp_path.to_string_lossy().as_ref()),
+        Some(temp_path.to_string_lossy().as_ref()),
+        &argv,
+        42,
+        Some("/tmp/ralph-test-bin"),
+        Some("0.0.0-test"),
+    ));
+    recorder.record_meta(Record::meta_termination("CompletionPromise", 2, 3.5, 4));
+    recorder.flush().ok();
+
+    let agents_path = ralph_dir.join("agents.json");
+    let snapshot = AgentsSnapshot {
+        generated_at: "2026-05-28T00:00:00Z".to_string(),
+        instances: vec![AgentInstanceSnapshot {
+            instance_id: "writer#1".to_string(),
+            hat_id: "writer".to_string(),
+            state: HatInstanceState::Idle,
+            is_dynamic: false,
+            last_input: Some(AgentLastInput {
+                ts: "2026-05-28T00:00:00Z".to_string(),
+                topic: "build.task".to_string(),
+                preview: "retryable job".to_string(),
+            }),
+            recoverable_failures: vec![AgentRecoverableFailureSummary {
+                failure_id: "failure-writer-429".to_string(),
+                job_id: 7,
+                status: "retry_scheduled".to_string(),
+                failure_kind: "retry_limit_exceeded".to_string(),
+                attempt: 1,
+                max_attempts: 3,
+                retry_after_ms: Some(30_000),
+                next_retry_at: Some("2026-05-28T00:00:30Z".to_string()),
+                ledger_path: ".ralph/recoverable-failures.jsonl".to_string(),
+                stderr_preview: Some("ERROR: exceeded retry limit, last status: 429".to_string()),
+            }],
+        }],
+    };
+    fs::write(&agents_path, serde_json::to_string_pretty(&snapshot)?)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "record",
+            "summary",
+            record_path.to_string_lossy().as_ref(),
+            "--agents-file",
+            agents_path.to_string_lossy().as_ref(),
+        ])
+        .current_dir(temp_path)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "record summary should succeed.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Evidence Inspect"));
+    assert!(stdout.contains("Agents Snapshot"));
+    assert!(stdout.contains("Recoverable Failures"));
+    assert!(stdout.contains("recoverable_failures: 1"));
+    assert!(stdout.contains("failure_id=failure-writer-429"));
+    assert!(stdout.contains("status=retry_scheduled"));
+    assert!(stdout.contains("attempt=1/3"));
+    assert!(stdout.contains("ledger=.ralph/recoverable-failures.jsonl"));
+    assert!(stdout.contains("ERROR: exceeded retry limit, last status: 429"));
 
     Ok(())
 }

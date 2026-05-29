@@ -38,6 +38,14 @@ pub struct AgentInstanceSnapshot {
     /// 最近一次收到的输入事件摘要(用于回答“它在做什么”).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_input: Option<AgentLastInput>,
+
+    /// 当前实例相关的 recoverable agent CLI failure 摘要。
+    ///
+    /// 注意：
+    /// - 这是从 `.ralph/recoverable-failures.jsonl` / live runtime map 派生的观察面。
+    /// - 这里只保存 compact metadata,不保存 prompt、原始 event stream 或完整 stderr。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recoverable_failures: Vec<AgentRecoverableFailureSummary>,
 }
 
 /// 最近一次输入事件摘要.
@@ -51,4 +59,41 @@ pub struct AgentLastInput {
 
     /// 输入内容预览(截断后的单行文本).
     pub preview: String,
+}
+
+/// 单个 recoverable failure lifecycle 的人类可读摘要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRecoverableFailureSummary {
+    /// Recoverable lifecycle id。
+    pub failure_id: String,
+
+    /// Runtime job id。
+    pub job_id: u64,
+
+    /// 生命周期状态,例如 `retry_scheduled` / `continued_by_human` / `exhausted`。
+    pub status: String,
+
+    /// 确定性分类,例如 `rate_limited`。
+    pub failure_kind: String,
+
+    /// 当前尝试序号。
+    pub attempt: u32,
+
+    /// 最大尝试次数。
+    pub max_attempts: u32,
+
+    /// 下一次 retry 延迟毫秒数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+
+    /// 下一次 retry 的绝对时间。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<String>,
+
+    /// compact ledger evidence path。
+    pub ledger_path: String,
+
+    /// 有界 stderr 摘要预览。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_preview: Option<String>,
 }

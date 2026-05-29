@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use ralph_core::AgentsSnapshot;
 use serde_json::Value;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,10 @@ struct RecordSummaryArgs {
     /// Path to record-session JSONL file
     #[arg(value_name = "FILE")]
     file: PathBuf,
+
+    /// Optional agents snapshot sidecar. Defaults to `<workspace_root>/.ralph/agents.json`.
+    #[arg(long, value_name = "FILE")]
+    agents_file: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -84,6 +89,7 @@ pub(crate) async fn execute(args: RecordArgs) -> Result<()> {
 fn summary_command(args: RecordSummaryArgs) -> Result<()> {
     let player = crate::record_session::load_session_player_strict(&args.file)?;
     let agg = crate::record_session::aggregate_record_session(&player)?;
+    let agents_probe = load_agents_snapshot_for_summary(&args, &agg);
 
     // ------------------------------------------------------------------
     // 输出策略:
@@ -139,6 +145,38 @@ fn summary_command(args: RecordSummaryArgs) -> Result<()> {
         writeln!(out, "  {:>2}. {}: {}", i + 1, topic, count)?;
     }
 
+    let evidence_text = match &agents_probe {
+        AgentsSnapshotProbe::Loaded { path, snapshot } => {
+            let path = path.display().to_string();
+            crate::record_session::render_evidence_inspect(
+                &agg,
+                crate::record_session::AgentsSnapshotInspect::Loaded {
+                    path: &path,
+                    snapshot,
+                },
+            )?
+        }
+        AgentsSnapshotProbe::Missing { searched } => {
+            crate::record_session::render_evidence_inspect(
+                &agg,
+                crate::record_session::AgentsSnapshotInspect::Missing {
+                    searched: searched
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
+                },
+            )?
+        }
+        AgentsSnapshotProbe::Invalid { path, error } => {
+            let path = path.display().to_string();
+            crate::record_session::render_evidence_inspect(
+                &agg,
+                crate::record_session::AgentsSnapshotInspect::Invalid { path: &path, error },
+            )?
+        }
+    };
+    write!(out, "{evidence_text}")?;
+
     // stdout tail
     writeln!(out, "Stdout Tail")?;
     if agg.stdout_tail.trim().is_empty() {
@@ -149,6 +187,118 @@ fn summary_command(args: RecordSummaryArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+enum AgentsSnapshotProbe {
+    Loaded {
+        path: PathBuf,
+        snapshot: AgentsSnapshot,
+    },
+    Missing {
+        searched: Vec<PathBuf>,
+    },
+    Invalid {
+        path: PathBuf,
+        error: String,
+    },
+}
+
+fn load_agents_snapshot_for_summary(
+    args: &RecordSummaryArgs,
+    agg: &crate::record_session::RecordSessionAggregate,
+) -> AgentsSnapshotProbe {
+    let candidates = agents_snapshot_candidates(args, agg);
+
+    for path in &candidates {
+        if !path.exists() {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) => {
+                return AgentsSnapshotProbe::Invalid {
+                    path: path.clone(),
+                    error: format!("failed to read: {error}"),
+                };
+            }
+        };
+
+        match serde_json::from_str::<AgentsSnapshot>(&content) {
+            Ok(snapshot) => {
+                return AgentsSnapshotProbe::Loaded {
+                    path: path.clone(),
+                    snapshot,
+                };
+            }
+            Err(error) => {
+                return AgentsSnapshotProbe::Invalid {
+                    path: path.clone(),
+                    error: format!("invalid JSON: {error}"),
+                };
+            }
+        }
+    }
+
+    AgentsSnapshotProbe::Missing {
+        searched: candidates,
+    }
+}
+
+fn agents_snapshot_candidates(
+    args: &RecordSummaryArgs,
+    agg: &crate::record_session::RecordSessionAggregate,
+) -> Vec<PathBuf> {
+    if let Some(path) = &args.agents_file {
+        return vec![path.clone()];
+    }
+
+    let mut candidates = Vec::new();
+
+    if let Some(root) = agg
+        .session_start
+        .as_ref()
+        .and_then(|meta| meta.workspace_root.as_deref())
+        .filter(|root| !root.trim().is_empty())
+    {
+        candidates.push(PathBuf::from(root).join(".ralph/agents.json"));
+    }
+
+    if let Some(cwd) = agg
+        .session_start
+        .as_ref()
+        .and_then(|meta| meta.cwd.as_deref())
+        .filter(|cwd| !cwd.trim().is_empty())
+    {
+        candidates.push(PathBuf::from(cwd).join(".ralph/agents.json"));
+    }
+
+    if let Some(found) = crate::find_file_in_parents(".ralph/agents.json") {
+        candidates.push(found);
+    }
+
+    // record-session 可能位于 workspace 根目录或临时目录。这里作为最后兜底,
+    // 只用于给 missing message 提供搜索路径,不把它当成强绑定真相源。
+    if let Some(parent) = args.file.parent() {
+        candidates.push(parent.join(".ralph/agents.json"));
+    }
+
+    dedup_paths(candidates)
+}
+
+fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+
+    for path in paths {
+        let key = path.to_string_lossy().to_string();
+        if seen.insert(key) {
+            out.push(path);
+        }
+    }
+
+    out
 }
 
 async fn watch_command(args: RecordWatchArgs) -> Result<()> {

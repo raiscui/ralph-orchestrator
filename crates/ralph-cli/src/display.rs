@@ -294,19 +294,24 @@ pub fn print_agents_table(snapshot: &AgentsSnapshot, use_colors: bool) {
 
     // Header
     if use_colors {
-        println!("{BOLD}{DIM}Instance        | Hat     | State    | Dynamic | Last Input{RESET}");
         println!(
-            "{DIM}---------------+---------+----------+---------+----------------------------------------{RESET}"
+            "{BOLD}{DIM}Instance        | Hat     | State    | Dynamic | Recoverable          | Last Input{RESET}"
+        );
+        println!(
+            "{DIM}---------------+---------+----------+---------+----------------------+----------------------------------------{RESET}"
         );
     } else {
-        println!("Instance        | Hat     | State    | Dynamic | Last Input");
         println!(
-            "---------------|---------|----------|---------|----------------------------------------"
+            "Instance        | Hat     | State    | Dynamic | Recoverable          | Last Input"
+        );
+        println!(
+            "---------------|---------|----------|---------|----------------------|----------------------------------------"
         );
     }
 
     for inst in &snapshot.instances {
         let dynamic = if inst.is_dynamic { "yes" } else { "no" };
+        let recoverable = format_recoverable_summary(&inst.recoverable_failures);
         let last = inst
             .last_input
             .as_ref()
@@ -329,24 +334,45 @@ pub fn print_agents_table(snapshot: &AgentsSnapshot, use_colors: bool) {
             };
 
             println!(
-                "{CYAN}{:<14}{RESET} | {MAGENTA}{:<7}{RESET} | {state_color}{:<8}{RESET} | {:<7} | {}",
+                "{CYAN}{:<14}{RESET} | {MAGENTA}{:<7}{RESET} | {state_color}{:<8}{RESET} | {:<7} | {:<20} | {}",
                 inst.instance_id,
                 inst.hat_id,
                 inst.state.as_str(),
                 dynamic,
+                recoverable,
                 last
             );
         } else {
             println!(
-                "{:<14} | {:<7} | {:<8} | {:<7} | {}",
+                "{:<14} | {:<7} | {:<8} | {:<7} | {:<20} | {}",
                 inst.instance_id,
                 inst.hat_id,
                 inst.state.as_str(),
                 dynamic,
+                recoverable,
                 last
             );
         }
     }
+}
+
+fn format_recoverable_summary(failures: &[ralph_core::AgentRecoverableFailureSummary]) -> String {
+    let Some(first) = failures.first() else {
+        return "-".to_string();
+    };
+
+    let mut summary = format!(
+        "{}:{}/{}:{}",
+        first.status,
+        first.attempt,
+        first.max_attempts,
+        truncate(&first.failure_id, 8)
+    );
+    if failures.len() > 1 {
+        summary.push_str(&format!("(+{})", failures.len() - 1));
+    }
+
+    truncate(&summary, 20)
 }
 
 /// Builds a map of event topics to hat display information for the TUI.

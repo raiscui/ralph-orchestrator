@@ -17,6 +17,12 @@ use crate::event_emission_protocol;
 use crate::event_parser::EventParser;
 use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
+use crate::{
+    AgentCliRecoverableFailuresConfig, RECOVERABLE_FAILURE_LEDGER_SCHEMA_VERSION,
+    RecoverableFailureKind, RecoverableFailureLedger, RecoverableFailureStatus,
+    RecoverableFailureTransition, classify_hat_job_result, recoverable_retry_delay_ms,
+    stable_recoverable_failure_id,
+};
 use anyhow::Context;
 use ralph_proto::{
     Event, GateKind, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
@@ -37,6 +43,12 @@ use tokio::time::Instant;
 pub enum HatInstanceCommand {
     /// 投递一个事件到实例 inbox。
     Deliver(Box<Event>),
+    /// 人类显式继续一个 recoverable failure lifecycle。
+    ///
+    /// 说明:
+    /// - 该命令只携带 failure_id。
+    /// - Instance 必须复用 runtime-held job context,不能从 ledger 重建任务。
+    ContinueRecoverableFailure { failure_id: String },
     /// 取消当前正在运行的 job（best-effort）。
     CancelCurrentJob,
     /// 关闭实例（best-effort）。
@@ -53,10 +65,21 @@ pub enum HatInstanceEvent {
     },
     /// 本次 job 完成，并解析出了新的事件。
     JobCompleted {
+        job_id: u64,
         instance_id: HatInstanceId,
         hat_id: HatId,
         result: HatJobResult,
         events: Vec<Event>,
+    },
+    /// Recoverable CLI failure lifecycle transition.
+    ///
+    /// 说明:
+    /// - ledger 是 durable evidence。
+    /// - 这条 runtime event 是 Supervisor 的 live lifecycle 信号,用于阻止 completion
+    ///   在 retry pending 时提前收敛。
+    RecoverableFailureTransition {
+        instance_id: HatInstanceId,
+        transition: RecoverableFailureTransition,
     },
     /// 实例在 orchestrator 内部发布的事件（不依赖外部 job 输出）。
     ///
@@ -113,6 +136,8 @@ impl HatInstanceHandle {
         supervisor_tx: mpsc::Sender<HatInstanceEvent>,
         job_semaphore: Arc<Semaphore>,
         command_queue: Arc<CommandQueue>,
+        recoverable_retry_policy: AgentCliRecoverableFailuresConfig,
+        recoverable_failure_ledger: RecoverableFailureLedger,
         is_dynamic: bool,
         dynamic_idle_ttl: Duration,
     ) -> Self {
@@ -150,6 +175,10 @@ impl HatInstanceHandle {
                 supervisor_tx,
                 job_semaphore,
                 command_queue,
+                recoverable_retry: RecoverableRetryRuntime::new(
+                    recoverable_retry_policy,
+                    recoverable_failure_ledger,
+                ),
                 is_dynamic,
                 dynamic_idle_ttl,
                 cmd_rx,
@@ -221,6 +250,12 @@ struct HatInstanceActor {
     job_semaphore: Arc<Semaphore>,
     /// in-process command queue(用于串行化 workspace/git 等副作用动作)。
     command_queue: Arc<CommandQueue>,
+    /// agent CLI 可恢复失败 retry runtime。
+    ///
+    /// 说明:
+    /// - 这里保存的是内存态 job context,用于 retry 重新执行。
+    /// - ledger 只保存 compact metadata,不保存 prompt / event stream。
+    recoverable_retry: RecoverableRetryRuntime,
     /// 是否为动态实例（由 autoscale 创建，空闲可回收）。
     is_dynamic: bool,
     /// 动态实例的 idle 回收阈值。
@@ -315,6 +350,101 @@ struct RunningWorkspace {
     on_release_hook: Option<String>,
 }
 
+/// retry 时需要复原的 workspace 计划。
+///
+/// 注意:
+/// - 这里是内存态,不是 ledger。
+/// - Worktree retry 必须重新 acquire workdir,不能复用已经 release 的旧目录。
+#[derive(Debug, Clone)]
+struct RecoverableWorkspaceContext {
+    strategy: WorkspaceStrategy,
+    hooks_allowed: bool,
+    hooks_on_acquire: Option<String>,
+    hooks_on_release: Option<String>,
+}
+
+impl RecoverableWorkspaceContext {
+    fn to_running_workspace(&self, job_id: u64) -> RunningWorkspace {
+        RunningWorkspace {
+            job_id,
+            strategy: self.strategy,
+            workdir: None,
+            hooks_allowed: self.hooks_allowed,
+            on_release_hook: self.hooks_on_release.clone(),
+        }
+    }
+}
+
+/// recoverable retry 的 runtime-held job context。
+///
+/// 这是 3.4 的关键边界:
+/// - 可以保存完整 `HatJob`,因为它只在进程内用于 retry。
+/// - 不能把该结构写入 ledger,否则 ledger 会变成第二份 prompt/event store。
+#[derive(Debug, Clone)]
+struct RecoverableRunningJobContext {
+    job: HatJob,
+    workspace: RecoverableWorkspaceContext,
+    source_event_ids: Vec<String>,
+}
+
+/// 当前正在执行的 retry attempt。
+#[derive(Debug, Clone)]
+struct RecoverableRunningAttempt {
+    failure_id: String,
+    failure_kind: RecoverableFailureKind,
+    attempt: u32,
+}
+
+/// 已调度、等待 due 的 retry。
+#[derive(Debug, Clone)]
+struct ScheduledRecoverableRetry {
+    context: RecoverableRunningJobContext,
+    failure_id: String,
+    failure_kind: RecoverableFailureKind,
+    next_attempt: u32,
+    retry_after_ms: u64,
+    due_at: Instant,
+}
+
+/// 单个 HatInstance 内的 recoverable retry 状态机。
+#[derive(Debug, Clone)]
+struct RecoverableRetryRuntime {
+    policy: AgentCliRecoverableFailuresConfig,
+    ledger: RecoverableFailureLedger,
+    running_context: Option<RecoverableRunningJobContext>,
+    running_attempt: Option<RecoverableRunningAttempt>,
+    scheduled: Option<ScheduledRecoverableRetry>,
+}
+
+impl RecoverableRetryRuntime {
+    fn new(policy: AgentCliRecoverableFailuresConfig, ledger: RecoverableFailureLedger) -> Self {
+        Self {
+            policy,
+            ledger,
+            running_context: None,
+            running_attempt: None,
+            scheduled: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn disabled_for_tests() -> Self {
+        Self::new(
+            AgentCliRecoverableFailuresConfig {
+                enabled: false,
+                ..AgentCliRecoverableFailuresConfig::default()
+            },
+            RecoverableFailureLedger::new(
+                std::env::temp_dir().join("ralph-recoverable-failures-disabled-tests.jsonl"),
+            ),
+        )
+    }
+
+    fn has_scheduled_retry(&self) -> bool {
+        self.scheduled.is_some()
+    }
+}
+
 impl HatInstanceActor {
     fn completion_freeze_active(&self) -> bool {
         self.completion_freeze_requested.load(Ordering::SeqCst)
@@ -374,6 +504,7 @@ impl HatInstanceActor {
                     if self.should_reap_dynamic_instance() {
                         break;
                     }
+                    self.maybe_start_scheduled_retry().await?;
                     self.maybe_start_job().await?;
                 }
                 cmd = self.cmd_rx.recv() => {
@@ -434,6 +565,7 @@ impl HatInstanceActor {
                             }
 
                             self.pending.push(*event);
+                            self.maybe_start_scheduled_retry().await?;
                             self.maybe_start_job().await?;
                         }
                         HatInstanceCommand::CancelCurrentJob => {
@@ -441,8 +573,12 @@ impl HatInstanceActor {
                                 let _ = cancel_tx.send(true);
                             }
                         }
+                        HatInstanceCommand::ContinueRecoverableFailure { failure_id } => {
+                            self.continue_recoverable_failure(&failure_id).await?;
+                            self.maybe_start_scheduled_retry().await?;
+                        }
                         HatInstanceCommand::Shutdown => {
-                            self.begin_shutdown().await?;
+                            self.begin_shutdown()?;
 
                             // 若当前没有 in-flight job,立刻收尾并退出(减少 drain 延迟)。
                             if self.running.is_none() {
@@ -495,6 +631,7 @@ impl HatInstanceActor {
         let truly_idle = self.state == HatInstanceState::Idle
             && self.running.is_none()
             && self.pending_permission_gate.is_none()
+            && !self.recoverable_retry.has_scheduled_retry()
             && self.pending.is_empty();
 
         if !truly_idle {
@@ -506,7 +643,7 @@ impl HatInstanceActor {
         since.elapsed() >= self.dynamic_idle_ttl
     }
 
-    async fn begin_shutdown(&mut self) -> anyhow::Result<()> {
+    fn begin_shutdown(&mut self) -> anyhow::Result<()> {
         if self.shutdown_requested {
             return Ok(());
         }
@@ -668,6 +805,9 @@ impl HatInstanceActor {
         if self.running.is_some() {
             return Ok(());
         }
+        if self.recoverable_retry.has_scheduled_retry() {
+            return Ok(());
+        }
         if self.pending.is_empty() {
             return Ok(());
         }
@@ -784,7 +924,7 @@ impl HatInstanceActor {
             strategy: final_strategy,
             workdir: None,
             hooks_allowed,
-            on_release_hook,
+            on_release_hook: on_release_hook.clone(),
         });
 
         // 5.3：worktree acquire（以及可选 hooks）。
@@ -798,6 +938,7 @@ impl HatInstanceActor {
         }
 
         let events = std::mem::take(&mut self.pending);
+        let source_event_ids = events.iter().filter_map(|event| event.id.clone()).collect();
         let prompt = self.build_prompt(&events);
         let continuation_prompt = self.build_continuation_prompt(&events);
 
@@ -830,6 +971,17 @@ impl HatInstanceActor {
                 .as_ref()
                 .and_then(|w| w.workdir.clone()),
         };
+        self.recoverable_retry.running_context = Some(RecoverableRunningJobContext {
+            job: job.clone(),
+            workspace: RecoverableWorkspaceContext {
+                strategy: final_strategy,
+                hooks_allowed,
+                hooks_on_acquire: hooks_on_acquire.clone(),
+                hooks_on_release: on_release_hook.clone(),
+            },
+            source_event_ids,
+        });
+        self.recoverable_retry.running_attempt = None;
         self.next_job_id += 1;
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -849,6 +1001,161 @@ impl HatInstanceActor {
                 .execute(job, output_tx, cancel_rx, control_rx)
                 .await
         }));
+        Ok(())
+    }
+
+    async fn maybe_start_scheduled_retry(&mut self) -> anyhow::Result<()> {
+        self.apply_completion_freeze_if_requested();
+
+        if self.shutdown_requested || self.completion_freeze_active() {
+            return Ok(());
+        }
+        if self.running.is_some() || self.pending_permission_gate.is_some() {
+            return Ok(());
+        }
+
+        let Some(scheduled) = self.recoverable_retry.scheduled.as_ref() else {
+            return Ok(());
+        };
+        if Instant::now() < scheduled.due_at {
+            return Ok(());
+        }
+
+        // 全局并发上限仍然要对 retry 生效,避免 retry 风暴放大限流。
+        let Ok(permit) = self.job_semaphore.clone().try_acquire_owned() else {
+            return Ok(());
+        };
+
+        let scheduled = self
+            .recoverable_retry
+            .scheduled
+            .take()
+            .expect("scheduled retry existed above");
+        let mut job = scheduled.context.job.clone();
+        let mut workspace = scheduled.context.workspace.to_running_workspace(job.job_id);
+
+        if workspace.strategy == WorkspaceStrategy::Worktree {
+            let workdir = self
+                .acquire_worktree(
+                    job.job_id,
+                    workspace.hooks_allowed,
+                    scheduled.context.workspace.hooks_on_acquire.as_ref(),
+                )
+                .await?;
+            workspace.workdir = Some(workdir.clone());
+            job.workdir = Some(workdir);
+        } else {
+            job.workdir = None;
+        }
+
+        self.running_workspace = Some(workspace);
+        self.recoverable_retry.running_context = Some(RecoverableRunningJobContext {
+            job: job.clone(),
+            workspace: scheduled.context.workspace.clone(),
+            source_event_ids: scheduled.context.source_event_ids.clone(),
+        });
+        self.recoverable_retry.running_attempt = Some(RecoverableRunningAttempt {
+            failure_id: scheduled.failure_id.clone(),
+            failure_kind: scheduled.failure_kind,
+            attempt: scheduled.next_attempt,
+        });
+
+        let transition = self.recoverable_transition(
+            &job,
+            scheduled.failure_id,
+            scheduled.failure_kind,
+            RecoverableFailureStatus::Retrying,
+            scheduled.next_attempt,
+            None,
+            None,
+            None,
+            false,
+            false,
+            format!(
+                "retrying recoverable failure after {}ms delay",
+                scheduled.retry_after_ms
+            ),
+            scheduled.context.source_event_ids,
+        );
+        self.append_and_publish_recoverable_transition(transition)
+            .await?;
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        self.cancel_tx = Some(cancel_tx);
+
+        let (control_tx, control_rx) = mpsc::channel::<HatJobControl>(32);
+        self.control_tx = Some(control_tx);
+        self.running_session_strategy = Some(job.session_strategy);
+
+        let executor = Arc::clone(&self.executor);
+        let output_tx = self.output_tx.clone();
+
+        self.set_state(HatInstanceState::Running).await?;
+        self.running = Some(tokio::spawn(async move {
+            let _permit = permit;
+            executor
+                .execute(job, output_tx, cancel_rx, control_rx)
+                .await
+        }));
+
+        Ok(())
+    }
+
+    async fn continue_recoverable_failure(&mut self, failure_id: &str) -> anyhow::Result<()> {
+        let Some(scheduled) = self.recoverable_retry.scheduled.as_ref() else {
+            tracing::warn!(
+                instance = %self.instance_id,
+                failure_id,
+                "Recoverable continue rejected by instance: no scheduled runtime context"
+            );
+            return Ok(());
+        };
+
+        if scheduled.failure_id != failure_id {
+            tracing::warn!(
+                instance = %self.instance_id,
+                requested_failure_id = failure_id,
+                scheduled_failure_id = %scheduled.failure_id,
+                "Recoverable continue rejected by instance: failure id mismatch"
+            );
+            return Ok(());
+        }
+
+        let job = scheduled.context.job.clone();
+        let scheduled_failure_id = scheduled.failure_id.clone();
+        let failure_kind = scheduled.failure_kind;
+        let next_attempt = scheduled.next_attempt;
+        let source_event_ids = scheduled.context.source_event_ids.clone();
+
+        // completion freeze 是软收敛状态。人类显式 continue 必须能解除它,
+        // 否则 TUI 暂停态里用户输入会看似成功但不会起 retry。
+        self.completion_freeze_requested
+            .store(false, Ordering::SeqCst);
+        self.completion_freeze_applied = false;
+
+        let transition = self.recoverable_transition(
+            &job,
+            scheduled_failure_id,
+            failure_kind,
+            RecoverableFailureStatus::ContinuedByHuman,
+            next_attempt,
+            Some(0),
+            None,
+            None,
+            false,
+            false,
+            "manual continue requested by human".to_string(),
+            source_event_ids,
+        );
+        self.append_and_publish_recoverable_transition(transition)
+            .await?;
+
+        // 复用 scheduled retry path: 只把 due 时间提前,真正执行仍由
+        // `maybe_start_scheduled_retry()` 负责 acquire permit / workspace / spawn executor。
+        if let Some(scheduled) = self.recoverable_retry.scheduled.as_mut() {
+            scheduled.retry_after_ms = 0;
+            scheduled.due_at = Instant::now();
+        }
         Ok(())
     }
 
@@ -1556,9 +1863,20 @@ impl HatInstanceActor {
         prompt_overlay::inject_all_hat_prompt(prompt_with_id, self.all_hat_prompt.as_deref())
     }
 
-    async fn on_job_completed(&mut self, result: HatJobResult) -> anyhow::Result<()> {
+    async fn on_job_completed(&mut self, mut result: HatJobResult) -> anyhow::Result<()> {
         // 事件解析必须基于 stdout-only 的输出,避免 stderr(例如 prompt transcript/后端日志)
         // 混入后触发假事件/假 completion/重复路由等 flaky 回归。
+        let job_id = self
+            .recoverable_retry
+            .running_context
+            .as_ref()
+            .map(|context| context.job.job_id)
+            .or_else(|| {
+                self.running_workspace
+                    .as_ref()
+                    .map(|workspace| workspace.job_id)
+            })
+            .unwrap_or_else(|| self.next_job_id.saturating_sub(1));
         let parsed_events = EventParser::new().parse(&result.output_for_parsing);
 
         let events = parsed_events
@@ -1566,7 +1884,41 @@ impl HatInstanceActor {
             .map(|event| self.decorate_outgoing_event(event))
             .collect::<Vec<_>>();
 
+        if result.success {
+            self.finish_recoverable_success_if_needed(&result).await?;
+        } else if self
+            .try_schedule_or_exhaust_recoverable_failure(&mut result, &events)
+            .await?
+        {
+            return Ok(());
+        }
+
         // 5.3：worktree release（best-effort；失败需要可观测，但不应吞掉 job 完成事件）
+        self.release_running_worktree_after_job().await;
+
+        // 成功/失败映射到实例状态：失败时先标 failed，再允许 Supervisor 决策下一步。
+        if result.success {
+            self.set_state(HatInstanceState::Idle).await?;
+        } else {
+            self.clear_recoverable_runtime_after_terminal_result();
+            self.set_state(HatInstanceState::Failed).await?;
+        }
+
+        self.supervisor_tx
+            .send(HatInstanceEvent::JobCompleted {
+                job_id,
+                instance_id: self.instance_id.clone(),
+                hat_id: self.hat.id.clone(),
+                result,
+                events,
+            })
+            .await
+            .context("Failed to send JobCompleted to supervisor")?;
+
+        Ok(())
+    }
+
+    async fn release_running_worktree_after_job(&mut self) {
         if let Some(ws) = self.running_workspace.take()
             && ws.strategy == WorkspaceStrategy::Worktree
             && let Some(workdir) = ws.workdir
@@ -1595,24 +1947,260 @@ impl HatInstanceActor {
         } else {
             self.running_workspace = None;
         }
+    }
 
-        // 成功/失败映射到实例状态：失败时先标 failed，再允许 Supervisor 决策下一步。
-        if result.success {
-            self.set_state(HatInstanceState::Idle).await?;
-        } else {
-            self.set_state(HatInstanceState::Failed).await?;
+    async fn try_schedule_or_exhaust_recoverable_failure(
+        &mut self,
+        result: &mut HatJobResult,
+        parsed_events: &[Event],
+    ) -> anyhow::Result<bool> {
+        // 如果失败 job 已经产出结构化事件,自动 retry 可能重复业务副作用。
+        // 这类情况先保持普通 terminal failure,后续如要扩展必须单独设计幂等边界。
+        if !parsed_events.is_empty() {
+            self.clear_recoverable_runtime_after_terminal_result();
+            return Ok(false);
         }
 
-        self.supervisor_tx
-            .send(HatInstanceEvent::JobCompleted {
-                instance_id: self.instance_id.clone(),
-                hat_id: self.hat.id.clone(),
+        let Some(classification) = classify_hat_job_result(result) else {
+            self.clear_recoverable_runtime_after_terminal_result();
+            return Ok(false);
+        };
+        let Some(context) = self.recoverable_retry.running_context.clone() else {
+            self.clear_recoverable_runtime_after_terminal_result();
+            return Ok(false);
+        };
+
+        let running_attempt = self.recoverable_retry.running_attempt.clone();
+        let failure_kind = running_attempt
+            .as_ref()
+            .map_or(classification.failure_kind, |attempt| attempt.failure_kind);
+        let failure_id = running_attempt.as_ref().map_or_else(
+            || {
+                stable_recoverable_failure_id(
+                    context.job.job_id,
+                    self.instance_id.as_str(),
+                    failure_kind,
+                )
+            },
+            |attempt| attempt.failure_id.clone(),
+        );
+        let failed_attempt = running_attempt
+            .as_ref()
+            .map_or(1, |attempt| attempt.attempt);
+
+        // 即使 retry policy 关闭,也保留 compact evidence,然后让原 failure 继续 terminal。
+        if !self.recoverable_retry.policy.enabled
+            || failed_attempt >= self.recoverable_retry.policy.max_attempts
+        {
+            let transition = self.recoverable_transition_for_result(
+                &context.job,
+                failure_id.clone(),
+                failure_kind,
+                RecoverableFailureStatus::Exhausted,
+                failed_attempt,
+                None,
+                None,
                 result,
-                events,
+                classification.stderr_excerpt.clone(),
+                context.source_event_ids.clone(),
+            );
+            self.append_and_publish_recoverable_transition(transition)
+                .await?;
+            self.append_recoverable_ledger_pointer(result, &failure_id);
+            self.clear_recoverable_runtime_after_terminal_result();
+            return Ok(false);
+        }
+
+        let retry_after_ms =
+            recoverable_retry_delay_ms(&self.recoverable_retry.policy, failed_attempt);
+        let due_at = Instant::now() + Duration::from_millis(retry_after_ms);
+        let next_retry_at = chrono::Utc::now()
+            + chrono::Duration::from_std(Duration::from_millis(retry_after_ms))
+                .unwrap_or_else(|_| chrono::Duration::milliseconds(i64::MAX));
+        let next_retry_at = next_retry_at.to_rfc3339();
+
+        let transition = self.recoverable_transition_for_result(
+            &context.job,
+            failure_id.clone(),
+            failure_kind,
+            RecoverableFailureStatus::RetryScheduled,
+            failed_attempt,
+            Some(retry_after_ms),
+            Some(next_retry_at.clone()),
+            result,
+            classification.stderr_excerpt.clone(),
+            context.source_event_ids.clone(),
+        );
+        self.append_and_publish_recoverable_transition(transition)
+            .await?;
+
+        // 当前 attempt 的 workspace 已经结束,必须先 release,再进入等待 retry 的空闲态。
+        self.release_running_worktree_after_job().await;
+
+        // 如果 coordinator 在 worker 暴露 recoverable failure 之前已经触发 completion freeze,
+        // retry lifecycle 必须优先于这次收敛候选继续推进,否则 scheduled retry 会被永久冻结。
+        self.completion_freeze_requested
+            .store(false, Ordering::SeqCst);
+        self.completion_freeze_applied = false;
+
+        self.recoverable_retry.scheduled = Some(ScheduledRecoverableRetry {
+            context,
+            failure_id,
+            failure_kind,
+            next_attempt: failed_attempt.saturating_add(1),
+            retry_after_ms,
+            due_at,
+        });
+        self.recoverable_retry.running_attempt = None;
+        self.set_state(HatInstanceState::Idle).await?;
+
+        Ok(true)
+    }
+
+    async fn finish_recoverable_success_if_needed(
+        &mut self,
+        result: &HatJobResult,
+    ) -> anyhow::Result<()> {
+        let Some(running_attempt) = self.recoverable_retry.running_attempt.clone() else {
+            self.recoverable_retry.running_context = None;
+            return Ok(());
+        };
+        let Some(context) = self.recoverable_retry.running_context.clone() else {
+            self.recoverable_retry.running_attempt = None;
+            return Ok(());
+        };
+
+        let transition = self.recoverable_transition_for_result(
+            &context.job,
+            running_attempt.failure_id.clone(),
+            running_attempt.failure_kind,
+            RecoverableFailureStatus::Recovered,
+            running_attempt.attempt,
+            None,
+            None,
+            result,
+            "recoverable retry succeeded".to_string(),
+            context.source_event_ids,
+        );
+        self.append_and_publish_recoverable_transition(transition)
+            .await?;
+        self.recoverable_retry.running_context = None;
+        self.recoverable_retry.running_attempt = None;
+        self.recoverable_retry.scheduled = None;
+        Ok(())
+    }
+
+    fn clear_recoverable_runtime_after_terminal_result(&mut self) {
+        self.recoverable_retry.running_context = None;
+        self.recoverable_retry.running_attempt = None;
+        self.recoverable_retry.scheduled = None;
+    }
+
+    fn append_recoverable_ledger_pointer(&self, result: &mut HatJobResult, failure_id: &str) {
+        if !result.observed_stderr.ends_with('\n') && !result.observed_stderr.is_empty() {
+            result.observed_stderr.push('\n');
+        }
+        result.observed_stderr.push_str(&format!(
+            "recoverable_failure_id: {failure_id}\nrecoverable_failure_ledger: {}\n",
+            self.recoverable_retry.ledger.path().display()
+        ));
+    }
+
+    fn recoverable_transition_for_result(
+        &self,
+        job: &HatJob,
+        failure_id: String,
+        failure_kind: RecoverableFailureKind,
+        status: RecoverableFailureStatus,
+        attempt: u32,
+        retry_after_ms: Option<u64>,
+        next_retry_at: Option<String>,
+        result: &HatJobResult,
+        stderr_excerpt: String,
+        source_event_ids: Vec<String>,
+    ) -> RecoverableFailureTransition {
+        self.recoverable_transition(
+            job,
+            failure_id,
+            failure_kind,
+            status,
+            attempt,
+            retry_after_ms,
+            next_retry_at,
+            result.exit_code,
+            result.timed_out,
+            result.canceled,
+            stderr_excerpt,
+            source_event_ids,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recoverable_transition(
+        &self,
+        job: &HatJob,
+        failure_id: String,
+        failure_kind: RecoverableFailureKind,
+        status: RecoverableFailureStatus,
+        attempt: u32,
+        retry_after_ms: Option<u64>,
+        next_retry_at: Option<String>,
+        exit_code: Option<i32>,
+        timed_out: bool,
+        canceled: bool,
+        stderr_excerpt: String,
+        source_event_ids: Vec<String>,
+    ) -> RecoverableFailureTransition {
+        RecoverableFailureTransition {
+            schema_version: RECOVERABLE_FAILURE_LEDGER_SCHEMA_VERSION,
+            failure_id,
+            job_id: job.job_id,
+            instance_id: self.instance_id.to_string(),
+            hat_id: self.hat.id.to_string(),
+            backend_kind: Self::backend_kind(&job.backend),
+            failure_kind,
+            status,
+            attempt,
+            max_attempts: self.recoverable_retry.policy.max_attempts,
+            retry_after_ms,
+            next_retry_at,
+            exit_code,
+            timed_out,
+            canceled,
+            stderr_excerpt,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            source_event_ids,
+        }
+    }
+
+    fn backend_kind(backend: &JobBackend) -> String {
+        match backend {
+            JobBackend::Default => "default".to_string(),
+            JobBackend::Hat(config) => config.to_cli_backend(),
+        }
+    }
+
+    async fn append_and_publish_recoverable_transition(
+        &mut self,
+        transition: RecoverableFailureTransition,
+    ) -> anyhow::Result<()> {
+        self.recoverable_retry
+            .ledger
+            .append_transition(&transition)
+            .with_context(|| {
+                format!(
+                    "Failed to append recoverable failure transition to {}",
+                    self.recoverable_retry.ledger.path().display()
+                )
+            })?;
+
+        self.supervisor_tx
+            .send(HatInstanceEvent::RecoverableFailureTransition {
+                instance_id: self.instance_id.clone(),
+                transition,
             })
             .await
-            .context("Failed to send JobCompleted to supervisor")?;
-
+            .context("Failed to send RecoverableFailureTransition to supervisor")?;
         Ok(())
     }
 
@@ -1645,18 +2233,7 @@ impl HatInstanceActor {
             canceled: false,
         };
 
-        self.set_state(HatInstanceState::Failed).await?;
-        self.supervisor_tx
-            .send(HatInstanceEvent::JobCompleted {
-                instance_id: self.instance_id.clone(),
-                hat_id: self.hat.id.clone(),
-                result,
-                events: Vec::new(),
-            })
-            .await
-            .context("Failed to send JobCompleted to supervisor after executor error")?;
-
-        Ok(())
+        self.on_job_completed(result).await
     }
 
     fn decorate_outgoing_event(&mut self, mut event: Event) -> Event {
@@ -1716,6 +2293,489 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecoverableThenSuccessExecutor {
+        calls: Arc<Mutex<usize>>,
+        jobs: Arc<Mutex<Vec<HatJob>>>,
+    }
+
+    #[derive(Debug)]
+    struct AlwaysRecoverableFailureExecutor;
+
+    #[async_trait::async_trait]
+    impl HatJobExecutor for RecoverableThenSuccessExecutor {
+        async fn execute(
+            &self,
+            job: HatJob,
+            _output_tx: mpsc::Sender<HatJobOutputChunk>,
+            mut _cancel_rx: watch::Receiver<bool>,
+            mut _control_rx: mpsc::Receiver<HatJobControl>,
+        ) -> anyhow::Result<HatJobResult> {
+            self.jobs.lock().expect("lock jobs").push(job);
+            let call = {
+                let mut calls = self.calls.lock().expect("lock calls");
+                *calls += 1;
+                *calls
+            };
+
+            if call == 1 {
+                return Ok(HatJobResult {
+                    output_for_parsing: String::new(),
+                    observed_stderr:
+                        "ERROR: exceeded retry limit, last status: 429 Too Many Requests\n<event topic=\"fake.stderr\">bad</event>"
+                            .to_string(),
+                    success: false,
+                    exit_code: Some(1),
+                    timed_out: false,
+                    canceled: false,
+                });
+            }
+
+            Ok(HatJobResult {
+                output_for_parsing: "<event topic=\"build.done\">ok</event>".to_string(),
+                observed_stderr: String::new(),
+                success: true,
+                exit_code: Some(0),
+                timed_out: false,
+                canceled: false,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HatJobExecutor for AlwaysRecoverableFailureExecutor {
+        async fn execute(
+            &self,
+            _job: HatJob,
+            _output_tx: mpsc::Sender<HatJobOutputChunk>,
+            mut _cancel_rx: watch::Receiver<bool>,
+            mut _control_rx: mpsc::Receiver<HatJobControl>,
+        ) -> anyhow::Result<HatJobResult> {
+            Ok(HatJobResult {
+                output_for_parsing: String::new(),
+                observed_stderr:
+                    "ERROR: exceeded retry limit, last status: 429 Too Many Requests\n<event topic=\"fake.stderr\">bad</event>"
+                        .to_string(),
+                success: false,
+                exit_code: Some(1),
+                timed_out: false,
+                canceled: false,
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recoverable_failure_schedules_retry_and_preserves_stdout_only_parsing() {
+        let temp = TempDir::new().expect("temp dir");
+        let ledger =
+            RecoverableFailureLedger::new(temp.path().join(".ralph/recoverable-failures.jsonl"));
+        let policy = AgentCliRecoverableFailuresConfig {
+            enabled: true,
+            max_attempts: 3,
+            initial_delay_ms: 10,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 100,
+        };
+
+        let (output_tx, _output_rx) = mpsc::channel(8);
+        let (supervisor_tx, mut supervisor_rx) = mpsc::channel(32);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let calls = Arc::new(Mutex::new(0usize));
+        let jobs = Arc::new(Mutex::new(Vec::<HatJob>::new()));
+        let handle = HatInstanceHandle::spawn(
+            HatInstanceId::new("writer#1"),
+            Hat::new("writer", "Writer").subscribe("build.task"),
+            None::<HatConfig>,
+            WorkspaceRuntimeConfig::default(),
+            PermissionsConfig::default(),
+            60,
+            None,
+            None,
+            String::new(),
+            None,
+            instruction_builder,
+            Arc::new(RecoverableThenSuccessExecutor {
+                calls: Arc::clone(&calls),
+                jobs: Arc::clone(&jobs),
+            }),
+            output_tx,
+            supervisor_tx,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(CommandQueue::new()),
+            policy,
+            ledger.clone(),
+            false,
+            Duration::from_secs(30),
+        );
+
+        handle
+            .cmd_tx
+            .send(HatInstanceCommand::Deliver(Box::new(
+                Event::new("build.task", "do work").with_id("evt-1"),
+            )))
+            .await
+            .expect("deliver event");
+
+        let mut saw_retry_scheduled = false;
+        let mut saw_retrying = false;
+        let mut saw_recovered = false;
+        let mut success_events = Vec::new();
+
+        for _ in 0..20 {
+            while let Ok(message) = supervisor_rx.try_recv() {
+                match message {
+                    HatInstanceEvent::RecoverableFailureTransition { transition, .. } => {
+                        match transition.status {
+                            RecoverableFailureStatus::RetryScheduled => {
+                                saw_retry_scheduled = true;
+                                assert_eq!(transition.attempt, 1);
+                                assert_eq!(transition.retry_after_ms, Some(10));
+                                assert!(
+                                    transition.stderr_excerpt.contains("429 Too Many Requests")
+                                );
+                            }
+                            RecoverableFailureStatus::Retrying => {
+                                saw_retrying = true;
+                                assert_eq!(transition.attempt, 2);
+                            }
+                            RecoverableFailureStatus::Recovered => {
+                                saw_recovered = true;
+                                assert_eq!(transition.attempt, 2);
+                            }
+                            _ => {}
+                        }
+                    }
+                    HatInstanceEvent::JobCompleted { result, events, .. } => {
+                        assert!(result.success, "only retry success should complete the job");
+                        success_events = events;
+                    }
+                    _ => {}
+                }
+            }
+
+            if saw_retry_scheduled && !saw_retrying {
+                tokio::time::advance(Duration::from_millis(250)).await;
+            }
+            if saw_retry_scheduled && saw_retrying && saw_recovered && !success_events.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(saw_retry_scheduled, "first failure should schedule retry");
+        assert!(saw_retrying, "scheduled retry should enter retrying state");
+        assert!(saw_recovered, "successful retry should close lifecycle");
+        assert_eq!(success_events.len(), 1);
+        assert_eq!(success_events[0].topic.as_str(), "build.done");
+
+        let captured_jobs = jobs.lock().expect("lock jobs").clone();
+        assert_eq!(captured_jobs.len(), 2, "expected original + retry job");
+        assert_eq!(
+            captured_jobs[0].prompt, captured_jobs[1].prompt,
+            "retry must reuse runtime-held job context instead of reconstructing from ledger"
+        );
+
+        let transitions = ledger.read_transitions().expect("read ledger");
+        let statuses = transitions
+            .iter()
+            .map(|transition| transition.status)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            vec![
+                RecoverableFailureStatus::RetryScheduled,
+                RecoverableFailureStatus::Retrying,
+                RecoverableFailureStatus::Recovered,
+            ]
+        );
+        assert!(
+            transitions
+                .iter()
+                .all(|transition| transition.source_event_ids == vec!["evt-1".to_string()])
+        );
+
+        handle
+            .cmd_tx
+            .send(HatInstanceCommand::Shutdown)
+            .await
+            .expect("shutdown actor");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_continue_appends_transition_and_uses_scheduled_retry_path() {
+        let temp = TempDir::new().expect("temp dir");
+        let ledger =
+            RecoverableFailureLedger::new(temp.path().join(".ralph/recoverable-failures.jsonl"));
+        let policy = AgentCliRecoverableFailuresConfig {
+            enabled: true,
+            max_attempts: 3,
+            // 设一个很长的自动 retry 延迟,确保本测试能证明是 manual continue 触发。
+            initial_delay_ms: 60_000,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 120_000,
+        };
+
+        let (output_tx, _output_rx) = mpsc::channel(8);
+        let (supervisor_tx, mut supervisor_rx) = mpsc::channel(32);
+
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let calls = Arc::new(Mutex::new(0usize));
+        let jobs = Arc::new(Mutex::new(Vec::<HatJob>::new()));
+        let handle = HatInstanceHandle::spawn(
+            HatInstanceId::new("writer#1"),
+            Hat::new("writer", "Writer").subscribe("build.task"),
+            None::<HatConfig>,
+            WorkspaceRuntimeConfig::default(),
+            PermissionsConfig::default(),
+            60,
+            None,
+            None,
+            String::new(),
+            None,
+            instruction_builder,
+            Arc::new(RecoverableThenSuccessExecutor {
+                calls: Arc::clone(&calls),
+                jobs: Arc::clone(&jobs),
+            }),
+            output_tx,
+            supervisor_tx,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(CommandQueue::new()),
+            policy,
+            ledger.clone(),
+            false,
+            Duration::from_secs(30),
+        );
+
+        handle
+            .cmd_tx
+            .send(HatInstanceCommand::Deliver(Box::new(
+                Event::new("build.task", "do work").with_id("evt-1"),
+            )))
+            .await
+            .expect("deliver event");
+
+        let mut scheduled_failure_id = None;
+        for _ in 0..20 {
+            while let Ok(message) = supervisor_rx.try_recv() {
+                if let HatInstanceEvent::RecoverableFailureTransition { transition, .. } = message
+                    && transition.status == RecoverableFailureStatus::RetryScheduled
+                {
+                    assert_eq!(transition.retry_after_ms, Some(60_000));
+                    scheduled_failure_id = Some(transition.failure_id);
+                }
+            }
+            if scheduled_failure_id.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let failure_id =
+            scheduled_failure_id.expect("initial recoverable failure should be scheduled");
+        handle
+            .cmd_tx
+            .send(HatInstanceCommand::ContinueRecoverableFailure {
+                failure_id: failure_id.clone(),
+            })
+            .await
+            .expect("manual continue should enqueue");
+
+        let mut saw_continued_by_human = false;
+        let mut saw_retrying = false;
+        let mut saw_recovered = false;
+        let mut success_events = Vec::new();
+
+        for _ in 0..30 {
+            while let Ok(message) = supervisor_rx.try_recv() {
+                match message {
+                    HatInstanceEvent::RecoverableFailureTransition { transition, .. } => {
+                        match transition.status {
+                            RecoverableFailureStatus::ContinuedByHuman => {
+                                saw_continued_by_human = true;
+                                assert_eq!(transition.failure_id, failure_id);
+                                assert_eq!(transition.retry_after_ms, Some(0));
+                            }
+                            RecoverableFailureStatus::Retrying => {
+                                saw_retrying = true;
+                                assert_eq!(transition.failure_id, failure_id);
+                                assert_eq!(transition.attempt, 2);
+                            }
+                            RecoverableFailureStatus::Recovered => {
+                                saw_recovered = true;
+                                assert_eq!(transition.failure_id, failure_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                    HatInstanceEvent::JobCompleted { result, events, .. } => {
+                        assert!(result.success);
+                        success_events = events;
+                    }
+                    _ => {}
+                }
+            }
+
+            if saw_continued_by_human && saw_retrying && saw_recovered && !success_events.is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            saw_continued_by_human,
+            "manual continue must append auditable transition before retry"
+        );
+        assert!(
+            saw_retrying,
+            "manual continue should use scheduled retry path"
+        );
+        assert!(saw_recovered, "retry success should close lifecycle");
+        assert_eq!(success_events.len(), 1);
+        assert_eq!(success_events[0].topic.as_str(), "build.done");
+
+        let captured_jobs = jobs.lock().expect("lock jobs").clone();
+        assert_eq!(
+            captured_jobs.len(),
+            2,
+            "expected original + manual retry job"
+        );
+        assert_eq!(
+            captured_jobs[0].prompt, captured_jobs[1].prompt,
+            "manual retry must reuse runtime-held job context"
+        );
+
+        let transitions = ledger.read_transitions().expect("read ledger");
+        let statuses = transitions
+            .iter()
+            .map(|transition| transition.status)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            vec![
+                RecoverableFailureStatus::RetryScheduled,
+                RecoverableFailureStatus::ContinuedByHuman,
+                RecoverableFailureStatus::Retrying,
+                RecoverableFailureStatus::Recovered,
+            ]
+        );
+
+        handle
+            .cmd_tx
+            .send(HatInstanceCommand::Shutdown)
+            .await
+            .expect("shutdown actor");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recoverable_failure_exhaustion_becomes_terminal_with_ledger_pointer() {
+        let temp = TempDir::new().expect("temp dir");
+        let ledger =
+            RecoverableFailureLedger::new(temp.path().join(".ralph/recoverable-failures.jsonl"));
+        let policy = AgentCliRecoverableFailuresConfig {
+            enabled: true,
+            max_attempts: 1,
+            initial_delay_ms: 10,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 100,
+        };
+
+        let (output_tx, _output_rx) = mpsc::channel(8);
+        let (supervisor_tx, mut supervisor_rx) = mpsc::channel(32);
+        let instruction_builder = Arc::new(InstructionBuilder::with_events(
+            "LOOP_COMPLETE",
+            CoreConfig::default(),
+            HashMap::<String, EventMetadata>::new(),
+        ));
+
+        let handle = HatInstanceHandle::spawn(
+            HatInstanceId::new("writer#1"),
+            Hat::new("writer", "Writer").subscribe("build.task"),
+            None::<HatConfig>,
+            WorkspaceRuntimeConfig::default(),
+            PermissionsConfig::default(),
+            60,
+            None,
+            None,
+            String::new(),
+            None,
+            instruction_builder,
+            Arc::new(AlwaysRecoverableFailureExecutor),
+            output_tx,
+            supervisor_tx,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(CommandQueue::new()),
+            policy,
+            ledger.clone(),
+            false,
+            Duration::from_secs(30),
+        );
+
+        handle
+            .cmd_tx
+            .send(HatInstanceCommand::Deliver(Box::new(
+                Event::new("build.task", "do work").with_id("evt-1"),
+            )))
+            .await
+            .expect("deliver event");
+
+        let mut saw_exhausted = false;
+        let mut terminal_result = None;
+        for _ in 0..20 {
+            while let Ok(message) = supervisor_rx.try_recv() {
+                match message {
+                    HatInstanceEvent::RecoverableFailureTransition { transition, .. } => {
+                        if transition.status == RecoverableFailureStatus::Exhausted {
+                            saw_exhausted = true;
+                            assert_eq!(transition.attempt, 1);
+                        }
+                    }
+                    HatInstanceEvent::JobCompleted { result, events, .. } => {
+                        assert!(events.is_empty(), "stderr must not be parsed as events");
+                        terminal_result = Some(result);
+                    }
+                    _ => {}
+                }
+            }
+            if saw_exhausted && terminal_result.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(saw_exhausted, "max_attempts=1 should exhaust immediately");
+        let result = terminal_result.expect("terminal JobCompleted should be emitted");
+        assert!(!result.success);
+        assert!(result.observed_stderr.contains("recoverable_failure_id:"));
+        assert!(
+            result
+                .observed_stderr
+                .contains("recoverable_failure_ledger:")
+        );
+
+        let transitions = ledger.read_transitions().expect("read ledger");
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].status, RecoverableFailureStatus::Exhausted);
+
+        handle
+            .cmd_tx
+            .send(HatInstanceCommand::Shutdown)
+            .await
+            .expect("shutdown actor");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn dynamic_instance_reaped_after_idle_ttl() {
         let (output_tx, _output_rx) = mpsc::channel(8);
@@ -1744,6 +2804,13 @@ mod tests {
             supervisor_tx,
             Arc::new(Semaphore::new(1)),
             Arc::new(CommandQueue::new()),
+            AgentCliRecoverableFailuresConfig {
+                enabled: false,
+                ..AgentCliRecoverableFailuresConfig::default()
+            },
+            RecoverableFailureLedger::new(
+                std::env::temp_dir().join("ralph-recoverable-dynamic-reap-test.jsonl"),
+            ),
             true,
             Duration::from_secs(30),
         );
@@ -1826,6 +2893,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -1914,6 +2982,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -1983,6 +3052,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -2041,6 +3111,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -2132,6 +3203,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -2230,6 +3302,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -2272,9 +3345,10 @@ mod tests {
         let mut failed_result = None;
         while let Ok(event) = supervisor_rx.try_recv() {
             match event {
-                HatInstanceEvent::StateChanged { state, .. }
-                    if state == HatInstanceState::Failed =>
-                {
+                HatInstanceEvent::StateChanged {
+                    state: HatInstanceState::Failed,
+                    ..
+                } => {
                     saw_failed_state = true;
                 }
                 HatInstanceEvent::JobCompleted { result, events, .. } => {
@@ -2329,6 +3403,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -2407,6 +3482,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -2484,6 +3560,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
@@ -2562,6 +3639,7 @@ mod tests {
             supervisor_tx,
             job_semaphore: Arc::new(Semaphore::new(1)),
             command_queue: Arc::new(CommandQueue::new()),
+            recoverable_retry: RecoverableRetryRuntime::disabled_for_tests(),
             is_dynamic: false,
             dynamic_idle_ttl: Duration::from_secs(30),
             cmd_rx,
