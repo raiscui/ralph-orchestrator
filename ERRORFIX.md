@@ -226,3 +226,21 @@
   - `cargo test -p ralph-cli --test integration_examples --quiet`: 26 passed。
   - `cargo test --quiet`: passed。
 - staged forbidden context check 无输出,说明六文件上下文没有进入 fixture patch。
+
+## [2026-08-02 23:50:00] [Session ID: omx-1785579233065-awidzo] ERRORFIX: codex app-server 不接受 --profile 导致 ralph#1 启动失败
+
+### 现象
+- ralph-example 加 `-p deepseek` 后, ralph#1 状态 running → failed(零输出)
+- 手动 `codex app-server --profile deepseek` 报错: unexpected argument '--profile'
+
+### 原因
+- app_server.rs build_codex_app_server_process_args 把 profile 透传为 `--profile`
+- codex(0.146)的 app-server 子命令只支持 --listen/--config, 不支持 --profile
+
+### 修复
+- app_server.rs: 不再透传 --profile, 改为 warn(提示用 --config 表达等价语义)
+- 保留 parse 逻辑(未来 codex 支持时可恢复透传)
+
+### 验证
+- 修复后 ralph#1 恢复正常(idle/running 交替, app-server 通道工作)
+- demo 用 deepseek 模型仍无法稳定闭环(模型行为漂移: human.message 乱入/审计不完整) — 模型兼容性问题, 非本 bug

@@ -144,9 +144,16 @@ fn build_codex_app_server_process_args(options: &CodexAppServerOptions) -> Vec<S
         "stdio://".to_string(),
     ];
 
+    // 注意: `codex app-server`(截至 0.146)只支持 `--listen` 与 `--config`,
+    // 不接受 `--profile`。直接透传会导致 app-server 启动即失败:
+    //   error: unexpected argument '--profile' found
+    // profile 的等价语义(模型/provider 等)应通过 `--config key=value` 表达。
+    // 若未来 codex app-server 支持 --profile,可在此恢复透传。
     if let Some(profile) = &options.profile {
-        args.push("--profile".to_string());
-        args.push(profile.clone());
+        tracing::warn!(
+            profile = %profile,
+            "codex app-server does not support --profile (codex <= 0.146); profile ignored, use --config overrides instead"
+        );
     }
 
     // 让 app-server 进程本身也继承 `codex exec -c ...` 的配置覆写。
