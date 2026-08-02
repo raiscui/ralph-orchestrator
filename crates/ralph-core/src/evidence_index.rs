@@ -24,6 +24,7 @@ pub const EVIDENCE_INDEX_SCHEMA_VERSION: u32 = 1;
 pub enum EvidenceArtifactKind {
     RecordSessionJsonl,
     EventLogJsonl,
+    AgentsSnapshotJson,
     RuntimeDeliveryRecord,
     RuntimeLifecycleRecord,
     ReplyEvent,
@@ -66,6 +67,8 @@ pub struct EvidenceIndexEntry {
     pub parent_correlation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_correlation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_topic: Option<String>,
     pub created_at: String,
 }
 
@@ -89,6 +92,7 @@ impl EvidenceIndexEntry {
             status,
             parent_correlation_id: None,
             child_correlation_id: None,
+            result_topic: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         }
     }
@@ -107,6 +111,98 @@ impl EvidenceIndexEntry {
             producer,
             EvidenceStatus::Missing,
         )
+    }
+
+    /// 创建 dynamic role contract hash -> source artifact 的 correlation link。
+    ///
+    /// 说明:
+    /// - index 只保存 hash / request / instance 关联和 artifact path。
+    /// - 完整 role contract 与 record-session / agents snapshot 仍是源 artifact。
+    pub fn dynamic_role_contract(
+        role_contract_hash: impl Into<String>,
+        artifact_kind: EvidenceArtifactKind,
+        artifact_path: impl Into<String>,
+        producer: impl Into<String>,
+        spawn_request_id: impl Into<String>,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            role_contract_hash,
+            artifact_kind,
+            artifact_path,
+            producer,
+            EvidenceStatus::Success,
+        )
+        .with_parent_correlation_id(spawn_request_id)
+        .with_child_correlation_id(instance_id)
+    }
+
+    /// 创建 dynamic role result topic -> source artifact 的 correlation link。
+    ///
+    /// 说明:
+    /// - 这是 `dynamic_role_contract` 的带 topic 版本。
+    /// - `result_topic` 是轻量 correlation metadata,不是完整 result payload。
+    pub fn dynamic_role_result_topic(
+        role_contract_hash: impl Into<String>,
+        artifact_kind: EvidenceArtifactKind,
+        artifact_path: impl Into<String>,
+        producer: impl Into<String>,
+        spawn_request_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        result_topic: impl Into<String>,
+    ) -> Self {
+        Self::dynamic_role_contract(
+            role_contract_hash,
+            artifact_kind,
+            artifact_path,
+            producer,
+            spawn_request_id,
+            instance_id,
+        )
+        .with_result_topic(result_topic)
+    }
+
+    /// 创建 spawn request id -> spawned child instance 的 correlation link。
+    pub fn dynamic_spawn_request(
+        spawn_request_id: impl Into<String>,
+        artifact_kind: EvidenceArtifactKind,
+        artifact_path: impl Into<String>,
+        producer: impl Into<String>,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            spawn_request_id,
+            artifact_kind,
+            artifact_path,
+            producer,
+            EvidenceStatus::Success,
+        )
+        .with_child_correlation_id(instance_id)
+    }
+
+    /// 创建 dynamic result 缺失 marker。
+    ///
+    /// 说明:
+    /// - correlation_id 建议由调用方构造成稳定 marker id,例如
+    ///   `missing-result:{request_id}:{instance_id}:{topic}`。
+    /// - parent 绑定 spawn request id,child 绑定 role contract hash。
+    pub fn missing_dynamic_result(
+        marker_id: impl Into<String>,
+        artifact_path: impl Into<String>,
+        producer: impl Into<String>,
+        spawn_request_id: impl Into<String>,
+        role_contract_hash: impl Into<String>,
+        expected_result_topic: impl Into<String>,
+    ) -> Self {
+        Self::missing(
+            marker_id,
+            EvidenceArtifactKind::MissingArtifact,
+            artifact_path,
+            producer,
+        )
+        .with_parent_correlation_id(spawn_request_id)
+        .with_child_correlation_id(role_contract_hash)
+        .with_result_topic(expected_result_topic)
     }
 
     /// 绑定 session id。
@@ -130,6 +226,16 @@ impl EvidenceIndexEntry {
     /// 绑定 child correlation id。
     pub fn with_child_correlation_id(mut self, child: impl Into<String>) -> Self {
         self.child_correlation_id = Some(child.into());
+        self
+    }
+
+    /// 绑定 produced / expected result topic。
+    ///
+    /// 说明:
+    /// - 这里只保存 topic 名称,不保存 result payload。
+    /// - 原始事件仍在 record-session 或 event log 中。
+    pub fn with_result_topic(mut self, topic: impl Into<String>) -> Self {
+        self.result_topic = Some(topic.into());
         self
     }
 }
@@ -281,6 +387,10 @@ impl EvidenceIndexReader {
     }
 
     /// 按 correlation id 查找 entries。
+    ///
+    /// 说明:
+    /// - 会匹配主 correlation id,也会匹配 parent / child correlation id。
+    /// - 这样 request id 和 role contract hash 能查到挂在 lineage 上的 missing marker。
     pub fn find_by_correlation(
         &self,
         correlation_id: &str,
@@ -288,7 +398,12 @@ impl EvidenceIndexReader {
         let matched: Vec<EvidenceIndexEntry> = self
             .read_all()?
             .into_iter()
-            .filter(|entry| entry.correlation_id == correlation_id)
+            .filter(|entry| {
+                entry.correlation_id == correlation_id
+                    || entry.parent_correlation_id.as_deref() == Some(correlation_id)
+                    || entry.child_correlation_id.as_deref() == Some(correlation_id)
+                    || entry.result_topic.as_deref() == Some(correlation_id)
+            })
             .collect();
 
         if matched.is_empty() {
@@ -349,6 +464,7 @@ mod tests {
         assert!(json.get("created_at").is_some());
 
         let object = json.as_object().unwrap();
+        assert!(!object.contains_key("result_topic"));
         assert!(!object.contains_key("summary"));
         assert!(!object.contains_key("inspect"));
         assert!(!object.contains_key("doctor"));
@@ -564,6 +680,7 @@ mod tests {
         let kinds = [
             EvidenceArtifactKind::RecordSessionJsonl,
             EvidenceArtifactKind::EventLogJsonl,
+            EvidenceArtifactKind::AgentsSnapshotJson,
             EvidenceArtifactKind::RuntimeDeliveryRecord,
             EvidenceArtifactKind::RuntimeLifecycleRecord,
             EvidenceArtifactKind::ReplyEvent,
@@ -581,5 +698,179 @@ mod tests {
         assert!(!serialized.iter().any(|kind| kind.contains("rerun")));
         assert!(!serialized.iter().any(|kind| kind.contains("runtime_graph")));
         assert!(!serialized.iter().any(|kind| kind.contains("graph_layout")));
+    }
+
+    #[test]
+    fn dynamic_role_contract_hash_links_to_source_artifact_without_full_contract() {
+        let (_temp, path) = temp_index_path();
+        let mut writer = EvidenceIndexWriter::new(&path);
+
+        writer
+            .record(&EvidenceIndexEntry::dynamic_role_result_topic(
+                "erc-aaaabbbbccccdddd",
+                EvidenceArtifactKind::AgentsSnapshotJson,
+                ".ralph/agents.json",
+                "agents-snapshot",
+                "spawn-1",
+                "builder#2",
+                "analysis.done",
+            ))
+            .unwrap();
+
+        let lookup = EvidenceIndexReader::new(&path)
+            .find_by_correlation("erc-aaaabbbbccccdddd")
+            .unwrap();
+        let entries = lookup.entries();
+        assert!(matches!(lookup, EvidenceLookup::Entries(_)));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].artifact_kind,
+            EvidenceArtifactKind::AgentsSnapshotJson
+        );
+        assert_eq!(entries[0].artifact_path, ".ralph/agents.json");
+        assert_eq!(entries[0].parent_correlation_id.as_deref(), Some("spawn-1"));
+        assert_eq!(
+            entries[0].child_correlation_id.as_deref(),
+            Some("builder#2")
+        );
+        assert_eq!(entries[0].result_topic.as_deref(), Some("analysis.done"));
+
+        let json = serde_json::to_value(&entries[0]).unwrap();
+        let object = json.as_object().unwrap();
+        assert!(!object.contains_key("role_name"));
+        assert!(!object.contains_key("objective"));
+        assert!(!object.contains_key("full_role_contract"));
+    }
+
+    #[test]
+    fn spawn_request_lookup_lists_spawned_child_instances_and_missing_markers() {
+        let (_temp, path) = temp_index_path();
+        let mut writer = EvidenceIndexWriter::new(&path);
+
+        for instance_id in ["builder#2", "builder#3"] {
+            writer
+                .record(&EvidenceIndexEntry::dynamic_spawn_request(
+                    "spawn-1",
+                    EvidenceArtifactKind::EventLogJsonl,
+                    ".ralph/events.jsonl",
+                    "parallel.supervisor.topology_spawn",
+                    instance_id,
+                ))
+                .unwrap();
+        }
+        writer
+            .record(&EvidenceIndexEntry::missing_dynamic_result(
+                "missing-result:spawn-1:builder#4:analysis.done",
+                ".ralph/events.jsonl",
+                "record-summary.dynamic-result-coverage",
+                "spawn-1",
+                "erc-missing-role",
+                "analysis.done",
+            ))
+            .unwrap();
+
+        let lookup = EvidenceIndexReader::new(&path)
+            .find_by_correlation("spawn-1")
+            .unwrap();
+        let spawned_children = lookup
+            .entries()
+            .iter()
+            .filter(|entry| entry.status == EvidenceStatus::Success)
+            .filter_map(|entry| entry.child_correlation_id.as_deref())
+            .collect::<Vec<_>>();
+        let missing_markers = lookup
+            .entries()
+            .iter()
+            .filter(|entry| entry.status == EvidenceStatus::Missing)
+            .collect::<Vec<_>>();
+        assert!(matches!(lookup, EvidenceLookup::Missing(_)));
+        assert_eq!(spawned_children, vec!["builder#2", "builder#3"]);
+        assert_eq!(missing_markers.len(), 1);
+        assert_eq!(
+            missing_markers[0].correlation_id,
+            "missing-result:spawn-1:builder#4:analysis.done"
+        );
+        assert!(
+            lookup
+                .entries()
+                .iter()
+                .all(|entry| entry.artifact_path == ".ralph/events.jsonl"),
+            "display/summary format changes must not affect stored artifact paths"
+        );
+    }
+
+    #[test]
+    fn missing_dynamic_result_marker_is_distinct_from_no_entry() {
+        let (_temp, path) = temp_index_path();
+        let mut writer = EvidenceIndexWriter::new(&path);
+
+        writer
+            .record(&EvidenceIndexEntry::missing_dynamic_result(
+                "missing-result:spawn-1:builder#2:analysis.done",
+                ".ralph/events.jsonl",
+                "record-summary.dynamic-result-coverage",
+                "spawn-1",
+                "erc-aaaabbbbccccdddd",
+                "analysis.done",
+            ))
+            .unwrap();
+
+        let lookup = EvidenceIndexReader::new(&path)
+            .find_by_correlation("missing-result:spawn-1:builder#2:analysis.done")
+            .unwrap();
+        let entries = lookup.entries();
+        assert!(matches!(lookup, EvidenceLookup::Missing(_)));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, EvidenceStatus::Missing);
+        assert_eq!(
+            entries[0].artifact_kind,
+            EvidenceArtifactKind::MissingArtifact
+        );
+        assert_eq!(entries[0].parent_correlation_id.as_deref(), Some("spawn-1"));
+        assert_eq!(
+            entries[0].child_correlation_id.as_deref(),
+            Some("erc-aaaabbbbccccdddd")
+        );
+        assert_eq!(entries[0].result_topic.as_deref(), Some("analysis.done"));
+        assert!(matches!(
+            EvidenceIndexReader::new(&path)
+                .find_by_correlation("missing-result:not-written")
+                .unwrap(),
+            EvidenceLookup::NoEntry
+        ));
+    }
+
+    #[test]
+    fn terminal_failed_dynamic_result_is_distinct_from_missing_marker() {
+        let (_temp, path) = temp_index_path();
+        let mut writer = EvidenceIndexWriter::new(&path);
+
+        writer
+            .record(
+                &EvidenceIndexEntry::new(
+                    "failed-result:spawn-1:builder#2:analysis.done",
+                    EvidenceArtifactKind::EventLogJsonl,
+                    ".ralph/events.jsonl",
+                    "parallel.supervisor.topology_spawn",
+                    EvidenceStatus::Failure,
+                )
+                .with_parent_correlation_id("spawn-1")
+                .with_child_correlation_id("erc-failed-role")
+                .with_result_topic("analysis.done"),
+            )
+            .unwrap();
+
+        let lookup = EvidenceIndexReader::new(&path)
+            .find_by_correlation("failed-result:spawn-1:builder#2:analysis.done")
+            .unwrap();
+        let entries = lookup.entries();
+        assert!(matches!(lookup, EvidenceLookup::Entries(_)));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, EvidenceStatus::Failure);
+        assert_eq!(
+            entries[0].artifact_kind,
+            EvidenceArtifactKind::EventLogJsonl
+        );
+        assert_eq!(entries[0].result_topic.as_deref(), Some("analysis.done"));
     }
 }

@@ -3,7 +3,10 @@
 //! This module supports both v1.x flat configuration format and v2.0 nested format.
 //! Users can switch from Python v1.x to Rust v2.0 with zero config changes.
 
-use crate::{AgentCliRecoverableFailuresConfig, DEFAULT_RECOVERABLE_FAILURE_LEDGER_PATH};
+use crate::{
+    AgentCliRecoverableFailuresConfig, DEFAULT_RECOVERABLE_FAILURE_LEDGER_PATH,
+    is_reserved_hat_trigger,
+};
 pub use ralph_proto::WorkspaceStrategy;
 use ralph_proto::{Topic, TopicContract};
 use serde::{Deserialize, Serialize};
@@ -719,12 +722,16 @@ impl RalphConfig {
             }
         }
 
-        // Check for reserved triggers: task.start and task.resume are reserved for Ralph
-        // Per design: Ralph coordinates first, then delegates to custom hats via events
-        const RESERVED_TRIGGERS: &[&str] = &["task.start", "task.resume"];
+        // Check for reserved runtime/control triggers.
+        //
+        // Per design:
+        // - Ralph handles runtime entry/control topics first.
+        // - Ordinary hats should receive delegated workflow events, not runtime handshakes.
+        // - The classification lives in event_emission_protocol.rs so prompt/runtime/config
+        //   不能各维护一套不同列表。
         for (hat_id, hat_config) in &self.hats {
             for trigger in &hat_config.triggers {
-                if RESERVED_TRIGGERS.contains(&trigger.as_str()) {
+                if is_reserved_hat_trigger(trigger) {
                     return Err(ConfigError::ReservedTrigger {
                         trigger: trigger.clone(),
                         hat: hat_id.clone(),
@@ -964,6 +971,14 @@ pub struct CoreConfig {
     #[serde(default)]
     pub all_hat_prompt: AllHatPromptConfig,
 
+    /// 是否允许当前运行时注入 parent-visible runtime capability catalog / invoker。
+    ///
+    /// 说明:
+    /// - 默认开启,这样正常 parent run 可以看到 capability catalog。
+    /// - child capability execution 会显式关掉它,避免 prompt 递归注入同一套 capability。
+    #[serde(default = "default_runtime_capabilities_enabled")]
+    pub runtime_capabilities_enabled: bool,
+
     /// Root directory for workspace-relative paths (.agent/, memories, etc.).
     ///
     /// All relative paths (scratchpad, specs_dir, memories) are resolved relative
@@ -1006,6 +1021,10 @@ fn default_guardrails() -> Vec<String> {
     ]
 }
 
+fn default_runtime_capabilities_enabled() -> bool {
+    true
+}
+
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
@@ -1013,6 +1032,7 @@ impl Default for CoreConfig {
             specs_dir: default_specs_dir(),
             guardrails: default_guardrails(),
             all_hat_prompt: AllHatPromptConfig::default(),
+            runtime_capabilities_enabled: default_runtime_capabilities_enabled(),
             workspace_root: std::env::var("RALPH_WORKSPACE_ROOT")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| {
@@ -1100,6 +1120,101 @@ impl CoreConfig {
     }
 }
 
+/// Role-aware model reasoning effort.
+///
+/// 说明:
+/// - 这是 Ralph 的语义配置,不是某个具体 CLI 的原生命令行参数。
+/// - Codex backend 会把它映射成 `model_reasoning_effort`。
+/// - 其他 backend 若暂时没有等价概念,可以安全忽略这个字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh", alias = "x_high")]
+    XHigh,
+}
+
+impl ReasoningEffort {
+    /// Stable CLI/config spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn default_coordinator_reasoning_effort() -> ReasoningEffort {
+    ReasoningEffort::Medium
+}
+
+fn default_worker_reasoning_effort() -> ReasoningEffort {
+    ReasoningEffort::High
+}
+
+/// Default reasoning-effort policy split by runtime role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleReasoningEffortConfig {
+    /// Ralph/coordinator jobs should decide routing quickly, so default to medium.
+    #[serde(default = "default_coordinator_reasoning_effort")]
+    pub coordinator: ReasoningEffort,
+
+    /// Worker hats do concrete execution/review, so default to high.
+    #[serde(default = "default_worker_reasoning_effort")]
+    pub worker: ReasoningEffort,
+}
+
+impl Default for RoleReasoningEffortConfig {
+    fn default() -> Self {
+        Self {
+            coordinator: default_coordinator_reasoning_effort(),
+            worker: default_worker_reasoning_effort(),
+        }
+    }
+}
+
+/// Extra CLI arguments split by runtime role.
+///
+/// 说明:
+/// - 这是追加到 backend argv 的窄配置层,用于表达“coordinator 与 worker
+///   需要不同 CLI 参数”的运行策略。
+/// - 它不替代 `cli.args`: `cli.args` 仍是所有角色共享的基础参数。
+/// - 典型用法是只给 Ralph coordinator 添加 Codex config override,例如
+///   `["-c", "features.hooks=false"]`,而 worker 继续保持默认 hooks。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RoleArgsConfig {
+    /// Ralph/coordinator jobs receive these extra arguments.
+    #[serde(default)]
+    pub coordinator: Vec<String>,
+
+    /// Non-Ralph worker jobs receive these extra arguments.
+    #[serde(default)]
+    pub worker: Vec<String>,
+}
+
+impl RoleArgsConfig {
+    /// Returns the extra args for the given role label.
+    #[must_use]
+    pub fn args_for_role(&self, coordinator: bool) -> &[String] {
+        if coordinator {
+            &self.coordinator
+        } else {
+            &self.worker
+        }
+    }
+}
+
 /// CLI backend configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
@@ -1129,6 +1244,20 @@ pub struct CliConfig {
     /// These are inserted before the prompt argument.
     #[serde(default)]
     pub args: Vec<String>,
+
+    /// Role-aware reasoning effort defaults.
+    #[serde(default)]
+    pub reasoning_effort: RoleReasoningEffortConfig,
+
+    /// Role-aware extra CLI arguments.
+    ///
+    /// 说明:
+    /// - 追加顺序由 executor 控制: backend 基础 args / hat args / runtime custom args
+    ///   之后,reasoning defaults 之前。
+    /// - 这样 role_args 中显式写入的 config override 能继续被后续 defaults 识别为
+    ///   用户意图,避免重复注入。
+    #[serde(default)]
+    pub role_args: RoleArgsConfig,
 
     /// Custom prompt flag for arg mode (for backend: "custom").
     /// If None, defaults to "-p" for arg mode.
@@ -1161,6 +1290,8 @@ impl Default for CliConfig {
             default_mode: default_mode(),
             idle_timeout_secs: default_idle_timeout(),
             args: Vec::new(),
+            reasoning_effort: RoleReasoningEffortConfig::default(),
+            role_args: RoleArgsConfig::default(),
             prompt_flag: None,
         }
     }
@@ -1560,7 +1691,7 @@ pub enum ConfigError {
     CustomBackendRequiresCommand,
 
     #[error(
-        "Reserved trigger '{trigger}' used by hat '{hat}' - task.start and task.resume are reserved for Ralph (the coordinator). Use a delegated event like 'work.start' instead."
+        "Reserved trigger '{trigger}' used by hat '{hat}' - runtime/control topics are reserved for Ralph or runtime observers. Use a delegated workflow event like 'work.start' instead."
     )]
     ReservedTrigger { trigger: String, hat: String },
 
@@ -1595,6 +1726,153 @@ mod tests {
             2.0
         );
         assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 300_000);
+    }
+
+    #[test]
+    fn test_parse_agent_cli_recoverable_failures_policy_override() {
+        let yaml = r"
+agent_cli_recoverable_failures:
+  enabled: false
+  max_attempts: 5
+  initial_delay_ms: 1000
+  backoff_multiplier: 1.5
+  max_delay_ms: 60000
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(!config.agent_cli_recoverable_failures.enabled);
+        assert_eq!(config.agent_cli_recoverable_failures.max_attempts, 5);
+        assert_eq!(config.agent_cli_recoverable_failures.initial_delay_ms, 1000);
+        assert_eq!(
+            config.agent_cli_recoverable_failures.backoff_multiplier,
+            1.5
+        );
+        assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 60_000);
+        assert!(
+            config.validate().is_ok(),
+            "custom bounded recoverable policy should validate"
+        );
+    }
+
+    #[test]
+    fn test_agent_cli_recoverable_failures_partial_override_keeps_defaults() {
+        let yaml = r"
+agent_cli_recoverable_failures:
+  max_attempts: 4
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(config.agent_cli_recoverable_failures.enabled);
+        assert_eq!(config.agent_cli_recoverable_failures.max_attempts, 4);
+        assert_eq!(
+            config.agent_cli_recoverable_failures.initial_delay_ms,
+            30_000
+        );
+        assert_eq!(
+            config.agent_cli_recoverable_failures.backoff_multiplier,
+            2.0
+        );
+        assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 300_000);
+    }
+
+    #[test]
+    fn test_cli_reasoning_effort_defaults_are_role_aware() {
+        let config = RalphConfig::default();
+
+        assert_eq!(
+            config.cli.reasoning_effort.coordinator,
+            ReasoningEffort::Medium
+        );
+        assert_eq!(config.cli.reasoning_effort.worker, ReasoningEffort::High);
+    }
+
+    #[test]
+    fn test_parse_yaml_with_cli_reasoning_effort_overrides() {
+        let yaml = r"
+cli:
+  reasoning_effort:
+    coordinator: low
+    worker: xhigh
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(
+            config.cli.reasoning_effort.coordinator,
+            ReasoningEffort::Low
+        );
+        assert_eq!(config.cli.reasoning_effort.worker, ReasoningEffort::XHigh);
+    }
+
+    #[test]
+    fn test_parse_yaml_with_cli_reasoning_effort_partial_override() {
+        let yaml = r"
+cli:
+  reasoning_effort:
+    coordinator: high
+";
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(
+            config.cli.reasoning_effort.coordinator,
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            config.cli.reasoning_effort.worker,
+            ReasoningEffort::High,
+            "未显式设置 worker 时应继续使用 high 默认值"
+        );
+    }
+
+    #[test]
+    fn test_cli_role_args_default_to_empty() {
+        let config = RalphConfig::default();
+
+        assert!(config.cli.role_args.coordinator.is_empty());
+        assert!(config.cli.role_args.worker.is_empty());
+    }
+
+    #[test]
+    fn test_parse_yaml_with_cli_role_args_overrides() {
+        let yaml = r#"
+cli:
+  role_args:
+    coordinator:
+      - "-c"
+      - "features.hooks=false"
+    worker:
+      - "--worker-flag"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(
+            config.cli.role_args.coordinator,
+            vec!["-c".to_string(), "features.hooks=false".to_string()]
+        );
+        assert_eq!(
+            config.cli.role_args.worker,
+            vec!["--worker-flag".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_with_cli_role_args_partial_override() {
+        let yaml = r#"
+cli:
+  role_args:
+    coordinator:
+      - "-c"
+      - "features.hooks=false"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(
+            config.cli.role_args.coordinator,
+            vec!["-c".to_string(), "features.hooks=false".to_string()]
+        );
+        assert!(
+            config.cli.role_args.worker.is_empty(),
+            "未显式设置 worker 时不应给 worker 追加任何 role args"
+        );
     }
 
     #[test]
@@ -1839,7 +2117,7 @@ adapters:
 
         let claude = config.adapter_settings("claude");
         assert_eq!(claude.timeout, 600);
-        assert_eq!(claude.context_window_tokens, Some(200000));
+        assert_eq!(claude.context_window_tokens, Some(200_000));
         assert!(claude.enabled);
 
         let gemini = config.adapter_settings("gemini");
@@ -2008,6 +2286,41 @@ hats:
     }
 
     #[test]
+    fn test_reserved_runtime_control_triggers_rejected_from_runtime_protocol_ssot() {
+        for trigger in [
+            "topology.spawn_group",
+            "topology.spawn.result",
+            "capability.request",
+            "capability.result",
+            "runtime.delivery",
+            "gate.request",
+            "human.message",
+            "reply.human.message",
+        ] {
+            let yaml = format!(
+                r#"
+hats:
+  my_hat:
+    name: "My Hat"
+    description: "Test hat"
+    triggers: ["{trigger}"]
+"#
+            );
+            let config: RalphConfig = serde_yaml::from_str(&yaml).unwrap();
+            let result = config.validate();
+
+            assert!(result.is_err(), "{trigger} should be rejected");
+            let err = result.unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::ReservedTrigger { trigger: got, hat }
+                    if got == trigger && hat == "my_hat"),
+                "Expected ReservedTrigger error for '{trigger}', got: {:?}",
+                err
+            );
+        }
+    }
+
+    #[test]
     fn test_missing_description_rejected() {
         // Description is required for all hats
         let yaml = r#"
@@ -2095,13 +2408,13 @@ core:
 
     #[test]
     fn test_parse_yaml_with_inline_all_hat_prompt_override() {
-        let yaml = r#"
+        let yaml = r"
 core:
   all_hat_prompt:
     mode: inline
     text: |
       lightweight overlay
-"#;
+";
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
             config.core.all_hat_prompt,
@@ -2189,53 +2502,6 @@ core:
                 "/tmp/ralph-scoped-experience/.ralph/recoverable-failures.jsonl"
             )
         );
-    }
-
-    #[test]
-    fn test_parse_agent_cli_recoverable_failures_policy_override() {
-        let yaml = r"
-agent_cli_recoverable_failures:
-  enabled: false
-  max_attempts: 5
-  initial_delay_ms: 1000
-  backoff_multiplier: 1.5
-  max_delay_ms: 60000
-";
-        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-
-        assert!(!config.agent_cli_recoverable_failures.enabled);
-        assert_eq!(config.agent_cli_recoverable_failures.max_attempts, 5);
-        assert_eq!(config.agent_cli_recoverable_failures.initial_delay_ms, 1000);
-        assert_eq!(
-            config.agent_cli_recoverable_failures.backoff_multiplier,
-            1.5
-        );
-        assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 60_000);
-        assert!(
-            config.validate().is_ok(),
-            "custom bounded recoverable policy should validate"
-        );
-    }
-
-    #[test]
-    fn test_agent_cli_recoverable_failures_partial_override_keeps_defaults() {
-        let yaml = r"
-agent_cli_recoverable_failures:
-  max_attempts: 4
-";
-        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
-
-        assert!(config.agent_cli_recoverable_failures.enabled);
-        assert_eq!(config.agent_cli_recoverable_failures.max_attempts, 4);
-        assert_eq!(
-            config.agent_cli_recoverable_failures.initial_delay_ms,
-            30_000
-        );
-        assert_eq!(
-            config.agent_cli_recoverable_failures.backoff_multiplier,
-            2.0
-        );
-        assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 300_000);
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod gate;
 mod routing;
 #[cfg(test)]
 mod routing_tests;
+mod topology_runtime;
 
 use super::{
     CommandQueue, HatInstanceCommand, HatInstanceEvent, HatInstanceHandle, HatJobExecutor,
@@ -24,16 +25,23 @@ use crate::hat_registry::HatRegistry;
 use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
 use crate::{
-    AgentInstanceSnapshot, AgentLastInput, AgentRecoverableFailureSummary, AgentsSnapshot,
-    CapabilityMetadata, EventParser, EventReader as FileEventReader, RecoverableFailureLedger,
-    RecoverableFailureSnapshot, RecoverableFailureStatus, RecoverableFailureTransition,
-    RuntimeCapabilityInvoker, TerminationReason, render_parent_capability_catalog,
+    AgentChildRunSnapshot, AgentCompletedDynamicInstanceSnapshot, AgentInstanceSnapshot,
+    AgentLastInput, AgentRecoverableFailureSummary, AgentsSnapshot, CapabilityMetadata,
+    EffectiveRoleContract, EventParser, EventReader as FileEventReader, IdentitySource,
+    RecoverableFailureLedger, RecoverableFailureSnapshot, RecoverableFailureStatus,
+    RecoverableFailureTransition, RuntimeCapabilityInvoker, TerminationReason,
+    render_parent_capability_catalog,
 };
 use anyhow::Context;
 use ralph_proto::{
     Event, Hat, HatId, HatInstanceId, HatInstanceState, RuntimeDeliveryKind, RuntimeDeliveryRecord,
     RuntimeLifecycleKind, RuntimeLifecycleRecord, SessionStrategy, TurnAction, WorkspaceStrategy,
 };
+
+const TOPIC_COORDINATOR_NO_EVENT_FIRST_TURN: &str = "coordinator.no_event_first_turn";
+const DYNAMIC_INSTANCE_RETIREMENT_REASON_DONE: &str = "dynamic_instance_unregistered_after_done";
+pub(super) const DYNAMIC_INSTANCE_RETIREMENT_REASON_DELIVERY_FAILED_AFTER_SPAWN: &str =
+    "delivery_failed_after_spawn";
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +67,12 @@ pub struct RuntimeDeliveryObservation {
     pub source_instance: Option<HatInstanceId>,
     pub recipient: HatInstanceId,
     pub mode: RuntimeDeliveryMode,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct FixedRoleMetadata {
+    pub label: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +106,13 @@ pub struct ParallelSupervisor {
     // - 只有在 ralph-cli 显式启用时才会落盘,避免测试/库用法污染工作区。
     agents_snapshot_path: Option<std::path::PathBuf>,
     agents_last_inputs: HashMap<HatInstanceId, AgentLastInput>,
+    fixed_role_metadata: HashMap<HatInstanceId, FixedRoleMetadata>,
+    effective_role_contracts: HashMap<HatInstanceId, EffectiveRoleContract>,
+    completed_dynamic_instances: HashMap<HatInstanceId, AgentCompletedDynamicInstanceSnapshot>,
+    child_runs: HashMap<String, AgentChildRunSnapshot>,
+    child_run_order: Vec<String>,
     recoverable_failures: HashMap<String, RecoverableFailureSnapshot>,
+    first_coordinator_turn_checked: bool,
 
     // 路由批次内的“乐观运行态”：
     // - 在同一个 job 输出里可能一次解析出多条事件。
@@ -132,6 +152,7 @@ pub struct ParallelSupervisor {
     runtime_capability_catalog: Vec<CapabilityMetadata>,
     handled_capability_request_ids: HashSet<String>,
     runtime_capability_invoker: Option<Arc<dyn RuntimeCapabilityInvoker>>,
+    handled_topology_spawn_request_ids: HashSet<String>,
 
     // Supervisor 自己生成的任务序号（用于 decider job 的稳定命名）
     next_decision_job_id: u64,
@@ -208,7 +229,13 @@ impl ParallelSupervisor {
             rr_cursor_by_topic: HashMap::new(),
             agents_snapshot_path: None,
             agents_last_inputs: HashMap::new(),
+            fixed_role_metadata: HashMap::new(),
+            effective_role_contracts: HashMap::new(),
+            completed_dynamic_instances: HashMap::new(),
+            child_runs: HashMap::new(),
+            child_run_order: Vec::new(),
             recoverable_failures: HashMap::new(),
+            first_coordinator_turn_checked: false,
             routing_batch_depth: 0,
             routing_inflight_instances: HashSet::new(),
             dynamic_instances: HashSet::new(),
@@ -223,6 +250,7 @@ impl ParallelSupervisor {
             runtime_capability_catalog: Vec::new(),
             handled_capability_request_ids: HashSet::new(),
             runtime_capability_invoker: None,
+            handled_topology_spawn_request_ids: HashSet::new(),
             next_decision_job_id: 1,
             pause_on_completion_promise: false,
             disable_dynamic_instance_reap: false,
@@ -293,6 +321,7 @@ impl ParallelSupervisor {
         topics.push("reply.human.message".to_string());
         topics.push("reply.hat.message".to_string());
         topics.push(crate::TOPIC_CAPABILITY_REQUEST.to_string());
+        topics.push(crate::TOPIC_TOPOLOGY_SPAWN_GROUP.to_string());
 
         if let Some(starting_event) = self.config.event_loop.starting_event.as_deref() {
             topics.push(starting_event.to_string());
@@ -442,7 +471,7 @@ impl ParallelSupervisor {
         // 最大 drain 窗口要比 tick/min 大很多：
         // - 真实后端（尤其是 Codex）在冷启动/高负载时，单次 job 可能轻松超过 10-20s
         // - 如果窗口太短，会导致“ralph 提前输出 completion -> 下游 job 还没来得及产出事件就被 cancel”
-        let completion_drain_max = Duration::from_secs(60);
+        let completion_drain_max = Duration::from_mins(1);
         let mut completion_promise_seen_at: Option<std::time::Instant> = None;
 
         // completion lock（并行 TUI 暂停态）：
@@ -566,7 +595,17 @@ impl ParallelSupervisor {
                             }
                             self.write_agents_snapshot_best_effort();
                         }
-                        HatInstanceEvent::JobCompleted { job_id: _, instance_id, hat_id, result, events } => {
+                        HatInstanceEvent::JobCompleted { job_id, instance_id, hat_id, result, mut events } => {
+                            if let Some(default_event) = self.default_publish_event_for_empty_job(
+                                job_id,
+                                &instance_id,
+                                &hat_id,
+                                &result,
+                                &events,
+                            ) {
+                                events.push(default_event);
+                            }
+
                             // 记录：把解析到的事件写入 debug events.jsonl（方便排查）
                             // 注意：这里先用 iteration=0（并行模式下“迭代”语义后续再收敛）。
                             for event in &events {
@@ -581,6 +620,14 @@ impl ParallelSupervisor {
                                 let triggered = self.registry.find_by_trigger(event.topic.as_str());
                                 let _ = self.event_logger.log_event(0, "capability", event, triggered);
                             }
+
+                            self.maybe_log_coordinator_no_event_first_turn(
+                                &instance_id,
+                                job_id,
+                                &result,
+                                &events,
+                            );
+
                             let routable_events = if hat_id.as_str() == "ralph" {
                                 events
                                     .into_iter()
@@ -647,6 +694,9 @@ impl ParallelSupervisor {
                                 if !capability_return_events.is_empty() {
                                     self.route_events_batch(capability_return_events).await?;
                                 }
+                            } else if completion_promise {
+                                self.observe_completion_batch_without_spawning(routable_events)
+                                    .await?;
                             }
 
                             // 迭代上限：以 ralph#1 的 job 完成次数为准（见上方说明）。
@@ -1088,6 +1138,18 @@ impl ParallelSupervisor {
         self.log_runtime_lifecycle_record(record);
     }
 
+    fn log_runtime_lifecycle_state_with_reason(
+        &mut self,
+        instance_id: &HatInstanceId,
+        state: HatInstanceState,
+        reason: &str,
+    ) {
+        let record = RuntimeLifecycleRecord::new(instance_id.clone(), RuntimeLifecycleKind::State)
+            .with_state(state)
+            .with_reason(reason.to_string());
+        self.log_runtime_lifecycle_record(record);
+    }
+
     fn log_runtime_lifecycle_control(
         &mut self,
         instance_id: &HatInstanceId,
@@ -1168,7 +1230,7 @@ impl ParallelSupervisor {
 
         if let Some(catalog) = render_parent_capability_catalog(&self.runtime_capability_catalog) {
             out.push_str(&catalog);
-            out.push_str("\n");
+            out.push('\n');
         }
 
         // =====================================================================
@@ -1198,7 +1260,7 @@ impl ParallelSupervisor {
         out.push_str(&event_emission_protocol::render_event_emission_protocol(
             coordinator_topics.iter().map(String::as_str),
         ));
-        out.push_str("\n");
+        out.push('\n');
         out.push_str("## OUT-OF-BAND EVENT INJECTION\n");
         out.push_str("- If you can execute shell/tool commands, you MAY run `ralph emit` for out-of-band event injection.\n");
         out.push_str("- If you choose out-of-band `ralph emit`, you MUST actually execute the command. Do NOT print the command as plain text.\n");
@@ -1304,6 +1366,22 @@ impl ParallelSupervisor {
             );
         }
 
+        out.push_str("### If you receive `topology.spawn.result`\n");
+        out.push_str("- Treat it as an acknowledgement that the requested parent-visible instances were spawned.\n");
+        out.push_str("- Spawned instances already received direct delivery through the `delivery_topic` in the spawn request.\n");
+        out.push_str("- Do NOT re-emit the delivery topic.\n");
+        out.push_str(
+            "- Do NOT use `audience_instances` as a replay mechanism for the original task.\n",
+        );
+        out.push_str("- Wait for the spawned workers' publish topics/results before doing more coordination.\n");
+        out.push_str("- If `failed` is non-empty, handle or report only those failed members; do not fake missing instances.\n\n");
+
+        out.push_str("### If you receive `topology.spawn.failed`\n");
+        out.push_str("- Treat it as a failed topology mutation request.\n");
+        out.push_str("- Do NOT pretend the requested instances exist.\n");
+        out.push_str("- Do NOT re-emit the original delivery topic as a fallback.\n");
+        out.push_str("- Emit a corrective event or `reply.human.message` with the failure reason, then stop.\n\n");
+
         out.push_str("### If you receive any other event\n");
         out.push_str("- Treat it as an orphan (no subscribers) or an explicitly targeted control-plane event.\n");
         out.push_str("- Decide which hat should handle it next and emit ONE event to delegate.\n");
@@ -1330,10 +1408,81 @@ impl ParallelSupervisor {
         Ok(())
     }
 
+    async fn observe_completion_batch_without_spawning(
+        &mut self,
+        events: Vec<Event>,
+    ) -> anyhow::Result<()> {
+        // =====================================================================
+        // completion 同批输出的 observer-only drain：
+        // - CLI/CI 模式下,`LOOP_COMPLETE` 之后必须继续禁止派生新 job。
+        // - 但同一 stdout batch 里的最终人类回复属于观测/展示证据,必须进入
+        //   event_observer,否则 record-session / Result Topics 会丢最终答案。
+        // - 因此这里只把 route_event 已经定义为“不会投递给 hat”的输出型 topic
+        //   放行到 observer,其它 workflow topic 仍然丢弃,保持 completion lockdown。
+        // =====================================================================
+        for event in events {
+            if Self::is_completion_observer_only_event(&event) {
+                self.route_event(event).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_completion_observer_only_event(event: &Event) -> bool {
+        event.topic.as_str() == "reply.human.message"
+            || (event.topic.as_str() == "human.message"
+                && (event.source.is_some() || event.source_instance.is_some()))
+    }
+
     fn unregister_dynamic_instance(&mut self, instance_id: &HatInstanceId) {
+        self.unregister_dynamic_instance_with_reason(
+            instance_id,
+            DYNAMIC_INSTANCE_RETIREMENT_REASON_DONE,
+        );
+    }
+
+    fn mark_dynamic_instance_failed_and_unregister(
+        &mut self,
+        instance_id: &HatInstanceId,
+        retirement_reason: &str,
+    ) {
+        self.instance_states
+            .insert(instance_id.clone(), HatInstanceState::Failed);
+        self.notify_instance_state_observer(instance_id, HatInstanceState::Failed);
+        self.log_runtime_lifecycle_state_with_reason(
+            instance_id,
+            HatInstanceState::Failed,
+            retirement_reason,
+        );
+        self.unregister_dynamic_instance_with_reason(instance_id, retirement_reason);
+    }
+
+    fn unregister_dynamic_instance_with_reason(
+        &mut self,
+        instance_id: &HatInstanceId,
+        retirement_reason: &str,
+    ) {
+        if self.dynamic_instances.contains(instance_id) {
+            let final_state = self
+                .instance_states
+                .get(instance_id)
+                .copied()
+                .unwrap_or(HatInstanceState::Done);
+            let completed = self.build_completed_dynamic_instance_snapshot(
+                instance_id,
+                final_state,
+                retirement_reason,
+            );
+            self.completed_dynamic_instances
+                .insert(instance_id.clone(), completed);
+        }
+
         self.instances.remove(instance_id);
         self.dynamic_instances.remove(instance_id);
         self.agents_last_inputs.remove(instance_id);
+        self.fixed_role_metadata.remove(instance_id);
+        self.effective_role_contracts.remove(instance_id);
 
         // 从 hat -> instances 索引里移除，避免后续路由继续选中该实例。
         if let Some(hat_id_str) = instance_id.split_hat_id() {
@@ -1353,11 +1502,6 @@ impl ParallelSupervisor {
     // - 因此所有写盘都采用 best-effort：失败只 warn,不让 Supervisor 退出。
 
     fn record_agents_last_input(&mut self, instance_id: &HatInstanceId, event: &Event) {
-        // 未启用快照时,不做任何额外工作.
-        if self.agents_snapshot_path.is_none() {
-            return;
-        }
-
         let topic = event.topic.to_string();
 
         // 预览策略：
@@ -1365,8 +1509,7 @@ impl ParallelSupervisor {
         // - 只截断到固定长度,避免把大块 prompt 落盘
         let collapsed = event
             .payload
-            .replace('\r', " ")
-            .replace('\n', " ")
+            .replace(['\r', '\n'], " ")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
@@ -1382,41 +1525,88 @@ impl ParallelSupervisor {
         );
     }
 
-    fn build_agents_snapshot(&self) -> AgentsSnapshot {
-        let mut instance_ids: Vec<HatInstanceId> = self.instances.keys().cloned().collect();
-        instance_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-
-        let instances = instance_ids
-            .into_iter()
-            .map(|instance_id| {
-                let hat_id = instance_id
-                    .split_hat_id()
-                    .unwrap_or("<unknown>")
-                    .to_string();
-                let state = self
-                    .instance_states
-                    .get(&instance_id)
-                    .copied()
-                    .unwrap_or(HatInstanceState::Created);
-                let is_dynamic = self.dynamic_instances.contains(&instance_id);
-                let last_input = self.agents_last_inputs.get(&instance_id).cloned();
-                let recoverable_failures = self.recoverable_summaries_for_instance(&instance_id);
-
-                AgentInstanceSnapshot {
-                    instance_id: instance_id.to_string(),
-                    hat_id,
-                    state,
-                    is_dynamic,
-                    last_input,
-                    recoverable_failures,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        AgentsSnapshot {
-            generated_at: chrono::Utc::now().to_rfc3339(),
-            instances,
+    fn default_publish_event_for_empty_job(
+        &self,
+        job_id: u64,
+        instance_id: &HatInstanceId,
+        hat_id: &HatId,
+        result: &crate::parallel::HatJobResult,
+        events: &[Event],
+    ) -> Option<Event> {
+        // ------------------------------------------------------------------
+        // parallel 模式补齐 serial path 已有的 `default_publishes` 语义:
+        // - 仅当 job 成功完成且没有任何结构化事件时才注入。
+        // - 失败、超时、取消不伪装成业务成功,避免掩盖真实故障。
+        // - payload 保留诊断信息,让 coordinator 能看出这是 fallback,不是 worker
+        //   主动产出的完整业务结果。
+        // ------------------------------------------------------------------
+        if !events.is_empty() || !result.success {
+            return None;
         }
+
+        let default_topic = self
+            .registry
+            .get_config(hat_id)
+            .and_then(|config| config.default_publishes.as_deref())
+            .map(str::trim)
+            .filter(|topic| !topic.is_empty())?;
+
+        let payload = serde_json::json!({
+            "reason": "default_publishes",
+            "message": "hat completed successfully without structured events; parallel supervisor injected default_publishes",
+            "hat_id": hat_id.to_string(),
+            "instance_id": instance_id.to_string(),
+            "job_id": job_id,
+        });
+
+        Some(
+            Event::new(default_topic, payload.to_string())
+                .with_id(format!("default-publishes-{instance_id}-{job_id}"))
+                .with_source(hat_id.clone())
+                .with_source_instance(instance_id.clone()),
+        )
+    }
+
+    fn maybe_log_coordinator_no_event_first_turn(
+        &mut self,
+        instance_id: &HatInstanceId,
+        job_id: u64,
+        result: &crate::parallel::HatJobResult,
+        events: &[Event],
+    ) {
+        if self.first_coordinator_turn_checked || instance_id.as_str() != "ralph#1" {
+            return;
+        }
+
+        self.first_coordinator_turn_checked = true;
+
+        if !events.is_empty() {
+            return;
+        }
+
+        let input_topic = self
+            .agents_last_inputs
+            .get(instance_id)
+            .map(|last_input| last_input.topic.clone());
+        let input_topic_missing = input_topic.is_none();
+
+        let payload = serde_json::json!({
+            "event_id": format!("coordinator-no-event-first-turn-{instance_id}-{job_id}"),
+            "instance_id": instance_id.to_string(),
+            "job_id": job_id,
+            "input_topic": input_topic,
+            "input_topic_missing": input_topic_missing,
+            "output_len": result.output_for_parsing.len(),
+            "parsed_event_count": events.len(),
+            "reason": "no_structured_event_first_turn",
+        });
+
+        let event = Event::new(TOPIC_COORDINATOR_NO_EVENT_FIRST_TURN, payload.to_string()).with_id(
+            format!("coordinator-no-event-first-turn-{instance_id}-{job_id}"),
+        );
+        let _ = self
+            .event_logger
+            .log_event(0, "supervisor", &event, Some(&HatId::new("ralph")));
     }
 
     fn record_recoverable_failure_transition(
@@ -1602,6 +1792,44 @@ impl ParallelSupervisor {
         )
     }
 
+    fn build_agent_instance_snapshot(
+        &self,
+        instance_id: &HatInstanceId,
+        state: HatInstanceState,
+        is_dynamic: bool,
+    ) -> AgentInstanceSnapshot {
+        let hat_id = instance_id
+            .split_hat_id()
+            .unwrap_or("<unknown>")
+            .to_string();
+        let role_contract = self.effective_role_contracts.get(instance_id);
+        let identity_source = role_contract
+            .map(|contract| contract.contract.identity_source)
+            .unwrap_or_else(|| {
+                if is_dynamic {
+                    IdentitySource::RuntimeAutoscale
+                } else {
+                    IdentitySource::ConfigDerived
+                }
+            });
+        let last_input = self.agents_last_inputs.get(instance_id).cloned();
+        let fixed_role = self.fixed_role_metadata.get(instance_id);
+        let recoverable_failures = self.recoverable_summaries_for_instance(instance_id);
+
+        AgentInstanceSnapshot {
+            instance_id: instance_id.to_string(),
+            hat_id,
+            state,
+            is_dynamic,
+            identity_source,
+            fixed_role_label: fixed_role.map(|role| role.label.clone()),
+            fixed_role_reason: fixed_role.and_then(|role| role.reason.clone()),
+            role_contract_summary: role_contract.map(EffectiveRoleContract::summary),
+            last_input,
+            recoverable_failures,
+        }
+    }
+
     fn recoverable_summaries_for_instance(
         &self,
         instance_id: &HatInstanceId,
@@ -1637,6 +1865,67 @@ impl ParallelSupervisor {
 
         summaries.sort_by(|a, b| a.failure_id.cmp(&b.failure_id));
         summaries
+    }
+
+    fn build_completed_dynamic_instance_snapshot(
+        &self,
+        instance_id: &HatInstanceId,
+        final_state: HatInstanceState,
+        retirement_reason: &str,
+    ) -> AgentCompletedDynamicInstanceSnapshot {
+        let current = self.build_agent_instance_snapshot(instance_id, final_state, true);
+
+        AgentCompletedDynamicInstanceSnapshot {
+            instance_id: current.instance_id,
+            hat_id: current.hat_id,
+            final_state: current.state,
+            identity_source: current.identity_source,
+            fixed_role_label: current.fixed_role_label,
+            fixed_role_reason: current.fixed_role_reason,
+            role_contract_summary: current.role_contract_summary,
+            last_input: current.last_input,
+            completed_at: chrono::Utc::now().to_rfc3339(),
+            retirement_reason: retirement_reason.to_string(),
+        }
+    }
+
+    fn build_agents_snapshot(&self) -> AgentsSnapshot {
+        let mut instance_ids: Vec<HatInstanceId> = self.instances.keys().cloned().collect();
+        instance_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        let instances = instance_ids
+            .into_iter()
+            .map(|instance_id| {
+                let state = self
+                    .instance_states
+                    .get(&instance_id)
+                    .copied()
+                    .unwrap_or(HatInstanceState::Created);
+                let is_dynamic = self.dynamic_instances.contains(&instance_id);
+                self.build_agent_instance_snapshot(&instance_id, state, is_dynamic)
+            })
+            .collect::<Vec<_>>();
+
+        let mut completed_instance_ids: Vec<HatInstanceId> =
+            self.completed_dynamic_instances.keys().cloned().collect();
+        completed_instance_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let completed_dynamic_instances = completed_instance_ids
+            .into_iter()
+            .filter_map(|instance_id| self.completed_dynamic_instances.get(&instance_id).cloned())
+            .collect::<Vec<_>>();
+
+        let child_runs = self
+            .child_run_order
+            .iter()
+            .filter_map(|request_id| self.child_runs.get(request_id).cloned())
+            .collect::<Vec<_>>();
+
+        AgentsSnapshot {
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            instances,
+            completed_dynamic_instances,
+            child_runs,
+        }
     }
 
     fn write_agents_snapshot_best_effort(&self) {
@@ -1783,10 +2072,12 @@ impl ParallelSupervisor {
                                     self.unregister_dynamic_instance(&instance_id);
                                 }
                             }
+                            HatInstanceEvent::RecoverableFailureTransition { instance_id, transition } => {
+                                self.record_recoverable_failure_transition(&instance_id, transition);
+                            }
                             // 收尾阶段只关心状态收敛。JobCompleted/Published 等事件不再继续路由，
                             // 避免“已决定退出却又被新事件拉起”。
                             HatInstanceEvent::JobCompleted { .. } | HatInstanceEvent::Published { .. } => {}
-                            HatInstanceEvent::RecoverableFailureTransition { .. } => {}
                         },
                         None => instance_closed = true,
                     }

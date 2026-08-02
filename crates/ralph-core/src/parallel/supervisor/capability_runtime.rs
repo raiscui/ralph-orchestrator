@@ -7,8 +7,9 @@
 
 use super::ParallelSupervisor;
 use crate::{
-    CapabilityFailureClass, CapabilityParentFailedRecord, CapabilityRequestRecord,
-    TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_REQUEST,
+    AgentChildRunSnapshot, AgentChildRunStatus, CapabilityFailureClass,
+    CapabilityParentFailedRecord, CapabilityParentResultRecord, CapabilityRequestRecord,
+    TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_REQUEST, TOPIC_CAPABILITY_RESULT,
 };
 use ralph_proto::{Event, HatId, HatInstanceId};
 
@@ -68,7 +69,19 @@ impl ParallelSupervisor {
                 continue;
             }
 
+            self.mark_child_run_running(&request);
+            self.write_agents_snapshot_best_effort();
+
             let Some(invoker) = self.runtime_capability_invoker.clone() else {
+                self.mark_child_run_failed(
+                    &request.request_id,
+                    &request.capability_id,
+                    None,
+                    "runtime capability invoker is not configured".to_string(),
+                    None,
+                );
+                self.write_agents_snapshot_best_effort();
+
                 let mut failed_event = parent_failed_event(
                     Some(event),
                     CapabilityParentFailedRecord {
@@ -95,15 +108,17 @@ impl ParallelSupervisor {
                     CapabilityParentFailedRecord {
                         status: "failed".to_string(),
                         failure_class: CapabilityFailureClass::Other,
-                        request_id: Some(request_for_failure.request_id),
+                        request_id: Some(request_for_failure.request_id.clone()),
                         invocation_id: None,
-                        capability_id: Some(request_for_failure.capability_id),
+                        capability_id: Some(request_for_failure.capability_id.clone()),
                         error: format!("{error:#}"),
                         artifacts: None,
                         parent_topology_unchanged: true,
                     },
                 )?,
             };
+            self.update_child_run_from_capability_event(&result_event, &request_for_failure);
+            self.write_agents_snapshot_best_effort();
 
             result_event = result_event
                 .with_reply(event.id.clone().unwrap_or_default())
@@ -113,6 +128,104 @@ impl ParallelSupervisor {
         }
 
         Ok(return_events)
+    }
+
+    fn mark_child_run_running(&mut self, request: &CapabilityRequestRecord) {
+        self.upsert_child_run_snapshot(AgentChildRunSnapshot {
+            request_id: request.request_id.clone(),
+            invocation_id: None,
+            capability_id: request.capability_id.clone(),
+            status: AgentChildRunStatus::Running,
+            summary: None,
+            artifact: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
+    fn mark_child_run_failed(
+        &mut self,
+        request_id: &str,
+        capability_id: &str,
+        invocation_id: Option<String>,
+        summary: String,
+        artifact: Option<String>,
+    ) {
+        self.upsert_child_run_snapshot(AgentChildRunSnapshot {
+            request_id: request_id.to_string(),
+            invocation_id,
+            capability_id: capability_id.to_string(),
+            status: AgentChildRunStatus::Failed,
+            summary: Some(summary),
+            artifact,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
+    fn update_child_run_from_capability_event(
+        &mut self,
+        event: &Event,
+        fallback_request: &CapabilityRequestRecord,
+    ) {
+        match event.topic.as_str() {
+            TOPIC_CAPABILITY_RESULT => {
+                let Ok(result) =
+                    serde_json::from_str::<CapabilityParentResultRecord>(&event.payload)
+                else {
+                    return;
+                };
+                self.upsert_child_run_snapshot(AgentChildRunSnapshot {
+                    request_id: result.request_id,
+                    invocation_id: Some(result.invocation_id),
+                    capability_id: result.capability_id,
+                    status: AgentChildRunStatus::Done,
+                    summary: Some(result.result_summary),
+                    artifact: result
+                        .artifacts
+                        .result_json
+                        .or(Some(result.artifacts.invoke_json)),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                });
+            }
+            TOPIC_CAPABILITY_FAILED => {
+                let Ok(failed) =
+                    serde_json::from_str::<CapabilityParentFailedRecord>(&event.payload)
+                else {
+                    return;
+                };
+                let artifact = failed
+                    .artifacts
+                    .as_ref()
+                    .and_then(|artifacts| artifacts.failed_json.clone())
+                    .or_else(|| {
+                        failed
+                            .artifacts
+                            .as_ref()
+                            .map(|artifacts| artifacts.invoke_json.clone())
+                    });
+                self.upsert_child_run_snapshot(AgentChildRunSnapshot {
+                    request_id: failed
+                        .request_id
+                        .unwrap_or_else(|| fallback_request.request_id.clone()),
+                    invocation_id: failed.invocation_id,
+                    capability_id: failed
+                        .capability_id
+                        .unwrap_or_else(|| fallback_request.capability_id.clone()),
+                    status: AgentChildRunStatus::Failed,
+                    summary: Some(failed.error),
+                    artifact,
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn upsert_child_run_snapshot(&mut self, snapshot: AgentChildRunSnapshot) {
+        if !self.child_runs.contains_key(&snapshot.request_id) {
+            self.child_run_order.push(snapshot.request_id.clone());
+        }
+        self.child_runs
+            .insert(snapshot.request_id.clone(), snapshot);
     }
 }
 
@@ -249,6 +362,16 @@ mod tests {
                 .map(HatInstanceId::as_str),
             Some("ralph#1")
         );
+
+        let snapshot = supervisor.build_agents_snapshot();
+        assert_eq!(snapshot.child_runs.len(), 1);
+        assert_eq!(snapshot.child_runs[0].request_id, "cap-req-1");
+        assert_eq!(
+            snapshot.child_runs[0].invocation_id.as_deref(),
+            Some("cap-test-1")
+        );
+        assert_eq!(snapshot.child_runs[0].status, AgentChildRunStatus::Done);
+        assert_eq!(snapshot.child_runs[0].summary.as_deref(), Some("ok"));
     }
 
     #[tokio::test]
@@ -295,5 +418,36 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(returned.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_invoker_marks_child_run_failed_in_agents_snapshot() {
+        let mut supervisor = ParallelSupervisor::new(
+            RalphConfig::default(),
+            "prompt".to_string(),
+            Arc::new(NoopExecutor),
+        )
+        .expect("supervisor");
+        let events = vec![request_event("event-1", "cap-req-no-invoker")];
+
+        let returned = supervisor
+            .handle_parent_capability_requests(&HatId::new("ralph"), &events)
+            .await
+            .unwrap();
+
+        assert_eq!(returned.len(), 1);
+        assert_eq!(returned[0].topic.as_str(), TOPIC_CAPABILITY_FAILED);
+
+        let snapshot = supervisor.build_agents_snapshot();
+        assert_eq!(snapshot.child_runs.len(), 1);
+        assert_eq!(snapshot.child_runs[0].request_id, "cap-req-no-invoker");
+        assert_eq!(snapshot.child_runs[0].capability_id, "hat:focused-reviewer");
+        assert_eq!(snapshot.child_runs[0].status, AgentChildRunStatus::Failed);
+        assert!(
+            snapshot.child_runs[0]
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("invoker is not configured"))
+        );
     }
 }

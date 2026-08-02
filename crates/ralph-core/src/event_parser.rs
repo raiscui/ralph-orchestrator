@@ -558,6 +558,27 @@ Some trailing text.
     }
 
     #[test]
+    fn test_parse_reply_human_message_with_multiline_payload() {
+        let output = r#"<event topic="reply.human.message" reply="done-1">
+第一行: 总结。
+第二行: 证据。
+</event>
+LOOP_COMPLETE
+"#;
+        let parser = EventParser::new();
+        let events = parser.parse(output);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].topic.as_str(), "reply.human.message");
+        assert_eq!(events[0].reply.as_deref(), Some("done-1"));
+        assert_eq!(events[0].payload, "第一行: 总结。\n第二行: 证据。");
+        assert!(
+            EventParser::contains_promise(output, "LOOP_COMPLETE"),
+            "completion promise should still be detected outside the multi-line event"
+        );
+    }
+
+    #[test]
     fn test_parse_event_with_escaped_close_tag() {
         let output = r#"<event topic="integration.task">{"run_id":"e2e"}<\/event>"#;
         let parser = EventParser::new();
@@ -794,7 +815,7 @@ LOOP_COMPLETE
 
     #[test]
     fn test_promise_in_event_tags_does_not_match_eventual() {
-        let output = r#"<eventual>LOOP_COMPLETE</eventual>"#;
+        let output = r"<eventual>LOOP_COMPLETE</eventual>";
         assert!(!EventParser::promise_in_event_tags(output, "LOOP_COMPLETE"));
         assert!(!EventParser::contains_promise(output, "LOOP_COMPLETE"));
     }
@@ -907,3 +928,4 @@ LOOP_COMPLETE
         assert!(evidence.lint_passed);
     }
 }
+

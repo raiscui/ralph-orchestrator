@@ -4,7 +4,10 @@
 //! The observer pattern allows hooking into the event bus without modifying routing.
 
 use crate::TOPIC_CAPABILITY_INVOKE;
-use crate::{TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_REQUEST, TOPIC_CAPABILITY_RESULT};
+use crate::{
+    TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_REQUEST, TOPIC_CAPABILITY_RESULT,
+    TOPIC_TOPOLOGY_SPAWN_FAILED, TOPIC_TOPOLOGY_SPAWN_GROUP, TOPIC_TOPOLOGY_SPAWN_RESULT,
+};
 use ralph_proto::{
     Event, HatId, QueueDecisionRecord, RuntimeDeliveryRecord, RuntimeLifecycleRecord,
     TOPIC_DISPATCH_DECISION, TOPIC_RUNTIME_DELIVERY, TOPIC_RUNTIME_LIFECYCLE,
@@ -129,6 +132,9 @@ impl EventRecord {
                 | TOPIC_CAPABILITY_REQUEST
                 | TOPIC_CAPABILITY_RESULT
                 | TOPIC_CAPABILITY_FAILED
+                | TOPIC_TOPOLOGY_SPAWN_GROUP
+                | TOPIC_TOPOLOGY_SPAWN_RESULT
+                | TOPIC_TOPOLOGY_SPAWN_FAILED
         )
     }
 

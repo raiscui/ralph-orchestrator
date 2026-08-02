@@ -355,7 +355,6 @@ fn drain_lane_locked(state: &mut LaneState) {
             }
             Err(_dropped) => {
                 // waiter 已被取消(Receiver drop),直接忽略并继续 drain.
-                continue;
             }
         }
     }

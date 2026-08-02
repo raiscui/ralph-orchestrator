@@ -495,7 +495,7 @@ impl WorkspaceManager {
         }
 
         // Sort by timestamp (newest first)
-        workspaces.sort_by(|a, b| b.1.cmp(&a.1));
+        workspaces.sort_by_key(|(_, timestamp)| std::cmp::Reverse(*timestamp));
 
         // Delete workspaces beyond keep_last_n
         for (path, _) in workspaces.into_iter().skip(keep_last_n) {
@@ -537,7 +537,7 @@ impl WorkspaceManager {
         }
 
         // Sort by timestamp (newest first)
-        workspaces.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.timestamp));
 
         Ok(workspaces)
     }
