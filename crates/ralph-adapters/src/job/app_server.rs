@@ -9,9 +9,11 @@
 //!   - 只解析 stdout(事件解析 stdout-only)。
 //!   - stderr 仅用于可观测输出/诊断(灰色),并可被 cassette 录制,但绝不参与事件解析。
 
-use crate::display::colors;
+use ralph_display::colors;
 use anyhow::{Context, Result};
-use ralph_adapters::{CliBackend, scrub_codex_parent_session_env_tokio};
+use crate::{
+    CliBackend, scrub_codex_parent_session_env_tokio, scrub_ralph_parent_worker_env_tokio,
+};
 use ralph_core::{
     HatJob, HatJobControl, HatJobOutputChunk, HatJobResult, OutputStream, clean_activity_label,
     normalize_activity_label,
@@ -202,6 +204,7 @@ impl CodexAppServerSession {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         command.kill_on_drop(true);
+        scrub_ralph_parent_worker_env_tokio(&mut command);
         scrub_codex_parent_session_env_tokio(&mut command, codex_command);
 
         let mut child = command
@@ -1102,9 +1105,10 @@ impl CodexAppServerRuntime {
 
             let check_interval = job.timeout.filter(|d| !d.is_zero());
             let mut next_check_deadline = check_interval.map(|d| tokio::time::Instant::now() + d);
-            let sleep = tokio::time::sleep_until(next_check_deadline.unwrap_or_else(|| {
-                tokio::time::Instant::now() + Duration::from_secs(365 * 24 * 60 * 60)
-            }));
+            let sleep = tokio::time::sleep_until(
+                next_check_deadline
+                    .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_hours(8760)),
+            );
             tokio::pin!(sleep);
 
             loop {
@@ -1639,7 +1643,7 @@ impl CodexAppServerRuntime {
                 success: completed && !canceled && !timed_out,
                 exit_code: completed
                     .then_some(0)
-                    .or(Some(1).filter(|_| !canceled && !timed_out && !completed)),
+                    .or((!canceled && !timed_out && !completed).then_some(1)),
                 timed_out,
                 canceled,
             };
@@ -1722,19 +1726,19 @@ mod tests {
                 "exec".to_string(),
                 "--full-auto".to_string(),
                 "--model".to_string(),
-                "gpt-5.2-codex".to_string(),
+                "gpt-5.5".to_string(),
                 "--config".to_string(),
                 "model_reasoning_effort=\"low\"".to_string(),
             ],
-            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_mode: crate::PromptMode::Arg,
             prompt_flag: None,
-            output_format: ralph_adapters::OutputFormat::Text,
+            output_format: crate::OutputFormat::Text,
         };
 
         let opts = parse_codex_app_server_options(&backend, None);
         assert_eq!(opts.sandbox.as_deref(), Some("workspace-write"));
         assert_eq!(opts.approval_policy.as_deref(), Some("on-request"));
-        assert_eq!(opts.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(opts.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(
             opts.config_overrides,
             vec!["model_reasoning_effort=\"low\"".to_string()]
@@ -1924,9 +1928,9 @@ if __name__ == "__main__":
         let backend = CliBackend {
             command: "codex".to_string(),
             args: vec![],
-            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_mode: crate::PromptMode::Arg,
             prompt_flag: None,
-            output_format: ralph_adapters::OutputFormat::Text,
+            output_format: crate::OutputFormat::Text,
         };
 
         // output_tx: 丢弃 receiver,避免 channel backpressure 影响测试(我们只关心 timed_out 语义)。
@@ -2055,9 +2059,9 @@ if __name__ == "__main__":
         let backend = CliBackend {
             command: "codex".to_string(),
             args: vec![],
-            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_mode: crate::PromptMode::Arg,
             prompt_flag: None,
-            output_format: ralph_adapters::OutputFormat::Text,
+            output_format: crate::OutputFormat::Text,
         };
 
         let (output_tx, mut output_rx) = mpsc::channel::<HatJobOutputChunk>(128);
@@ -2207,9 +2211,9 @@ if __name__ == "__main__":
         let backend = CliBackend {
             command: "codex".to_string(),
             args: vec![],
-            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_mode: crate::PromptMode::Arg,
             prompt_flag: None,
-            output_format: ralph_adapters::OutputFormat::Text,
+            output_format: crate::OutputFormat::Text,
         };
 
         let (output_tx, mut output_rx) = mpsc::channel::<HatJobOutputChunk>(128);
@@ -2368,9 +2372,9 @@ if __name__ == "__main__":
         let backend = CliBackend {
             command: "codex".to_string(),
             args: vec![],
-            prompt_mode: ralph_adapters::PromptMode::Arg,
+            prompt_mode: crate::PromptMode::Arg,
             prompt_flag: None,
-            output_format: ralph_adapters::OutputFormat::Text,
+            output_format: crate::OutputFormat::Text,
         };
 
         let make_job = |job_id: u64, prompt: &str, continuation_prompt: &str| HatJob {

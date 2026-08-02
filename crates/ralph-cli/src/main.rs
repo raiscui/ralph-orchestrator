@@ -15,8 +15,6 @@
 mod answer;
 mod autopilot;
 mod capability;
-mod codex_app_server_session;
-mod codex_mcp_session;
 mod display;
 mod doctor;
 mod hats;
@@ -464,7 +462,7 @@ struct RunArgs {
     /// Custom backend command and arguments (use after --)
     ///
     /// 示例：
-    /// - `ralph run -b codex -- --model gpt-5.1-codex-max`
+    /// - `ralph run -b codex -- --model gpt-5.5`
     /// - `ralph run -b claude -- --no-cache`
     #[arg(last = true)]
     custom_args: Vec<String>,
@@ -998,17 +996,17 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Run(args)) => {
-            run_command(
+            Box::pin(run_command(
                 cli.config,
                 config_was_explicit,
                 cli.verbose,
                 cli.color,
                 args,
-            )
+            ))
             .await
         }
         Some(Commands::Resume(args)) => {
-            resume_command(cli.config, cli.verbose, cli.color, args).await
+            Box::pin(resume_command(cli.config, cli.verbose, cli.color, args)).await
         }
         Some(Commands::Events(args)) => events_command(cli.color, args),
         Some(Commands::Agents(args)) => agents_command(cli.color, args),
@@ -1053,7 +1051,7 @@ async fn main() -> Result<()> {
                 show_stderr: true,
                 instance: Vec::new(),
             };
-            run_command(cli.config, false, cli.verbose, cli.color, args).await
+            Box::pin(run_command(cli.config, false, cli.verbose, cli.color, args)).await
         }
     }
 }
@@ -1081,11 +1079,13 @@ async fn run_command(
                 RalphConfig::from_file(&path)
                     .with_context(|| format!("Failed to load config from {:?}", path))?
             } else if startup_resources::should_bootstrap_missing_default_config(
-                &path,
-                config_was_explicit,
-                args.prompt_text.is_some(),
-                args.prompt_file.is_some(),
-                args.continue_mode,
+                startup_resources::MissingDefaultConfigBootstrapInput {
+                    config_path: &path,
+                    config_was_explicit,
+                    has_cli_prompt_text: args.prompt_text.is_some(),
+                    has_cli_prompt_file: args.prompt_file.is_some(),
+                    resume: args.continue_mode,
+                },
             ) {
                 let resolution = startup_resources::resolve_default_bootstrap()
                     .context("Failed to resolve startup resources")?;
@@ -1252,11 +1252,7 @@ async fn run_command(
 
         // Show prompt source
         if let Some(ref inline) = config.event_loop.prompt {
-            let preview = if inline.len() > 60 {
-                format!("{}...", &inline[..60].replace('\n', " "))
-            } else {
-                inline.replace('\n', " ")
-            };
+            let preview = display::preview_one_line(inline, 60);
             println!("  Prompt: inline text ({})", preview);
         } else {
             println!("  Prompt file: {}", config.event_loop.prompt_file);
@@ -1296,7 +1292,7 @@ async fn run_command(
     }
 
     let reason = if config.parallel.enabled {
-        parallel_runner::run_parallel_loop_impl(
+        Box::pin(parallel_runner::run_parallel_loop_impl(
             config,
             color_mode,
             parallel_runner::ParallelLoopFlags {
@@ -1312,7 +1308,7 @@ async fn run_command(
             args.record_session,
             args.instance.clone(),
             custom_args.clone(),
-        )
+        ))
         .await?
     } else {
         loop_runner::run_loop_impl(
@@ -1445,7 +1441,7 @@ async fn resume_command(
         anyhow::bail!("`--runtime-graph-rrd` requires `parallel.enabled=true` in config.");
     }
     let reason = if config.parallel.enabled {
-        parallel_runner::run_parallel_loop_impl(
+        Box::pin(parallel_runner::run_parallel_loop_impl(
             config,
             color_mode,
             parallel_runner::ParallelLoopFlags {
@@ -1461,7 +1457,7 @@ async fn resume_command(
             args.record_session,
             args.instance.clone(),
             Vec::new(), // resume 不支持 `-- <custom args>`
-        )
+        ))
         .await?
     } else {
         loop_runner::run_loop_impl(
@@ -2013,17 +2009,7 @@ fn agents_command(color_mode: ColorMode, args: AgentsArgs) -> Result<()> {
                 );
             }
 
-            if !path.exists() {
-                if use_colors {
-                    println!(
-                        "{}No agents snapshot found yet.{} Waiting for `.ralph/agents.json`...",
-                        colors::DIM,
-                        colors::RESET
-                    );
-                } else {
-                    println!("No agents snapshot found yet. Waiting for `.ralph/agents.json`...");
-                }
-            } else {
+            if path.exists() {
                 match fs::read_to_string(&path) {
                     Ok(content) => {
                         match serde_json::from_str::<ralph_core::AgentsSnapshot>(&content) {
@@ -2055,6 +2041,14 @@ fn agents_command(color_mode: ColorMode, args: AgentsArgs) -> Result<()> {
                         }
                     }
                 }
+            } else if use_colors {
+                println!(
+                    "{}No agents snapshot found yet.{} Waiting for `.ralph/agents.json`...",
+                    colors::DIM,
+                    colors::RESET
+                );
+            } else {
+                println!("No agents snapshot found yet. Waiting for `.ralph/agents.json`...");
             }
 
             // Flush: 确保在被 kill/管道场景下尽量不丢输出.

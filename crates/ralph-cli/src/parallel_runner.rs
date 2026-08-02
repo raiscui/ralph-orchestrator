@@ -4,29 +4,31 @@
 //! - 该模块把“调度/路由”交给 `ralph-core::ParallelSupervisor`。
 //! - 这里实现 `HatJobExecutor`：spawn 外部 headless CLI 进程，流式采集 stdout/stderr。
 
-use crate::codex_app_server_session::CodexAppServerRuntime;
-use crate::codex_mcp_session::CodexMcpRuntime;
 use anyhow::{Context, Result};
-use ralph_adapters::{CliBackend, scrub_codex_parent_session_env_tokio};
-use ralph_core::{
-    HatJob, HatJobControl, HatJobExecutor, HatJobOutputChunk, HatJobResult, JobBackend,
-    OutputStream,
+use ralph_adapters::{
+    job::{CliHatJobExecutor, CodexAppServerRuntime, CodexMcpRuntime},
+    CliBackend,
 };
 use ralph_core::{
-    HatRegistry, ParallelSupervisor, RalphConfig, Record, SessionRecorder, TerminationReason,
+    CapabilityParentFailedRecord, CapabilityParentResultRecord, CapabilityRequestRecord,
+    EventLogger, EvidenceIndexWriter, HatRegistry, ParallelSupervisor, RalphConfig, Record,
+    SessionRecorder, TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_REQUEST,
+    TOPIC_CAPABILITY_RESULT, TOPIC_TOPOLOGY_SPAWN_FAILED, TOPIC_TOPOLOGY_SPAWN_GROUP,
+    TOPIC_TOPOLOGY_SPAWN_RESULT, TerminationReason, TopologySpawnGroupFailed,
+    TopologySpawnGroupRequest, TopologySpawnGroupResult,
 };
-use ralph_proto::{HatInstanceId, HatInstanceState, SessionStrategy, TerminalWrite, UxEvent};
+use ralph_core::{
+    HatJobOutputChunk, OutputStream,
+};
+use ralph_proto::{HatInstanceId, HatInstanceState, TerminalWrite, UxEvent};
 use ralph_tui::{Tui, TuiUpdate};
 use std::fs::File;
 use std::future::Future;
 use std::io::{IsTerminal, Write, stdin, stdout};
-use std::path::PathBuf;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::watch;
 use tracing::{debug, warn};
 
@@ -43,10 +45,16 @@ fn should_forward_event_to_tui(event: &ralph_proto::Event) -> bool {
     // - source_instance 存在：用于运行态可视化（Hat Graph Radar 边动画可据此推导发布者 hat）。
     let topic = event.topic.as_str();
     topic.starts_with("gate.")
+        || topic.starts_with("capability.")
+        || topic.starts_with("topology.")
         || topic == "human.message"
         || topic == "reply.human.message"
         || event.source_instance.is_some()
         || event.source.is_some()
+}
+
+fn runtime_capability_wiring_enabled(config: &RalphConfig) -> bool {
+    config.core.runtime_capabilities_enabled
 }
 
 fn write_parallel_cli_line<W: Write>(out: &mut W, line: &str) {
@@ -61,6 +69,186 @@ fn write_parallel_cli_line<W: Write>(out: &mut W, line: &str) {
     // ------------------------------------------------------------------
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
+}
+
+fn parallel_cli_event_summary(event: &ralph_proto::Event) -> Option<String> {
+    let topic = event.topic.as_str();
+    match topic {
+        TOPIC_TOPOLOGY_SPAWN_GROUP => {
+            let request = TopologySpawnGroupRequest::parse_payload(&event.payload).ok()?;
+            Some(format!(
+                "[supervisor:event] topology.spawn_group request_id={} hat={} delivery_topic={} requested_instances={}",
+                request.request_id,
+                request.hat,
+                request.delivery_topic,
+                request.instances.len()
+            ))
+        }
+        TOPIC_TOPOLOGY_SPAWN_RESULT => {
+            let result = serde_json::from_str::<TopologySpawnGroupResult>(&event.payload).ok()?;
+            let spawned = result
+                .spawned
+                .iter()
+                .map(|item| {
+                    let fixed = if item.fixed_role == Some(true) {
+                        ",fixed"
+                    } else {
+                        ""
+                    };
+                    let contract = item
+                        .role_contract_summary
+                        .as_ref()
+                        .map(|summary| {
+                            format!(
+                                ",identity_source={},persistence={},contract_schema_version={},role_contract_hash={},source_spawn_request_id={}",
+                                summary.identity_source,
+                                summary.persistence,
+                                summary.contract_schema_version,
+                                short_hash(&summary.role_contract_hash),
+                                summary.source_spawn_request_id
+                            )
+                        })
+                        .unwrap_or_default();
+                    format!("{}:{}{}{}", item.instance_id, item.role, fixed, contract)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            Some(format!(
+                "[supervisor:event] topology.spawn.result request_id={} status={} parent_topology_unchanged={} spawned=[{}] failed={}",
+                result.request_id,
+                result.status,
+                result.parent_topology_unchanged,
+                if spawned.is_empty() {
+                    "-".to_string()
+                } else {
+                    spawned
+                },
+                result.failed.len()
+            ))
+        }
+        TOPIC_TOPOLOGY_SPAWN_FAILED => {
+            let failed = serde_json::from_str::<TopologySpawnGroupFailed>(&event.payload).ok()?;
+            Some(format!(
+                "[supervisor:event] topology.spawn.failed request_id={} hat={} parent_topology_unchanged={} error={}",
+                failed.request_id.as_deref().unwrap_or("-"),
+                failed.hat.as_deref().unwrap_or("-"),
+                failed.parent_topology_unchanged,
+                one_line(&failed.error)
+            ))
+        }
+        TOPIC_CAPABILITY_REQUEST => {
+            let request = CapabilityRequestRecord::parse_payload(&event.payload).ok()?;
+            Some(format!(
+                "[supervisor:event] capability.request request_id={} capability={} status=running parent_topology_unchanged=true",
+                request.request_id, request.capability_id
+            ))
+        }
+        TOPIC_CAPABILITY_RESULT => {
+            let result =
+                serde_json::from_str::<CapabilityParentResultRecord>(&event.payload).ok()?;
+            Some(format!(
+                "[supervisor:event] capability.result request_id={} invocation={} capability={} status=done parent_topology_unchanged={} summary={}",
+                result.request_id,
+                result.invocation_id,
+                result.capability_id,
+                result.parent_topology_unchanged,
+                truncate_plain_summary(&result.result_summary)
+            ))
+        }
+        TOPIC_CAPABILITY_FAILED => {
+            let failed =
+                serde_json::from_str::<CapabilityParentFailedRecord>(&event.payload).ok()?;
+            Some(format!(
+                "[supervisor:event] capability.failed request_id={} invocation={} capability={} status=failed class={} parent_topology_unchanged={} error={}",
+                failed.request_id.as_deref().unwrap_or("-"),
+                failed.invocation_id.as_deref().unwrap_or("-"),
+                failed.capability_id.as_deref().unwrap_or("-"),
+                failed.failure_class,
+                failed.parent_topology_unchanged,
+                truncate_plain_summary(&failed.error)
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn truncate_plain_summary(value: &str) -> String {
+    let one_line = one_line(value);
+    ralph_core::truncate_with_ellipsis(&one_line, 96)
+}
+
+fn one_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn short_hash(value: &str) -> String {
+    value.chars().take(12).collect()
+}
+
+fn maybe_parallel_cli_event_summary(
+    event: &ralph_proto::Event,
+    verbosity: Verbosity,
+) -> Option<String> {
+    if matches!(verbosity, Verbosity::Quiet) {
+        return None;
+    }
+
+    parallel_cli_event_summary(event)
+}
+
+#[cfg(test)]
+fn maybe_write_parallel_cli_event_summary<W: Write>(
+    out: &mut W,
+    event: &ralph_proto::Event,
+    verbosity: Verbosity,
+) {
+    if let Some(summary) = maybe_parallel_cli_event_summary(event, verbosity) {
+        write_parallel_cli_line(out, &summary);
+    }
+}
+
+fn display_path_for_tui(workspace_root: &Path, path: &Path) -> String {
+    let absolute_or_rooted = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    };
+
+    if let Ok(relative) = absolute_or_rooted.strip_prefix(workspace_root) {
+        let display = relative.display().to_string();
+        if !display.is_empty() {
+            return display;
+        }
+    }
+
+    path.display().to_string()
+}
+
+fn current_events_path_for_tui(config: &RalphConfig) -> PathBuf {
+    let marker_path = config.core.resolve_path(".ralph/current-events");
+    let events_path = std::fs::read_to_string(&marker_path)
+        .map(|value| value.trim().to_string())
+        .unwrap_or_else(|_| EventLogger::DEFAULT_PATH.to_string());
+
+    config.core.resolve_path(&events_path)
+}
+
+fn parallel_evidence_paths_for_tui(
+    config: &RalphConfig,
+    record_session_path: Option<&Path>,
+) -> ralph_tui::state::ParallelEvidencePaths {
+    let workspace_root = &config.core.workspace_root;
+    let events_path = current_events_path_for_tui(config);
+    let evidence_index_path = config.core.resolve_path(EvidenceIndexWriter::DEFAULT_PATH);
+    let agents_snapshot_path = config.core.resolve_path(".ralph/agents.json");
+
+    ralph_tui::state::ParallelEvidencePaths {
+        events_path: Some(display_path_for_tui(workspace_root, &events_path)),
+        evidence_index_path: Some(display_path_for_tui(workspace_root, &evidence_index_path)),
+        agents_snapshot_path: Some(display_path_for_tui(workspace_root, &agents_snapshot_path)),
+        record_session_path: record_session_path
+            .map(|path| display_path_for_tui(workspace_root, path)),
+    }
 }
 
 async fn shutdown_parallel_runtime_with_timeout<F>(
@@ -110,560 +298,6 @@ async fn shutdown_parallel_runtimes(
     .await;
 }
 
-/// ralph-cli 的 HatJobExecutor：使用外部 CLI 后端执行 prompt（headless）。
-#[derive(Debug, Clone)]
-struct CliHatJobExecutor {
-    default_backend: CliBackend,
-    /// `ralph run -- <custom args>`：按次追加到实际执行的 backend args。
-    ///
-    /// 说明：
-    /// - 这对并行模式同样重要（否则行为与串行不一致）。
-    /// - 追加顺序：backend 默认 args / hat-level args 在前，custom_args 在后（更像“命令行最终覆盖”）。
-    custom_args: Vec<String>,
-    /// Ralph 实例专用: Codex MCP 常驻会话运行时。
-    codex_mcp_runtime: Arc<CodexMcpRuntime>,
-    /// Codex App Server 常驻会话运行时（支持 turn/steer/interrupt）。
-    codex_app_server_runtime: Arc<CodexAppServerRuntime>,
-}
-
-#[async_trait::async_trait]
-impl HatJobExecutor for CliHatJobExecutor {
-    async fn execute(
-        &self,
-        job: HatJob,
-        output_tx: tokio::sync::mpsc::Sender<HatJobOutputChunk>,
-        mut cancel_rx: tokio::sync::watch::Receiver<bool>,
-        control_rx: tokio::sync::mpsc::Receiver<HatJobControl>,
-    ) -> anyhow::Result<HatJobResult> {
-        let mut backend = match &job.backend {
-            JobBackend::Default => self.default_backend.clone(),
-            JobBackend::Hat(hat_backend) => CliBackend::from_hat_backend(hat_backend)
-                .map_err(|e| anyhow::anyhow!("Invalid hat backend config: {e}"))?,
-        };
-
-        if !self.custom_args.is_empty() {
-            backend.args.extend(self.custom_args.iter().cloned());
-        }
-
-        if Self::should_use_codex_app_server(&job, &backend) {
-            return self
-                .codex_app_server_runtime
-                .execute_job(&job, &backend, output_tx, cancel_rx, control_rx)
-                .await;
-        }
-
-        if Self::should_use_codex_mcp(&job, &backend) {
-            // 当前 Codex MCP runtime 不支持 in-flight steer；控制消息会在 core 侧被降级为普通事件入队。
-            let _ = control_rx;
-            return self
-                .codex_mcp_runtime
-                .execute_job(&job, &backend, output_tx, cancel_rx)
-                .await;
-        }
-
-        // 非 app_server 的后端不支持 in-flight steer: 避免 control_rx 堵塞,直接丢弃即可。
-        let _ = control_rx;
-
-        let (cmd, args, stdin_input, _temp_file) = backend.build_command(&job.prompt, false);
-
-        let mut command = Command::new(&cmd);
-        command.args(&args);
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-        scrub_codex_parent_session_env_tokio(&mut command, &cmd);
-
-        // Unix: 让每个 job 成为一个新的进程组 leader。
-        //
-        // 为什么:
-        // - 后端进程可能会再 spawn 子进程.
-        // - cancel/timeout/中断时,我们需要“一刀切”杀掉整组,避免残留污染下一次 run/test.
-        // - 同时避免“kill 自己所在进程组”导致 orchestrator 自杀,从而来不及写 `_meta.termination`.
-        #[cfg(unix)]
-        command.process_group(0);
-
-        // 并行模式回放/诊断：把实例信息传给后端（custom backend 可用来做输出分流）
-        command.env("RALPH_HAT_INSTANCE_ID", job.instance_id.as_str());
-        command.env("RALPH_HAT_ID", job.hat_id.as_str());
-
-        if let Some(workdir) = &job.workdir {
-            command.current_dir(workdir);
-        }
-
-        if stdin_input.is_some() {
-            command.stdin(Stdio::piped());
-        }
-
-        debug!(
-            instance = %job.instance_id,
-            hat = %job.hat_id,
-            command = %cmd,
-            args = ?args,
-            workdir = ?job.workdir,
-            "Spawning headless job"
-        );
-
-        let mut child = command.spawn().with_context(|| {
-            format!(
-                "Failed to spawn backend process: cmd={cmd} args={args:?} workdir={:?}",
-                job.workdir
-            )
-        })?;
-
-        // 写 stdin（如需要）
-        if let Some(input) = stdin_input
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            stdin.write_all(input.as_bytes()).await?;
-            drop(stdin);
-        }
-
-        // 并发读取 stdout/stderr，避免 pipe buffer deadlock
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<(OutputStream, String)>(256);
-
-        let spawn_reader =
-            |stream: OutputStream,
-             handle: Option<tokio::process::ChildStdout>,
-             tx: tokio::sync::mpsc::Sender<(OutputStream, String)>| async move {
-                if let Some(handle) = handle {
-                    let reader = BufReader::new(handle);
-                    let mut lines = reader.lines();
-                    while let Some(line) = lines.next_line().await? {
-                        if tx.send((stream, line)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Ok::<(), std::io::Error>(())
-            };
-
-        // stdout
-        let tx1 = line_tx.clone();
-        let stdout_task = tokio::spawn(spawn_reader(OutputStream::Stdout, stdout, tx1));
-        // stderr（类型不同：ChildStderr）
-        let stderr_tx = line_tx.clone();
-        let stderr_task = tokio::spawn(async move {
-            if let Some(stderr) = stderr {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Some(line) = lines.next_line().await? {
-                    if stderr_tx.send((OutputStream::Stderr, line)).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            Ok::<(), std::io::Error>(())
-        });
-
-        // 释放主 sender，让 rx 能在两个 task 结束后自然关闭
-        drop(line_tx);
-
-        let mut stdout_output = String::new();
-        let mut stderr_output = String::new();
-        let mut timed_out = false;
-        let mut canceled = false;
-        let mut last_output_changed_at = std::time::Instant::now();
-
-        // 收集输出，直到流结束 or 被取消/超时
-        match job.timeout.filter(|d| !d.is_zero()) {
-            Some(check_interval) => {
-                // “检测超时”语义：
-                // - check_interval 到期时不立刻 kill
-                // - 只有当输出停滞超过 `output_stale_timeout` 才判定 timed_out
-                // - 若输出仍在变化：判定通过，并把检测窗口从此刻重新计时
-                let mut next_check_deadline = tokio::time::Instant::now() + check_interval;
-                let sleep = tokio::time::sleep_until(next_check_deadline);
-                tokio::pin!(sleep);
-
-                loop {
-                    tokio::select! {
-                        biased;
-                        // 取消优先
-                        changed = cancel_rx.changed() => {
-                            if changed.is_ok() && *cancel_rx.borrow() {
-                                canceled = true;
-                                Self::terminate_child(&mut child, "canceled").await?;
-                                break;
-                            }
-                        }
-                        // 检测窗口到期：根据“输出是否停滞”决定是否超时
-                        _ = &mut sleep => {
-                            match job.output_stale_timeout {
-                                Some(stale_timeout) => {
-                                    if last_output_changed_at.elapsed() >= stale_timeout {
-                                        timed_out = true;
-                                        Self::terminate_child(&mut child, "timed_out").await?;
-                                        break;
-                                    }
-
-                                    // 检测通过：检测窗口重新计时（从现在开始）
-                                    next_check_deadline = tokio::time::Instant::now() + check_interval;
-                                    sleep.as_mut().reset(next_check_deadline);
-                                }
-                                None => {
-                                    // 兼容兜底：若未提供 stale 阈值，则退化为“硬超时”
-                                    timed_out = true;
-                                    Self::terminate_child(&mut child, "timed_out").await?;
-                                    break;
-                                }
-                            }
-                        }
-                        line = line_rx.recv() => {
-                            let Some((stream, line)) = line else {
-                                break;
-                            };
-
-                            last_output_changed_at = std::time::Instant::now();
-                            Self::handle_output_line(
-                                job.job_id,
-                                &job.instance_id,
-                                &output_tx,
-                                &backend,
-                                &mut stdout_output,
-                                &mut stderr_output,
-                                stream,
-                                line,
-                            )
-                            .await;
-                        }
-                    }
-                }
-            }
-            None => loop {
-                tokio::select! {
-                    biased;
-                    changed = cancel_rx.changed() => {
-                        if changed.is_ok() && *cancel_rx.borrow() {
-                            canceled = true;
-                            Self::terminate_child(&mut child, "canceled").await?;
-                            break;
-                        }
-                    }
-                    line = line_rx.recv() => {
-                        let Some((stream, line)) = line else {
-                            break;
-                        };
-                        Self::handle_output_line(
-                            job.job_id,
-                            &job.instance_id,
-                            &output_tx,
-                            &backend,
-                            &mut stdout_output,
-                            &mut stderr_output,
-                            stream,
-                            line,
-                        )
-                        .await;
-                    }
-                }
-            },
-        }
-
-        // 确保子进程被 reap（避免僵尸进程）
-        let status = child.wait().await?;
-
-        // 等待读取 task 收尾（best-effort）
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
-
-        let output_for_parsing = Self::finalize_output_for_parsing(&backend, &stdout_output);
-
-        if backend.emits_structured_response()
-            && let Some(display_output) =
-                backend.finalize_structured_stdout_for_display(&stdout_output)
-        {
-            Self::emit_final_structured_output(
-                job.job_id,
-                &job.instance_id,
-                &output_tx,
-                &display_output,
-            )
-            .await;
-        }
-
-        Ok(HatJobResult {
-            output_for_parsing,
-            observed_stderr: stderr_output,
-            success: status.success() && !timed_out && !canceled,
-            exit_code: status.code(),
-            timed_out,
-            canceled,
-        })
-    }
-}
-
-impl CliHatJobExecutor {
-    fn finalize_output_for_parsing(backend: &CliBackend, stdout_output: &str) -> String {
-        // -----------------------------------------------------------------
-        // 说明：
-        // - 并行模式下，事件解析只能消费 stdout-only 的稳定正文。
-        // - stderr 经常带 prompt transcript、后端日志、warning，甚至会出现 `<event ...>` 示例。
-        // - 一旦把 stderr 混回解析输入，就会制造伪事件、重复路由和假 completion。
-        // - 对结构化 backend，仍然要先从 stdout 中提取最终 response，再交给 EventParser。
-        // -----------------------------------------------------------------
-        if backend.emits_structured_response()
-            && let Some(response) = backend.finalize_structured_stdout_for_display(stdout_output)
-        {
-            return Self::normalize_codex_leading_escaped_event_output(backend, &response)
-                .unwrap_or(response);
-        }
-
-        Self::normalize_codex_leading_escaped_event_output(backend, stdout_output)
-            .unwrap_or_else(|| stdout_output.to_string())
-    }
-
-    fn normalize_codex_leading_escaped_event_output(
-        backend: &CliBackend,
-        output: &str,
-    ) -> Option<String> {
-        // -----------------------------------------------------------------
-        // 说明：
-        // - 这里故意不去改 `EventParser` 的通用协议。
-        // - 仓库里大量 prompt / overlay / README 会把 `<event ...>` 转义成
-        //   `&lt;event ...&gt;` 作为“展示文本”，它们默认不应被当成真实事件。
-        // - 但真实 Codex 最终回复偶尔会把“本来就要发到 stdout 的真实事件”
-        //   HTML 转义后再吐出来，导致 durable 主流漏事件。
-        // - 因此这里只做一个很窄的恢复：
-        //   - 仅限 `codex`
-        //   - 仅限去掉前导空白后就直接以 `&lt;event` 开头的回复
-        //   - 仅解码 tag 边界，不做全量 HTML unescape
-        // -----------------------------------------------------------------
-        const ESCAPED_OPEN_TAG: &str = "&lt;event";
-        const ESCAPED_OPEN_END: &str = "&gt;";
-        const ESCAPED_CLOSE_TAG: &str = "&lt;/event&gt;";
-        const ESCAPED_CLOSE_TAG_JSON_STYLE: &str = "&lt;\\/event&gt;";
-
-        if backend.command != "codex" {
-            return None;
-        }
-
-        let trimmed = output.trim_start_matches(|ch: char| ch.is_whitespace());
-        if !trimmed.starts_with(ESCAPED_OPEN_TAG) {
-            return None;
-        }
-
-        let leading_whitespace_len = output.len() - trimmed.len();
-        let mut remaining = trimmed;
-        let mut normalized = String::with_capacity(output.len());
-        normalized.push_str(&output[..leading_whitespace_len]);
-        let mut converted_any = false;
-
-        loop {
-            if !remaining.starts_with(ESCAPED_OPEN_TAG) {
-                break;
-            }
-
-            let Some(open_end_idx) = remaining.find(ESCAPED_OPEN_END) else {
-                break;
-            };
-            let opening_attrs = &remaining[ESCAPED_OPEN_TAG.len()..open_end_idx];
-            let content_start = &remaining[open_end_idx + ESCAPED_OPEN_END.len()..];
-
-            let standard_close = content_start
-                .find(ESCAPED_CLOSE_TAG)
-                .map(|idx| (idx, ESCAPED_CLOSE_TAG, "</event>"));
-            let json_style_close = content_start
-                .find(ESCAPED_CLOSE_TAG_JSON_STYLE)
-                .map(|idx| (idx, ESCAPED_CLOSE_TAG_JSON_STYLE, "<\\/event>"));
-
-            let Some((close_idx, close_raw, close_normalized)) =
-                (match (standard_close, json_style_close) {
-                    (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
-                    (Some(found), None) | (None, Some(found)) => Some(found),
-                    (None, None) => None,
-                })
-            else {
-                break;
-            };
-
-            normalized.push_str("<event");
-            normalized.push_str(opening_attrs);
-            normalized.push('>');
-            normalized.push_str(&content_start[..close_idx]);
-            normalized.push_str(close_normalized);
-            remaining = &content_start[close_idx + close_raw.len()..];
-            converted_any = true;
-
-            // 只继续吞连续的 leading escaped event block。
-            // 一旦进入普通 prose，就立即停下，避免把正文里引用的示例也“扶正”为真实事件。
-            let next_trimmed = remaining.trim_start_matches(|ch: char| ch.is_whitespace());
-            let whitespace_len = remaining.len() - next_trimmed.len();
-            normalized.push_str(&remaining[..whitespace_len]);
-            remaining = next_trimmed;
-            if !remaining.starts_with(ESCAPED_OPEN_TAG) {
-                break;
-            }
-        }
-
-        if !converted_any {
-            return None;
-        }
-
-        normalized.push_str(remaining);
-        Some(normalized)
-    }
-
-    fn should_use_codex_mcp(job: &HatJob, backend: &CliBackend) -> bool {
-        // ------------------------------------------------------------------
-        // 说明:
-        // - 默认走一次性 exec.
-        // - 只有当事件显式请求 `session_strategy=mcp` 时才升级为 Codex MCP 常驻模式.
-        // - 方案1(只升级,不降级): instance 一旦进入 mcp,后续 job 会 sticky 到 mcp(由 core 侧合并).
-        // ------------------------------------------------------------------
-        if backend.command != "codex" {
-            return false;
-        }
-
-        // 显式请求 app_server 时,必须让 app_server 通道接管（优先级高于 mcp）。
-        if job.session_strategy == SessionStrategy::AppServer {
-            return false;
-        }
-
-        job.session_strategy == SessionStrategy::Mcp
-    }
-
-    fn should_use_codex_app_server(job: &HatJob, backend: &CliBackend) -> bool {
-        if backend.command != "codex" {
-            return false;
-        }
-
-        job.session_strategy == SessionStrategy::AppServer
-    }
-
-    async fn handle_output_line(
-        job_id: u64,
-        instance_id: &HatInstanceId,
-        output_tx: &tokio::sync::mpsc::Sender<HatJobOutputChunk>,
-        backend: &CliBackend,
-        stdout_output: &mut String,
-        stderr_output: &mut String,
-        stream: OutputStream,
-        line: String,
-    ) {
-        match stream {
-            OutputStream::Stdout => {
-                stdout_output.push_str(&line);
-                stdout_output.push('\n');
-            }
-            OutputStream::Stderr => {
-                stderr_output.push_str(&line);
-                stderr_output.push('\n');
-            }
-            OutputStream::Activity => {}
-        }
-
-        // JSON backend 的 stdout 是结构化负载, 不适合逐行原样透传.
-        // 我们先缓存,等进程结束后再提取稳定正文并一次性发给上层.
-        if backend.emits_structured_response() && stream == OutputStream::Stdout {
-            return;
-        }
-
-        // 1) 流式输出给 Supervisor（带 instance_id 归因）
-        let _ = output_tx
-            .send(HatJobOutputChunk {
-                job_id,
-                instance_id: instance_id.clone(),
-                stream,
-                line: line.clone(),
-            })
-            .await;
-
-        // 2) 组装完整 output（用于 event parser）
-        match stream {
-            OutputStream::Stdout => {
-                // 普通文本 backend: stdout 已在上面缓存,这里无需重复拼接。
-            }
-            OutputStream::Stderr => {
-                // 重要：并行模式下，stderr 往往包含“后端自身的日志”（例如 Codex 会回显 user prompt、
-                // MCP 启动日志、warnings 等）。这些内容可能包含 `<event ...>` 字样（来自 prompt 本身），
-                // 如果把 stderr 拼进 `output`，会导致 EventParser 把“输入/日志”误判为“已发出事件”，
-                // 从而造成重复路由、假阳性 completion、E2E 波动等问题。
-                //
-                // 因此：
-                // - stderr 仍然会通过 `output_tx` 传给 Supervisor 做可观测输出（`[hat#n:err] ...`）
-                // - 但不会进入 `HatJobResult.output`，以保证 event parsing 只基于 stdout（模型最终输出）
-            }
-            OutputStream::Activity => {
-                // Activity 是纯状态信号,不参与 event parsing。
-            }
-        }
-    }
-
-    async fn emit_final_structured_output(
-        job_id: u64,
-        instance_id: &HatInstanceId,
-        output_tx: &tokio::sync::mpsc::Sender<HatJobOutputChunk>,
-        display_output: &str,
-    ) {
-        for line in display_output.lines() {
-            let _ = output_tx
-                .send(HatJobOutputChunk {
-                    job_id,
-                    instance_id: instance_id.clone(),
-                    stream: OutputStream::Stdout,
-                    line: line.to_string(),
-                })
-                .await;
-        }
-    }
-
-    /// 尽最大努力终止子进程：
-    /// 1) SIGTERM
-    /// 2) 5s grace
-    /// 3) SIGKILL（或 start_kill）
-    async fn terminate_child(
-        child: &mut tokio::process::Child,
-        reason: &str,
-    ) -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            use nix::sys::signal::{Signal, killpg};
-            use nix::unistd::Pid;
-
-            if let Some(pid) = child.id() {
-                #[allow(clippy::cast_possible_wrap)]
-                let pid = Pid::from_raw(pid as i32);
-                // 注意: 我们在 spawn 时已通过 `process_group(0)` 让该 pid 成为进程组 leader.
-                // 因此这里用 killpg 终止整组(包含后端派生的子进程).
-                let _ = killpg(pid, Signal::SIGTERM);
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = child.start_kill();
-        }
-
-        // grace period
-        let wait_res = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-        match wait_res {
-            Ok(Ok(_status)) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                warn!(%reason, "Job did not exit after SIGTERM, forcing kill");
-                #[cfg(unix)]
-                {
-                    use nix::sys::signal::{Signal, killpg};
-                    use nix::unistd::Pid;
-                    if let Some(pid) = child.id() {
-                        #[allow(clippy::cast_possible_wrap)]
-                        let pid = Pid::from_raw(pid as i32);
-                        let _ = killpg(pid, Signal::SIGKILL);
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = child.start_kill();
-                }
-                let _ = child.wait().await;
-                Ok(())
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod guardrail_tests {
     use super::*;
@@ -703,6 +337,154 @@ mod guardrail_tests {
         );
     }
 
+    #[test]
+    fn parallel_cli_event_summary_shows_topology_spawn_result() {
+        let payload = serde_json::to_string(&TopologySpawnGroupResult {
+            status: "spawned".to_string(),
+            request_id: "spawn-001".to_string(),
+            hat: "builder".to_string(),
+            delivery_topic: "analysis.task".to_string(),
+            spawned: vec![
+                ralph_core::TopologySpawnedInstance {
+                    index: 0,
+                    instance_id: "builder#2".to_string(),
+                    role: "功能补充".to_string(),
+                    fixed_role: None,
+                    role_contract_summary: Some(ralph_core::RoleContractSummary {
+                        role_name: "功能补充".to_string(),
+                        objective_preview: "补充 feature A".to_string(),
+                        allowed_result_topics: vec!["analysis.done".to_string()],
+                        identity_source: ralph_core::IdentitySource::TaskDerived,
+                        persistence: ralph_core::RolePersistence::Temporary,
+                        contract_schema_version: 1,
+                        role_contract_hash: "erc-1234567890abcdef".to_string(),
+                        source_spawn_request_id: "spawn-001".to_string(),
+                    }),
+                },
+                ralph_core::TopologySpawnedInstance {
+                    index: 1,
+                    instance_id: "builder#3".to_string(),
+                    role: "review".to_string(),
+                    fixed_role: Some(true),
+                    role_contract_summary: Some(ralph_core::RoleContractSummary {
+                        role_name: "review".to_string(),
+                        objective_preview: "review".to_string(),
+                        allowed_result_topics: vec!["analysis.done".to_string()],
+                        identity_source: ralph_core::IdentitySource::TaskDerived,
+                        persistence: ralph_core::RolePersistence::Fixed,
+                        contract_schema_version: 1,
+                        role_contract_hash: "erc-fedcba0987654321".to_string(),
+                        source_spawn_request_id: "spawn-001".to_string(),
+                    }),
+                },
+            ],
+            failed: Vec::new(),
+            parent_topology_unchanged: false,
+        })
+        .expect("topology spawn result should serialize");
+        let event = ralph_proto::Event::new(TOPIC_TOPOLOGY_SPAWN_RESULT, payload);
+
+        let summary = parallel_cli_event_summary(&event)
+            .expect("topology.spawn.result should produce a plain summary");
+
+        assert!(summary.contains("topology.spawn.result"));
+        assert!(summary.contains("parent_topology_unchanged=false"));
+        assert!(summary.contains("builder#2:功能补充"));
+        assert!(summary.contains("builder#3:review,fixed"));
+        assert!(summary.contains("identity_source=task-derived"));
+        assert!(summary.contains("persistence=temporary"));
+        assert!(summary.contains("contract_schema_version=1"));
+        assert!(summary.contains("role_contract_hash=erc-12345678"));
+        assert!(summary.contains("source_spawn_request_id=spawn-001"));
+    }
+
+    #[test]
+    fn parallel_cli_event_summary_shows_capability_result() {
+        let payload = serde_json::to_string(&CapabilityParentResultRecord {
+            status: "done".to_string(),
+            request_id: "cap-001".to_string(),
+            invocation_id: "invoke-001".to_string(),
+            capability_id: "workflow:default-parallel".to_string(),
+            result_summary: "worker completed\nwith useful result".to_string(),
+            artifacts: ralph_core::CapabilityParentArtifactPaths {
+                invoke_json: ".ralph/capabilities/invoke.json".to_string(),
+                result_json: Some(".ralph/capabilities/result.json".to_string()),
+                failed_json: None,
+                resolved_config: ".ralph/capabilities/resolved-config.yml".to_string(),
+                events_jsonl: ".ralph/capabilities/events.jsonl".to_string(),
+                evidence_index: ".ralph/capabilities/evidence-index.jsonl".to_string(),
+            },
+            parent_topology_unchanged: true,
+        })
+        .expect("capability result should serialize");
+        let event = ralph_proto::Event::new(TOPIC_CAPABILITY_RESULT, payload);
+
+        let summary = parallel_cli_event_summary(&event)
+            .expect("capability.result should produce a plain summary");
+
+        assert!(summary.contains("capability.result"));
+        assert!(summary.contains("status=done"));
+        assert!(summary.contains("parent_topology_unchanged=true"));
+        assert!(summary.contains("workflow:default-parallel"));
+        assert!(summary.contains("worker completed with useful result"));
+    }
+
+    #[test]
+    fn parallel_cli_event_summary_shows_capability_failed_class() {
+        let payload = serde_json::to_string(&CapabilityParentFailedRecord {
+            status: "failed".to_string(),
+            failure_class: ralph_core::CapabilityFailureClass::ChildRunFailed,
+            request_id: Some("cap-002".to_string()),
+            invocation_id: Some("invoke-002".to_string()),
+            capability_id: Some("workflow:default-parallel".to_string()),
+            error: "child run failed\nsee evidence".to_string(),
+            artifacts: None,
+            parent_topology_unchanged: true,
+        })
+        .expect("capability failed should serialize");
+        let event = ralph_proto::Event::new(TOPIC_CAPABILITY_FAILED, payload);
+
+        let summary = parallel_cli_event_summary(&event)
+            .expect("capability.failed should produce a plain summary");
+
+        assert!(summary.contains("capability.failed"));
+        assert!(summary.contains("status=failed"));
+        assert!(summary.contains("class=child_run_failed"));
+        assert!(summary.contains("parent_topology_unchanged=true"));
+        assert!(summary.contains("child run failed see evidence"));
+    }
+
+    #[test]
+    fn parallel_cli_event_summary_ignores_unrelated_topic() {
+        let event = ralph_proto::Event::new("analysis.done", "ok");
+
+        assert!(
+            parallel_cli_event_summary(&event).is_none(),
+            "plain event summary should only show topology/capability control-plane events"
+        );
+    }
+
+    #[test]
+    fn maybe_write_parallel_cli_event_summary_respects_verbosity() {
+        let event = ralph_proto::Event::new(
+            TOPIC_CAPABILITY_REQUEST,
+            r#"{"request_id":"cap-003","capability_id":"workflow:default-parallel","input":"run"}"#,
+        );
+        let mut normal_writer = CountingWriter::default();
+        let mut quiet_writer = CountingWriter::default();
+
+        maybe_write_parallel_cli_event_summary(&mut normal_writer, &event, Verbosity::Normal);
+        maybe_write_parallel_cli_event_summary(&mut quiet_writer, &event, Verbosity::Quiet);
+
+        let normal_output =
+            String::from_utf8(normal_writer.bytes).expect("writer bytes should be utf8");
+        assert!(normal_output.contains("[supervisor:event] capability.request"));
+        assert!(normal_output.contains("status=running"));
+        assert_eq!(normal_writer.flushes, 1);
+        assert!(quiet_writer.bytes.is_empty());
+        assert_eq!(quiet_writer.flushes, 0);
+    }
+
     #[tokio::test]
     async fn shutdown_parallel_runtime_with_timeout_reports_timeout() {
         let completed = shutdown_parallel_runtime_with_timeout(
@@ -733,89 +515,6 @@ mod guardrail_tests {
             completed,
             "shutdown helper should report success when cleanup finishes in time"
         );
-    }
-
-    #[tokio::test]
-    async fn parallel_output_for_event_parsing_is_stdout_only() {
-        // ------------------------------------------------------------------
-        // 目标:
-        // - 锁死 parallel 模式的关键不变量: EventParser 的输入必须是 stdout-only.
-        // - stderr 可能包含 prompt transcript / MCP 日志 / warnings 等,它们经常含 `<event ...>` 字样。
-        //   一旦把 stderr 拼进 `HatJobResult.output`,就会产生“假事件/假 completion/重复路由”的回归。
-        // ------------------------------------------------------------------
-
-        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<HatJobOutputChunk>(8);
-        let instance_id = HatInstanceId::from("writer#1");
-        let job_id = 42_u64;
-        let backend = CliBackend::kiro();
-        let mut stdout_output = String::new();
-        let mut stderr_output = String::new();
-
-        // 1) stdout: 必须进入 output(用于事件解析).
-        let stdout_line = "<event topic=\"build.done\">ok</event>".to_string();
-        CliHatJobExecutor::handle_output_line(
-            job_id,
-            &instance_id,
-            &output_tx,
-            &backend,
-            &mut stdout_output,
-            &mut stderr_output,
-            OutputStream::Stdout,
-            stdout_line.clone(),
-        )
-        .await;
-
-        assert_eq!(stdout_output, format!("{stdout_line}\n"));
-        let chunk = output_rx.recv().await.expect("should receive stdout chunk");
-        assert_eq!(chunk.job_id, job_id);
-        assert_eq!(chunk.instance_id, instance_id);
-        assert_eq!(chunk.stream, OutputStream::Stdout);
-        assert_eq!(chunk.line, stdout_line);
-
-        let parser = ralph_core::EventParser::new();
-        let events = parser.parse(&CliHatJobExecutor::finalize_output_for_parsing(
-            &backend,
-            &stdout_output,
-        ));
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].topic.as_str(), "build.done");
-        assert_eq!(events[0].payload, "ok");
-
-        // 2) stderr: 仍要流式转发给 supervisor 做可观测输出,但绝不能污染 output.
-        let stderr_line = "<event topic=\"build.task\">should_not_parse</event>".to_string();
-        CliHatJobExecutor::handle_output_line(
-            job_id,
-            &instance_id,
-            &output_tx,
-            &backend,
-            &mut stdout_output,
-            &mut stderr_output,
-            OutputStream::Stderr,
-            stderr_line.clone(),
-        )
-        .await;
-
-        assert_eq!(
-            stdout_output, "<event topic=\"build.done\">ok</event>\n",
-            "REGRESSION: stderr must NOT be appended to output used for event parsing"
-        );
-        assert_eq!(stderr_output, format!("{stderr_line}\n"));
-        let chunk = output_rx.recv().await.expect("should receive stderr chunk");
-        assert_eq!(chunk.job_id, job_id);
-        assert_eq!(chunk.instance_id, instance_id);
-        assert_eq!(chunk.stream, OutputStream::Stderr);
-        assert_eq!(chunk.line, stderr_line);
-
-        let events = parser.parse(&CliHatJobExecutor::finalize_output_for_parsing(
-            &backend,
-            &stdout_output,
-        ));
-        assert_eq!(
-            events.len(),
-            1,
-            "REGRESSION: stderr event text must not create extra parsed events"
-        );
-        assert_eq!(events[0].topic.as_str(), "build.done");
     }
 }
 
@@ -852,6 +551,7 @@ pub async fn run_parallel_loop_impl(
     let plain = flags.plain;
     let show_stderr = flags.show_stderr;
     let runtime_graph_rrd = flags.runtime_graph_rrd.clone();
+    let record_session_for_tui = record_session.clone();
 
     // TUI 需要 stdin/stdout 都是 TTY（crossterm 既要读键盘也要写屏幕）
     let enable_tui = flags.enable_tui && stdin().is_terminal() && stdout().is_terminal();
@@ -939,9 +639,7 @@ pub async fn run_parallel_loop_impl(
             .map(|s| s.to_string())
             .unwrap_or_default();
 
-        if !inline.trim().is_empty() {
-            inline
-        } else {
+        if inline.trim().is_empty() {
             // 2) prompt_file
             let prompt_file = config.event_loop.prompt_file.as_str();
             let default_prompt_file = prompt_file == "PROMPT.md";
@@ -981,6 +679,8 @@ pub async fn run_parallel_loop_impl(
                     crate::loop_runner::resolve_prompt_content(&config.event_loop)?
                 }
             }
+        } else {
+            inline
         }
     };
 
@@ -1020,6 +720,8 @@ pub async fn run_parallel_loop_impl(
 
     let executor = Arc::new(CliHatJobExecutor {
         default_backend,
+        role_args: config.cli.role_args.clone(),
+        role_reasoning_effort: config.cli.reasoning_effort,
         custom_args,
         codex_mcp_runtime: Arc::clone(&codex_mcp_runtime),
         codex_app_server_runtime: Arc::clone(&codex_app_server_runtime),
@@ -1044,6 +746,10 @@ pub async fn run_parallel_loop_impl(
         let mut tui = Tui::new_parallel()
             .with_parallel_markdown_rendering(!plain)
             .with_parallel_max_buffer_lines(config.tui.max_buffer_lines)
+            .with_parallel_evidence_paths(parallel_evidence_paths_for_tui(
+                &config,
+                record_session_for_tui.as_deref(),
+            ))
             .with_termination_signal(terminated_rx)
             .with_interrupt_tx(interrupt_tx.clone());
 
@@ -1238,12 +944,24 @@ pub async fn run_parallel_loop_impl(
             write_parallel_cli_line(&mut out, &format!("[{}:state] {}", instance_id, state));
         });
 
-        // 日志模式默认不展示事件；但若开启了 session recording，则仍记录 bus.publish
-        let event_observer: Option<EventObserver> = session_recorder.clone().map(|recorder| {
-            Arc::new(move |event: &ralph_proto::Event| {
-                recorder.record_bus_event(event);
-            }) as EventObserver
-        });
+        // 日志模式默认展示低频控制面事件摘要。
+        //
+        // 说明:
+        // - `topology.*` / `capability.*` 是用户判断“实例是否真的创建 / child-run 是否启动”的关键证据。
+        // - 这里只输出一行结构化摘要,不把所有业务事件刷到终端,避免重复 record-session 的完整审计职责。
+        // - recorder 仍然是完整 bus.publish 的耐久真相源；这里是 display layer。
+        let recorder_for_events = session_recorder.clone();
+        let event_observer: Option<EventObserver> =
+            Some(Arc::new(move |event: &ralph_proto::Event| {
+                if let Some(recorder) = &recorder_for_events {
+                    recorder.record_bus_event(event);
+                }
+
+                if let Some(summary) = maybe_parallel_cli_event_summary(event, verbosity) {
+                    let mut out = std::io::stdout().lock();
+                    write_parallel_cli_line(&mut out, &summary);
+                }
+            }) as EventObserver);
 
         (observer, state_observer, event_observer)
     };
@@ -1328,20 +1046,36 @@ pub async fn run_parallel_loop_impl(
     // - core supervisor 只识别 `capability.request` 并回传 result/failure event。
     // - 真正 isolated child/micro-run 仍由 CLI capability module 执行。
     // - workspace_root 是 artifact 真相源根目录,不会热改 parent topology。
-    let runtime_capability_catalog = crate::capability::capability_catalog();
-    let runtime_capability_invoker =
-        crate::capability::runtime_capability_invoker(config.core.workspace_root.clone());
+    let runtime_capabilities_enabled = runtime_capability_wiring_enabled(&config);
+    let workspace_root = config.core.workspace_root.clone();
+    let runtime_capability_base_config = config.clone();
+    let runtime_capability_catalog = if runtime_capabilities_enabled {
+        crate::capability::capability_catalog()
+    } else {
+        debug!(
+            "Runtime capability catalog disabled by config; child run will not receive catalog or invoker"
+        );
+        Vec::new()
+    };
+
     let mut supervisor = ParallelSupervisor::new(config, prompt_content, executor)?
         .with_runtime_capability_catalog(runtime_capability_catalog)
         .with_agents_snapshot_to_default_path()
         .with_output_observer(observer)
         .with_instance_state_observer(state_observer)
-        .with_runtime_capability_invoker(runtime_capability_invoker)
         // 并行 TUI：completion promise（LOOP_COMPLETE）进入“暂停”而不是“退出”，并禁用动态实例回收，
         // 这样 human message 可以在会话中持续驱动下一轮对话/工作，而不会被 done/回收打断。
         .with_pause_on_completion_promise(enable_tui)
         .with_disable_dynamic_instance_reap(enable_tui)
         .with_idle_start(idle_start);
+    if runtime_capabilities_enabled {
+        supervisor = supervisor.with_runtime_capability_invoker(
+            crate::capability::runtime_capability_invoker(
+                workspace_root,
+                runtime_capability_base_config,
+            ),
+        );
+    }
     if let Some(event_observer) = event_observer {
         supervisor = supervisor.with_event_observer(event_observer);
     }
@@ -1421,12 +1155,10 @@ pub async fn run_parallel_loop_impl(
 
     // 自然结束：如果 TUI 开着，让用户按 q 退出（与串行模式对齐）。
     // Ctrl+C/SIGTERM: 不等待,直接退出(证据完整优先,避免收尾卡住)。
-    if reason != TerminationReason::Interrupted {
-        if let Some(handle) = tui_handle.take() {
-            let _ = handle.await;
-        }
-    } else {
+    if reason == TerminationReason::Interrupted {
         let _ = terminated_tx.send(true);
+    } else if let Some(handle) = tui_handle.take() {
+        let _ = handle.await;
     }
 
     // best-effort：写入 termination 元信息，便于 cassette 诊断/回放
@@ -1459,6 +1191,20 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tui_event_forwarding_allows_capability_topics() {
+        // capability.* 是 isolated child-run 的父级观测事件：没有 source 时也必须进入 TUI。
+        let event = Event::new("capability.invoke", "");
+        assert!(should_forward_event_to_tui(&event));
+    }
+
+    #[test]
+    fn parallel_tui_event_forwarding_allows_topology_topics() {
+        // topology.* 是 parent-visible 动态实例控制面事件：需要进入 TUI 做状态提示。
+        let event = Event::new("topology.spawn.result", "");
+        assert!(should_forward_event_to_tui(&event));
+    }
+
+    #[test]
     fn parallel_tui_event_forwarding_allows_human_message() {
         // human.message 会影响 TUI 的活跃度与最近事件展示。
         let event = Event::new("human.message", "");
@@ -1487,58 +1233,47 @@ mod tests {
     }
 
     #[test]
-    fn finalize_output_for_parsing_keeps_text_backend_stdout_only() {
-        let backend = CliBackend::codex();
-        let stdout = "<event topic=\"spec.ready\">ok</event>\n";
+    fn runtime_capability_wiring_respects_core_flag() {
+        let mut config = RalphConfig::default();
+        assert!(runtime_capability_wiring_enabled(&config));
 
-        let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
-
-        assert_eq!(output, stdout);
+        config.core.runtime_capabilities_enabled = false;
+        assert!(!runtime_capability_wiring_enabled(&config));
     }
 
     #[test]
-    fn finalize_output_for_parsing_extracts_structured_stdout_only() {
-        let backend = CliBackend::gemini();
-        let stdout = r#"{"response":"<event topic=\"spec.ready\">ok</event>"}"#;
+    fn parallel_evidence_paths_for_tui_use_current_events_marker() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = RalphConfig::default();
+        config.core.workspace_root = temp.path().to_path_buf();
 
-        let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
+        let ralph_dir = temp.path().join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).unwrap();
+        std::fs::write(
+            ralph_dir.join("current-events"),
+            ".ralph/events-20260517-200000.jsonl\n",
+        )
+        .unwrap();
 
-        assert_eq!(output, r#"<event topic="spec.ready">ok</event>"#);
-    }
-
-    #[test]
-    fn finalize_output_for_parsing_normalizes_leading_escaped_codex_event_block() {
-        let backend = CliBackend::codex();
-        let stdout = concat!(
-            "&lt;event topic=\"experiment.result\" reply=\"E1\"&gt;\n",
-            "comparison: 2 &gt; 1\n",
-            "&lt;/event&gt;\n",
-            "- trailing prose stays visible\n",
-        );
-
-        let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
+        let record_path = temp.path().join("records/session.jsonl");
+        let paths = parallel_evidence_paths_for_tui(&config, Some(&record_path));
 
         assert_eq!(
-            output,
-            concat!(
-                "<event topic=\"experiment.result\" reply=\"E1\">\n",
-                "comparison: 2 &gt; 1\n",
-                "</event>\n",
-                "- trailing prose stays visible\n",
-            )
+            paths.events_path.as_deref(),
+            Some(".ralph/events-20260517-200000.jsonl")
+        );
+        assert_eq!(
+            paths.evidence_index_path.as_deref(),
+            Some(".ralph/evidence-index.jsonl")
+        );
+        assert_eq!(
+            paths.agents_snapshot_path.as_deref(),
+            Some(".ralph/agents.json")
+        );
+        assert_eq!(
+            paths.record_session_path.as_deref(),
+            Some("records/session.jsonl")
         );
     }
 
-    #[test]
-    fn finalize_output_for_parsing_does_not_normalize_escaped_event_after_prose() {
-        let backend = CliBackend::codex();
-        let stdout = concat!(
-            "Here is an example event block:\n",
-            "&lt;event topic=\"experiment.result\"&gt;demo&lt;/event&gt;\n",
-        );
-
-        let output = CliHatJobExecutor::finalize_output_for_parsing(&backend, stdout);
-
-        assert_eq!(output, stdout);
-    }
 }
