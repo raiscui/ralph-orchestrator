@@ -239,31 +239,6 @@ impl Default for ParallelMigrationRehearsalExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn example_config_does_not_embed_raw_event_blocks() {
-        let config = include_str!("../../../../examples/parallel-migration-rehearsal/ralph.yml");
-
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not contain raw event tags; use escaped display text instead"
-        );
-    }
-
-    #[test]
-    fn example_config_requires_silent_wait_before_all_ready_lanes() {
-        let config = include_str!("../../../../examples/parallel-migration-rehearsal/ralph.yml");
-
-        assert!(
-            config.contains("当 4 条 ready 还没有全部到齐时:")
-                && config.contains("你必须保持静默,空输出是合法且首选的")
-                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
-            "migration rehearsal config must explicitly forbid interim prose mentioning LOOP_COMPLETE before migration.ready"
-        );
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelMigrationRehearsalExampleScenario {
     fn id(&self) -> &str {
@@ -320,5 +295,30 @@ impl TestScenario for ParallelMigrationRehearsalExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config = include_str!("../../../../examples/parallel-migration-rehearsal/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_silent_wait_before_all_ready_lanes() {
+        let config = include_str!("../../../../examples/parallel-migration-rehearsal/ralph.yml");
+
+        assert!(
+            config.contains("当 4 条 ready 还没有全部到齐时:")
+                && config.contains("你必须保持静默,空输出是合法且首选的")
+                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
+            "migration rehearsal config must explicitly forbid interim prose mentioning LOOP_COMPLETE before migration.ready"
+        );
     }
 }

@@ -268,46 +268,6 @@ impl Default for ParallelPostmortemActionBoardExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn example_config_does_not_embed_raw_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-postmortem-action-board/ralph.yml");
-
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not contain raw event tags; use escaped display text instead"
-        );
-    }
-
-    #[test]
-    fn example_config_requires_event_only_workers() {
-        let config =
-            include_str!("../../../../examples/parallel-postmortem-action-board/ralph.yml");
-
-        assert!(
-            config.contains(
-                "禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。"
-            ),
-            "postmortem example must forbid escaped event display text and extra prose"
-        );
-        assert!(
-            config.contains("你的最终回复必须直接从 `actions.ready` 的真实 event 开始标签开始。"),
-            "action lane must be forced to emit a real actions.ready event"
-        );
-    }
-
-    #[test]
-    fn postmortem_board_payload_matches_json_and_line_payloads() {
-        let json_payload = r#"{"postmortem_id":"PM-2026-0307","status":"READY_FOR_REVIEW","top_action":"add_completion_promise_guardrail","owner":"runtime-platform"}"#;
-        let line_payload = "postmortem_id: PM-2026-0307\nstatus: READY_FOR_REVIEW\ntop_action: add_completion_promise_guardrail\nowner: runtime-platform";
-
-        assert!(super::postmortem_board_payload_matches(json_payload));
-        assert!(super::postmortem_board_payload_matches(line_payload));
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelPostmortemActionBoardExampleScenario {
     fn id(&self) -> &str {
@@ -369,5 +329,45 @@ impl TestScenario for ParallelPostmortemActionBoardExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-postmortem-action-board/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_event_only_workers() {
+        let config =
+            include_str!("../../../../examples/parallel-postmortem-action-board/ralph.yml");
+
+        assert!(
+            config.contains(
+                "禁止输出 `&lt;event`、`&gt;`、代码块、前言、后续建议或任何事件外 prose。"
+            ),
+            "postmortem example must forbid escaped event display text and extra prose"
+        );
+        assert!(
+            config.contains("你的最终回复必须直接从 `actions.ready` 的真实 event 开始标签开始。"),
+            "action lane must be forced to emit a real actions.ready event"
+        );
+    }
+
+    #[test]
+    fn postmortem_board_payload_matches_json_and_line_payloads() {
+        let json_payload = r#"{"postmortem_id":"PM-2026-0307","status":"READY_FOR_REVIEW","top_action":"add_completion_promise_guardrail","owner":"runtime-platform"}"#;
+        let line_payload = "postmortem_id: PM-2026-0307\nstatus: READY_FOR_REVIEW\ntop_action: add_completion_promise_guardrail\nowner: runtime-platform";
+
+        assert!(super::postmortem_board_payload_matches(json_payload));
+        assert!(super::postmortem_board_payload_matches(line_payload));
     }
 }

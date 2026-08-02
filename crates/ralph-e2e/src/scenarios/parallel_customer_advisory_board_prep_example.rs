@@ -275,59 +275,6 @@ impl Default for ParallelCustomerAdvisoryBoardPrepExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn example_config_does_not_embed_raw_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-customer-advisory-board-prep/ralph.yml");
-
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not embed raw event tags"
-        );
-    }
-
-    #[test]
-    fn example_config_requires_silent_wait_before_all_ready_lanes() {
-        let config =
-            include_str!("../../../../examples/parallel-customer-advisory-board-prep/ralph.yml");
-
-        assert!(
-            config.contains("当 4 条 ready 还没有全部到齐时:")
-                && config.contains("你必须保持静默,空输出是合法也是首选")
-                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
-            "config must explicitly forbid interim prose before all ready lanes arrive"
-        );
-    }
-
-    #[test]
-    fn example_config_forbids_self_closing_events() {
-        let config =
-            include_str!("../../../../examples/parallel-customer-advisory-board-prep/ralph.yml");
-
-        assert!(
-            config.contains("不要使用自闭合 `&lt;event .../&gt;` 形式")
-                && config.contains("不要把业务字段塞进 opening tag 属性"),
-            "config must forbid self-closing events and attribute-only payloads"
-        );
-    }
-
-    #[test]
-    fn payload_matcher_accepts_json_and_line_payloads() {
-        let json_payload = r#"{"packet_id":"CAB-APJ-2026-04","cab_status":"READY_TO_CONFIRM","event_region":"APJ","next_owner":"customer-marketing","packet_focus":"expand_critical_accounts","summary":"ready for confirmation"}"#;
-        let line_payload = "packet_id: CAB-APJ-2026-04\n\
-cab_status: READY_TO_CONFIRM\n\
-event_region: APJ\n\
-next_owner: customer-marketing\n\
-packet_focus: expand_critical_accounts\n\
-summary: ready for confirmation";
-
-        assert!(super::cab_payload_matches(json_payload));
-        assert!(super::cab_payload_matches(line_payload));
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelCustomerAdvisoryBoardPrepExampleScenario {
     fn id(&self) -> &str {
@@ -389,5 +336,58 @@ impl TestScenario for ParallelCustomerAdvisoryBoardPrepExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-advisory-board-prep/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not embed raw event tags"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_silent_wait_before_all_ready_lanes() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-advisory-board-prep/ralph.yml");
+
+        assert!(
+            config.contains("当 4 条 ready 还没有全部到齐时:")
+                && config.contains("你必须保持静默,空输出是合法也是首选")
+                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
+            "config must explicitly forbid interim prose before all ready lanes arrive"
+        );
+    }
+
+    #[test]
+    fn example_config_forbids_self_closing_events() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-advisory-board-prep/ralph.yml");
+
+        assert!(
+            config.contains("不要使用自闭合 `&lt;event .../&gt;` 形式")
+                && config.contains("不要把业务字段塞进 opening tag 属性"),
+            "config must forbid self-closing events and attribute-only payloads"
+        );
+    }
+
+    #[test]
+    fn payload_matcher_accepts_json_and_line_payloads() {
+        let json_payload = r#"{"packet_id":"CAB-APJ-2026-04","cab_status":"READY_TO_CONFIRM","event_region":"APJ","next_owner":"customer-marketing","packet_focus":"expand_critical_accounts","summary":"ready for confirmation"}"#;
+        let line_payload = "packet_id: CAB-APJ-2026-04\n\
+cab_status: READY_TO_CONFIRM\n\
+event_region: APJ\n\
+next_owner: customer-marketing\n\
+packet_focus: expand_critical_accounts\n\
+summary: ready for confirmation";
+
+        assert!(super::cab_payload_matches(json_payload));
+        assert!(super::cab_payload_matches(line_payload));
     }
 }

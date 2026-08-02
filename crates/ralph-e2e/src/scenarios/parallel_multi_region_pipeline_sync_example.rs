@@ -265,71 +265,6 @@ impl Default for ParallelMultiRegionPipelineSyncExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn example_config_does_not_embed_raw_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-multi-region-pipeline-sync/ralph.yml");
-
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config 不应直接包含事件标签"
-        );
-    }
-
-    #[test]
-    fn example_config_requires_silent_wait_before_all_ready_lanes() {
-        let config =
-            include_str!("../../../../examples/parallel-multi-region-pipeline-sync/ralph.yml");
-
-        assert!(
-            config.contains("当 4 条 ready 还没有全部到齐时:")
-                && config.contains("你必须保持完全静默")
-                && config.contains("`LOOP_COMPLETE` 只能在 `pipeline.sync.ready` 之后")
-                && config.contains("pipeline.sync.packet.request"),
-            "parallel-multi-region-pipeline-sync config 必须明确静默等待和 sync 请求时点"
-        );
-    }
-
-    #[test]
-    fn example_config_forbids_self_closing_events() {
-        let config =
-            include_str!("../../../../examples/parallel-multi-region-pipeline-sync/ralph.yml");
-
-        assert!(
-            config.contains("禁止自闭合 `&lt;event .../&gt;`")
-                && config.contains("把字段塞进 opening tag 属性"),
-            "multi-region pipeline sync 需要禁止自闭合及属性式 payload"
-        );
-    }
-
-    #[test]
-    fn example_config_requires_compact_latam_event_shape() {
-        let config =
-            include_str!("../../../../examples/parallel-multi-region-pipeline-sync/ralph.yml");
-
-        assert!(
-            config.contains("整个回复必须是一条单行真实事件")
-                && config.contains("payload 请使用紧凑 JSON 对象")
-                && config.contains("结束标签必须精确写成 `&lt;/event&gt;`"),
-            "latam reviewer 必须被锁定为单行 JSON 事件,避免 closing tag 漂移"
-        );
-    }
-
-    #[test]
-    fn payload_matcher_accepts_json_and_line_payloads() {
-        let json_payload = r#"{"sync_id":"MRP-2026-W15","sync_status":"READY_FOR_GLOBAL_FORECAST_CALL","forecast_week":"FY26_W15","sync_owner":"global-revenue-operations"}"#;
-        let line_payload = "sync_id: MRP-2026-W15
-sync_status: READY_FOR_GLOBAL_FORECAST_CALL
-forecast_week: FY26_W15
-sync_owner: global-revenue-operations";
-
-        assert!(super::pipeline_sync_payload_matches(json_payload));
-        assert!(super::pipeline_sync_payload_matches(line_payload));
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelMultiRegionPipelineSyncExampleScenario {
     fn id(&self) -> &str {
@@ -392,5 +327,70 @@ impl TestScenario for ParallelMultiRegionPipelineSyncExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-multi-region-pipeline-sync/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config 不应直接包含事件标签"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_silent_wait_before_all_ready_lanes() {
+        let config =
+            include_str!("../../../../examples/parallel-multi-region-pipeline-sync/ralph.yml");
+
+        assert!(
+            config.contains("当 4 条 ready 还没有全部到齐时:")
+                && config.contains("你必须保持完全静默")
+                && config.contains("`LOOP_COMPLETE` 只能在 `pipeline.sync.ready` 之后")
+                && config.contains("pipeline.sync.packet.request"),
+            "parallel-multi-region-pipeline-sync config 必须明确静默等待和 sync 请求时点"
+        );
+    }
+
+    #[test]
+    fn example_config_forbids_self_closing_events() {
+        let config =
+            include_str!("../../../../examples/parallel-multi-region-pipeline-sync/ralph.yml");
+
+        assert!(
+            config.contains("禁止自闭合 `&lt;event .../&gt;`")
+                && config.contains("把字段塞进 opening tag 属性"),
+            "multi-region pipeline sync 需要禁止自闭合及属性式 payload"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_compact_latam_event_shape() {
+        let config =
+            include_str!("../../../../examples/parallel-multi-region-pipeline-sync/ralph.yml");
+
+        assert!(
+            config.contains("整个回复必须是一条单行真实事件")
+                && config.contains("payload 请使用紧凑 JSON 对象")
+                && config.contains("结束标签必须精确写成 `&lt;/event&gt;`"),
+            "latam reviewer 必须被锁定为单行 JSON 事件,避免 closing tag 漂移"
+        );
+    }
+
+    #[test]
+    fn payload_matcher_accepts_json_and_line_payloads() {
+        let json_payload = r#"{"sync_id":"MRP-2026-W15","sync_status":"READY_FOR_GLOBAL_FORECAST_CALL","forecast_week":"FY26_W15","sync_owner":"global-revenue-operations"}"#;
+        let line_payload = "sync_id: MRP-2026-W15
+sync_status: READY_FOR_GLOBAL_FORECAST_CALL
+forecast_week: FY26_W15
+sync_owner: global-revenue-operations";
+
+        assert!(super::pipeline_sync_payload_matches(json_payload));
+        assert!(super::pipeline_sync_payload_matches(line_payload));
     }
 }

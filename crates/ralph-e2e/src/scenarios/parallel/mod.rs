@@ -37,6 +37,25 @@ use std::time::Duration;
 // - 可见性限制在 `crate::scenarios`，避免扩散到整个 crate。
 pub(in crate::scenarios) use job_run_counts::{JobRunCounts, parse_parallel_job_line};
 
+const RALPH_E2E_CODEX_MODEL_ENV: &str = "RALPH_E2E_CODEX_MODEL";
+const DEFAULT_RALPH_E2E_CODEX_MODEL: &str = "gpt-5.5";
+
+/// 解析 live Codex E2E 使用的模型名。
+///
+/// 说明：
+/// - live E2E 依赖外部 provider,硬编码模型会把"模型不可用"误报成 runtime 语义失败。
+/// - 默认值跟当前仓库开发机 Codex 配置保持一致；需要切换 provider/model 时只改环境变量。
+pub(in crate::scenarios) fn codex_e2e_model() -> String {
+    codex_e2e_model_from_lookup(|name| std::env::var(name).ok())
+}
+
+fn codex_e2e_model_from_lookup(lookup: impl FnOnce(&str) -> Option<String>) -> String {
+    lookup(RALPH_E2E_CODEX_MODEL_ENV)
+        .map(|raw| raw.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| DEFAULT_RALPH_E2E_CODEX_MODEL.to_string())
+}
+
 /// 读取并解析并行运行态的 agent 快照：`.ralph/agents.json`。
 ///
 /// 说明：
@@ -154,14 +173,16 @@ pub(in crate::scenarios) fn patch_example_config_for_codex_e2e(
         return Ok(config_content.to_string());
     }
 
-    let cli_block = r#"cli:
+    let model = codex_e2e_model();
+    let cli_block = format!(
+        r#"cli:
   # E2E: 覆写 Codex 参数,降噪/提速(不影响仓库 example 原文件).
   backend: custom
   command: codex
   args:
     - exec
     - -m
-    - gpt-5-codex
+    - {model}
     - --full-auto
     - -c
     - 'model_reasoning_effort="low"'
@@ -169,10 +190,13 @@ pub(in crate::scenarios) fn patch_example_config_for_codex_e2e(
     - 'model_reasoning_summary="none"'
     - -c
     - 'rmcp_client=false'
+    - -c
+    - 'features.hooks=false'
 
-"#;
+"#
+    );
 
-    replace_top_level_yaml_block(config_content, "cli:", cli_block)
+    replace_top_level_yaml_block(config_content, "cli:", &cli_block)
 }
 
 /// 为带 `prompt_file: "PROMPT.md"` 的 direct example scenario 准备 E2E workspace。
@@ -241,4 +265,28 @@ pub(in crate::scenarios) fn setup_prompt_file_example_workspace(
         timeout: std::cmp::min(backend.default_timeout(), Duration::from_secs(300)),
         extra_args: vec!["--no-tui".to_string()],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_e2e_model_uses_default_when_env_missing_or_blank() {
+        let missing = codex_e2e_model_from_lookup(|_| None);
+        let blank = codex_e2e_model_from_lookup(|_| Some("   ".to_string()));
+
+        assert_eq!(missing, DEFAULT_RALPH_E2E_CODEX_MODEL);
+        assert_eq!(blank, DEFAULT_RALPH_E2E_CODEX_MODEL);
+    }
+
+    #[test]
+    fn codex_e2e_model_trims_env_override() {
+        let model = codex_e2e_model_from_lookup(|name| {
+            assert_eq!(name, RALPH_E2E_CODEX_MODEL_ENV);
+            Some("  gpt-test-model  ".to_string())
+        });
+
+        assert_eq!(model, "gpt-test-model");
+    }
 }

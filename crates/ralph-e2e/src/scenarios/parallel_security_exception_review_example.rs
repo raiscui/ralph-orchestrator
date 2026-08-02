@@ -266,45 +266,6 @@ impl Default for ParallelSecurityExceptionReviewExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn example_config_does_not_embed_raw_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-security-exception-review/ralph.yml");
-
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not contain raw event tags; use escaped display text instead"
-        );
-    }
-
-    #[test]
-    fn example_config_requires_silent_wait_before_all_ready_lanes() {
-        let config =
-            include_str!("../../../../examples/parallel-security-exception-review/ralph.yml");
-
-        assert!(
-            config.contains("当 4 条 ready 还没有全部到齐时:")
-                && config.contains("你必须保持静默,空输出是合法且首选的")
-                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
-            "parallel-security-exception-review config must explicitly forbid interim prose before all ready lanes arrive"
-        );
-    }
-
-    #[test]
-    fn payload_matcher_accepts_json_and_line_payloads() {
-        let json_payload = r#"{"exception_id":"EXC-2026-17","decision":"APPROVE_WITH_COMPENSATING_CONTROLS","required_controls":"waf_rate_limit_plus_audit","expiry_date":"2026-06-30"}"#;
-        let line_payload = "exception_id: EXC-2026-17
-decision: APPROVE_WITH_COMPENSATING_CONTROLS
-required_controls: waf_rate_limit_plus_audit
-expiry_date: 2026-06-30";
-
-        assert!(super::exception_payload_matches(json_payload));
-        assert!(super::exception_payload_matches(line_payload));
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelSecurityExceptionReviewExampleScenario {
     fn id(&self) -> &str {
@@ -366,5 +327,44 @@ impl TestScenario for ParallelSecurityExceptionReviewExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-security-exception-review/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_silent_wait_before_all_ready_lanes() {
+        let config =
+            include_str!("../../../../examples/parallel-security-exception-review/ralph.yml");
+
+        assert!(
+            config.contains("当 4 条 ready 还没有全部到齐时:")
+                && config.contains("你必须保持静默,空输出是合法且首选的")
+                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
+            "parallel-security-exception-review config must explicitly forbid interim prose before all ready lanes arrive"
+        );
+    }
+
+    #[test]
+    fn payload_matcher_accepts_json_and_line_payloads() {
+        let json_payload = r#"{"exception_id":"EXC-2026-17","decision":"APPROVE_WITH_COMPENSATING_CONTROLS","required_controls":"waf_rate_limit_plus_audit","expiry_date":"2026-06-30"}"#;
+        let line_payload = "exception_id: EXC-2026-17
+decision: APPROVE_WITH_COMPENSATING_CONTROLS
+required_controls: waf_rate_limit_plus_audit
+expiry_date: 2026-06-30";
+
+        assert!(super::exception_payload_matches(json_payload));
+        assert!(super::exception_payload_matches(line_payload));
     }
 }

@@ -270,68 +270,6 @@ impl Default for ParallelRenewalRiskCalibrationExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn config_missing_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-renewal-risk-calibration/ralph.yml");
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not embed raw event tags"
-        );
-    }
-
-    #[test]
-    fn config_requires_silent_waiting() {
-        let config =
-            include_str!("../../../../examples/parallel-renewal-risk-calibration/ralph.yml");
-        assert!(
-            config.contains("当 4 条 ready 还没有全部到齐时:")
-                && config.contains("你必须保持完全静默")
-                && config.contains("`renewal.calibration.packet.request`"),
-            "config must describe the silent waiting requirement"
-        );
-    }
-
-    #[test]
-    fn config_forbids_self_closing_events() {
-        let config =
-            include_str!("../../../../examples/parallel-renewal-risk-calibration/ralph.yml");
-        assert!(
-            config.contains("禁止自闭合 `&lt;event .../&gt;`")
-                && config.contains("不要把字段塞进 opening tag 属性"),
-            "config must forbid self-closing events and attribute-only payloads"
-        );
-    }
-
-    #[test]
-    fn config_requires_compact_success_event_shape() {
-        let config =
-            include_str!("../../../../examples/parallel-renewal-risk-calibration/ralph.yml");
-        assert!(
-            config.contains("整个回复必须是一条单行真实事件")
-                && config.contains("payload 请使用紧凑 JSON 对象")
-                && config.contains("结束标签必须精确写成 `&lt;/event&gt;`")
-                && config.contains("唯一允许的输出模板如下")
-                && config.contains("risk_playbooks_assigned"),
-            "success plan reviewer 必须被锁定为更机械化的单行 JSON 事件模板"
-        );
-    }
-
-    #[test]
-    fn payload_matcher_accepts_json_and_line_payloads() {
-        let json_payload = r#"{"calibration_status":"READY_FOR_FORECAST_COMMIT","forecast_window":"Q3_RENEWAL_CALIBRATION","forecast_owner":"retention-ops","calibration_summary":"four lanes aligned"}"#;
-        let line_payload = "calibration_status: READY_FOR_FORECAST_COMMIT
-forecast_window: Q3_RENEWAL_CALIBRATION
-forecast_owner: retention-ops
-calibration_summary: four lanes aligned";
-
-        assert!(super::calibration_payload_matches(json_payload));
-        assert!(super::calibration_payload_matches(line_payload));
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelRenewalRiskCalibrationExampleScenario {
     fn id(&self) -> &str {
@@ -391,5 +329,67 @@ impl TestScenario for ParallelRenewalRiskCalibrationExampleScenario {
             assertions,
             duration: execution.duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn config_missing_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-renewal-risk-calibration/ralph.yml");
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not embed raw event tags"
+        );
+    }
+
+    #[test]
+    fn config_requires_silent_waiting() {
+        let config =
+            include_str!("../../../../examples/parallel-renewal-risk-calibration/ralph.yml");
+        assert!(
+            config.contains("当 4 条 ready 还没有全部到齐时:")
+                && config.contains("你必须保持完全静默")
+                && config.contains("`renewal.calibration.packet.request`"),
+            "config must describe the silent waiting requirement"
+        );
+    }
+
+    #[test]
+    fn config_forbids_self_closing_events() {
+        let config =
+            include_str!("../../../../examples/parallel-renewal-risk-calibration/ralph.yml");
+        assert!(
+            config.contains("禁止自闭合 `&lt;event .../&gt;`")
+                && config.contains("不要把字段塞进 opening tag 属性"),
+            "config must forbid self-closing events and attribute-only payloads"
+        );
+    }
+
+    #[test]
+    fn config_requires_compact_success_event_shape() {
+        let config =
+            include_str!("../../../../examples/parallel-renewal-risk-calibration/ralph.yml");
+        assert!(
+            config.contains("整个回复必须是一条单行真实事件")
+                && config.contains("payload 请使用紧凑 JSON 对象")
+                && config.contains("结束标签必须精确写成 `&lt;/event&gt;`")
+                && config.contains("唯一允许的输出模板如下")
+                && config.contains("risk_playbooks_assigned"),
+            "success plan reviewer 必须被锁定为更机械化的单行 JSON 事件模板"
+        );
+    }
+
+    #[test]
+    fn payload_matcher_accepts_json_and_line_payloads() {
+        let json_payload = r#"{"calibration_status":"READY_FOR_FORECAST_COMMIT","forecast_window":"Q3_RENEWAL_CALIBRATION","forecast_owner":"retention-ops","calibration_summary":"four lanes aligned"}"#;
+        let line_payload = "calibration_status: READY_FOR_FORECAST_COMMIT
+forecast_window: Q3_RENEWAL_CALIBRATION
+forecast_owner: retention-ops
+calibration_summary: four lanes aligned";
+
+        assert!(super::calibration_payload_matches(json_payload));
+        assert!(super::calibration_payload_matches(line_payload));
     }
 }

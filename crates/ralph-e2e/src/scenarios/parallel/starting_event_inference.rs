@@ -71,12 +71,16 @@ impl ParallelStartingEventInferenceScenario {
         // - 这里用 `custom` 后端精确注入 codex 参数，做到降噪/提速而不改默认设置。
         // ---------------------------------------------------------------------
         match backend {
-            Backend::Codex => r#"  backend: custom
+            Backend::Codex => {
+                let model = super::codex_e2e_model();
+
+                format!(
+                    r#"  backend: custom
   command: codex
   args:
     - exec
     - -m
-    - gpt-5-codex
+    - {model}
     - --full-auto
     - -c
     - 'model_reasoning_effort="low"'
@@ -84,8 +88,11 @@ impl ParallelStartingEventInferenceScenario {
     - 'model_reasoning_summary="none"'
     - -c
     - 'rmcp_client=false'
+    - -c
+    - 'features.hooks=false'
 "#
-            .to_string(),
+                )
+            }
             _ => format!("  backend: {}\n", backend.as_config_str()),
         }
     }

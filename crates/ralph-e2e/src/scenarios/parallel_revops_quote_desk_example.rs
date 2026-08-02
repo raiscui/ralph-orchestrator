@@ -243,6 +243,65 @@ impl Default for ParallelRevopsQuoteDeskExampleScenario {
     }
 }
 
+#[async_trait]
+impl TestScenario for ParallelRevopsQuoteDeskExampleScenario {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn tier(&self) -> &str {
+        &self.tier
+    }
+
+    fn supported_backends(&self) -> Vec<Backend> {
+        vec![Backend::Codex]
+    }
+
+    fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
+        setup_prompt_file_example_workspace(workspace, backend, "parallel-revops-quote-desk", 20)
+    }
+
+    async fn run(
+        &self,
+        executor: &RalphExecutor,
+        config: &ScenarioConfig,
+    ) -> Result<TestResult, ScenarioError> {
+        let start = std::time::Instant::now();
+        let execution = executor
+            .run(config)
+            .await
+            .map_err(|error| ScenarioError::ExecutionError(format!("ralph 执行失败: {error}")))?;
+        let duration = start.elapsed();
+
+        let assertions = vec![
+            Assertions::response_received(&execution),
+            Assertions::exit_code(&execution, 0),
+            Assertions::no_timeout(&execution),
+            self.parallel_mode_visible(&execution),
+            self.agents_snapshot_written(executor),
+            self.required_topic_chain_observed(&execution),
+            self.final_payload_expected(&execution),
+            self.no_new_jobs_started_after_loop_complete(&execution),
+        ];
+
+        let all_passed = assertions.iter().all(|assertion| assertion.passed);
+
+        Ok(TestResult {
+            scenario_id: self.id.clone(),
+            scenario_description: self.description.clone(),
+            backend: String::new(),
+            tier: self.tier.clone(),
+            passed: all_passed,
+            assertions,
+            duration,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -301,64 +360,5 @@ pricing_owner: revops-desk";
 
         assert!(super::quote_payload_matches(json_payload));
         assert!(super::quote_payload_matches(line_payload));
-    }
-}
-
-#[async_trait]
-impl TestScenario for ParallelRevopsQuoteDeskExampleScenario {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn tier(&self) -> &str {
-        &self.tier
-    }
-
-    fn supported_backends(&self) -> Vec<Backend> {
-        vec![Backend::Codex]
-    }
-
-    fn setup(&self, workspace: &Path, backend: Backend) -> Result<ScenarioConfig, ScenarioError> {
-        setup_prompt_file_example_workspace(workspace, backend, "parallel-revops-quote-desk", 20)
-    }
-
-    async fn run(
-        &self,
-        executor: &RalphExecutor,
-        config: &ScenarioConfig,
-    ) -> Result<TestResult, ScenarioError> {
-        let start = std::time::Instant::now();
-        let execution = executor
-            .run(config)
-            .await
-            .map_err(|error| ScenarioError::ExecutionError(format!("ralph 执行失败: {error}")))?;
-        let duration = start.elapsed();
-
-        let assertions = vec![
-            Assertions::response_received(&execution),
-            Assertions::exit_code(&execution, 0),
-            Assertions::no_timeout(&execution),
-            self.parallel_mode_visible(&execution),
-            self.agents_snapshot_written(executor),
-            self.required_topic_chain_observed(&execution),
-            self.final_payload_expected(&execution),
-            self.no_new_jobs_started_after_loop_complete(&execution),
-        ];
-
-        let all_passed = assertions.iter().all(|assertion| assertion.passed);
-
-        Ok(TestResult {
-            scenario_id: self.id.clone(),
-            scenario_description: self.description.clone(),
-            backend: String::new(),
-            tier: self.tier.clone(),
-            passed: all_passed,
-            assertions,
-            duration,
-        })
     }
 }

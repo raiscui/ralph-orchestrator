@@ -272,57 +272,6 @@ impl Default for ParallelCustomerOnboardingActivationExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn example_config_does_not_embed_raw_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
-
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not contain raw event tags; use escaped display text instead"
-        );
-    }
-
-    #[test]
-    fn example_config_requires_silent_wait_before_all_ready_lanes() {
-        let config =
-            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
-
-        assert!(
-            config.contains("当 4 条 ready 还没有全部到齐时:")
-                && config.contains("你必须保持静默,空输出是合法且首选的")
-                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
-            "parallel-customer-onboarding-activation config must explicitly forbid interim prose before all ready lanes arrive"
-        );
-    }
-
-    #[test]
-    fn example_config_forbids_self_closing_events() {
-        let config =
-            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
-
-        assert!(
-            config.contains("不要使用自闭合 `&lt;event .../&gt;` 形式。")
-                && config.contains("不要把业务字段塞进 opening tag 属性。"),
-            "customer onboarding example must forbid self-closing events and attribute-only payloads"
-        );
-    }
-
-    #[test]
-    fn payload_matcher_accepts_json_and_line_payloads() {
-        let json_payload = r#"{"onboarding_id":"ONB-2026-04","onboarding_status":"READY_FOR_KICKOFF","primary_risk":"LOW","first_milestone":"api_sandbox_enablement"}"#;
-        let line_payload = "onboarding_id: ONB-2026-04
-onboarding_status: READY_FOR_KICKOFF
-primary_risk: LOW
-first_milestone: api_sandbox_enablement";
-
-        assert!(super::onboarding_activation_payload_matches(json_payload));
-        assert!(super::onboarding_activation_payload_matches(line_payload));
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelCustomerOnboardingActivationExampleScenario {
     fn id(&self) -> &str {
@@ -384,5 +333,56 @@ impl TestScenario for ParallelCustomerOnboardingActivationExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
+    }
+
+    #[test]
+    fn example_config_requires_silent_wait_before_all_ready_lanes() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
+
+        assert!(
+            config.contains("当 4 条 ready 还没有全部到齐时:")
+                && config.contains("你必须保持静默,空输出是合法且首选的")
+                && config.contains("`LOOP_COMPLETE` 这个字符串只能在最终收尾那一行出现一次"),
+            "parallel-customer-onboarding-activation config must explicitly forbid interim prose before all ready lanes arrive"
+        );
+    }
+
+    #[test]
+    fn example_config_forbids_self_closing_events() {
+        let config =
+            include_str!("../../../../examples/parallel-customer-onboarding-activation/ralph.yml");
+
+        assert!(
+            config.contains("不要使用自闭合 `&lt;event .../&gt;` 形式。")
+                && config.contains("不要把业务字段塞进 opening tag 属性。"),
+            "customer onboarding example must forbid self-closing events and attribute-only payloads"
+        );
+    }
+
+    #[test]
+    fn payload_matcher_accepts_json_and_line_payloads() {
+        let json_payload = r#"{"onboarding_id":"ONB-2026-04","onboarding_status":"READY_FOR_KICKOFF","primary_risk":"LOW","first_milestone":"api_sandbox_enablement"}"#;
+        let line_payload = "onboarding_id: ONB-2026-04
+onboarding_status: READY_FOR_KICKOFF
+primary_risk: LOW
+first_milestone: api_sandbox_enablement";
+
+        assert!(super::onboarding_activation_payload_matches(json_payload));
+        assert!(super::onboarding_activation_payload_matches(line_payload));
     }
 }

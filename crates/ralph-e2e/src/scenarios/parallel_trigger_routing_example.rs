@@ -52,14 +52,16 @@ impl ParallelTriggerRoutingExampleScenario {
             return Ok(config_content.to_string());
         }
 
-        let cli_block = r#"cli:
+        let model = super::parallel::codex_e2e_model();
+        let cli_block = format!(
+            r#"cli:
   # E2E: 覆写 Codex 参数,降噪/提速(不影响仓库 example 原文件).
   backend: custom
   command: codex
   args:
     - exec
     - -m
-    - gpt-5-codex
+    - {model}
     - --full-auto
     - -c
     - 'model_reasoning_effort="low"'
@@ -67,10 +69,13 @@ impl ParallelTriggerRoutingExampleScenario {
     - 'model_reasoning_summary="none"'
     - -c
     - 'rmcp_client=false'
+    - -c
+    - 'features.hooks=false'
 
-"#;
+"#
+        );
 
-        replace_top_level_yaml_block(config_content, "cli:", cli_block).map_err(|e| {
+        replace_top_level_yaml_block(config_content, "cli:", &cli_block).map_err(|e| {
             ScenarioError::SetupError(format!(
                 "failed to patch example ralph.yml cli block for e2e: {e}"
             ))
@@ -243,34 +248,6 @@ impl Default for ParallelTriggerRoutingExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    /// 这条回归专门锁住 example 提示词里的协议示例污染。
-    /// 一旦有人把 raw `<event ...>` 写回 example，真实后端很容易把它照抄成伪事件。
-    #[test]
-    fn example_config_does_not_embed_raw_event_blocks() {
-        let config = include_str!("../../../../examples/parallel-trigger-routing/ralph.yml");
-
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not contain raw event tags; use escaped display text instead"
-        );
-    }
-
-    #[test]
-    fn example_config_does_not_embed_placeholder_payload_templates() {
-        let config = include_str!("../../../../examples/parallel-trigger-routing/ralph.yml");
-
-        assert!(
-            !config.contains("...规格内容...")
-                && !config.contains("&gt;...&lt;/event&gt;")
-                && !config.contains("- spec.start: ...")
-                && !config.contains("- spec.rejected: ..."),
-            "example config must not teach placeholder payloads that the model can echo back"
-        );
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelTriggerRoutingExampleScenario {
     fn id(&self) -> &str {
@@ -360,5 +337,33 @@ impl TestScenario for ParallelTriggerRoutingExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// 这条回归专门锁住 example 提示词里的协议示例污染。
+    /// 一旦有人把 raw `<event ...>` 写回 example，真实后端很容易把它照抄成伪事件。
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config = include_str!("../../../../examples/parallel-trigger-routing/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
+    }
+
+    #[test]
+    fn example_config_does_not_embed_placeholder_payload_templates() {
+        let config = include_str!("../../../../examples/parallel-trigger-routing/ralph.yml");
+
+        assert!(
+            !config.contains("...规格内容...")
+                && !config.contains("&gt;...&lt;/event&gt;")
+                && !config.contains("- spec.start: ...")
+                && !config.contains("- spec.rejected: ..."),
+            "example config must not teach placeholder payloads that the model can echo back"
+        );
     }
 }

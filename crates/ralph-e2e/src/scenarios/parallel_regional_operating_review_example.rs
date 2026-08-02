@@ -266,66 +266,6 @@ impl Default for ParallelRegionalOperatingReviewExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn config_missing_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-regional-operating-review/ralph.yml");
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not embed raw event tags"
-        );
-    }
-
-    #[test]
-    fn config_requires_silent_waiting() {
-        let config =
-            include_str!("../../../../examples/parallel-regional-operating-review/ralph.yml");
-        assert!(
-            config.contains("在四条 ready 全部到齐之前必须保持完全静默")
-                && config.contains("你必须保持完全静默"),
-            "config must describe the silent waiting requirement"
-        );
-    }
-
-    #[test]
-    fn config_forbids_self_closing_events() {
-        let config =
-            include_str!("../../../../examples/parallel-regional-operating-review/ralph.yml");
-        assert!(
-            config.contains("禁止自闭合 `&lt;event .../&gt;`")
-                && config.contains("把字段塞进 opening tag 属性"),
-            "config must forbid self-closing events and attribute-only payloads"
-        );
-    }
-
-    #[test]
-    fn config_requires_compact_delivery_event_shape() {
-        let config =
-            include_str!("../../../../examples/parallel-regional-operating-review/ralph.yml");
-        assert!(
-            config.contains("整个回复必须是一条单行真实事件")
-                && config.contains("payload 请使用紧凑 JSON 对象")
-                && config.contains("结束标签必须精确写成 `&lt;/event&gt;`"),
-            "delivery reviewer 必须被锁定为单行 JSON 事件"
-        );
-    }
-
-    #[test]
-    fn payload_matcher_accepts_json_and_line_payloads() {
-        let json_payload = r#"{"review_status":"READY_FOR_REGION_WEEKLY","region_code":"APAC_ENTERPRISE","operating_owner":"regional-chief-of-staff","packet_summary":"four lanes aligned","next_action_owner":"regional-chief-of-staff"}"#;
-        let line_payload = "review_status: READY_FOR_REGION_WEEKLY
-region_code: APAC_ENTERPRISE
-operating_owner: regional-chief-of-staff
-packet_summary: four lanes aligned
-next_action_owner: regional-chief-of-staff";
-
-        assert!(super::regional_payload_matches(json_payload));
-        assert!(super::regional_payload_matches(line_payload));
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelRegionalOperatingReviewExampleScenario {
     fn id(&self) -> &str {
@@ -385,5 +325,65 @@ impl TestScenario for ParallelRegionalOperatingReviewExampleScenario {
             assertions,
             duration: execution.duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn config_missing_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-regional-operating-review/ralph.yml");
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not embed raw event tags"
+        );
+    }
+
+    #[test]
+    fn config_requires_silent_waiting() {
+        let config =
+            include_str!("../../../../examples/parallel-regional-operating-review/ralph.yml");
+        assert!(
+            config.contains("在四条 ready 全部到齐之前必须保持完全静默")
+                && config.contains("你必须保持完全静默"),
+            "config must describe the silent waiting requirement"
+        );
+    }
+
+    #[test]
+    fn config_forbids_self_closing_events() {
+        let config =
+            include_str!("../../../../examples/parallel-regional-operating-review/ralph.yml");
+        assert!(
+            config.contains("禁止自闭合 `&lt;event .../&gt;`")
+                && config.contains("把字段塞进 opening tag 属性"),
+            "config must forbid self-closing events and attribute-only payloads"
+        );
+    }
+
+    #[test]
+    fn config_requires_compact_delivery_event_shape() {
+        let config =
+            include_str!("../../../../examples/parallel-regional-operating-review/ralph.yml");
+        assert!(
+            config.contains("整个回复必须是一条单行真实事件")
+                && config.contains("payload 请使用紧凑 JSON 对象")
+                && config.contains("结束标签必须精确写成 `&lt;/event&gt;`"),
+            "delivery reviewer 必须被锁定为单行 JSON 事件"
+        );
+    }
+
+    #[test]
+    fn payload_matcher_accepts_json_and_line_payloads() {
+        let json_payload = r#"{"review_status":"READY_FOR_REGION_WEEKLY","region_code":"APAC_ENTERPRISE","operating_owner":"regional-chief-of-staff","packet_summary":"four lanes aligned","next_action_owner":"regional-chief-of-staff"}"#;
+        let line_payload = "review_status: READY_FOR_REGION_WEEKLY
+region_code: APAC_ENTERPRISE
+operating_owner: regional-chief-of-staff
+packet_summary: four lanes aligned
+next_action_owner: regional-chief-of-staff";
+
+        assert!(super::regional_payload_matches(json_payload));
+        assert!(super::regional_payload_matches(line_payload));
     }
 }

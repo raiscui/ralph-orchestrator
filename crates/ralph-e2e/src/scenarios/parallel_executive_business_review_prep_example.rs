@@ -243,66 +243,6 @@ impl Default for ParallelExecutiveBusinessReviewPrepExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn config_missing_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-executive-business-review-prep/ralph.yml");
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not embed raw event tags"
-        );
-    }
-
-    #[test]
-    fn config_requires_silent_waiting() {
-        let config =
-            include_str!("../../../../examples/parallel-executive-business-review-prep/ralph.yml");
-        assert!(
-            config.contains("四条 ready 到齐之前") && config.contains("必须保持静默"),
-            "config must describe the silent waiting requirement"
-        );
-    }
-
-    #[test]
-    fn config_forbids_self_closing_events() {
-        let config =
-            include_str!("../../../../examples/parallel-executive-business-review-prep/ralph.yml");
-        assert!(
-            config.contains("不要使用自闭合 `&lt;event .../&gt;`")
-                && config.contains("不要把业务字段塞进 opening tag"),
-            "config must forbid self-closing events and attribute-only payloads"
-        );
-    }
-
-    #[test]
-    fn config_requires_fixed_final_fields() {
-        let config =
-            include_str!("../../../../examples/parallel-executive-business-review-prep/ralph.yml");
-        assert!(
-            config.contains("`ebr_status: READY_FOR_EXEC_REVIEW`")
-                && config.contains("`meeting_tier: Q2_BUSINESS_REVIEW`")
-                && config.contains("`narrative_owner: gm-office`")
-                && config.contains("`next_action_owner: gm-office`"),
-            "config must lock the fixed EBR final fields"
-        );
-    }
-
-    #[test]
-    fn payload_matcher_accepts_json_and_line_payloads() {
-        let json_payload = r#"{"ebr_status":"READY_FOR_EXEC_REVIEW","meeting_tier":"Q2_BUSINESS_REVIEW","narrative_owner":"gm-office","packet_summary":"four lanes aligned","next_action_owner":"gm-office"}"#;
-        let line_payload = "ebr_status: READY_FOR_EXEC_REVIEW
-meeting_tier: Q2_BUSINESS_REVIEW
-narrative_owner: gm-office
-packet_summary: four lanes aligned
-next_action_owner: gm-office";
-
-        assert!(super::ebr_payload_matches(json_payload));
-        assert!(super::ebr_payload_matches(line_payload));
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelExecutiveBusinessReviewPrepExampleScenario {
     fn id(&self) -> &str {
@@ -361,5 +301,65 @@ impl TestScenario for ParallelExecutiveBusinessReviewPrepExampleScenario {
             assertions,
             duration: execution.duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn config_missing_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-executive-business-review-prep/ralph.yml");
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not embed raw event tags"
+        );
+    }
+
+    #[test]
+    fn config_requires_silent_waiting() {
+        let config =
+            include_str!("../../../../examples/parallel-executive-business-review-prep/ralph.yml");
+        assert!(
+            config.contains("四条 ready 到齐之前") && config.contains("必须保持静默"),
+            "config must describe the silent waiting requirement"
+        );
+    }
+
+    #[test]
+    fn config_forbids_self_closing_events() {
+        let config =
+            include_str!("../../../../examples/parallel-executive-business-review-prep/ralph.yml");
+        assert!(
+            config.contains("不要使用自闭合 `&lt;event .../&gt;`")
+                && config.contains("不要把业务字段塞进 opening tag"),
+            "config must forbid self-closing events and attribute-only payloads"
+        );
+    }
+
+    #[test]
+    fn config_requires_fixed_final_fields() {
+        let config =
+            include_str!("../../../../examples/parallel-executive-business-review-prep/ralph.yml");
+        assert!(
+            config.contains("`ebr_status: READY_FOR_EXEC_REVIEW`")
+                && config.contains("`meeting_tier: Q2_BUSINESS_REVIEW`")
+                && config.contains("`narrative_owner: gm-office`")
+                && config.contains("`next_action_owner: gm-office`"),
+            "config must lock the fixed EBR final fields"
+        );
+    }
+
+    #[test]
+    fn payload_matcher_accepts_json_and_line_payloads() {
+        let json_payload = r#"{"ebr_status":"READY_FOR_EXEC_REVIEW","meeting_tier":"Q2_BUSINESS_REVIEW","narrative_owner":"gm-office","packet_summary":"four lanes aligned","next_action_owner":"gm-office"}"#;
+        let line_payload = "ebr_status: READY_FOR_EXEC_REVIEW
+meeting_tier: Q2_BUSINESS_REVIEW
+narrative_owner: gm-office
+packet_summary: four lanes aligned
+next_action_owner: gm-office";
+
+        assert!(super::ebr_payload_matches(json_payload));
+        assert!(super::ebr_payload_matches(line_payload));
     }
 }

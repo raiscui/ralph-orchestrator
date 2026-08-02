@@ -50,12 +50,16 @@ impl ParallelEmitSpawnInstanceScenario {
         // - 同时注入降噪参数，避免 E2E stdout/stderr 被长篇推理淹没。
         // ---------------------------------------------------------------------
         match backend {
-            Backend::Codex => r#"  backend: custom
+            Backend::Codex => {
+                let model = super::codex_e2e_model();
+
+                format!(
+                    r#"  backend: custom
   command: codex
   args:
     - exec
     - -m
-    - gpt-5-codex
+    - {model}
     - --full-auto
     - --sandbox
     - danger-full-access
@@ -65,8 +69,11 @@ impl ParallelEmitSpawnInstanceScenario {
     - 'model_reasoning_summary="none"'
     - -c
     - 'rmcp_client=false'
+    - -c
+    - 'features.hooks=false'
 "#
-            .to_string(),
+                )
+            }
             _ => format!("  backend: {}\n", backend.as_config_str()),
         }
     }
@@ -397,7 +404,7 @@ impl ParallelEmitSpawnInstanceScenario {
             .collect::<Vec<_>>();
 
         let content = format!(
-            r#"# E2E Human Log: {id}
+            r"# E2E Human Log: {id}
 
 ## 目标
 
@@ -470,7 +477,7 @@ impl ParallelEmitSpawnInstanceScenario {
 - agents snapshot: `.e2e/agents.json`
 - events log: `.e2e/events.jsonl`
 - 本文件: `.e2e/human-log.md`
-"#,
+",
             id = self.id,
             marker = E2E_SPAWN_MARKER,
             question = E2E_MATH_QUESTION,
@@ -540,9 +547,7 @@ fn extract_dynamic_worker_spawn_done_block(
     stdout: &str,
     dynamic_worker_instance_id: Option<&str>,
 ) -> Option<String> {
-    let Some(instance_id) = dynamic_worker_instance_id else {
-        return None;
-    };
+    let instance_id = dynamic_worker_instance_id?;
 
     let prefix = format!("[{instance_id}:out:");
     let mut lines = Vec::new();
@@ -691,11 +696,11 @@ hats:
         // 说明：
         // - prompt 文件保持极简,避免把 coordinator 的细节提示注入其它 hat。
         // - 真实约束语义放在 `event_loop.ralph_prompt`。
-        let prompt_content = r#"# E2E Prompt
+        let prompt_content = r"# E2E Prompt
 
 请严格遵守 `event_loop.ralph_prompt` 的协议.
 不要自作主张修改流程.
-"#;
+";
         std::fs::write(workspace.join("PROMPT.md"), prompt_content)
             .map_err(|e| ScenarioError::SetupError(format!("failed to write PROMPT.md: {e}")))?;
 

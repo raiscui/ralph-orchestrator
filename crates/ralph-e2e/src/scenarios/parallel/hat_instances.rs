@@ -74,12 +74,16 @@ impl ParallelHatInstancesScenario {
         // - 因此这里用 `backend: custom + command: codex + args: [...]` 精确控制执行参数。
         // ---------------------------------------------------------------------
         match backend {
-            Backend::Codex => r#"  backend: custom
+            Backend::Codex => {
+                let model = super::codex_e2e_model();
+
+                format!(
+                    r#"  backend: custom
   command: codex
   args:
     - exec
     - -m
-    - gpt-5-codex
+    - {model}
     - --full-auto
     # 降低推理强度/总结输出（避免 E2E 噪音与延迟）。
     - -c
@@ -89,8 +93,12 @@ impl ParallelHatInstancesScenario {
     # E2E 场景不需要 MCP client 能力，关闭可减少启动噪音。
     - -c
     - 'rmcp_client=false'
+    # live E2E 必须隔离本机 Codex Stop hook,否则 app-server turn 可能被 hook 反复拉回。
+    - -c
+    - 'features.hooks=false'
 "#
-            .to_string(),
+                )
+            }
             _ => format!("  backend: {}\n", backend.as_config_str()),
         }
     }

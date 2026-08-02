@@ -241,20 +241,6 @@ impl Default for ParallelIncidentResponseWarRoomExampleScenario {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn example_config_does_not_embed_raw_event_blocks() {
-        let config =
-            include_str!("../../../../examples/parallel-incident-response-war-room/ralph.yml");
-
-        assert!(
-            !config.contains("<event") && !config.contains("</event>"),
-            "example config must not contain raw event tags; use escaped display text instead"
-        );
-    }
-}
-
 #[async_trait]
 impl TestScenario for ParallelIncidentResponseWarRoomExampleScenario {
     fn id(&self) -> &str {
@@ -316,5 +302,19 @@ impl TestScenario for ParallelIncidentResponseWarRoomExampleScenario {
             assertions,
             duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_does_not_embed_raw_event_blocks() {
+        let config =
+            include_str!("../../../../examples/parallel-incident-response-war-room/ralph.yml");
+
+        assert!(
+            !config.contains("<event") && !config.contains("</event>"),
+            "example config must not contain raw event tags; use escaped display text instead"
+        );
     }
 }

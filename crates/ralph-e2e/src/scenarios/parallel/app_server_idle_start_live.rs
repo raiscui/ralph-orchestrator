@@ -264,7 +264,7 @@ impl ParallelAppServerIdleStartLiveScenario {
         let agents_before_summary = agents_before.unwrap_or_else(|| "(missing)".to_string());
 
         let content = format!(
-            r#"# E2E Human Log: {id}
+            r"# E2E Human Log: {id}
 
 ## 目标
 
@@ -332,7 +332,7 @@ impl ParallelAppServerIdleStartLiveScenario {
 - emit-2 stdout: `.e2e/emit-2.stdout.txt`
 - emit-2 stderr: `.e2e/emit-2.stderr.txt`
 - this file: `.e2e/human-log.md`
-"#,
+",
             id = self.id,
             marker = IDLE_START_MARKER,
             warmup_phase = WARMUP_PHASE,
@@ -378,15 +378,14 @@ impl ParallelAppServerIdleStartLiveScenario {
     async fn wait_for_ralph_idle(workspace: &Path) -> Result<String, String> {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if let Ok(snapshot) = super::read_agents_snapshot(workspace) {
-                if snapshot
+            if let Ok(snapshot) = super::read_agents_snapshot(workspace)
+                && snapshot
                     .instances
                     .iter()
                     .any(|i| i.instance_id == "ralph#1" && i.state == HatInstanceState::Idle)
-                {
-                    return serde_json::to_string_pretty(&snapshot)
-                        .map_err(|e| format!("failed to serialize agents snapshot: {e}"));
-                }
+            {
+                return serde_json::to_string_pretty(&snapshot)
+                    .map_err(|e| format!("failed to serialize agents snapshot: {e}"));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -422,7 +421,7 @@ impl ParallelAppServerIdleStartLiveScenario {
         Err("timeout: ralph#1 did not complete warmup cycle (Running -> Idle)".to_string())
     }
 
-    async fn assert_still_idle(workspace: &Path) -> Result<(), String> {
+    fn assert_still_idle(workspace: &Path) -> Result<(), String> {
         let snapshot = super::read_agents_snapshot(workspace)?;
         let ralph = snapshot
             .instances
@@ -581,7 +580,7 @@ hats: {}
 
             // 先等过第一段超时窗口,证明 idle_start 在首条消息前不计 runtime.
             tokio::time::sleep(pre_wait).await;
-            Self::assert_still_idle(&inject_workspace).await?;
+            Self::assert_still_idle(&inject_workspace)?;
 
             let warmup_payload = format!("marker: {IDLE_START_MARKER}; phase: {WARMUP_PHASE}");
             let warmup_cmd = format!(

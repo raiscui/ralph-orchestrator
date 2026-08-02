@@ -39,7 +39,7 @@ const EXPECTED_EXPERIMENTS: usize = 2;
 //   - 尊重当前 hat instructions
 //   - 用最小动作完成当前 workflow 并尽快发出结构化事件
 // -------------------------------------------------------------------------
-const E2E_WORKSPACE_AGENTS_OVERRIDE: &str = r#"# AGENTS.md
+const E2E_WORKSPACE_AGENTS_OVERRIDE: &str = r"# AGENTS.md
 
 ## E2E Workspace
 
@@ -63,7 +63,7 @@ const E2E_WORKSPACE_AGENTS_OVERRIDE: &str = r#"# AGENTS.md
 - 不要为了“流程完整”创建额外计划、日志、经验文件。
 - 不要把事件写进 shell transcript、文件内容或 stderr 后再口头说明“已经上报”。
 - 不要输出与当前 event 无关的大段背景分析。
-"#;
+";
 
 // -------------------------------------------------------------------------
 // E2E light all-hat overlay
@@ -73,12 +73,12 @@ const E2E_WORKSPACE_AGENTS_OVERRIDE: &str = r#"# AGENTS.md
 // - 这里给隔离 workspace 显式切一份“只保留协议必需语义”的轻量 overlay。
 // - 目标不是改变默认产品行为,而是减少 worker 被开发型元指令拉长尾巴。
 // -------------------------------------------------------------------------
-const E2E_LIGHT_ALL_HAT_PROMPT: &str = r#"你是 Ralph workflow 中的一个 agent。
+const E2E_LIGHT_ALL_HAT_PROMPT: &str = r"你是 Ralph workflow 中的一个 agent。
 - 优先遵守当前 hat instructions 与 incoming event payload。
 - 只执行完成当前 event 必需的最小步骤,不要把任务扩展成仓库开发流程。
 - 需要回流 workflow 结果时,直接在最终 assistant 回复中输出原始 `<event ...>...</event>`。
 - 不要通过 shell、文件、stderr、代码块或工具 transcript 间接打印 `<event ...>`。
-- 如果当前 job 不是在回复人类,不要输出 `reply.human.message`。"#;
+- 如果当前 job 不是在回复人类,不要输出 `reply.human.message`。";
 
 /// 直接覆盖 `examples/parallel-experimental-dev-engine` 的端到端（E2E）场景。
 ///
@@ -120,7 +120,9 @@ impl ParallelExperimentalDevEngineExampleScenario {
 
         if backend == Backend::Codex {
             // 注意：该 example 需要更高权限来跑 git/文件写入，因此保留 `--sandbox danger-full-access`。
-            let cli_block = r#"cli:
+            let model = super::parallel::codex_e2e_model();
+            let cli_block = format!(
+                r#"cli:
   # E2E: 覆写 Codex 参数,降噪/提速(不影响仓库 example 原文件).
   backend: "custom"
   command: "codex"
@@ -128,7 +130,7 @@ impl ParallelExperimentalDevEngineExampleScenario {
   args:
     - "exec"
     - "-m"
-    - "gpt-5-codex"
+    - "{model}"
     - "--sandbox"
     - "danger-full-access"
     - "-c"
@@ -137,16 +139,18 @@ impl ParallelExperimentalDevEngineExampleScenario {
     - 'model_reasoning_summary="none"'
     - "-c"
     - 'rmcp_client=false'
+    - "-c"
+    - 'features.hooks=false'
 
-"#;
+"#
+            );
 
-            patched = replace_or_append_top_level_yaml_block(&patched, "cli:", cli_block).map_err(
-                |e| {
+            patched = replace_or_append_top_level_yaml_block(&patched, "cli:", &cli_block)
+                .map_err(|e| {
                     ScenarioError::SetupError(format!(
                         "failed to patch example ralph.yml cli block for e2e: {e}"
                     ))
-                },
-            )?;
+                })?;
         }
 
         let core_block = build_inline_all_hat_prompt_block(E2E_LIGHT_ALL_HAT_PROMPT);

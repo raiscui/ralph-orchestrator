@@ -473,7 +473,7 @@ if __name__ == "__main__":
         }
 
         let content = format!(
-            r#"# E2E Human Log: {id}
+            r"# E2E Human Log: {id}
 
 ## 目标
 
@@ -525,7 +525,7 @@ if __name__ == "__main__":
 - emit-2 stdout: `.e2e/emit-2.stdout.txt`
 - emit-2 stderr: `.e2e/emit-2.stderr.txt`
 - 本文件: `.e2e/human-log.md`
-"#,
+",
             id = self.id,
             m1 = STEER_MARKER_1,
             m2 = STEER_MARKER_2,
@@ -555,14 +555,13 @@ if __name__ == "__main__":
     async fn wait_for_ralph_running(workspace: &Path) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if let Ok(snapshot) = super::read_agents_snapshot(workspace) {
-                if snapshot
+            if let Ok(snapshot) = super::read_agents_snapshot(workspace)
+                && snapshot
                     .instances
                     .iter()
                     .any(|i| i.instance_id == "ralph#1" && i.state == HatInstanceState::Running)
-                {
-                    return Ok(());
-                }
+            {
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
