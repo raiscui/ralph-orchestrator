@@ -3,7 +3,7 @@
 
 ### 现象
 - 执行 `omx explore --prompt ...` 后长时间无输出。
-- 最终输出显示 spark 模型 `gpt-5.3-codex-spark` 503,并且 harness 在 120000ms 后 timeout。
+- 最终输出显示 spark 模型 `gpt-5.5` 503,并且 harness 在 120000ms 后 timeout。
 
 ### 原因
 - 这是外部模型通道不可用与 explore harness 超时,不是仓库代码问题。

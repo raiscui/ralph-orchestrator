@@ -379,3 +379,44 @@
   - `cargo test -p ralph-core smoke_runner --quiet`
   - `openspec validate clean-current-runtime-evidence-and-dynamic-role-contract --type change --strict`
   - `ralph record summary <session.jsonl> --agents-file <agents.json>` 并检查 `topology.spawn_group: 1`,`topology.spawn.result: 1`,`topology.spawn.failed: 0`,`analysis.done: 3`,`reason: CompletionPromise`。
+
+
+### exp-20260529-scoped-commit-in-mixed-worktree
+> 在混杂工作区做 scoped commit 时,只把 staged index 当提交真相源。先证明 staged 里没有上下文/临时状态文件,再 commit,最后用空 index 证明提交边界。
+<!-- scope: project | source_topics: recoverable_retry_scoped_commit,continuous_learning | source_hats: codex | status: active | confidence: high | created_at: 2026-05-29T18:00:00+08:00 | updated_at: 2026-05-29T18:00:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 工作区有大量未暂存支线改动,但用户只允许提交当前主线 staged patch。
+  - git status --short 出现大量未暂存/未跟踪项,且部分同文件存在 staged + unstaged 双层改动。
+  - 要提交 recoverable/runtime 类主线,但六文件上下文、.omx/state 或其它支线不能混入。
+- 已验证做法:
+  - 提交前运行 git diff --cached --name-status 确认 intended files。
+  - 运行 git diff --cached --check 确认 staged patch 基础质量。
+  - 运行 staged forbidden context check,确保 task_plan / notes / WORKLOG / ERRORFIX / LATER_PLANS / EPIPHANY_LOG / .omx 不在 index。
+  - 运行 git submodule status,确认没有意外 submodule 指针变化。
+  - commit 后运行 git diff --cached --name-status,必须为空。
+- 关键边界:
+  - 不要为了 commit 方便执行整仓 git add .。
+  - 不要因为同一个文件还有 unstaged 修改就否定 staged commit;Git 可以只提交 index 中那一层。
+  - 如果 pre-commit hook 读取整个 working tree 而非 staged patch 并失败,先记录证据,不要立即绕过 hook。
+- 验证锚点:
+  - 本轮 commit: 8bf37643 feat: add recoverable agent cli retry lifecycle。
+  - 提交前 staged forbidden context check 无输出。
+  - 提交后 git diff --cached --name-status 为空。
+
+### exp-20260529-spec-code-drift-needs-reconciliation-first
+> OpenSpec tasks 的勾选状态不是实现事实。若 tasks 声称 TUI 富渲染已完成,但 Cargo 依赖和代码注释显示仍是纯文本模型,下一步必须先做 spec-code reconciliation。
+<!-- scope: project | source_topics: evolution_analysis,tui_mdfried_viewer,spec_code_drift | source_hats: codex | status: active | confidence: medium | created_at: 2026-05-29T18:00:00+08:00 | updated_at: 2026-05-29T18:00:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 继续 tui-mdfried-viewer 或任何 OpenSpec change 时,看到 tasks 已勾选但代码依赖/模块结构对不上。
+  - 用户问某个功能是否已经实现,而证据来自 tasks 或计划文档,不是当前代码。
+- 已观察现象:
+  - tui-mdfried-viewer tasks 曾标记 ratatui-image、OutputBlock::{Text, Image} 和 Big Headers 已完成。
+  - 当前 ralph-tui 依赖和 parallel output buffer 注释显示仍是纯文本行模型。
+- 关键边界:
+  - 不能把 tasks 勾选直接表述成已验证实现事实。
+  - 先看当前代码、Cargo 依赖、测试和 record/screenshot evidence,再决定恢复实现、修正 tasks 状态,还是开 correction change。
+- 验证锚点:
+  - 支线归档位置: archive/branch_contexts/evolution_analysis/。
+  - 后续入口: LATER_PLANS.md 中 tui-mdfried-viewer spec-code reconciliation 项。

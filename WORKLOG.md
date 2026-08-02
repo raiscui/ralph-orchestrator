@@ -460,3 +460,17 @@
 
 ### 总结感悟
 - 修复沉淀到 spec 的最佳位置是"同类场景旁"(turn-action 旁加 session-directed)
+
+## [2026-08-02 15:10:00] [Session ID: omx-1785579233065-awidzo] 任务名称: 提交本次会话改动(scoped commits)
+
+### 任务内容
+- 6 个 scoped commit: display 管线 / job 执行域 / TUI 切片 / record_aggregate / e2e 修复+spec / 上下文文件
+- 混合文件(用户改动+本次改动交织)按用户决定全部提交
+- 提交后 workspace check 0 warning, core/adapters/display 测试全过
+
+### 完成过程
+- 按文件粒度分组, 每个文件只进一个 commit
+- 用户的独立改动(135 项: docs/.agent/core 用户文件等)保留未动
+
+### 总结感悟
+- 混合工作树的 scoped commit: 先列文件归属, 再按逻辑分组

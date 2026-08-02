@@ -518,3 +518,184 @@
 - 下次如果继续做 catalog / capability,优先先看:
   - `openspec/changes/startup-resource-bootstrap/design.md`
   - `openspec/changes/runtime-capability-invocation/design.md`
+## [2026-05-18 07:01:08] [Session ID: omx-1779004640353-blcixq] 主题: live capability “只思考不出结果” 可能是多层故障叠加
+
+### 发现来源
+- 这次对 `parallel_rec.jsonl` 的复跑与回溯分析。
+- 结合了 child run panic、workflow capability materialization 和 live capability 专项测试的复核结果。
+
+### 核心问题
+- 表面现象是 parent 侧一直在输出 reasoning / thinking,但没有最终结果。
+- 实际上可能同时叠着两层甚至多层问题:
+  - child 预览/截断阶段先 panic。
+  - workflow capability resolved config 仍是 stub,导致根本没有正确 materialize 出预期的运行图。
+
+### 为什么重要
+- 只盯着 UI 或单一日志层,很容易把“没有结果”误判成同一个根因。
+- 这种问题如果不拆层,后续还会继续把 child failure、parent result 回写、以及 runtime materialization 混成一团。
+
+### 未来风险
+- 以后任何“持续输出 thinking 但没有 result”的 case,都可能再次出现这种叠层故障。
+- 如果先入为主只修一层,很容易留下表面已绿、实际语义契约仍坏的假修复。
+
+### 当前结论
+- 这次验证后,当前代码状态下 live capability 专项测试已经转绿。
+- 但分析方法上必须保留“先看 `events.jsonl` / `capability.result` / `capability.failed`,再看 UI”的顺序。
+
+### 后续讨论入口
+- 下次再遇到类似问题,先从 record / events.jsonl / failed.json 三件套切层,不要直接从思考流量判断卡死。
+
+## [2026-05-18 07:18:00] [Session ID: omx-1779004640353-blcixq] 主题: 简单问题也会拖长的真正原因是协调面太宽
+
+### 发现来源
+- 对 `parallel_rec.jsonl` 的二次统计和对 `parallel#1` prompt 注入逻辑的回看。
+
+### 核心问题
+- `ralph#1` 不只是“回答问题”的角色,它同时被要求做协调、记忆治理、文件上下文维护、事件发射、证据收集,这让它在简单问题上也会先陷入元流程。
+
+### 为什么重要
+- token 浪费并不总是因为模型不会答,而是因为它在过度遵守一整套复杂协作协议。
+- 如果不拆分角色,后面同类简单问题还会继续被拖成长轮次思考。
+
+### 未来风险
+- 任何涉及 `AGENTS.md`、六文件上下文、skill、omx state、memory 的任务,都会有再次放大轮次的风险。
+- 越是简单的问答,越容易被这套治理协议挤成“先想很多,后说很少”。
+
+### 当前结论
+- 代码失败是第一层,流程过宽和缺少 event-first 快路径是第二层。
+- 当前现象最像“协调协议诱发的高 token 额外成本”,不是业务逻辑本身复杂。
+
+### 后续讨论入口
+- 后面如果要优化,建议先拆 `coordination` 和 `answering` 两个 prompt surface,再考虑给简单问题加 turn budget。
+## [2026-05-18 10:34:11] [Session ID: omx-1779004640353-blcixq] 主题: Ralph 必须是调度者,非 Ralph hat 必须是执行者
+
+### 发现来源
+- 用户在分析 `parallel_rec.jsonl` 的 token 浪费问题后指出: Ralph 的任务应该是决定任务如何分发、安排和分配,而不是真正解决问题。
+- 这和前面观察到的“简单问题也被协调/文件治理/记忆治理拖长”现象一致。
+
+### 核心问题
+- 当前 prompt surface 容易让 `ralph#1` 同时承担协调者、分析者、执行者、记录员等角色。
+- 非 Ralph hat 如果也继承太多和 Ralph 相同的 prompt,就会导致职责边界模糊: worker 会思考调度,coordinator 会亲自解题。
+
+### 为什么重要
+- Ralph 的核心价值不是亲自回答,而是把任务切成清晰事件、选择合适 hat、管理依赖和收敛结果。
+- Child hat 的核心价值是按 role contract 完成具体任务,不应该携带完整 coordinator prompt。
+
+### 未来风险
+- 如果继续让 Ralph 和 worker 共享过宽 prompt,简单问题会继续耗费大量 token 在元流程上。
+- 后续 parallel runtime / capability runtime 的行为也会变得不可预测: 有的任务被 Ralph 自己做掉,有的任务被 worker 再次调度。
+
+### 当前结论
+- 应该拆成三层 prompt:
+  - Coordinator prompt: 只给 Ralph,负责分发、安排、收敛、兜底。
+  - Worker prompt: 只给普通 hat instance,负责完成被分配的具体任务。
+  - Shared protocol prompt: 极小公共层,只包含 event envelope、reply 语义、必要 stop/输出协议。
+
+### 后续讨论入口
+- 后续如果实现 prompt 瘦身,优先从 `crates/ralph-core/src/parallel/supervisor.rs` 和 `crates/ralph-core/src/parallel/instance.rs` 的 prompt assembly 边界切入。
+## [2026-05-18 10:39:32] [Session ID: omx-1779004640353-blcixq] 主题: Ralph 动态创建 hat 时应支持三类身份来源
+
+### 发现来源
+- 用户补充: Ralph 分配任务、创建 hat 实例时,可以基于项目模板,也可以基于 `ralph.yml` 中配置的 hats,还可以实时根据任务性质直接生成 hat 身份角色。
+
+### 核心问题
+- hat 身份不能被限制成“只能来自静态配置”。
+- 但动态生成的 hat 也不能继承过多 Ralph coordinator prompt,否则它会同时承担调度和执行职责,重新制造职责混淆。
+
+### 为什么重要
+- 这给 Ralph 的分发能力打开了第三条路径: dynamic role synthesis。
+- Ralph 的任务应该是选择合适身份来源,而不是把自己的一整套 prompt 复制给子实例。
+
+### 未来风险
+- 如果动态 hat 只是把 Ralph prompt 复制一份再加一个角色名,它还是会继续过度思考、过度治理、过度协调。
+- 如果动态生成完全无边界,也可能造成 role 漂移、输出契约不稳定、测试难以断言。
+
+### 当前结论
+- 后续 prompt / runtime 设计应显式区分三种 hat 身份来源:
+  - template-derived hat: 来自项目内模板或 preset。
+  - config-derived hat: 来自 `ralph.yml` 的静态 hats。
+  - task-derived dynamic hat: Ralph 根据当前任务性质即时生成的轻量身份。
+- 无论哪种来源,非 Ralph hat 都应该只获得 worker prompt + role contract + shared protocol,不能继承完整 coordinator prompt。
+
+### 后续讨论入口
+- 继续设计时,需要给 dynamic hat synthesis 增加最小字段: role name, objective, input contract, output contract, allowed topics, stop rule。
+## [2026-05-18 10:44:57] [Session ID: omx-1779004640353-blcixq] 主题: Ralph 只该负责调度,worker 只该负责执行,共享 prompt 必须极小化
+
+### 发现来源
+- 用户对 `parallel_rec.jsonl` 的 token 浪费问题做出的架构补充。
+- 本轮新落盘的 `specs/ralph-prompt-role-layering.md`。
+
+### 核心问题
+- 如果 Ralph 和 worker 共享太多 prompt,就会把调度、治理、分析、执行这些职责混成一团。
+- 这会让简单问题也被迫走完整的元流程,造成严重 token 浪费。
+
+### 为什么重要
+- Ralph 的价值在于分发与收敛,不是亲自解题。
+- worker 的价值在于完成被分配任务,不是重新做全局调度。
+
+### 未来风险
+- 如果后续实现仍把 coordinator prompt 广播给所有 hat,职责边界会再次崩掉。
+- dynamic hat 如果没有最小 role contract,很容易变成“换个名字的 Ralph”。
+
+### 当前结论
+- 需要明确三层 prompt:
+  - coordinator prompt.
+  - worker prompt.
+  - shared protocol prompt.
+- 三类 hat 身份来源也应明确: config-derived, template-derived, task-derived dynamic.
+
+### 后续讨论入口
+- 后续实现 prompt assembly 时,优先检查是否把 coordinator-only sections 错注入给 worker。
+
+## [2026-05-21 21:02:00] [Session ID: omx-1779158263949-kticiv] 主题: 控制面协议必须给 schema-literate 示例,不能只依赖 Rust parser
+
+### 发现来源
+- task-derived role contract live dogfood。
+- 首轮 `topology.spawn_group` 失败: `instances[0]: field input must be a string when present`。
+
+### 核心问题
+- Rust parser 和 runtime canonicalization 已经严格,但 LLM coordinator 首轮仍会把 `role_contract` 这种结构化 contract 错放进 `input` object。
+- 如果 prompt 只说字段列表而不给 sibling field 示例,模型会倾向把 contract 当作 worker input 子对象。
+
+### 为什么重要
+- parent-visible topology spawn、capability request、reply.hat.message 这类控制面协议都依赖 LLM 正确发结构化事件。
+- 只靠 parser fail closed 可以避免坏状态,但会制造 live run retry、超时和用户可见的不确定性。
+
+### 未来风险
+- 后续新增任何控制面字段时,如果 prompt 示例不同步,会再次出现“类型系统正确,模型输出错误”的断层。
+- 这种问题不会在纯 Rust unit test 中自然暴露,需要 live dogfood 或 prompt regression test 才能抓到。
+
+### 当前结论
+- 已补强 `event_emission_protocol.rs`: `role_contract` 是 `instances[]` sibling field,`input` 必须是 string,禁止把 `role_contract` 放进 `input`。
+- 已补 focused prompt test 锁住 guidance。
+
+### 后续讨论入口
+- 继续设计控制面协议时,先写 prompt schema 示例和负例,再写 parser。
+- live dogfood 后应把 LLM 实际犯错形态转成 prompt guardrail test。
+
+## [2026-05-28 12:26:41] [Session ID: omx-1779158263949-kticiv] 主题: recoverable retry 必须有 recovered 终态并能打断 completion freeze
+
+### 发现来源
+- `agent-cli-recoverable-failure-retry` 3.x parallel runtime retry lifecycle 实现。
+- 将 recoverable failure 接入 `HatInstanceActor` 和 `ParallelSupervisor` 时发现 completion promise / freeze 与 scheduled retry 存在竞态。
+
+### 核心问题
+- 如果 retry 成功后不写入 `recovered` 终态,ledger replay 会长期停在 `retrying`,Supervisor / evidence inspect 无法证明 lifecycle 已解决。
+- 如果 coordinator 先输出 completion promise,worker 随后才暴露 recoverable failure,旧 completion freeze 可能让 scheduled retry 永远起不来。
+
+### 为什么重要
+- retry lifecycle 不是纯 executor 行为,它会影响 Supervisor 的完成判定。
+- completion promise 是软退出信号,不能覆盖仍然 pending 的 recoverable job lifecycle。
+
+### 未来风险
+- 后续做 manual `!continue` 或 agents snapshot 可视化时,如果只看 `Failed/Idle/Running` 这些粗状态,可能会把 retryable job 误显示为已结束或空闲。
+- 如果新增 retry 状态但没有终态,`ralph agents` / record summary 会出现“永远 retrying”的假象。
+
+### 当前结论
+- recoverable lifecycle 至少需要 pending 类状态和 terminal 类状态两组语义。
+- terminal 类状态当前包括 `recovered` 和 `exhausted`。
+- pending recoverable transition 出现时,Supervisor 应撤销 completion drain/lockdown,让 retry lifecycle 先闭环。
+
+### 后续讨论入口
+- 继续 4.x manual continue 时,`continued_by_human` 应走同一套 scheduler path,并最终落到 `retrying -> recovered/exhausted`。
+- 继续 5.x observability 时,agents snapshot 应能把 pending 和 terminal recoverable 状态区分展示。
