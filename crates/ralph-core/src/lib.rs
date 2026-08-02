@@ -37,9 +37,11 @@ pub mod memory_parser;
 mod memory_store;
 mod parallel;
 mod prompt_overlay;
+mod prompt_surface;
 mod recoverable_failure;
 mod session_player;
 mod session_recorder;
+pub mod record_aggregate;
 pub mod state_operations;
 mod summary_writer;
 pub mod task;
@@ -47,11 +49,13 @@ pub mod task_definition;
 pub mod task_store;
 pub mod testing;
 mod text;
+mod topology_spawn;
 pub mod utils;
 pub mod workspace;
 
 pub use activity::{clean_activity_label, normalize_activity_label};
 pub use agents_snapshot::{
+    AgentChildRunSnapshot, AgentChildRunStatus, AgentCompletedDynamicInstanceSnapshot,
     AgentInstanceSnapshot, AgentLastInput, AgentRecoverableFailureSummary, AgentsSnapshot,
 };
 pub use capability::{
@@ -66,11 +70,17 @@ pub use cli_capture::{CliCapture, CliCapturePair};
 pub use config::{
     AllHatPromptConfig, CliConfig, CoreConfig, EventLoopConfig, EventMetadata, GateConfig,
     HatBackend, HatConfig, HatWorkspaceConfig, InjectMode, MemoriesConfig, MemoriesFilter,
-    ParallelConfig, PermissionMode, PermissionsConfig, RalphConfig, WorkspaceHooksConfig,
-    WorkspaceRuntimeConfig, WorkspaceStrategy,
+    ParallelConfig, PermissionMode, PermissionsConfig, RalphConfig, ReasoningEffort,
+    RoleArgsConfig, RoleReasoningEffortConfig, WorkspaceHooksConfig, WorkspaceRuntimeConfig,
+    WorkspaceStrategy,
 };
 pub use diagnostics::DiagnosticsCollector;
-pub use event_emission_protocol::EVENT_EMISSION_PROTOCOL_HEADING;
+pub use event_emission_protocol::{
+    EVENT_EMISSION_PROTOCOL_HEADING, RuntimeTopicClass, RuntimeTopicClassification,
+    classify_runtime_topic, is_allowed_role_result_topic, is_reserved_hat_trigger,
+    is_runtime_control_or_observer_topic, render_runtime_topic_matrix,
+    runtime_topic_bypasses_strict_target,
+};
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{EventLoop, LoopState, TerminationReason};
 pub use event_parser::EventParser;
@@ -108,6 +118,13 @@ pub use parallel::{
     HatJobOutputChunk, HatJobResult, JobBackend, OutputStream, ParallelRunResult,
     ParallelSupervisor, RuntimeDeliveryMode, RuntimeDeliveryObservation, TopicContractStore,
 };
+pub use prompt_surface::{
+    ALL_HAT_PROMPT_HEADING, COORDINATOR_ONLY_HEADINGS, COORDINATOR_ONLY_SECTION_SPECS,
+    EffectiveRoleContract, IdentitySource, PromptAudience, PromptSection, PromptSectionSpec,
+    PromptSurface, RoleContract, RoleContractSummary, RolePersistence, SHARED_PROTOCOL_HEADINGS,
+    SHARED_PROTOCOL_SECTION_SPECS, WORKER_ONLY_HEADINGS, WORKER_ONLY_SECTION_SPECS,
+    headings_for_surface, section_specs_for_surface, surface_for_heading,
+};
 pub use recoverable_failure::{
     AgentCliRecoverableFailuresConfig, DEFAULT_RECOVERABLE_FAILURE_LEDGER_PATH,
     DEFAULT_RECOVERABLE_FAILURE_MAX_ATTEMPTS, RECOVERABLE_FAILURE_LEDGER_SCHEMA_VERSION,
@@ -119,6 +136,13 @@ pub use recoverable_failure::{
 };
 pub use session_player::{PlayerConfig, ReplayMode, SessionPlayer, TimestampedRecord};
 pub use session_recorder::{Record, SessionRecorder};
+pub use record_aggregate::{
+    CapabilityFailedEvidence, CapabilityRequestEvidence, CapabilityResultEvidence,
+    EvidenceInspectAggregate, MetaLoopStart, MetaSessionStart, MetaTermination,
+    RecordSessionAggregate, ResultTopicEvidence, TopologySpawnFailedEvidence,
+    TopologySpawnGroupEvidence, TopologySpawnResultEvidence, aggregate_record_session,
+    aggregate_session, load_session_player_strict,
+};
 pub use state_operations::{
     LifecycleOutcome, RunOutcome, RuntimeStateRecord, StateClearRequest, StateClearResult,
     StateMode, StateOperationError, StateOperationStore, StateReadResult, StateStatus,
@@ -131,6 +155,16 @@ pub use task_definition::{
 };
 pub use task_store::TaskStore;
 pub use text::truncate_with_ellipsis;
+pub use topology_spawn::{
+    TOPIC_TOPOLOGY_SPAWN_FAILED, TOPIC_TOPOLOGY_SPAWN_GROUP, TOPIC_TOPOLOGY_SPAWN_RESULT,
+    TOPOLOGY_SPAWN_PHASE_CLEANUP_REAPED_AFTER_FAILURE,
+    TOPOLOGY_SPAWN_PHASE_DELIVERY_FAILED_AFTER_SPAWN,
+    TOPOLOGY_SPAWN_PHASE_MEMBER_VALIDATION_FAILED, TOPOLOGY_SPAWN_PHASE_MISSING_RESULT,
+    TOPOLOGY_SPAWN_PHASE_RESULT_TIMEOUT, TOPOLOGY_SPAWN_PHASE_SPAWN_FAILED,
+    TopologySpawnFailedMember, TopologySpawnGroupFailed, TopologySpawnGroupParseError,
+    TopologySpawnGroupRequest, TopologySpawnGroupResult, TopologySpawnMember,
+    TopologySpawnedInstance,
+};
 pub use workspace::{
     CleanupPolicy, TaskWorkspace, VerificationResult, WorkspaceError, WorkspaceInfo,
     WorkspaceManager,

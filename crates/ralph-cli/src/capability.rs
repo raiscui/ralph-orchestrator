@@ -7,20 +7,25 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
+use ralph_adapters::{
+    CliBackend, CliExecutionRole, scrub_codex_parent_session_env, scrub_ralph_parent_worker_env,
+};
 use ralph_core::{
     CapabilityChoice, CapabilityFailedRecord, CapabilityFailureClass, CapabilityInvocationMode,
     CapabilityInvocationRecord, CapabilityKind, CapabilityMetadata, CapabilityParentArtifactPaths,
     CapabilityParentFailedRecord, CapabilityParentResultRecord, CapabilityRequestRecord,
     CapabilityResultRecord, EventLogger, EvidenceArtifactKind, EvidenceIndexEntry,
-    EvidenceIndexReader, EvidenceIndexWriter, EvidenceLookup, EvidenceStatus, RalphConfig,
-    RuntimeCapabilityInvoker, TOPIC_CAPABILITY_FAILED, TOPIC_CAPABILITY_INVOKE,
-    TOPIC_CAPABILITY_RESULT,
+    EvidenceIndexReader, EvidenceIndexWriter, EvidenceLookup, EvidenceStatus, IdentitySource,
+    RalphConfig, RoleContract, RuntimeCapabilityInvoker, TOPIC_CAPABILITY_FAILED,
+    TOPIC_CAPABILITY_INVOKE, TOPIC_CAPABILITY_RESULT,
 };
 use ralph_proto::Event;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use crate::startup_resources::{self, ResourceKind};
@@ -90,6 +95,10 @@ pub struct CapabilityInvokeArgs {
     /// 输出 JSON。
     #[arg(long)]
     pub json: bool,
+
+    /// 只预览 resolved child config,不执行真实 child run。
+    #[arg(long)]
+    pub preview: bool,
 }
 
 /// Capability evidence inspect 参数。
@@ -133,6 +142,30 @@ pub fn execute(args: CapabilityArgs, _use_colors: bool) -> Result<()> {
         CapabilityCommands::Invoke(args) => invoke_capability(args),
         CapabilityCommands::Inspect(args) => inspect_capability_evidence(args),
     }
+}
+
+fn load_capability_base_config(workspace: &Path) -> Result<RalphConfig> {
+    let config_path = workspace.join("ralph.yml");
+    let mut config = if config_path.exists() {
+        RalphConfig::from_file(&config_path)
+            .with_context(|| format!("Failed to load config from {}", config_path.display()))?
+    } else {
+        RalphConfig::default()
+    };
+
+    // ---------------------------------------------------------------------
+    // capability child config base
+    //
+    // 说明:
+    // - `tools capability invoke` 没有全局 `--config`,所以默认读取 workspace
+    //   里的 `ralph.yml`。
+    // - live parent run 会直接把已归一化的 parent config 注入 invoker。
+    // - 这里也做 normalize / workspace_root 对齐,避免 v1/v2 字段在 child
+    //   config 中出现语义漂移。
+    // ---------------------------------------------------------------------
+    config.normalize();
+    config.core.workspace_root = workspace.to_path_buf();
+    Ok(config)
 }
 
 /// 从 startup resource catalog 暴露 lightweight capability metadata。
@@ -218,6 +251,7 @@ fn invoke_capability(args: CapabilityInvokeArgs) -> Result<()> {
     let workspace = args
         .workspace
         .unwrap_or(std::env::current_dir().context("Failed to resolve current directory")?);
+    let base_config = load_capability_base_config(&workspace)?;
     let catalog = filtered_capabilities(args.kind);
     let choice = choose_capability(&catalog, args.id.as_deref(), &args.input)?;
     let capability = catalog
@@ -226,7 +260,19 @@ fn invoke_capability(args: CapabilityInvokeArgs) -> Result<()> {
         .cloned()
         .ok_or_else(|| anyhow!("Selected capability disappeared: {}", choice.capability_id))?;
 
-    let report = invoke_isolated(&workspace, capability, choice, &args.input)?;
+    let child_run_mode = if args.preview {
+        CapabilityChildRunMode::DryRun
+    } else {
+        child_run_mode_for_capability(&capability)
+    };
+    let report = invoke_isolated(
+        &workspace,
+        capability,
+        choice,
+        &args.input,
+        &base_config,
+        child_run_mode,
+    )?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -247,26 +293,45 @@ fn invoke_capability(args: CapabilityInvokeArgs) -> Result<()> {
 /// 说明:
 /// - 这是 parallel parent run 注入给 core supervisor 的 adapter。
 /// - adapter 只复用现有 isolated invocation path,不修改 parent config/topology。
-pub(crate) fn runtime_capability_invoker(workspace: PathBuf) -> Arc<dyn RuntimeCapabilityInvoker> {
-    Arc::new(CliRuntimeCapabilityInvoker { workspace })
+pub(crate) fn runtime_capability_invoker(
+    workspace: PathBuf,
+    base_config: RalphConfig,
+) -> Arc<dyn RuntimeCapabilityInvoker> {
+    Arc::new(CliRuntimeCapabilityInvoker {
+        workspace,
+        base_config,
+    })
 }
 
 struct CliRuntimeCapabilityInvoker {
     workspace: PathBuf,
+    base_config: RalphConfig,
 }
 
 #[async_trait]
 impl RuntimeCapabilityInvoker for CliRuntimeCapabilityInvoker {
     async fn invoke(&self, request: CapabilityRequestRecord) -> Result<Event> {
         let workspace = self.workspace.clone();
-        tokio::task::spawn_blocking(move || invoke_parent_request(&workspace, request))
-            .await
-            .context("runtime capability invocation task panicked")?
+        let base_config = self.base_config.clone();
+        tokio::task::spawn_blocking(move || {
+            invoke_parent_request(&workspace, request, &base_config)
+        })
+        .await
+        .context("runtime capability invocation task panicked")?
     }
 }
 
-fn invoke_parent_request(workspace: &Path, request: CapabilityRequestRecord) -> Result<Event> {
-    match invoke_capability_by_id(workspace, &request.capability_id, &request.input) {
+fn invoke_parent_request(
+    workspace: &Path,
+    request: CapabilityRequestRecord,
+    base_config: &RalphConfig,
+) -> Result<Event> {
+    match invoke_capability_by_id(
+        workspace,
+        &request.capability_id,
+        &request.input,
+        base_config,
+    ) {
         Ok(report) if report.child_success => {
             Ok(parent_result_event(workspace, &request, &report)?)
         }
@@ -281,6 +346,7 @@ fn invoke_capability_by_id(
     workspace: &Path,
     capability_id: &str,
     input: &str,
+    base_config: &RalphConfig,
 ) -> Result<CapabilityInvokeReport> {
     let catalog = capability_catalog();
     let choice = choose_capability(&catalog, Some(capability_id), input)?;
@@ -290,7 +356,15 @@ fn invoke_capability_by_id(
         .cloned()
         .ok_or_else(|| anyhow!("Selected capability disappeared: {}", choice.capability_id))?;
 
-    invoke_isolated(workspace, capability, choice, input)
+    let child_run_mode = child_run_mode_for_capability(&capability);
+    invoke_isolated(
+        workspace,
+        capability,
+        choice,
+        input,
+        base_config,
+        child_run_mode,
+    )
 }
 
 fn classify_capability_resolution_error(error: &anyhow::Error) -> CapabilityFailureClass {
@@ -579,6 +653,19 @@ struct CapabilityInvokeReport {
     child_success: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityChildRunMode {
+    DryRun,
+    Execute,
+}
+
+fn child_run_mode_for_capability(capability: &CapabilityMetadata) -> CapabilityChildRunMode {
+    match capability.kind {
+        CapabilityKind::WorkflowCapability => CapabilityChildRunMode::Execute,
+        CapabilityKind::HatCapability => CapabilityChildRunMode::Execute,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ChildRunOutput {
     success: bool,
@@ -603,8 +690,53 @@ fn invoke_isolated(
     capability: CapabilityMetadata,
     choice: CapabilityChoice,
     input: &str,
+    base_config: &RalphConfig,
+    child_run_mode: CapabilityChildRunMode,
 ) -> Result<CapabilityInvokeReport> {
-    invoke_isolated_with_runner(workspace, capability, choice, input, run_child_dry_run)
+    let runner = match (child_run_mode, capability.kind) {
+        (CapabilityChildRunMode::DryRun, _) => run_child_dry_run,
+        (CapabilityChildRunMode::Execute, CapabilityKind::HatCapability) => {
+            run_hat_capability_execute
+        }
+        (CapabilityChildRunMode::Execute, CapabilityKind::WorkflowCapability) => run_child_execute,
+    };
+    invoke_isolated_with_runner(workspace, capability, choice, input, base_config, runner)
+}
+
+fn role_contract_for_capability(capability: &CapabilityMetadata) -> Option<RoleContract> {
+    if capability.kind != CapabilityKind::HatCapability {
+        return None;
+    }
+
+    // ---------------------------------------------------------------------
+    // task-derived micro-run provenance
+    //
+    // 说明:
+    // - `hat:*` capability 是 Ralph 根据当前任务临时调用的 bounded reviewer/worker。
+    // - 它不会加入 parent topology,也不是 autoscale 出来的 runtime instance。
+    // - 因此这里把身份来源显式写成 TaskDerived,让 artifact 能证明两者没有混用。
+    // ---------------------------------------------------------------------
+    Some(RoleContract::new(
+        capability.id.clone(),
+        capability.goal.clone(),
+        capability.input_contract.clone(),
+        capability.output_contract.clone(),
+        vec![
+            TOPIC_CAPABILITY_RESULT.to_string(),
+            TOPIC_CAPABILITY_FAILED.to_string(),
+        ],
+        vec![
+            "Do not mutate the parent topology.".to_string(),
+            "Do not act as the Ralph coordinator.".to_string(),
+            "Do not create additional hats unless explicitly delegated by the parent run."
+                .to_string(),
+        ],
+        vec![
+            "Return a bounded result summary suitable for the parent run.".to_string(),
+            "Preserve parent_topology_unchanged=true.".to_string(),
+        ],
+        IdentitySource::TaskDerived,
+    ))
 }
 
 fn invoke_isolated_with_runner(
@@ -612,7 +744,8 @@ fn invoke_isolated_with_runner(
     capability: CapabilityMetadata,
     choice: CapabilityChoice,
     input: &str,
-    runner: impl FnOnce(&Path, &Path, &str) -> Result<ChildRunOutput>,
+    base_config: &RalphConfig,
+    runner: impl FnOnce(&Path, &Path, &str, &Path) -> Result<ChildRunOutput>,
 ) -> Result<CapabilityInvokeReport> {
     fs::create_dir_all(workspace)
         .with_context(|| format!("Failed to create {}", workspace.display()))?;
@@ -624,7 +757,7 @@ fn invoke_isolated_with_runner(
     let evidence_path = workspace.join(EvidenceIndexWriter::DEFAULT_PATH);
     let mut evidence_writer = EvidenceIndexWriter::new(&evidence_path);
 
-    let config = resolved_config_for_capability(&capability, input);
+    let config = resolved_config_for_capability(&capability, input, base_config)?;
     let resolved_config_path = invocation_dir.join("resolved-config.yml");
     fs::write(&resolved_config_path, serde_yaml::to_string(&config)?)
         .with_context(|| format!("Failed to write {}", resolved_config_path.display()))?;
@@ -644,6 +777,7 @@ fn invoke_isolated_with_runner(
         input: input.to_string(),
         input_contract: capability.input_contract.clone(),
         resolved_config_path: resolved_config_path.display().to_string(),
+        role_contract: role_contract_for_capability(&capability),
         parent_topology_unchanged: true,
     };
     let invoke_path = invocation_dir.join("invoke.json");
@@ -665,27 +799,47 @@ fn invoke_isolated_with_runner(
         EvidenceStatus::Success,
     )?;
 
-    let child_output = runner(workspace, &resolved_config_path, input)?;
+    let child_record_session_path = invocation_dir.join("child-record-session.jsonl");
+    let child_output = runner(
+        workspace,
+        &resolved_config_path,
+        input,
+        &child_record_session_path,
+    )?;
 
-    let result_summary = if child_output.success {
-        format!(
-            "{} completed as isolated {}",
-            capability.id, capability.invocation_mode
-        )
-    } else {
-        format!(
-            "{} failed as isolated {}",
-            capability.id, capability.invocation_mode
-        )
-    };
+    if child_record_session_path.exists() {
+        record_capability_evidence(
+            &mut evidence_writer,
+            &invocation_id,
+            EvidenceArtifactKind::RecordSessionJsonl,
+            &child_record_session_path,
+            if child_output.success {
+                EvidenceStatus::Success
+            } else {
+                EvidenceStatus::Failure
+            },
+        )?;
+    }
+
+    let stdout_summary = summarize_output(&child_output.stdout);
+    let stderr_summary = summarize_output(&child_output.stderr);
+    let result_summary = child_result_summary(
+        &capability,
+        child_output.success,
+        &stdout_summary,
+        &stderr_summary,
+        child_record_session_path
+            .exists()
+            .then_some(child_record_session_path.as_path()),
+    );
     let result = CapabilityResultRecord {
         invocation_id,
         ts: Utc::now(),
         capability_id: capability.id.clone(),
         result_summary,
         exit_code: child_output.exit_code,
-        stdout_summary: summarize_output(&child_output.stdout),
-        stderr_summary: summarize_output(&child_output.stderr),
+        stdout_summary,
+        stderr_summary,
         output_contract: capability.output_contract.clone(),
         parent_topology_unchanged: true,
     };
@@ -731,19 +885,43 @@ fn invoke_isolated_with_runner(
     })
 }
 
-fn resolved_config_for_capability(capability: &CapabilityMetadata, input: &str) -> RalphConfig {
-    let mut config = RalphConfig::default();
+fn resolved_config_for_capability(
+    capability: &CapabilityMetadata,
+    input: &str,
+    base_config: &RalphConfig,
+) -> Result<RalphConfig> {
+    if capability.kind == CapabilityKind::WorkflowCapability {
+        return startup_resources::resolve_workflow_capability_config(&capability.id, input);
+    }
+
+    Ok(resolved_micro_run_config_for_capability(
+        capability,
+        input,
+        base_config,
+    ))
+}
+
+fn resolved_micro_run_config_for_capability(
+    capability: &CapabilityMetadata,
+    input: &str,
+    base_config: &RalphConfig,
+) -> RalphConfig {
+    let mut config = base_config.clone();
     config.event_loop.prompt = Some(format!(
-        "Runtime capability invocation: {}\n\nInput:\n{}",
-        capability.id, input
+        "Runtime hat capability invocation: {}\n\nRole goal:\n{}\n\nInput:\n{}\n\nReturn a concise result for the parent run. Do not act as the Ralph coordinator. Do not create additional hats.",
+        capability.id, capability.goal, input
     ));
+    config.event_loop.ralph_prompt = None;
     config.event_loop.prompt_file.clear();
     config.event_loop.max_iterations = 1;
     config.event_loop.max_runtime_seconds = 120;
-    config.cli.backend = "custom".to_string();
-    config.cli.command = Some("true".to_string());
-    config.cli.prompt_mode = "stdin".to_string();
-    config.core.workspace_root = PathBuf::from(".");
+    config.event_loop.starting_hat = None;
+    config.event_loop.starting_event = None;
+    config.event_loop.complete_publishes = None;
+    config.parallel.enabled = false;
+    config.hats = HashMap::new();
+    config.events = HashMap::new();
+    config.core.runtime_capabilities_enabled = false;
     config
 }
 
@@ -751,22 +929,166 @@ fn run_child_dry_run(
     workspace: &Path,
     resolved_config_path: &Path,
     input: &str,
+    _child_record_session_path: &Path,
+) -> Result<ChildRunOutput> {
+    run_child(
+        workspace,
+        resolved_config_path,
+        input,
+        CapabilityChildRunMode::DryRun,
+        None,
+    )
+}
+
+fn run_child_execute(
+    workspace: &Path,
+    resolved_config_path: &Path,
+    input: &str,
+    child_record_session_path: &Path,
+) -> Result<ChildRunOutput> {
+    run_child(
+        workspace,
+        resolved_config_path,
+        input,
+        CapabilityChildRunMode::Execute,
+        Some(child_record_session_path),
+    )
+}
+
+fn run_hat_capability_execute(
+    workspace: &Path,
+    resolved_config_path: &Path,
+    input: &str,
+    _child_record_session_path: &Path,
+) -> Result<ChildRunOutput> {
+    let config = RalphConfig::from_file(resolved_config_path).with_context(|| {
+        format!(
+            "Failed to load hat capability child config from {}",
+            resolved_config_path.display()
+        )
+    })?;
+    let prompt = config
+        .event_loop
+        .prompt
+        .clone()
+        .filter(|prompt| !prompt.trim().is_empty())
+        .unwrap_or_else(|| input.to_string());
+
+    // ---------------------------------------------------------------------
+    // hat capability execute
+    //
+    // 说明:
+    // - `hat:*` capability 是 task-derived transient worker,不是新的 Ralph
+    //   coordinator。
+    // - 因此这里直接调用底层 backend,不再嵌套 `ralph run`。
+    // - 这样可以避免注入 coordinator prompt,也避免 loop 的双确认机制让
+    //   简单 review 多耗一轮。
+    // ---------------------------------------------------------------------
+    let mut backend = CliBackend::from_config(&config.cli).map_err(anyhow::Error::new)?;
+    backend.apply_role_args(&config.cli.role_args, CliExecutionRole::Worker);
+    backend.apply_role_reasoning_effort_defaults(
+        &config.cli.reasoning_effort,
+        CliExecutionRole::Worker,
+    );
+    let (command_name, args, stdin_input, _temp_file) = backend.build_command(&prompt, false);
+    let mut command = Command::new(&command_name);
+    command.args(args);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command.current_dir(workspace);
+    scrub_ralph_parent_worker_env(&mut command);
+    command.env("RALPH_CAPABILITY_CHILD", "1");
+    command.env("RALPH_CAPABILITY_MODE", "execute");
+    scrub_codex_parent_session_env(&mut command, &command_name);
+
+    if stdin_input.is_some() {
+        command.stdin(Stdio::piped());
+    }
+
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "Failed to execute hat capability backend command `{}`",
+            command_name
+        )
+    })?;
+
+    if let Some(input) = stdin_input
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        stdin
+            .write_all(input.as_bytes())
+            .context("Failed to write hat capability prompt to backend stdin")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for hat capability backend output")?;
+    Ok(output.into())
+}
+
+fn run_child(
+    workspace: &Path,
+    resolved_config_path: &Path,
+    input: &str,
+    child_run_mode: CapabilityChildRunMode,
+    child_record_session_path: Option<&Path>,
 ) -> Result<ChildRunOutput> {
     let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
-    let output = Command::new(current_exe)
-        .args([
-            "run",
-            "--config",
-            resolved_config_path.to_string_lossy().as_ref(),
-            "--dry-run",
-            "--no-tui",
-            "--prompt",
-            input,
-        ])
-        .current_dir(workspace)
-        .output()
-        .context("Failed to execute isolated capability child dry-run")?;
+    let mut command = Command::new(current_exe);
+    command.args(child_run_args(
+        resolved_config_path,
+        input,
+        child_run_mode,
+        child_record_session_path,
+    ));
+    scrub_ralph_parent_worker_env(&mut command);
+    command.env("RALPH_CAPABILITY_CHILD", "1");
+    command.env(
+        "RALPH_CAPABILITY_MODE",
+        match child_run_mode {
+            CapabilityChildRunMode::DryRun => "preview",
+            CapabilityChildRunMode::Execute => "execute",
+        },
+    );
+    command.current_dir(workspace);
+    let output = command.output().with_context(|| match child_run_mode {
+        CapabilityChildRunMode::DryRun => {
+            "Failed to execute isolated capability child dry-run".to_string()
+        }
+        CapabilityChildRunMode::Execute => {
+            "Failed to execute isolated capability child run".to_string()
+        }
+    })?;
     Ok(output.into())
+}
+
+fn child_run_args(
+    resolved_config_path: &Path,
+    input: &str,
+    child_run_mode: CapabilityChildRunMode,
+    child_record_session_path: Option<&Path>,
+) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "--config".to_string(),
+        resolved_config_path.display().to_string(),
+        "--no-tui".to_string(),
+    ];
+
+    if matches!(child_run_mode, CapabilityChildRunMode::DryRun) {
+        args.push("--dry-run".to_string());
+        args.push("--prompt".to_string());
+        args.push(input.to_string());
+    }
+
+    if matches!(child_run_mode, CapabilityChildRunMode::Execute)
+        && let Some(record_session_path) = child_record_session_path
+    {
+        args.push("--record-session".to_string());
+        args.push(record_session_path.display().to_string());
+    }
+
+    args
 }
 
 fn log_capability_event(workspace: &Path, topic: &str, value: &impl Serialize) -> Result<()> {
@@ -810,6 +1132,82 @@ fn summarize_output(bytes: &[u8]) -> String {
     let mut summary = trimmed.chars().take(500).collect::<String>();
     summary.push_str("... [truncated]");
     summary
+}
+
+fn child_result_summary(
+    capability: &CapabilityMetadata,
+    success: bool,
+    stdout_summary: &str,
+    stderr_summary: &str,
+    child_record_session_path: Option<&Path>,
+) -> String {
+    if capability.kind == CapabilityKind::WorkflowCapability
+        && let Some(path) = child_record_session_path
+        && let Ok(summary) = workflow_child_record_summary(capability, success, path)
+    {
+        return summary;
+    }
+
+    let status = if success { "completed" } else { "failed" };
+    let evidence = if success {
+        stdout_summary
+    } else {
+        stderr_summary
+    };
+    if evidence.is_empty() {
+        return format!(
+            "{} {} as isolated {}",
+            capability.id, status, capability.invocation_mode
+        );
+    }
+
+    format!(
+        "{} {} as isolated {}: {}",
+        capability.id, status, capability.invocation_mode, evidence
+    )
+}
+
+fn workflow_child_record_summary(
+    capability: &CapabilityMetadata,
+    success: bool,
+    child_record_session_path: &Path,
+) -> Result<String> {
+    let aggregate = ralph_core::aggregate_session(child_record_session_path)?;
+    let status = if success { "completed" } else { "failed" };
+    let termination = aggregate
+        .termination
+        .as_ref()
+        .and_then(|termination| termination.reason.as_deref())
+        .unwrap_or("<missing>");
+    let topics = concise_topic_timeline(&aggregate.topic_timeline, 8);
+    let topics_summary = if topics.is_empty() {
+        "<none>".to_string()
+    } else {
+        topics.join(" -> ")
+    };
+    let record_file = child_record_session_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("child-record-session.jsonl");
+
+    Ok(format!(
+        "{} {} as isolated {}: termination={}; topics={}; record_session={}",
+        capability.id, status, capability.invocation_mode, termination, topics_summary, record_file
+    ))
+}
+
+fn concise_topic_timeline(timeline: &[String], max_topics: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for topic in timeline {
+        if out.last() == Some(topic) {
+            continue;
+        }
+        out.push(topic.clone());
+        if out.len() >= max_topics {
+            break;
+        }
+    }
+    out
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -871,8 +1269,9 @@ mod tests {
     fn isolated_invocation_writes_auditable_artifacts_without_parent_topology_mutation() {
         let temp = TempDir::new().unwrap();
         let parent_config = temp.path().join("ralph.yml");
-        fs::write(&parent_config, "parent topology sentinel").unwrap();
+        fs::write(&parent_config, "core: {}\n# parent topology sentinel\n").unwrap();
         let before = fs::read_to_string(&parent_config).unwrap();
+        let base_config = RalphConfig::default();
         let capability = capability_catalog()
             .into_iter()
             .find(|capability| capability.kind == CapabilityKind::HatCapability)
@@ -888,8 +1287,14 @@ mod tests {
             capability,
             choice,
             "review input",
-            |_workspace, resolved_config, _input| {
+            &base_config,
+            |_workspace, resolved_config, _input, child_record_session_path| {
                 assert!(resolved_config.exists());
+                fs::write(
+                    child_record_session_path,
+                    "{\"event\":\"_meta.termination\"}\n",
+                )
+                .unwrap();
                 Ok(ChildRunOutput {
                     success: true,
                     exit_code: Some(0),
@@ -937,11 +1342,17 @@ mod tests {
             entry.artifact_kind == EvidenceArtifactKind::EventLogJsonl
                 && entry.status == EvidenceStatus::Success
         }));
+        assert!(evidence_entries.iter().any(|entry| {
+            entry.artifact_kind == EvidenceArtifactKind::RecordSessionJsonl
+                && entry.status == EvidenceStatus::Success
+                && entry.artifact_path.ends_with("child-record-session.jsonl")
+        }));
     }
 
     #[test]
     fn isolated_invocation_failure_writes_failed_artifact_for_parent_audit() {
         let temp = TempDir::new().unwrap();
+        let base_config = RalphConfig::default();
         let capability = capability_catalog()
             .into_iter()
             .find(|capability| capability.kind == CapabilityKind::HatCapability)
@@ -957,7 +1368,8 @@ mod tests {
             capability,
             choice,
             "review input",
-            |_workspace, resolved_config, _input| {
+            &base_config,
+            |_workspace, resolved_config, _input, _child_record_session_path| {
                 assert!(resolved_config.exists());
                 Ok(ChildRunOutput {
                     success: false,
@@ -1010,6 +1422,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let blocked_evidence_path = temp.path().join(EvidenceIndexWriter::DEFAULT_PATH);
         fs::create_dir_all(&blocked_evidence_path).unwrap();
+        let base_config = RalphConfig::default();
         let capability = capability_catalog()
             .into_iter()
             .find(|capability| capability.kind == CapabilityKind::HatCapability)
@@ -1025,7 +1438,8 @@ mod tests {
             capability,
             choice,
             "review input",
-            |_workspace, _resolved_config, _input| {
+            &base_config,
+            |_workspace, _resolved_config, _input, _child_record_session_path| {
                 panic!("runner should not start after evidence index recording fails");
             },
         )
@@ -1043,6 +1457,82 @@ mod tests {
         assert_eq!(
             classify_capability_resolution_error(&error),
             CapabilityFailureClass::InvalidCapabilityId
+        );
+    }
+
+    #[test]
+    fn child_run_args_include_prompt_only_in_dry_run_mode() {
+        let config_path = PathBuf::from(".ralph/capability-invocations/cap-1/resolved-config.yml");
+        let input = "中文输入";
+
+        let record_path =
+            PathBuf::from(".ralph/capability-invocations/cap-1/child-record-session.jsonl");
+        let dry_run_args = child_run_args(
+            &config_path,
+            input,
+            CapabilityChildRunMode::DryRun,
+            Some(&record_path),
+        );
+        assert!(dry_run_args.contains(&"--dry-run".to_string()));
+        assert!(dry_run_args.contains(&"--prompt".to_string()));
+        assert!(dry_run_args.contains(&input.to_string()));
+        assert!(!dry_run_args.contains(&"--record-session".to_string()));
+
+        let execute_args = child_run_args(
+            &config_path,
+            input,
+            CapabilityChildRunMode::Execute,
+            Some(&record_path),
+        );
+        assert!(!execute_args.contains(&"--dry-run".to_string()));
+        assert!(!execute_args.contains(&"--prompt".to_string()));
+        assert!(!execute_args.contains(&input.to_string()));
+        assert!(execute_args.contains(&"--no-tui".to_string()));
+        assert!(execute_args.contains(&"--record-session".to_string()));
+        assert!(execute_args.contains(&record_path.display().to_string()));
+    }
+
+    #[test]
+    fn hat_capability_defaults_to_execute_mode() {
+        let capability = capability_catalog()
+            .into_iter()
+            .find(|capability| capability.kind == CapabilityKind::HatCapability)
+            .unwrap();
+
+        assert_eq!(
+            child_run_mode_for_capability(&capability),
+            CapabilityChildRunMode::Execute
+        );
+    }
+
+    #[test]
+    fn resolved_micro_run_inherits_backend_and_disables_recursion() {
+        let capability = capability_catalog()
+            .into_iter()
+            .find(|capability| capability.kind == CapabilityKind::HatCapability)
+            .unwrap();
+        let mut base_config = RalphConfig::default();
+        base_config.cli.backend = "custom".to_string();
+        base_config.cli.command = Some("/tmp/real-reviewer".to_string());
+        base_config.cli.prompt_mode = "stdin".to_string();
+        base_config.core.runtime_capabilities_enabled = true;
+        base_config.parallel.enabled = true;
+
+        let resolved =
+            resolved_micro_run_config_for_capability(&capability, "review input", &base_config);
+
+        assert_eq!(resolved.cli.backend, "custom");
+        assert_eq!(resolved.cli.command.as_deref(), Some("/tmp/real-reviewer"));
+        assert_ne!(resolved.cli.command.as_deref(), Some("true"));
+        assert!(!resolved.parallel.enabled);
+        assert!(resolved.hats.is_empty());
+        assert!(!resolved.core.runtime_capabilities_enabled);
+        assert!(
+            resolved
+                .event_loop
+                .prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("review input"))
         );
     }
 

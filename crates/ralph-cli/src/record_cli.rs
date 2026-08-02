@@ -87,8 +87,7 @@ pub(crate) async fn execute(args: RecordArgs) -> Result<()> {
 }
 
 fn summary_command(args: RecordSummaryArgs) -> Result<()> {
-    let player = crate::record_session::load_session_player_strict(&args.file)?;
-    let agg = crate::record_session::aggregate_record_session(&player)?;
+    let agg = ralph_core::aggregate_session(&args.file)?;
     let agents_probe = load_agents_snapshot_for_summary(&args, &agg);
 
     // ------------------------------------------------------------------
@@ -206,7 +205,7 @@ enum AgentsSnapshotProbe {
 
 fn load_agents_snapshot_for_summary(
     args: &RecordSummaryArgs,
-    agg: &crate::record_session::RecordSessionAggregate,
+    agg: &ralph_core::RecordSessionAggregate,
 ) -> AgentsSnapshotProbe {
     let candidates = agents_snapshot_candidates(args, agg);
 
@@ -248,7 +247,7 @@ fn load_agents_snapshot_for_summary(
 
 fn agents_snapshot_candidates(
     args: &RecordSummaryArgs,
-    agg: &crate::record_session::RecordSessionAggregate,
+    agg: &ralph_core::RecordSessionAggregate,
 ) -> Vec<PathBuf> {
     if let Some(path) = &args.agents_file {
         return vec![path.clone()];

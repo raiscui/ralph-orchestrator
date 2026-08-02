@@ -624,7 +624,7 @@ async fn ensure_git_worktree_available(repo_dir: &Path) -> Result<()> {
 }
 
 async fn load_config_for_repo(
-    config_path: &PathBuf,
+    config_path: &Path,
     repo_dir: &Path,
 ) -> Result<(RalphConfig, String)> {
     // 说明:
@@ -849,8 +849,8 @@ fn parse_record_session(path: &Path) -> Result<RecordSessionSummary> {
     // 说明:
     // - strict parse: 这份 JSONL 是 autopilot 的主证据源,必须 fail-closed.
     // - 解析/聚合口径由共享模块维护,避免 autopilot 与其他 record 工具漂移.
-    let player = crate::record_session::load_session_player_strict(path)?;
-    let agg = crate::record_session::aggregate_record_session(&player)
+    let player = ralph_core::load_session_player_strict(path)?;
+    let agg = ralph_core::aggregate_record_session(&player)
         .with_context(|| format!("Failed to aggregate record-session: {}", path.display()))?;
 
     let required_topics: [&str; 6] = [
@@ -953,8 +953,6 @@ fn parse_record_session(path: &Path) -> Result<RecordSessionSummary> {
                     }),
                 }
             }
-
-            continue;
         }
     }
     let terminal_tail = agg.stdout_tail;
@@ -1070,21 +1068,21 @@ fn extract_string_field_from_payload(payload: &str, field: &str) -> Option<Strin
     // 说明:
     // - payload 可能是 JSON 或 YAML,也可能是“半结构化文本”.
     // - 优先按 JSON/YAML 解析;失败后再做一次轻量 regex 回退,尽量减少误判.
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-        if let Some(s) = v.get(field).and_then(|v| v.as_str()) {
-            return Some(s.to_string());
-        }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload)
+        && let Some(s) = v.get(field).and_then(|v| v.as_str())
+    {
+        return Some(s.to_string());
     }
 
-    if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(payload) {
-        if let Some(s) = v.get(field).and_then(|v| v.as_str()) {
-            return Some(s.to_string());
-        }
+    if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(payload)
+        && let Some(s) = v.get(field).and_then(|v| v.as_str())
+    {
+        return Some(s.to_string());
     }
 
     // fallback: 支持 `commit: xxx` 或 `"commit": "xxx"` 的常见片段.
     let re = regex::Regex::new(&format!(
-        r#"(?m)^\s*{}\s*[:=]\s*([^\s#]+)\s*$"#,
+        r"(?m)^\s*{}\s*[:=]\s*([^\s#]+)\s*$",
         regex::escape(field)
     ))
     .ok()?;
@@ -1094,10 +1092,10 @@ fn extract_string_field_from_payload(payload: &str, field: &str) -> Option<Strin
 }
 
 fn extract_bool_field_from_payload(payload: &str, field: &str) -> Option<bool> {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-        if let Some(b) = v.get(field).and_then(|v| v.as_bool()) {
-            return Some(b);
-        }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload)
+        && let Some(b) = v.get(field).and_then(|v| v.as_bool())
+    {
+        return Some(b);
     }
 
     if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(payload) {
@@ -1116,7 +1114,7 @@ fn extract_bool_field_from_payload(payload: &str, field: &str) -> Option<bool> {
 
     // fallback: 文本里出现 evidence_ok=true.
     let re = regex::Regex::new(&format!(
-        r#"(?i)\b{}\s*[:=]\s*(true|false)\b"#,
+        r"(?i)\b{}\s*[:=]\s*(true|false)\b",
         regex::escape(field)
     ))
     .ok()?;
@@ -1168,7 +1166,7 @@ async fn write_analysis_input_json(
 }
 
 async fn run_agent_analysis(
-    config_path: &PathBuf,
+    config_path: &Path,
     repo_dir: &Path,
     out_dir: &Path,
     analysis_input_path: &Path,
@@ -1373,6 +1371,22 @@ fn build_min_analysis_config_yaml(cli: &CliConfig, prompt_file: &str) -> String 
         }
     }
 
+    if !cli.role_args.coordinator.is_empty() || !cli.role_args.worker.is_empty() {
+        cli_lines.push_str("  role_args:\n");
+        if !cli.role_args.coordinator.is_empty() {
+            cli_lines.push_str("    coordinator:\n");
+            for arg in &cli.role_args.coordinator {
+                cli_lines.push_str(&format!("      - \"{}\"\n", yaml_escape_double_quoted(arg)));
+            }
+        }
+        if !cli.role_args.worker.is_empty() {
+            cli_lines.push_str("    worker:\n");
+            for arg in &cli.role_args.worker {
+                cli_lines.push_str(&format!("      - \"{}\"\n", yaml_escape_double_quoted(arg)));
+            }
+        }
+    }
+
     cli_lines.push_str("  default_mode: \"autonomous\"\n");
 
     format!(
@@ -1450,14 +1464,14 @@ fn build_analysis_prompt_markdown(analysis_input_json: &str) -> String {
     // - evidence pack 可能很长,但前面已经做过预算与截断.
     // - 这里用 Markdown 只是为了可读性; analyzer hat 会被要求输出纯 JSON.
     format!(
-        r#"# Autopilot Analysis
+        r"# Autopilot Analysis
 
 你将收到一份 evidence pack(JSON).
 请严格按 instructions 输出 analyze.complete 的 JSON verdict.
 
 ## Evidence Pack (JSON)
 {analysis_input_json}
-"#
+"
     )
 }
 
@@ -1910,6 +1924,8 @@ more noise
                 "--sandbox".to_string(),
                 "danger-full-access".to_string(),
             ],
+            reasoning_effort: ralph_core::RoleReasoningEffortConfig::default(),
+            role_args: ralph_core::RoleArgsConfig::default(),
             prompt_flag: None,
         };
 
@@ -1931,6 +1947,37 @@ more noise
     }
 
     #[test]
+    fn analysis_config_preserves_cli_role_args() -> Result<()> {
+        let cli = CliConfig {
+            backend: "custom".to_string(),
+            command: Some("codex".to_string()),
+            prompt_mode: "arg".to_string(),
+            default_mode: "autonomous".to_string(),
+            idle_timeout_secs: 30,
+            args: vec!["exec".to_string()],
+            reasoning_effort: ralph_core::RoleReasoningEffortConfig::default(),
+            role_args: ralph_core::RoleArgsConfig {
+                coordinator: vec!["-c".to_string(), "features.hooks=false".to_string()],
+                worker: Vec::new(),
+            },
+            prompt_flag: None,
+        };
+
+        let yaml = build_min_analysis_config_yaml(&cli, "/tmp/analysis_prompt.md");
+        let cfg: RalphConfig = serde_yaml::from_str(&yaml)?;
+
+        assert_eq!(
+            cfg.cli.role_args.coordinator,
+            vec!["-c".to_string(), "features.hooks=false".to_string()]
+        );
+        assert!(
+            cfg.cli.role_args.worker.is_empty(),
+            "analysis child worker role args should remain empty unless explicitly configured"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn analysis_config_disables_memories_and_tasks() -> Result<()> {
         let cli = CliConfig {
             backend: "claude".to_string(),
@@ -1939,6 +1986,8 @@ more noise
             default_mode: "autonomous".to_string(),
             idle_timeout_secs: 30,
             args: vec![],
+            reasoning_effort: ralph_core::RoleReasoningEffortConfig::default(),
+            role_args: ralph_core::RoleArgsConfig::default(),
             prompt_flag: None,
         };
 
