@@ -266,10 +266,6 @@ pub enum RuntimeLifecycleKind {
     Shutdown,
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 /// 一条实例 lifecycle / control-plane durable evidence。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeLifecycleRecord {
@@ -280,8 +276,8 @@ pub struct RuntimeLifecycleRecord {
     /// 如果该记录携带状态,保存在这里。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<HatInstanceState>,
-    /// 是否是动态实例。
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// 是否是动态实例。默认静态实例不写入 JSON,保持 evidence 更紧凑。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dynamic: bool,
     /// 如果该动作由某条事件触发,保存源 event id。
     #[serde(skip_serializing_if = "Option::is_none")]

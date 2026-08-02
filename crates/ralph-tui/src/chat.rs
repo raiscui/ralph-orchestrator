@@ -20,6 +20,8 @@ pub enum ChatSubmit {
     },
     /// gate.resolve（由 `!approve/!deny/!resolve` 触发）。
     GateResolve { gate_id: String, decision: Value },
+    /// recoverable.continue（由 `!continue [failure_id]` 触发）。
+    RecoverableContinue { failure_id: Option<String> },
 }
 
 /// 解析 chat 输入文本。
@@ -32,6 +34,7 @@ pub enum ChatSubmit {
 /// - `!resolve <gate_id> <text...>` → gate.resolve(decision="<text...>")
 /// - `!steer [@writer#2] <text...>` → human.message(session_strategy=app_server, turn_action=steer)
 /// - `!interrupt [@writer#2]` → human.message(turn_action=interrupt)
+/// - `!continue [failure_id]` → recoverable.continue(failure_id?)
 pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
     let trimmed_all = input.trim();
     if trimmed_all.is_empty() {
@@ -155,6 +158,27 @@ pub fn parse_chat_submit(input: &str) -> Result<ChatSubmit, String> {
                     session_strategy: None,
                     turn_action: Some("interrupt".to_string()),
                 });
+            }
+            "continue" => {
+                // 语法：
+                // - !continue              (由 Supervisor 根据当前 paused/scheduled failure 消歧)
+                // - !continue failure-123  (显式指定 recoverable failure lifecycle)
+                //
+                // 注意:
+                // - 普通中文 "继续分析这个问题" 不带 `!`,会继续走 human.message。
+                // - control action 不接收多行 payload,避免把普通聊天误写成 retry 控制。
+                let parts_vec = parts.collect::<Vec<_>>();
+                if parts_vec.len() > 1 || !rest.trim().is_empty() {
+                    return Err("usage: !continue [failure_id]".to_string());
+                }
+
+                let failure_id = parts_vec
+                    .first()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+
+                return Ok(ChatSubmit::RecoverableContinue { failure_id });
             }
             _ => {
                 return Err(format!("unknown command: !{cmd}"));
@@ -332,6 +356,43 @@ mod tests {
                 turn_action: Some("interrupt".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn parse_continue_command_without_failure_id() {
+        let submit = parse_chat_submit("!continue").unwrap();
+        assert_eq!(submit, ChatSubmit::RecoverableContinue { failure_id: None });
+    }
+
+    #[test]
+    fn parse_continue_command_with_failure_id() {
+        let submit = parse_chat_submit("!continue failure-123").unwrap();
+        assert_eq!(
+            submit,
+            ChatSubmit::RecoverableContinue {
+                failure_id: Some("failure-123".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn parse_plain_chinese_continue_remains_human_message() {
+        let submit = parse_chat_submit("继续分析这个问题").unwrap();
+        assert_eq!(
+            submit,
+            ChatSubmit::HumanMessage {
+                target_instance: None,
+                payload: "继续分析这个问题".to_string(),
+                session_strategy: None,
+                turn_action: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_continue_command_rejects_extra_payload() {
+        let err = parse_chat_submit("!continue failure-123 extra").unwrap_err();
+        assert!(err.contains("usage: !continue [failure_id]"));
     }
 
     #[test]
