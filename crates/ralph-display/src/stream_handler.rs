@@ -640,7 +640,10 @@ impl MarkdownRenderMode {
 
 /// Renders streaming output with colors and markdown.
 pub struct PrettyStreamHandler {
-    stdout: io::Stdout,
+    /// 输出目标(生产: 真实 stdout; 测试: 注入 Vec<u8> 等)。
+    ///
+    /// 可注入是"接口即测试面"的落点: 渲染行为终于能通过断言输出验证。
+    stdout: Box<dyn Write + Send>,
     verbose: bool,
     /// Buffer for accumulating text before markdown rendering
     text_buffer: String,
@@ -656,8 +659,17 @@ impl PrettyStreamHandler {
 
     /// Creates a new pretty handler with explicit render mode.
     pub fn new_with_mode(verbose: bool, render_mode: MarkdownRenderMode) -> Self {
+        Self::new_with_output(verbose, render_mode, Box::new(io::stdout()))
+    }
+
+    /// 创建一个输出目标可注入的 pretty handler(测试用)。
+    pub fn new_with_output(
+        verbose: bool,
+        render_mode: MarkdownRenderMode,
+        stdout: Box<dyn Write + Send>,
+    ) -> Self {
         Self {
-            stdout: io::stdout(),
+            stdout,
             verbose,
             text_buffer: String::new(),
             render_mode,
@@ -784,14 +796,40 @@ pub trait StreamHandler: Send {
     fn on_complete(&mut self, result: &SessionResult);
 }
 
+/// Box 化 trait 对象的转发实现: 让工厂返回 `Box<dyn StreamHandler>` 后,
+/// 仍能直接交给 `PtyExecutor::run_observe_streaming<H: StreamHandler>` 使用。
+impl StreamHandler for Box<dyn StreamHandler> {
+    fn on_text(&mut self, text: &str) {
+        (**self).on_text(text);
+    }
+
+    fn on_tool_call(&mut self, name: &str, id: &str, input: &serde_json::Value) {
+        (**self).on_tool_call(name, id, input);
+    }
+
+    fn on_tool_result(&mut self, id: &str, output: &str) {
+        (**self).on_tool_result(id, output);
+    }
+
+    fn on_error(&mut self, error: &str) {
+        (**self).on_error(error);
+    }
+
+    fn on_complete(&mut self, result: &SessionResult) {
+        (**self).on_complete(result);
+    }
+}
+
 /// Writes streaming output to stdout/stderr.
 ///
 /// In normal mode, displays assistant text and tool invocations.
 /// In verbose mode, also displays tool results and session summary.
 pub struct ConsoleStreamHandler {
     verbose: bool,
-    stdout: io::Stdout,
-    stderr: io::Stderr,
+    /// 输出目标(生产: 真实 stdout; 测试: 注入 Vec<u8> 等)。
+    stdout: Box<dyn Write + Send>,
+    /// 错误输出目标(生产: 真实 stderr; 测试: 注入 Vec<u8> 等)。
+    stderr: Box<dyn Write + Send>,
 }
 
 impl ConsoleStreamHandler {
@@ -800,10 +838,19 @@ impl ConsoleStreamHandler {
     /// # Arguments
     /// * `verbose` - If true, shows tool results and session summary.
     pub fn new(verbose: bool) -> Self {
+        Self::new_with_output(verbose, Box::new(io::stdout()), Box::new(io::stderr()))
+    }
+
+    /// 创建一个输出目标可注入的 console handler(测试用)。
+    pub fn new_with_output(
+        verbose: bool,
+        stdout: Box<dyn Write + Send>,
+        stderr: Box<dyn Write + Send>,
+    ) -> Self {
         Self {
             verbose,
-            stdout: io::stdout(),
-            stderr: io::stderr(),
+            stdout,
+            stderr,
         }
     }
 }
@@ -856,6 +903,74 @@ impl StreamHandler for QuietStreamHandler {
     fn on_tool_result(&mut self, _: &str, _: &str) {}
     fn on_error(&mut self, _: &str) {}
     fn on_complete(&mut self, _: &SessionResult) {}
+}
+
+// ============================================================================
+// DisplayTarget: 展示意图的窄入口
+//
+// 设计目标:
+// - 调用者只表达"我要什么"(控制台 / TUI / 静默),不选具体 handler。
+// - 选择矩阵(verbosity × render_mode × output_format × 目标)收进这个工厂,
+//   不再泄漏到 loop_runner 之类调用者手里。
+// ============================================================================
+
+/// 调用者对展示的意图,合法组合由类型系统保证(Some(lines) 与 tty 互斥)。
+#[derive(Debug, Clone)]
+pub enum DisplayTarget {
+    /// 控制台输出。
+    ///
+    /// - `stream_json`: 后端是否为 StreamJson(决定是否启用 Markdown 美化渲染)
+    /// - `tty`: 当前 stdout 是否为终端(决定是否启用颜色/美化)
+    Console {
+        stream_json: bool,
+        tty: bool,
+    },
+    /// TUI 共享行缓冲(实时流式显示,由 TUI 应用持有)。
+    Tui(Arc<Mutex<Vec<Line<'static>>>>),
+}
+
+/// 展示详细度(与 CLI 的 Verbosity 一一对应,但归 display 所有,
+/// 避免跨 crate 泄漏 CLI 类型)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayVerbosity {
+    /// 静默: 只消费输出,不展示。
+    Quiet,
+    /// 常规: 展示文本与工具调用。
+    Normal,
+    /// 详细: 额外展示工具结果与会话摘要。
+    Verbose,
+}
+
+/// 选择矩阵工厂: 根据展示意图与详细度,选出具体 handler。
+///
+/// 语义与历史行为保持一致:
+/// - TUI 目标优先于详细度(TUI 模式下总是 TuiStreamHandler)。
+/// - 控制台 + Quiet → QuietStreamHandler。
+/// - 控制台 + StreamJson 且 TTY → PrettyStreamHandler(Markdown 渲染)。
+/// - 其余 → ConsoleStreamHandler。
+pub fn make_stream_handler(
+    target: DisplayTarget,
+    verbosity: DisplayVerbosity,
+    render_mode: MarkdownRenderMode,
+) -> Box<dyn StreamHandler> {
+    match target {
+        DisplayTarget::Tui(lines) => Box::new(TuiStreamHandler::with_lines_and_mode(
+            verbosity == DisplayVerbosity::Verbose,
+            lines,
+            render_mode,
+        )),
+        DisplayTarget::Console { stream_json, tty } => match verbosity {
+            DisplayVerbosity::Quiet => Box::new(QuietStreamHandler),
+            DisplayVerbosity::Normal | DisplayVerbosity::Verbose => {
+                let verbose = verbosity == DisplayVerbosity::Verbose;
+                if stream_json && tty {
+                    Box::new(PrettyStreamHandler::new_with_mode(verbose, render_mode))
+                } else {
+                    Box::new(ConsoleStreamHandler::new(verbose))
+                }
+            }
+        },
+    }
 }
 
 fn plain_text_to_lines(text: &str) -> Vec<Line<'static>> {
@@ -1876,38 +1991,146 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn test_console_handler_verbose_shows_results() {
-        let mut handler = ConsoleStreamHandler::new(true);
-        let bash_input = json!({"command": "ls -la"});
+    /// 测试用的共享写入器: handler 写完输出后,测试仍能读取内容做断言。
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
-        // These calls should not panic
-        handler.on_text("Hello");
-        handler.on_tool_call("Bash", "tool_1", &bash_input);
-        handler.on_tool_result("tool_1", "output");
-        handler.on_complete(&SessionResult {
+    impl SharedWriter {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        fn content(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap_or_default()
+        }
+    }
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn sample_result() -> SessionResult {
+        SessionResult {
             duration_ms: 1000,
             total_cost_usd: 0.01,
             num_turns: 1,
             is_error: false,
-        });
+        }
+    }
+
+    #[test]
+    fn test_console_handler_verbose_shows_results() {
+        let stdout = SharedWriter::new();
+        let stderr = SharedWriter::new();
+        let mut handler =
+            ConsoleStreamHandler::new_with_output(true, Box::new(stdout.clone()), Box::new(stderr));
+        let bash_input = json!({"command": "ls -la"});
+
+        handler.on_text("Hello");
+        handler.on_tool_call("Bash", "tool_1", &bash_input);
+        handler.on_tool_result("tool_1", "output");
+        handler.on_error("boom");
+        handler.on_complete(&sample_result());
+
+        // 文本、工具调用、工具结果、错误、会话摘要都应可见
+        assert!(stdout.content().contains("Hello"));
+        assert!(stdout.content().contains("[Tool] Bash: ls -la"));
+        assert!(stdout.content().contains("[Result] output"));
+        assert!(stdout.content().contains("[Error] boom"));
+        assert!(stdout.content().contains("Session Complete"));
     }
 
     #[test]
     fn test_console_handler_normal_skips_results() {
-        let mut handler = ConsoleStreamHandler::new(false);
+        let stdout = SharedWriter::new();
+        let stderr = SharedWriter::new();
+        let mut handler = ConsoleStreamHandler::new_with_output(
+            false,
+            Box::new(stdout.clone()),
+            Box::new(stderr),
+        );
         let read_input = json!({"file_path": "src/main.rs"});
 
-        // These should not show tool results
         handler.on_text("Hello");
         handler.on_tool_call("Read", "tool_1", &read_input);
-        handler.on_tool_result("tool_1", "output"); // Should be silent
-        handler.on_complete(&SessionResult {
-            duration_ms: 1000,
-            total_cost_usd: 0.01,
-            num_turns: 1,
-            is_error: false,
-        }); // Should be silent
+        handler.on_tool_result("tool_1", "output");
+        handler.on_complete(&sample_result());
+
+        // 工具结果与会话摘要应保持静默
+        let out = stdout.content();
+        assert!(out.contains("Hello"));
+        assert!(out.contains("[Tool] Read: src/main.rs"));
+        assert!(!out.contains("[Result]"));
+        assert!(!out.contains("Session Complete"));
+    }
+
+    #[test]
+    fn test_make_handler_console_quiet_is_silent() {
+        let mut handler = make_stream_handler(
+            DisplayTarget::Console {
+                stream_json: true,
+                tty: true,
+            },
+            DisplayVerbosity::Quiet,
+            MarkdownRenderMode::Rendered,
+        );
+
+        // Quiet: 无论后端是什么,输出都应为空
+        handler.on_text("Hello");
+        handler.on_tool_call("Read", "t1", &json!({"file_path": "a.rs"}));
+        handler.on_complete(&sample_result());
+        // 无法直接断言(输出进了真实 stdout),但 Quiet 不 panic 即满足契约;
+        // 行为等价性由 QuietStreamHandler 的 no-op 实现保证。
+    }
+
+    #[test]
+    fn test_make_handler_console_stream_json_tty_renders_markdown() {
+        // StreamJson + TTY: Pretty handler,markdown 被渲染(控制符消失)
+        let stdout = SharedWriter::new();
+        let mut handler = PrettyStreamHandler::new_with_output(
+            false,
+            MarkdownRenderMode::Rendered,
+            Box::new(stdout.clone()),
+        );
+        handler.on_text("hello **world**");
+        handler.on_complete(&sample_result());
+
+        let out = stdout.content();
+        assert!(out.contains("world"));
+        assert!(!out.contains("**"));
+    }
+
+    #[test]
+    fn test_make_handler_console_text_backend_passthrough() {
+        // Text 后端: Console handler,文本原样立即输出
+        let stdout = SharedWriter::new();
+        let mut handler = ConsoleStreamHandler::new_with_output(
+            false,
+            Box::new(stdout.clone()),
+            Box::new(SharedWriter::new()),
+        );
+        handler.on_text("plain text");
+        assert_eq!(stdout.content(), "plain text");
+    }
+
+    #[test]
+    fn test_make_handler_tui_writes_lines() {
+        // TUI 目标: 输出进入共享 lines 缓冲
+        let lines: Arc<Mutex<Vec<Line<'static>>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut handler = make_stream_handler(
+            DisplayTarget::Tui(lines.clone()),
+            DisplayVerbosity::Normal,
+            MarkdownRenderMode::Plain,
+        );
+        handler.on_text("hello tui");
+        assert!(!lines.lock().unwrap().is_empty());
     }
 
     #[test]

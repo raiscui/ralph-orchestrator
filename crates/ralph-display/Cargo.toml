@@ -1,0 +1,37 @@
+[package]
+name = "ralph-display"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Terminal display for Ralph Orchestrator (stream handlers, markdown rendering)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Terminal markdown rendering (used for both TUI and non-TUI modes for parity)
+termimad.workspace = true
+
+# ANSI escape code parsing (converts ANSI to ratatui Text)
+ansi-to-tui = "8"
+
+# TUI (for TuiStreamHandler)
+ratatui.workspace = true
+crossterm.workspace = true
+
+# Tree-sitter syntax highlighting (for fenced code blocks)
+tree-sitter = "0.26.5"
+tree-sitter-highlight = "0.26.5"
+tree-sitter-bash = "0.25.1"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.0"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-yaml = "0.7.2"

@@ -18,7 +18,7 @@ pub mod widgets;
 
 use anyhow::Result;
 use app::App;
-use ralph_adapters::MarkdownRenderMode;
+use ralph_display::MarkdownRenderMode;
 use ralph_core::HatJobOutputChunk;
 use ralph_proto::{Event, HatId, HatInstanceId, HatInstanceState};
 use std::collections::HashMap;
@@ -99,6 +99,22 @@ impl Tui {
     pub fn with_parallel_max_buffer_lines(self, max_buffer_lines: usize) -> Self {
         if let Ok(mut state) = self.state.lock() {
             state.parallel.max_buffer_lines = max_buffer_lines;
+        }
+        self
+    }
+
+    /// 设置并行 Supervisor TUI 的证据路径展示信息。
+    ///
+    /// 说明:
+    /// - CLI/runtime 负责解析真正的证据文件路径。
+    /// - TUI 只保存展示文本，不在 widget 中重新推导路径，避免出现第二套真相源。
+    #[must_use]
+    pub fn with_parallel_evidence_paths(
+        self,
+        evidence_paths: state::ParallelEvidencePaths,
+    ) -> Self {
+        if let Ok(mut state) = self.state.lock() {
+            state.parallel.evidence_paths = evidence_paths;
         }
         self
     }

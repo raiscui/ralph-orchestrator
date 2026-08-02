@@ -6,9 +6,11 @@
 
 use anyhow::{Context, Result};
 use ralph_adapters::{
-    CliBackend, CliExecutor, ConsoleStreamHandler, MarkdownRenderMode,
-    OutputFormat as BackendOutputFormat, PrettyStreamHandler, PtyConfig, PtyExecutor,
-    QuietStreamHandler, TuiStreamHandler,
+    CliBackend, CliExecutionRole, CliExecutor, OutputFormat as BackendOutputFormat, PtyConfig,
+    PtyExecutor,
+};
+use ralph_display::{
+    DisplayTarget, DisplayVerbosity, MarkdownRenderMode, make_stream_handler,
 };
 use ralph_core::{
     EventLogger, EventLoop, EventParser, EventRecord, HatBackend, RalphConfig, Record,
@@ -24,7 +26,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
-use crate::display::{build_tui_hat_map, print_iteration_separator, print_termination};
+use crate::display::{
+    build_tui_hat_map, preview_one_line, print_iteration_separator, print_termination,
+};
 use crate::process_management;
 use crate::{ColorMode, Verbosity};
 
@@ -613,9 +617,23 @@ pub async fn run_loop_impl(
                 }
             };
 
+        // 角色化 reasoning 默认:
+        // - `display_hat=ralph` 时,这一轮是 coordinator turn,默认 medium。
+        // - 非 Ralph hat 作为当前活跃 worker 时,默认 high。
+        // - 若 backend/命令行已经显式带了 `model_reasoning_effort`,adapter 会保留显式值。
+        let cli_role = if display_hat.as_str() == "ralph" {
+            CliExecutionRole::Coordinator
+        } else {
+            CliExecutionRole::Worker
+        };
+        effective_backend.apply_role_args(&config.cli.role_args, cli_role);
+
         if !custom_args.is_empty() {
             effective_backend.args.extend(custom_args.iter().cloned());
         }
+
+        effective_backend
+            .apply_role_reasoning_effort_defaults(&config.cli.reasoning_effort, cli_role);
 
         // Execute the prompt (interactive or autonomous mode)
         // Get per-adapter timeout from config (based on the actual backend used).
@@ -886,51 +904,29 @@ async fn execute_pty(
     });
 
     // Run PTY executor with shared interrupt channel
+    // Raw interactive mode only when not using TUI (TUI handles its own terminal);
+    // 其余情况把"展示意图"交给 display 工厂,选择矩阵不再泄漏到调用者。
     let result = if interactive && tui_lines.is_none() {
-        // Raw interactive mode only when not using TUI (TUI handles its own terminal)
         exec.run_interactive(prompt, interrupt_rx).await
-    } else if let Some(lines) = tui_lines {
-        // TUI mode: use TuiStreamHandler to capture output for TUI display
-        let verbose = verbosity == Verbosity::Verbose;
-        let mut handler = TuiStreamHandler::with_lines_and_mode(verbose, lines, render_mode);
+    } else {
+        // 表达"我要什么",而不是"用哪个 handler":
+        // - TUI 模式 → 共享行缓冲
+        // - 控制台模式 → 由 stream_json/tty 决定美化与否
+        let target = match tui_lines {
+            Some(lines) => DisplayTarget::Tui(lines),
+            None => DisplayTarget::Console {
+                stream_json: backend.output_format == BackendOutputFormat::StreamJson,
+                tty: stdout().is_terminal(),
+            },
+        };
+        let display_verbosity = match verbosity {
+            Verbosity::Quiet => DisplayVerbosity::Quiet,
+            Verbosity::Normal => DisplayVerbosity::Normal,
+            Verbosity::Verbose => DisplayVerbosity::Verbose,
+        };
+        let mut handler = make_stream_handler(target, display_verbosity, render_mode);
         exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
             .await
-    } else {
-        // Use streaming handler for non-interactive mode (respects verbosity)
-        // Use PrettyStreamHandler for StreamJson backends (Claude) on TTY for markdown rendering
-        // Use ConsoleStreamHandler for Text format backends (Kiro, Gemini, etc.) for immediate output
-        let use_pretty =
-            backend.output_format == BackendOutputFormat::StreamJson && stdout().is_terminal();
-
-        match verbosity {
-            Verbosity::Quiet => {
-                let mut handler = QuietStreamHandler;
-                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                    .await
-            }
-            Verbosity::Normal => {
-                if use_pretty {
-                    let mut handler = PrettyStreamHandler::new_with_mode(false, render_mode);
-                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                        .await
-                } else {
-                    let mut handler = ConsoleStreamHandler::new(false);
-                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                        .await
-                }
-            }
-            Verbosity::Verbose => {
-                if use_pretty {
-                    let mut handler = PrettyStreamHandler::new_with_mode(true, render_mode);
-                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                        .await
-                } else {
-                    let mut handler = ConsoleStreamHandler::new(true);
-                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                        .await
-                }
-            }
-        }
     };
 
     match result {
@@ -1032,7 +1028,7 @@ pub(crate) fn resolve_prompt_content(
     event_loop_config: &ralph_core::EventLoopConfig,
 ) -> Result<String> {
     debug!(
-        inline_prompt = ?event_loop_config.prompt.as_ref().map(|s| format!("{}...", &s[..s.len().min(50)])),
+        inline_prompt = ?event_loop_config.prompt.as_ref().map(|s| preview_one_line(s, 50)),
         prompt_file = %event_loop_config.prompt_file,
         "Resolving prompt content"
     );

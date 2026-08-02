@@ -21,7 +21,7 @@
 use crate::claude_stream::{ClaudeStreamEvent, ClaudeStreamParser, ContentBlock, UserContentBlock};
 use crate::cli_backend::{CliBackend, OutputFormat};
 use crate::codex_env::scrub_codex_parent_session_env_pty;
-use crate::stream_handler::{SessionResult, StreamHandler};
+use ralph_display::{SessionResult, StreamHandler};
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]

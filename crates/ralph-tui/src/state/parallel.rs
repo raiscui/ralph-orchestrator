@@ -10,9 +10,14 @@ pub(crate) mod output;
 
 use crate::theme::MUTED_FG;
 use output::wrap_lines_to_width;
-use ralph_adapters::{MarkdownRenderMode, render_text_to_lines};
-use ralph_core::{HatJobOutputChunk, OutputStream};
-use ralph_core::{clean_activity_label, normalize_activity_label};
+use ralph_display::{MarkdownRenderMode, render_text_to_lines};
+use ralph_core::{
+    CapabilityInvocationRecord, CapabilityParentFailedRecord, CapabilityParentResultRecord,
+    HatJobOutputChunk, OutputStream, RoleContractSummary, TOPIC_CAPABILITY_FAILED,
+    TOPIC_CAPABILITY_INVOKE, TOPIC_CAPABILITY_RESULT, TOPIC_TOPOLOGY_SPAWN_RESULT,
+    TopologySpawnGroupResult, clean_activity_label, normalize_activity_label,
+    truncate_with_ellipsis,
+};
 use ralph_proto::{
     Event, GateRequest, GateResolve, GateTimeout, HatInstanceId, HatInstanceState,
     TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE, TOPIC_GATE_TIMEOUT,
@@ -22,6 +27,36 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
+
+/// 并行 TUI 中展示用的证据路径集合。
+///
+/// 说明:
+/// - 这些字段只负责“把 runtime 已经选择好的证据路径显示出来”。
+/// - 它们不参与调度、解析、落盘，也不替代 `.ralph/*` 文件本身。
+/// - 使用 `String` 而不是 `PathBuf`，是因为 TUI 只需要稳定展示文本。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParallelEvidencePaths {
+    /// 当前 events JSONL 文件路径。
+    pub events_path: Option<String>,
+    /// evidence index JSONL 文件路径。
+    pub evidence_index_path: Option<String>,
+    /// agents snapshot JSON 文件路径。
+    pub agents_snapshot_path: Option<String>,
+    /// `--record-session` 指向的 JSONL 文件路径；未启用时为 None。
+    pub record_session_path: Option<String>,
+}
+
+impl ParallelEvidencePaths {
+    /// 返回适合单行状态条展示的摘要。
+    pub fn summary_text(&self) -> String {
+        let events = self.events_path.as_deref().unwrap_or("-");
+        let index = self.evidence_index_path.as_deref().unwrap_or("-");
+        let agents = self.agents_snapshot_path.as_deref().unwrap_or("-");
+        let record = self.record_session_path.as_deref().unwrap_or("off");
+
+        format!("events={events} | index={index} | agents={agents} | record={record}")
+    }
+}
 
 /// 并行 TUI 的焦点区域（Tab 循环）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -724,6 +759,79 @@ pub enum GateStatus {
     Resolved,
 }
 
+/// isolated child/micro-run 的 UI 状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildRunStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+impl ChildRunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// footer / status strip 使用的 child-run 计数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChildRunCounts {
+    pub running: usize,
+    pub done: usize,
+    pub failed: usize,
+}
+
+impl ChildRunCounts {
+    pub fn total(self) -> usize {
+        self.running + self.done + self.failed
+    }
+}
+
+/// parent-observable child run 投影。
+///
+/// 说明:
+/// - 它不是 HatInstance,不能进入 `instances` 或 `instance_order`。
+/// - 它只回答“隔离子运行是否真的启动/结束,证据在哪里”。
+#[derive(Debug, Clone)]
+pub struct ChildRunViewState {
+    pub key: String,
+    pub request_id: Option<String>,
+    pub invocation_id: Option<String>,
+    pub capability_id: String,
+    pub status: ChildRunStatus,
+    pub summary: Option<String>,
+    pub artifact: Option<String>,
+    pub updated_at: Instant,
+}
+
+impl ChildRunViewState {
+    pub fn short_label(&self) -> String {
+        let id = self
+            .invocation_id
+            .as_deref()
+            .or(self.request_id.as_deref())
+            .unwrap_or(self.key.as_str());
+        format!("{}:{}:{}", self.status.as_str(), self.capability_id, id)
+    }
+}
+
+fn child_run_preview(value: &str, max_len: usize) -> String {
+    let collapsed = value
+        .replace(['\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_with_ellipsis(&collapsed, max_len)
+}
+
+fn short_role_contract_hash(value: &str) -> String {
+    child_run_preview(value, 12)
+}
+
 impl GateViewState {
     pub fn new(request: GateRequest) -> Self {
         Self {
@@ -968,6 +1076,27 @@ pub struct ParallelTuiState {
     /// - Audit：展示 instance / stream / job 归因,便于核对完整到达流。
     pub output_view_mode: ParallelOutputViewMode,
 
+    /// 并行 TUI 的证据路径展示信息。
+    pub evidence_paths: ParallelEvidencePaths,
+
+    /// isolated child run 的观测态。
+    pub child_runs: HashMap<String, ChildRunViewState>,
+    pub child_run_order: Vec<String>,
+
+    /// parent-visible 动态 spawn 的临时角色标签。
+    ///
+    /// 说明:
+    /// - 这只服务当前 TUI 展示,不等同于 `agents.json` 的 fixed-role metadata。
+    /// - 临时角色来自运行中 `topology.spawn.result`,例如 "功能补充" / "review"。
+    pub spawn_role_labels: HashMap<HatInstanceId, String>,
+
+    /// parent-visible 动态 spawn 的 role contract 摘要。
+    ///
+    /// 说明:
+    /// - 这里同样只保存 summary,不保存完整 contract 或 prompt。
+    /// - 来源是 live `topology.spawn.result`,用于父级 TUI 证明 task-derived worker 的身份边界。
+    pub spawn_role_summaries: HashMap<HatInstanceId, RoleContractSummary>,
+
     /// Markdown 语义换行宽度（仅用于 Rendered 模式下的 stdout 渲染）。
     ///
     /// 说明：
@@ -997,6 +1126,11 @@ impl Default for ParallelTuiState {
             gate_order: Vec::new(),
             selected_gate: None,
             output_view_mode: ParallelOutputViewMode::Rendered,
+            evidence_paths: ParallelEvidencePaths::default(),
+            child_runs: HashMap::new(),
+            child_run_order: Vec::new(),
+            spawn_role_labels: HashMap::new(),
+            spawn_role_summaries: HashMap::new(),
             output_render_width: 80,
             max_buffer_lines: 10_000,
         }
@@ -1004,6 +1138,64 @@ impl Default for ParallelTuiState {
 }
 
 impl ParallelTuiState {
+    pub fn child_run_counts(&self) -> ChildRunCounts {
+        let mut counts = ChildRunCounts::default();
+        for run in self.child_runs.values() {
+            match run.status {
+                ChildRunStatus::Running => counts.running += 1,
+                ChildRunStatus::Done => counts.done += 1,
+                ChildRunStatus::Failed => counts.failed += 1,
+            }
+        }
+        counts
+    }
+
+    pub fn latest_child_run(&self) -> Option<&ChildRunViewState> {
+        self.child_run_order
+            .iter()
+            .rev()
+            .find_map(|key| self.child_runs.get(key))
+    }
+
+    pub fn child_run_summary_text(&self) -> Option<String> {
+        let counts = self.child_run_counts();
+        if counts.total() == 0 {
+            return None;
+        }
+
+        let latest = self
+            .latest_child_run()
+            .map(ChildRunViewState::short_label)
+            .unwrap_or_else(|| "-".to_string());
+
+        Some(format!(
+            "child: {} running / {} done / {} failed | latest {latest}",
+            counts.running, counts.done, counts.failed
+        ))
+    }
+
+    pub fn latest_child_run_evidence_text(&self) -> Option<String> {
+        let latest = self.latest_child_run()?;
+        let label = latest.short_label();
+        let artifact = latest.artifact.as_deref().unwrap_or("-");
+        Some(format!("{label} artifact={artifact}"))
+    }
+
+    pub fn spawn_role_label(&self, instance_id: &HatInstanceId) -> Option<&str> {
+        self.spawn_role_labels.get(instance_id).map(String::as_str)
+    }
+
+    pub fn spawn_role_contract_badge(&self, instance_id: &HatInstanceId) -> Option<String> {
+        let summary = self.spawn_role_summaries.get(instance_id)?;
+        Some(format!(
+            "{} {} {} req:{}",
+            summary.identity_source,
+            summary.persistence,
+            short_role_contract_hash(&summary.role_contract_hash),
+            child_run_preview(&summary.source_spawn_request_id, 24)
+        ))
+    }
+
     pub fn clear_output_selection(&mut self) {
         self.output_selection = None;
         self.output_selecting = false;
@@ -1173,8 +1365,136 @@ impl ParallelTuiState {
                 Ok(resolve) => self.apply_gate_resolve(resolve),
                 Err(e) => warn!(error = %e, "Failed to parse gate.resolve payload"),
             },
+            TOPIC_CAPABILITY_INVOKE => self.apply_capability_invoke(event),
+            TOPIC_CAPABILITY_RESULT => self.apply_capability_result(event),
+            TOPIC_CAPABILITY_FAILED => self.apply_capability_failed(event),
+            TOPIC_TOPOLOGY_SPAWN_RESULT => self.apply_topology_spawn_result(event),
             _ => {}
         }
+    }
+
+    fn apply_topology_spawn_result(&mut self, event: &Event) {
+        let Ok(result) = serde_json::from_str::<TopologySpawnGroupResult>(&event.payload) else {
+            warn!("Failed to parse topology.spawn.result payload");
+            return;
+        };
+
+        for spawned in result.spawned {
+            let instance_id = HatInstanceId::from(spawned.instance_id.as_str());
+            let role = child_run_preview(&spawned.role, 48);
+            if !role.is_empty() {
+                self.spawn_role_labels.insert(instance_id.clone(), role);
+            }
+
+            if let Some(summary) = spawned.role_contract_summary {
+                self.spawn_role_summaries.insert(instance_id, summary);
+            }
+        }
+    }
+
+    fn apply_capability_invoke(&mut self, event: &Event) {
+        let Ok(invoke) = serde_json::from_str::<CapabilityInvocationRecord>(&event.payload) else {
+            warn!("Failed to parse capability.invoke payload");
+            return;
+        };
+
+        let key = invoke.invocation_id.clone();
+        self.upsert_child_run(ChildRunViewState {
+            key,
+            request_id: None,
+            invocation_id: Some(invoke.invocation_id),
+            capability_id: invoke.capability.id,
+            status: ChildRunStatus::Running,
+            summary: Some(child_run_preview(&invoke.input, 96)),
+            artifact: Some(invoke.resolved_config_path),
+            updated_at: Instant::now(),
+        });
+    }
+
+    fn apply_capability_result(&mut self, event: &Event) {
+        let Ok(result) = serde_json::from_str::<CapabilityParentResultRecord>(&event.payload)
+        else {
+            warn!("Failed to parse capability.result payload");
+            return;
+        };
+
+        let key = result.request_id.clone();
+        self.remove_child_run_by_invocation(&result.invocation_id, Some(&key));
+        self.upsert_child_run(ChildRunViewState {
+            key,
+            request_id: Some(result.request_id),
+            invocation_id: Some(result.invocation_id),
+            capability_id: result.capability_id,
+            status: ChildRunStatus::Done,
+            summary: Some(result.result_summary),
+            artifact: result
+                .artifacts
+                .result_json
+                .or(Some(result.artifacts.invoke_json)),
+            updated_at: Instant::now(),
+        });
+    }
+
+    fn apply_capability_failed(&mut self, event: &Event) {
+        let Ok(failed) = serde_json::from_str::<CapabilityParentFailedRecord>(&event.payload)
+        else {
+            warn!("Failed to parse capability.failed payload");
+            return;
+        };
+
+        let key = failed
+            .request_id
+            .clone()
+            .or_else(|| failed.invocation_id.clone())
+            .or_else(|| event.id.clone())
+            .unwrap_or_else(|| "capability.failed".to_string());
+
+        if let Some(invocation_id) = failed.invocation_id.as_deref() {
+            self.remove_child_run_by_invocation(invocation_id, Some(&key));
+        }
+
+        let artifact = failed
+            .artifacts
+            .as_ref()
+            .and_then(|artifacts| artifacts.failed_json.clone())
+            .or_else(|| {
+                failed
+                    .artifacts
+                    .as_ref()
+                    .map(|artifacts| artifacts.invoke_json.clone())
+            });
+
+        self.upsert_child_run(ChildRunViewState {
+            key,
+            request_id: failed.request_id,
+            invocation_id: failed.invocation_id,
+            capability_id: failed
+                .capability_id
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            status: ChildRunStatus::Failed,
+            summary: Some(failed.error),
+            artifact,
+            updated_at: Instant::now(),
+        });
+    }
+
+    fn upsert_child_run(&mut self, run: ChildRunViewState) {
+        if !self.child_runs.contains_key(&run.key) {
+            self.child_run_order.push(run.key.clone());
+        }
+        self.child_runs.insert(run.key.clone(), run);
+    }
+
+    fn remove_child_run_by_invocation(&mut self, invocation_id: &str, keep_key: Option<&str>) {
+        let Some(existing_key) = self.child_runs.iter().find_map(|(key, run)| {
+            (run.invocation_id.as_deref() == Some(invocation_id) && Some(key.as_str()) != keep_key)
+                .then(|| key.clone())
+        }) else {
+            return;
+        };
+
+        self.child_runs.remove(&existing_key);
+        self.child_run_order.retain(|key| key != &existing_key);
     }
 
     fn upsert_gate_request(&mut self, request: GateRequest) {
@@ -1438,6 +1758,49 @@ mod tests {
         }
     }
 
+    fn capability_invoke_event(invocation_id: &str) -> Event {
+        // 说明:
+        // - 这里直接构造 wire JSON,让 reducer 测试覆盖真实 TUI 收到的事件形状。
+        // - child-run 是观测投影,所以 payload 里没有任何 HatInstance 字段。
+        let payload = serde_json::json!({
+            "invocation_id": invocation_id,
+            "ts": "2026-02-01T00:00:00Z",
+            "capability": {
+                "id": "workflow:default-parallel",
+                "kind": "workflow_capability",
+                "summary": "run a parallel child workflow",
+                "goal": "child workflow result",
+                "when_to_use": "when parent topology should stay unchanged",
+                "input_contract": "task input",
+                "output_contract": "summary plus artifacts",
+                "invocation_mode": "isolated_child_run"
+            },
+            "choice": {
+                "capability_id": "workflow:default-parallel",
+                "reason": "test",
+                "chooser_version": "test"
+            },
+            "input": "分析项目演进方向\\n并输出风险",
+            "input_contract": "task input",
+            "resolved_config_path": format!(".ralph/capability-invocations/{invocation_id}/resolved-config.yml"),
+            "parent_topology_unchanged": true
+        })
+        .to_string();
+
+        Event::new(TOPIC_CAPABILITY_INVOKE, payload)
+    }
+
+    fn capability_artifacts(invocation_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "invoke_json": format!(".ralph/capability-invocations/{invocation_id}/invoke.json"),
+            "result_json": format!(".ralph/capability-invocations/{invocation_id}/result.json"),
+            "failed_json": serde_json::Value::Null,
+            "resolved_config": format!(".ralph/capability-invocations/{invocation_id}/resolved-config.yml"),
+            "events_jsonl": ".ralph/events.jsonl",
+            "evidence_index": ".ralph/evidence-index.jsonl"
+        })
+    }
+
     #[test]
     fn gate_status_waiting_and_timeout_are_deterministic() {
         let opened_at = Instant::now();
@@ -1504,6 +1867,115 @@ mod tests {
         let resolve_payload = serde_json::to_string(&resolve).unwrap();
         state.apply_event(&Event::new(TOPIC_GATE_RESOLVE, resolve_payload));
         assert!(state.gates.get("g1").unwrap().resolved.is_some());
+    }
+
+    #[test]
+    fn child_run_capability_invoke_creates_running_projection_without_fake_instance() {
+        let mut state = ParallelTuiState::default();
+
+        state.apply_event(&capability_invoke_event("cap-inv-1"));
+
+        let counts = state.child_run_counts();
+        assert_eq!(counts.running, 1);
+        assert_eq!(counts.done, 0);
+        assert_eq!(counts.failed, 0);
+        assert!(
+            state.instance_order.is_empty(),
+            "capability.invoke 只能创建 child-run 投影,不能创建假的 HatInstance"
+        );
+
+        let run = state
+            .child_runs
+            .get("cap-inv-1")
+            .expect("child-run should be keyed by invocation before parent result");
+        assert_eq!(run.status, ChildRunStatus::Running);
+        assert_eq!(run.capability_id, "workflow:default-parallel");
+        assert_eq!(
+            run.artifact.as_deref(),
+            Some(".ralph/capability-invocations/cap-inv-1/resolved-config.yml")
+        );
+        assert!(
+            state
+                .child_run_summary_text()
+                .expect("summary should exist")
+                .contains("1 running"),
+            "summary should expose running child run"
+        );
+    }
+
+    #[test]
+    fn child_run_capability_result_marks_done_and_rekeys_by_request_id() {
+        let mut state = ParallelTuiState::default();
+        state.apply_event(&capability_invoke_event("cap-inv-1"));
+
+        let payload = serde_json::json!({
+            "status": "result",
+            "request_id": "cap-req-1",
+            "invocation_id": "cap-inv-1",
+            "capability_id": "workflow:default-parallel",
+            "result_summary": "child workflow completed",
+            "artifacts": capability_artifacts("cap-inv-1"),
+            "parent_topology_unchanged": true
+        })
+        .to_string();
+        state.apply_event(&Event::new(TOPIC_CAPABILITY_RESULT, payload));
+
+        assert!(
+            !state.child_runs.contains_key("cap-inv-1"),
+            "parent result 应把临时 invocation key 合并到 request_id,避免重复显示"
+        );
+        let run = state
+            .child_runs
+            .get("cap-req-1")
+            .expect("child-run should be keyed by parent request after result");
+        assert_eq!(run.status, ChildRunStatus::Done);
+        assert_eq!(run.summary.as_deref(), Some("child workflow completed"));
+        assert_eq!(
+            run.artifact.as_deref(),
+            Some(".ralph/capability-invocations/cap-inv-1/result.json")
+        );
+        assert!(state.instance_order.is_empty());
+    }
+
+    #[test]
+    fn child_run_capability_failed_marks_failed_without_fake_instance() {
+        let mut state = ParallelTuiState::default();
+        state.apply_event(&capability_invoke_event("cap-inv-2"));
+
+        let mut artifacts = capability_artifacts("cap-inv-2");
+        artifacts["failed_json"] = serde_json::Value::String(
+            ".ralph/capability-invocations/cap-inv-2/failed.json".to_string(),
+        );
+
+        let payload = serde_json::json!({
+            "status": "failed",
+            "failure_class": "child_run_failed",
+            "request_id": "cap-req-2",
+            "invocation_id": "cap-inv-2",
+            "capability_id": "workflow:default-parallel",
+            "error": "child workflow failed",
+            "artifacts": artifacts,
+            "parent_topology_unchanged": true
+        })
+        .to_string();
+        state.apply_event(&Event::new(TOPIC_CAPABILITY_FAILED, payload));
+
+        let counts = state.child_run_counts();
+        assert_eq!(counts.running, 0);
+        assert_eq!(counts.done, 0);
+        assert_eq!(counts.failed, 1);
+
+        let run = state
+            .child_runs
+            .get("cap-req-2")
+            .expect("failed child-run should be keyed by parent request");
+        assert_eq!(run.status, ChildRunStatus::Failed);
+        assert_eq!(run.summary.as_deref(), Some("child workflow failed"));
+        assert_eq!(
+            run.artifact.as_deref(),
+            Some(".ralph/capability-invocations/cap-inv-2/failed.json")
+        );
+        assert!(state.instance_order.is_empty());
     }
 
     #[test]

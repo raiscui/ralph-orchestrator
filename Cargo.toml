@@ -4,6 +4,7 @@ members = [
     "crates/ralph-proto",
     "crates/ralph-core",
     "crates/ralph-adapters",
+    "crates/ralph-display",
     "crates/ralph-tui",
     "crates/ralph-cli",
     "crates/ralph-bench",
@@ -73,6 +74,7 @@ struct_excessive_bools = "allow"
 # Async runtime
 tokio = { version = "1", features = ["full", "test-util"] }
 async-trait = "0.1"
+ralph-display = { path = "crates/ralph-display" }
 
 # TUI (pinned for rustc 1.87.0 compatibility)
 ratatui = "0.30"

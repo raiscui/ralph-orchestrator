@@ -29,8 +29,9 @@ mod cli_backend;
 mod cli_executor;
 mod codex_env;
 mod pty_executor;
+pub mod job;
 pub mod pty_handle;
-mod stream_handler;
+mod ralph_env;
 
 pub use auto_detect::{
     DEFAULT_PRIORITY, NoBackendError, detect_backend, detect_backend_default, is_backend_available,
@@ -39,7 +40,7 @@ pub use claude_stream::{
     AssistantMessage, ClaudeStreamEvent, ClaudeStreamParser, ContentBlock, Usage, UserContentBlock,
     UserMessage,
 };
-pub use cli_backend::{CliBackend, CustomBackendError, OutputFormat, PromptMode};
+pub use cli_backend::{CliBackend, CliExecutionRole, CustomBackendError, OutputFormat, PromptMode};
 pub use cli_executor::{CliExecutor, ExecutionResult};
 pub use codex_env::{
     CODEX_PARENT_SESSION_ENV_VARS, is_codex_command, scrub_codex_parent_session_env,
@@ -49,7 +50,7 @@ pub use pty_executor::{
     CtrlCAction, CtrlCState, PtyConfig, PtyExecutionResult, PtyExecutor, TerminationType,
 };
 pub use pty_handle::{ControlCommand, PtyHandle};
-pub use stream_handler::{
-    ConsoleStreamHandler, MarkdownRenderMode, PrettyStreamHandler, QuietStreamHandler,
-    SessionResult, StreamHandler, TuiStreamHandler, render_text_to_lines,
+pub use ralph_env::{
+    RALPH_PARENT_WORKER_ENV_VARS, scrub_ralph_parent_worker_env,
+    scrub_ralph_parent_worker_env_tokio,
 };
