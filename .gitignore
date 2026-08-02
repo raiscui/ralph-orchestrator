@@ -91,3 +91,9 @@ PROMPT.md
 !.agent/memories.md
 !.agent/tasks.jsonl
 .omx/
+
+# 工具/临时目录(agent 会话产物)
+.codegraph/
+.cursor/
+parallel_rec.jsonl
+test
