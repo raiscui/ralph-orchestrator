@@ -4,7 +4,10 @@
 //! - 这些测试不依赖真实 LLM 后端。
 //! - 通过 Fake HatJobExecutor 验证：并行、missing 行为、require_delivery escalate、queue 决策 replay。
 
-use super::ParallelSupervisor;
+use super::{
+    DYNAMIC_INSTANCE_RETIREMENT_REASON_DELIVERY_FAILED_AFTER_SPAWN, ParallelSupervisor,
+    TOPIC_COORDINATOR_NO_EVENT_FIRST_TURN,
+};
 use crate::config::{
     CoreConfig, HatBackend, HatConfig, HatWorkspaceConfig, ParallelConfig, RalphConfig,
 };
@@ -25,12 +28,12 @@ use ralph_proto::{
     MissingInstancePolicy, QueueDecisionRecord, QueueSelection, RuntimeDeliveryKind,
     RuntimeDeliveryRecord, RuntimeLifecycleKind, RuntimeLifecycleRecord, TOPIC_DISPATCH_DECISION,
     TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN, TOPIC_RUNTIME_DELIVERY,
-    TOPIC_RUNTIME_LIFECYCLE, TopicContract, TurnAction,
+    TOPIC_RUNTIME_LIFECYCLE, SessionStrategy, TopicContract, TurnAction,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -242,6 +245,12 @@ struct CompletionStopsRoutingExecutor {
 struct QueuedRalphJobAfterCompletionExecutor {
     /// 记录每个 instance 的启动次数,用于验证“completion 前已排队的 ralph job”
     /// 是否会在 `LOOP_COMPLETE` 之后继续起跑。
+    starts: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
+}
+
+#[derive(Debug, Clone)]
+struct DefaultPublishesExecutor {
+    /// 记录每个 instance 的启动次数,用于构造确定性的多轮输出。
     starts: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
 }
 
@@ -841,6 +850,73 @@ async fn supervisor_freezes_prequeued_ralph_job_after_completion_promise() {
     );
 }
 
+#[tokio::test]
+async fn supervisor_observes_multiline_reply_human_message_in_completion_batch() {
+    // =====================================================================
+    // 目的：
+    // - 锁住 live dogfood 暴露的问题：ralph#1 同一批 stdout 里先输出多行
+    //   `reply.human.message`,随后输出 `LOOP_COMPLETE`。
+    // - CLI/CI 模式仍必须停止派生新 job,但最终人类回复事件不能只停留在
+    //   stdout；它必须触发 event_observer,这样 record-session 才能写入
+    //   bus.publish,record summary 的 Result Topics 才能看到该回复。
+    // =====================================================================
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.event_loop.max_runtime_seconds = 10;
+    config.core = config.core.with_workspace_root(temp_dir.path());
+    config
+        .hats
+        .insert("ralph".to_string(), hat_config("Ralph", vec![], 1));
+
+    let observed = Arc::new(std::sync::Mutex::new(
+        Vec::<(String, String, Option<String>)>::new(),
+    ));
+    let observed_for_callback = Arc::clone(&observed);
+
+    let executor = FirstTurnOutputExecutor {
+        output_for_parsing: r#"<event topic="reply.human.message" reply="done-1">
+第一行: 总结。
+第二行: 证据。
+</event>
+LOOP_COMPLETE
+"#
+        .to_string(),
+    };
+
+    let mut supervisor =
+        ParallelSupervisor::new(config, "simple prompt".to_string(), Arc::new(executor))
+            .expect("ParallelSupervisor::new should succeed")
+            .with_event_observer(Arc::new(move |event: &Event| {
+                observed_for_callback.lock().unwrap().push((
+                    event.topic.as_str().to_string(),
+                    event.payload.clone(),
+                    event.reply.clone(),
+                ));
+            }));
+    supervisor.event_logger = EventLogger::new(events_path);
+
+    let result = supervisor.run(false).await.expect("run should succeed");
+    assert_eq!(
+        result.termination,
+        Some(TerminationReason::CompletionPromise),
+        "test should still end via completion promise"
+    );
+
+    let got = observed.lock().unwrap().clone();
+    assert!(
+        got.iter().any(|(topic, payload, reply)| {
+            topic == "reply.human.message"
+                && reply.as_deref() == Some("done-1")
+                && payload == "第一行: 总结。\n第二行: 证据。"
+        }),
+        "completion batch should notify observer about the multi-line human reply: {got:?}"
+    );
+}
+
 #[async_trait::async_trait]
 impl HatJobExecutor for CompletionStopsRoutingExecutor {
     async fn execute(
@@ -983,6 +1059,103 @@ second orphan
     }
 }
 
+#[async_trait::async_trait]
+impl HatJobExecutor for DefaultPublishesExecutor {
+    async fn execute(
+        &self,
+        job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        mut _control_rx: mpsc::Receiver<HatJobControl>,
+    ) -> anyhow::Result<HatJobResult> {
+        let instance_id = job.instance_id.to_string();
+        let now = {
+            let mut starts = self.starts.lock().await;
+            let entry = starts.entry(instance_id.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+
+        let output = match instance_id.as_str() {
+            // 第一轮由 coordinator 派发给 analyst。
+            "ralph#1" if now == 1 => r#"<event topic="analysis.task">inspect quickly</event>
+"#
+            .to_string(),
+            // 第二轮收到 fallback completion candidate 后收敛。
+            "ralph#1" => "LOOP_COMPLETE\n".to_string(),
+            // analyst 成功完成,但忘记输出结构化 event。
+            "analyst#1" => "analysis finished but no event was emitted\n".to_string(),
+            _ => String::new(),
+        };
+
+        Ok(HatJobResult {
+            output_for_parsing: output,
+            observed_stderr: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn parallel_default_publishes_injects_when_worker_finishes_without_event() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.core = config.core.with_workspace_root(temp_dir.path());
+    config.event_loop.max_iterations = 3;
+    config.event_loop.max_runtime_seconds = 5;
+    config.event_loop.complete_publishes = Some("analysis.done".to_string());
+    config.tasks.enabled = false;
+    config.memories.enabled = false;
+
+    let mut analyst = hat_config("Analyst", vec!["analysis.task"], 1);
+    analyst.publishes = vec!["analysis.done".to_string()];
+    analyst.default_publishes = Some("analysis.done".to_string());
+    config.hats.insert("analyst".to_string(), analyst);
+
+    let executor = DefaultPublishesExecutor {
+        starts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+    };
+    let mut supervisor =
+        ParallelSupervisor::new(config, "simple prompt".to_string(), Arc::new(executor))
+            .expect("ParallelSupervisor::new should succeed");
+    supervisor.event_logger = EventLogger::new(&events_path);
+
+    let result = supervisor.run(false).await.expect("run should succeed");
+    assert_eq!(
+        result.termination,
+        Some(TerminationReason::CompletionPromise),
+        "fallback analysis.done should let ralph#1 observe the completion candidate"
+    );
+
+    let events_log = fs::read_to_string(&events_path).expect("events.jsonl should be readable");
+    assert!(
+        events_log.contains("\"topic\":\"analysis.done\""),
+        "parallel default_publishes should persist the fallback event: {events_log}"
+    );
+    assert!(
+        events_log.contains("\"source_instance\":\"analyst#1\""),
+        "fallback event should keep worker instance attribution: {events_log}"
+    );
+
+    let fallback_payload = events_log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("jsonl record"))
+        .find(|record| record["topic"] == "analysis.done")
+        .and_then(|record| {
+            record["payload"]
+                .as_str()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        })
+        .expect("fallback analysis.done should contain structured JSON payload");
+    assert_eq!(fallback_payload["reason"], "default_publishes");
+}
+
 #[tokio::test]
 async fn supervisor_run_waits_for_instances_to_reach_terminal_state_on_shutdown() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1034,6 +1207,96 @@ async fn supervisor_run_waits_for_instances_to_reach_terminal_state_on_shutdown(
         result.instance_states.get(&logger),
         Some(HatInstanceState::Done | HatInstanceState::Failed)
     ));
+}
+
+#[tokio::test]
+async fn coordinator_no_event_first_turn_diagnostic_is_durable() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.core = config.core.with_workspace_root(temp_dir.path());
+    config.event_loop.max_iterations = 1;
+    config
+        .hats
+        .insert("ralph".to_string(), hat_config("Ralph", vec![], 1));
+
+    let executor = FirstTurnOutputExecutor {
+        output_for_parsing: "I am still thinking but emitted no structured event.\n".to_string(),
+    };
+    let mut supervisor =
+        ParallelSupervisor::new(config, "simple prompt".to_string(), Arc::new(executor))
+            .expect("ParallelSupervisor::new should succeed");
+    supervisor.event_logger = EventLogger::new(&events_path);
+
+    let result = supervisor.run(false).await.expect("run should succeed");
+    assert_eq!(
+        result.termination,
+        Some(TerminationReason::MaxIterations),
+        "test should stop through max_iterations after the first ralph turn"
+    );
+
+    let events_log = fs::read_to_string(&events_path).expect("events.jsonl should be readable");
+    let records = events_log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("jsonl record"))
+        .collect::<Vec<_>>();
+    let diagnostic = records
+        .iter()
+        .find(|record| record["topic"] == TOPIC_COORDINATOR_NO_EVENT_FIRST_TURN)
+        .expect("events.jsonl should contain coordinator no-event diagnostic");
+    let payload = diagnostic["payload"]
+        .as_str()
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .expect("diagnostic payload should be structured JSON string");
+
+    assert_eq!(payload["instance_id"], "ralph#1");
+    assert_eq!(payload["job_id"], 1);
+    assert_eq!(payload["input_topic"], "task.start");
+    assert_eq!(payload["input_topic_missing"], false);
+    assert_eq!(payload["parsed_event_count"], 0);
+    assert_eq!(payload["reason"], "no_structured_event_first_turn");
+    assert!(
+        payload["output_len"].as_u64().is_some_and(|len| len > 0),
+        "diagnostic should preserve output length for evidence"
+    );
+}
+
+#[tokio::test]
+async fn simple_task_dispatches_on_first_turn() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.core = config.core.with_workspace_root(temp_dir.path());
+    config.event_loop.max_iterations = 1;
+    config
+        .hats
+        .insert("ralph".to_string(), hat_config("Ralph", vec![], 1));
+
+    let executor = FirstTurnOutputExecutor {
+        output_for_parsing:
+            "<event id=\"first-reply\" topic=\"reply.human.message\">done</event>\n".to_string(),
+    };
+    let mut supervisor =
+        ParallelSupervisor::new(config, "simple prompt".to_string(), Arc::new(executor))
+            .expect("ParallelSupervisor::new should succeed");
+    supervisor.event_logger = EventLogger::new(&events_path);
+
+    let result = supervisor.run(false).await.expect("run should succeed");
+    assert_eq!(result.termination, Some(TerminationReason::MaxIterations));
+
+    let events_log = fs::read_to_string(&events_path).expect("events.jsonl should be readable");
+    assert!(
+        events_log.contains("\"topic\":\"reply.human.message\""),
+        "first turn should persist the structured human reply event: {events_log}"
+    );
+    assert!(
+        !events_log.contains(TOPIC_COORDINATOR_NO_EVENT_FIRST_TURN),
+        "structured first turn should not produce no-event diagnostic: {events_log}"
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -1160,6 +1423,31 @@ impl HatJobExecutor for PromptCaptureNotifyExecutor {
 
         Ok(HatJobResult {
             output_for_parsing: String::new(),
+            observed_stderr: String::new(),
+            success: true,
+            exit_code: Some(0),
+            timed_out: false,
+            canceled: false,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FirstTurnOutputExecutor {
+    output_for_parsing: String,
+}
+
+#[async_trait::async_trait]
+impl HatJobExecutor for FirstTurnOutputExecutor {
+    async fn execute(
+        &self,
+        _job: HatJob,
+        _output_tx: mpsc::Sender<HatJobOutputChunk>,
+        mut _cancel_rx: tokio::sync::watch::Receiver<bool>,
+        _control_rx: mpsc::Receiver<HatJobControl>,
+    ) -> anyhow::Result<HatJobResult> {
+        Ok(HatJobResult {
+            output_for_parsing: self.output_for_parsing.clone(),
             observed_stderr: String::new(),
             success: true,
             exit_code: Some(0),
@@ -1445,6 +1733,17 @@ fn hat_config(name: &str, triggers: Vec<&str>, instances: usize) -> HatConfig {
     }
 }
 
+fn hat_config_with_publishes(
+    name: &str,
+    triggers: Vec<&str>,
+    publishes: Vec<&str>,
+    instances: usize,
+) -> HatConfig {
+    let mut hat = hat_config(name, triggers, instances);
+    hat.publishes = publishes.into_iter().map(str::to_string).collect();
+    hat
+}
+
 fn make_supervisor_with_catalog(
     mut config: RalphConfig,
     executor: Arc<dyn HatJobExecutor>,
@@ -1532,14 +1831,14 @@ fn runtime_delivery_records(events_path: &PathBuf) -> Vec<RuntimeDeliveryRecord>
         .collect()
 }
 
-fn evidence_lookup_for_events_path(events_path: &PathBuf, correlation_id: &str) -> EvidenceLookup {
+fn evidence_lookup_for_events_path(events_path: &Path, correlation_id: &str) -> EvidenceLookup {
     let index_path = events_path.with_file_name("evidence-index.jsonl");
     EvidenceIndexReader::new(index_path)
         .find_by_correlation(correlation_id)
         .expect("evidence index lookup should succeed")
 }
 
-fn assert_no_evidence_entry(events_path: &PathBuf, correlation_id: &str) {
+fn assert_no_evidence_entry(events_path: &Path, correlation_id: &str) {
     assert!(
         matches!(
             evidence_lookup_for_events_path(events_path, correlation_id),
@@ -1559,6 +1858,42 @@ fn runtime_lifecycle_records(events_path: &PathBuf) -> Vec<RuntimeLifecycleRecor
                 .expect("runtime.lifecycle payload should be valid JSON")
         })
         .collect()
+}
+
+fn topology_builder_config(publishes: Vec<&str>) -> RalphConfig {
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "builder".to_string(),
+        hat_config_with_publishes("Builder", vec!["build.task"], publishes, 1),
+    );
+    config
+}
+
+fn latest_topology_spawn_result(events_path: &PathBuf) -> crate::TopologySpawnGroupResult {
+    let result_records = EventHistory::new(events_path)
+        .filter_by_topic(crate::TOPIC_TOPOLOGY_SPAWN_RESULT)
+        .expect("topology.spawn.result records should be readable");
+    let latest = result_records
+        .last()
+        .expect("topology.spawn.result should be present");
+    serde_json::from_str(&latest.payload).expect("topology.spawn.result payload should be valid")
+}
+
+fn topology_spawn_group_event(member: serde_json::Value) -> Event {
+    Event::new(
+        crate::TOPIC_TOPOLOGY_SPAWN_GROUP,
+        serde_json::json!({
+            "request_id": "spawn-role-contract-1",
+            "hat": "builder",
+            "delivery_topic": "build.task",
+            "instances": [member]
+        })
+        .to_string(),
+    )
+    .with_id("spawn-role-contract-event-1")
+    .with_source("ralph")
+    .with_source_instance(HatInstanceId::new("ralph#1"))
 }
 
 async fn capture_timeout_for_instance(
@@ -1760,6 +2095,1039 @@ async fn spawn_instance_forces_new_dynamic_instance_and_delivers_direct() {
         spawn_record.reason.as_deref(),
         Some("explicit_spawn_instance")
     );
+}
+
+#[tokio::test]
+async fn topology_spawn_group_creates_three_dynamic_instances_and_delivers_direct() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "builder".to_string(),
+        hat_config_with_publishes("Builder", vec!["build.task"], vec!["analysis.done"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 3,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path.clone());
+
+    let event = Event::new(
+        crate::TOPIC_TOPOLOGY_SPAWN_GROUP,
+        serde_json::json!({
+            "request_id": "create-three-evolution-hats-20260519-001",
+            "hat": "builder",
+            "delivery_topic": "build.task",
+            "instances": [
+                {"role": "功能补充", "task": "补充 feature A"},
+                {"role": "功能完善", "task": "完善 feature B"},
+                {"role": "review", "task": "review the proposal", "fixed_role": true}
+            ]
+        })
+        .to_string(),
+    )
+    .with_id("spawn-group-1")
+    .with_source("ralph")
+    .with_source_instance(HatInstanceId::new("ralph#1"));
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if executor.started.load(Ordering::SeqCst) >= 3 {
+                break;
+            }
+            executor.notify.notified().await;
+        }
+    })
+    .await
+    .expect("Timed out waiting for topology spawn deliveries");
+
+    let builder_instances = supervisor
+        .instances_by_hat
+        .get(&HatId::new("builder"))
+        .expect("builder hat should be present")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        builder_instances,
+        vec![
+            "builder#1".to_string(),
+            "builder#2".to_string(),
+            "builder#3".to_string(),
+            "builder#4".to_string()
+        ]
+    );
+
+    let snapshot = supervisor.build_agents_snapshot();
+    let dynamic_instances = snapshot
+        .instances
+        .iter()
+        .filter(|instance| instance.hat_id == "builder" && instance.is_dynamic)
+        .map(|instance| instance.instance_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dynamic_instances,
+        vec!["builder#2", "builder#3", "builder#4"],
+        "topology.spawn_group must create three parent-visible dynamic instances"
+    );
+    let builder_2 = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == "builder#2")
+        .expect("builder#2 should be present");
+    let builder_4 = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == "builder#4")
+        .expect("builder#4 should be present");
+    assert_eq!(
+        builder_2.fixed_role_label, None,
+        "unmarked temporary roles must not become first-class agents.json role fields"
+    );
+    assert_eq!(
+        builder_2.identity_source,
+        crate::IdentitySource::TaskDerived
+    );
+    let builder_2_summary = builder_2
+        .role_contract_summary
+        .as_ref()
+        .expect("builder#2 should expose a role contract summary");
+    assert_eq!(builder_2_summary.role_name, "功能补充");
+    assert_eq!(builder_2_summary.objective_preview, "补充 feature A");
+    assert_eq!(
+        builder_2_summary.allowed_result_topics,
+        vec!["analysis.done".to_string()]
+    );
+    assert_eq!(
+        builder_2_summary.identity_source,
+        crate::IdentitySource::TaskDerived
+    );
+    assert_eq!(
+        builder_2_summary.persistence,
+        crate::RolePersistence::Temporary
+    );
+    assert_eq!(builder_2_summary.contract_schema_version, 1);
+    assert!(builder_2_summary.role_contract_hash.starts_with("erc-"));
+    assert_eq!(
+        builder_2_summary.source_spawn_request_id,
+        "create-three-evolution-hats-20260519-001"
+    );
+    assert_eq!(
+        builder_4.fixed_role_label.as_deref(),
+        Some("review"),
+        "fixed_role=true should promote the role label into agents snapshot metadata"
+    );
+    let builder_4_summary = builder_4
+        .role_contract_summary
+        .as_ref()
+        .expect("builder#4 should expose a role contract summary");
+    assert_eq!(
+        builder_4_summary.identity_source,
+        crate::IdentitySource::TaskDerived,
+        "fixed_role=true must not change the identity source"
+    );
+    assert_eq!(
+        builder_4_summary.persistence,
+        crate::RolePersistence::Fixed,
+        "fixed_role=true should only change role persistence"
+    );
+
+    let lifecycle_records = runtime_lifecycle_records(&events_path);
+    let spawned = lifecycle_records
+        .iter()
+        .filter(|record| {
+            record.instance_id.as_str().starts_with("builder#")
+                && record.kind == RuntimeLifecycleKind::Spawn
+                && record.dynamic
+                && record.source_event_id.as_deref() == Some("spawn-group-1")
+        })
+        .map(|record| record.instance_id.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(spawned, vec!["builder#2", "builder#3", "builder#4"]);
+
+    let deliveries = runtime_delivery_records(&events_path);
+    let builder_deliveries = deliveries
+        .iter()
+        .filter(|record| {
+            record.topic == "build.task"
+                && record.source_instance.as_ref().is_some_and(|source| {
+                    source.as_str() == "ralph#1" || source.as_str() == "builder#1"
+                })
+        })
+        .map(|record| record.recipient.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        builder_deliveries,
+        vec![
+            "builder#2".to_string(),
+            "builder#3".to_string(),
+            "builder#4".to_string()
+        ]
+    );
+
+    let response_topics = EventHistory::new(&events_path)
+        .filter_by_topic(crate::TOPIC_TOPOLOGY_SPAWN_RESULT)
+        .expect("spawn result should be readable");
+    assert_eq!(response_topics.len(), 1);
+    assert!(response_topics[0].payload.contains("\"spawned\""));
+    assert!(response_topics[0].payload.contains("builder#4"));
+}
+
+#[tokio::test]
+async fn topology_spawn_group_is_idempotent_by_request_id() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "builder".to_string(),
+        hat_config_with_publishes("Builder", vec!["build.task"], vec!["analysis.done"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 3,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path.clone());
+
+    let payload = serde_json::json!({
+        "request_id": "create-three-evolution-hats-20260519-001",
+        "hat": "builder",
+        "delivery_topic": "build.task",
+        "instances": [
+            {"role": "功能补充", "task": "补充 feature A"},
+            {"role": "功能完善", "task": "完善 feature B"},
+            {"role": "review", "task": "review the proposal"}
+        ]
+    })
+    .to_string();
+
+    let first = Event::new(crate::TOPIC_TOPOLOGY_SPAWN_GROUP, payload.clone())
+        .with_id("spawn-group-1")
+        .with_source("ralph")
+        .with_source_instance(HatInstanceId::new("ralph#1"));
+    supervisor
+        .route_event(first)
+        .await
+        .expect("first route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if executor.started.load(Ordering::SeqCst) >= 3 {
+                break;
+            }
+            executor.notify.notified().await;
+        }
+    })
+    .await
+    .expect("Timed out waiting for first topology spawn");
+
+    let second = Event::new(crate::TOPIC_TOPOLOGY_SPAWN_GROUP, payload)
+        .with_id("spawn-group-2")
+        .with_source("ralph")
+        .with_source_instance(HatInstanceId::new("ralph#1"));
+    supervisor
+        .route_event(second)
+        .await
+        .expect("second route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let builder_instances = supervisor
+        .instances_by_hat
+        .get(&HatId::new("builder"))
+        .expect("builder hat should be present")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        builder_instances,
+        vec![
+            "builder#1".to_string(),
+            "builder#2".to_string(),
+            "builder#3".to_string(),
+            "builder#4".to_string()
+        ]
+    );
+
+    let result_records = EventHistory::new(&events_path)
+        .filter_by_topic(crate::TOPIC_TOPOLOGY_SPAWN_RESULT)
+        .expect("spawn result records should be readable");
+    assert_eq!(
+        result_records.len(),
+        1,
+        "duplicate request_id must not create another topology.spawn result"
+    );
+}
+
+#[tokio::test]
+async fn topology_spawn_group_rejects_conflicting_role_contract() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor),
+        events_path.clone(),
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "补充 feature A",
+            "role_contract": {
+                "role_name": "review",
+                "objective": "补充 feature A",
+                "input_contract": "handle build.task",
+                "output_contract": "publish analysis.done",
+                "allowed_topics": ["analysis.done"],
+                "forbidden_responsibilities": [],
+                "success_criteria": ["done"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed with structured failed member");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let result = latest_topology_spawn_result(&events_path);
+    assert_eq!(result.status, "failed");
+    assert!(result.spawned.is_empty());
+    assert_eq!(result.failed.len(), 1);
+    assert!(
+        result.failed[0].error.contains("role_contract.role_name"),
+        "conflict should be explicit: {result:#?}"
+    );
+    assert!(
+        supervisor
+            .instances_by_hat
+            .get(&HatId::new("builder"))
+            .expect("builder hat should be present")
+            .iter()
+            .all(|id| id.as_str() == "builder#1"),
+        "conflicting role contract must not spawn a dynamic instance"
+    );
+}
+
+#[tokio::test]
+async fn topology_spawn_group_canonical_objective_uses_member_task() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor.clone()),
+        events_path.clone(),
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "canonical member task",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "RAW OBJECTIVE SHOULD NOT WIN",
+                "input_contract": "handle build.task",
+                "output_contract": "publish analysis.done",
+                "allowed_topics": ["analysis.done"],
+                "forbidden_responsibilities": ["do not coordinate globally"],
+                "success_criteria": ["publish allowed result"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(2), executor.notify.notified())
+        .await
+        .expect("dynamic worker should receive delivery");
+
+    let snapshot = supervisor.build_agents_snapshot();
+    let builder_2 = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == "builder#2")
+        .expect("builder#2 should exist");
+    let summary = builder_2
+        .role_contract_summary
+        .as_ref()
+        .expect("role contract summary should exist");
+    assert_eq!(summary.objective_preview, "canonical member task");
+    assert_eq!(
+        summary.allowed_result_topics,
+        vec!["analysis.done".to_string()]
+    );
+
+    let deliveries = EventHistory::new(&events_path)
+        .filter_by_topic("build.task")
+        .expect("build.task records should be readable");
+    let payload = deliveries
+        .last()
+        .expect("delivery should be logged")
+        .payload
+        .as_str();
+    assert!(payload.contains("raw role_contract.objective ignored"));
+    assert!(!payload.contains("RAW OBJECTIVE SHOULD NOT WIN"));
+}
+
+#[tokio::test]
+async fn topology_spawn_group_rejects_non_task_derived_identity_source() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor),
+        events_path.clone(),
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "补充 feature A",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "补充 feature A",
+                "input_contract": "handle build.task",
+                "output_contract": "publish analysis.done",
+                "allowed_topics": ["analysis.done"],
+                "forbidden_responsibilities": [],
+                "success_criteria": ["done"],
+                "identity_source": "template-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed with structured failed member");
+
+    let result = latest_topology_spawn_result(&events_path);
+    assert_eq!(result.status, "failed");
+    assert!(result.failed[0].error.contains("must be task-derived"));
+}
+
+#[tokio::test]
+async fn topology_spawn_group_rejects_control_plane_output_topic() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor),
+        events_path.clone(),
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "补充 feature A",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "补充 feature A",
+                "input_contract": "handle build.task",
+                "output_contract": "publish analysis.done",
+                "allowed_topics": ["analysis.done", "topology.spawn_group"],
+                "forbidden_responsibilities": [],
+                "success_criteria": ["done"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed with structured failed member");
+
+    let result = latest_topology_spawn_result(&events_path);
+    assert_eq!(result.status, "failed");
+    let failure = &result.failed[0];
+    assert!(failure.error.contains("control-plane topic"));
+    assert_eq!(failure.request_id.as_deref(), Some("spawn-role-contract-1"));
+    assert_eq!(failure.instance_id, None);
+    assert_eq!(
+        failure.phase.as_deref(),
+        Some(crate::TOPOLOGY_SPAWN_PHASE_MEMBER_VALIDATION_FAILED)
+    );
+    assert!(
+        failure
+            .recovery_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("role_contract")),
+        "failed member should carry a human/actionable recovery hint: {failure:#?}"
+    );
+}
+
+#[tokio::test]
+async fn topology_spawn_group_partial_failure_keeps_successful_members_running() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor.clone()),
+        events_path.clone(),
+    );
+
+    let event = Event::new(
+        crate::TOPIC_TOPOLOGY_SPAWN_GROUP,
+        serde_json::json!({
+            "request_id": "spawn-partial-1",
+            "hat": "builder",
+            "delivery_topic": "build.task",
+            "instances": [
+                {"role": "功能补充", "task": "补充 feature A"},
+                {
+                    "role": "review",
+                    "task": "review the proposal",
+                    "role_contract": {
+                        "role_name": "review",
+                        "objective": "review the proposal",
+                        "input_contract": "handle build.task",
+                        "output_contract": "publish analysis.done",
+                        "allowed_topics": ["topology.spawn_group"],
+                        "forbidden_responsibilities": [],
+                        "success_criteria": ["done"],
+                        "identity_source": "task-derived"
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .with_id("spawn-partial-event-1")
+    .with_source("ralph")
+    .with_source_instance(HatInstanceId::new("ralph#1"));
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should keep non-atomic spawn_group alive");
+
+    tokio::time::timeout(Duration::from_secs(2), executor.notify.notified())
+        .await
+        .expect("successful member should still receive direct delivery");
+
+    let result = latest_topology_spawn_result(&events_path);
+    assert_eq!(result.status, "partial");
+    assert_eq!(result.request_id, "spawn-partial-1");
+    assert_eq!(result.spawned.len(), 1);
+    assert_eq!(result.spawned[0].instance_id, "builder#2");
+    assert_eq!(result.failed.len(), 1);
+
+    let failure = &result.failed[0];
+    assert_eq!(failure.index, 1);
+    assert_eq!(failure.role, "review");
+    assert_eq!(failure.request_id.as_deref(), Some("spawn-partial-1"));
+    assert_eq!(failure.instance_id, None);
+    assert_eq!(
+        failure.phase.as_deref(),
+        Some(crate::TOPOLOGY_SPAWN_PHASE_MEMBER_VALIDATION_FAILED)
+    );
+    assert!(failure.recovery_hint.is_some());
+
+    let seen = executor.seen.lock().await.clone();
+    let builder_seen = seen
+        .iter()
+        .filter(|instance_id| instance_id.starts_with("builder#"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        builder_seen,
+        vec!["builder#2".to_string()],
+        "non-atomic partial failure must not prevent successful members from running"
+    );
+}
+
+#[tokio::test]
+async fn topology_spawn_group_rejects_empty_output_allowlist_intersection() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor),
+        events_path.clone(),
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "补充 feature A",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "补充 feature A",
+                "input_contract": "handle build.task",
+                "output_contract": "publish analysis.done",
+                "allowed_topics": ["review.done"],
+                "forbidden_responsibilities": [],
+                "success_criteria": ["done"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed with structured failed member");
+
+    let result = latest_topology_spawn_result(&events_path);
+    assert_eq!(result.status, "failed");
+    assert!(result.failed[0].error.contains("no intersection"));
+}
+
+#[tokio::test]
+async fn topology_spawn_group_excludes_delivery_topic_from_output_allowlist() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["build.task", "analysis.done"]),
+        Arc::new(executor.clone()),
+        events_path,
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "补充 feature A",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "补充 feature A",
+                "input_contract": "handle build.task",
+                "output_contract": "publish analysis.done",
+                "allowed_topics": ["build.task", "analysis.done"],
+                "forbidden_responsibilities": [],
+                "success_criteria": ["done"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(2), executor.notify.notified())
+        .await
+        .expect("dynamic worker should receive delivery");
+    let snapshot = supervisor.build_agents_snapshot();
+    let summary = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == "builder#2")
+        .and_then(|instance| instance.role_contract_summary.as_ref())
+        .expect("role contract summary should exist");
+    assert_eq!(
+        summary.allowed_result_topics,
+        vec!["analysis.done".to_string()],
+        "delivery topic must be removed from the output allowlist"
+    );
+}
+
+#[tokio::test]
+async fn agents_snapshot_stores_role_contract_summary_not_full_contract() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor.clone()),
+        events_path,
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "补充 feature A",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "补充 feature A",
+                "input_contract": "SECRET input contract should stay out of agents snapshot",
+                "output_contract": "SECRET output contract should stay out of agents snapshot",
+                "allowed_topics": ["analysis.done"],
+                "forbidden_responsibilities": ["SECRET forbidden item"],
+                "success_criteria": ["SECRET success item"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(2), executor.notify.notified())
+        .await
+        .expect("dynamic worker should receive delivery");
+
+    let snapshot_json = serde_json::to_string_pretty(&supervisor.build_agents_snapshot())
+        .expect("agents snapshot should serialize");
+    assert!(snapshot_json.contains("\"role_contract_summary\""));
+    assert!(snapshot_json.contains("\"role_contract_hash\""));
+    assert!(snapshot_json.contains("\"source_spawn_request_id\""));
+    assert!(!snapshot_json.contains("SECRET input contract"));
+    assert!(!snapshot_json.contains("SECRET output contract"));
+    assert!(!snapshot_json.contains("SECRET forbidden item"));
+    assert!(!snapshot_json.contains("SECRET success item"));
+    assert!(!snapshot_json.contains("### ROLE CONTRACT"));
+}
+
+#[tokio::test]
+async fn completed_dynamic_instance_remains_visible_as_agents_tombstone() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor.clone()),
+        events_path,
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "补充 feature A",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "补充 feature A",
+                "input_contract": "handle build.task",
+                "output_contract": "publish analysis.done",
+                "allowed_topics": ["analysis.done"],
+                "forbidden_responsibilities": ["do not coordinate globally"],
+                "success_criteria": ["publish analysis.done"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(2), executor.notify.notified())
+        .await
+        .expect("dynamic worker should receive delivery");
+
+    let instance_id = HatInstanceId::new("builder#2");
+    let before = supervisor.build_agents_snapshot();
+    assert!(
+        before
+            .instances
+            .iter()
+            .any(|instance| instance.instance_id == "builder#2"),
+        "dynamic instance should be visible while it is in the current registry"
+    );
+
+    supervisor
+        .instance_states
+        .insert(instance_id.clone(), HatInstanceState::Done);
+    supervisor.unregister_dynamic_instance(&instance_id);
+
+    let after = supervisor.build_agents_snapshot();
+    assert!(
+        after
+            .instances
+            .iter()
+            .all(|instance| instance.instance_id != "builder#2"),
+        "completed dynamic instance must not stay in the current registry list"
+    );
+
+    let completed = after
+        .completed_dynamic_instances
+        .iter()
+        .find(|instance| instance.instance_id == "builder#2")
+        .expect("completed dynamic instance should have a tombstone");
+    assert_eq!(completed.hat_id, "builder");
+    assert_eq!(completed.final_state, HatInstanceState::Done);
+    assert_eq!(
+        completed.identity_source,
+        crate::IdentitySource::TaskDerived
+    );
+    assert_eq!(
+        completed
+            .last_input
+            .as_ref()
+            .map(|input| input.topic.as_str()),
+        Some("build.task")
+    );
+    let summary = completed
+        .role_contract_summary
+        .as_ref()
+        .expect("completed tombstone should preserve the role contract summary");
+    assert_eq!(summary.role_name, "功能补充");
+    assert_eq!(
+        summary.allowed_result_topics,
+        vec!["analysis.done".to_string()]
+    );
+    assert_eq!(
+        completed.retirement_reason,
+        "dynamic_instance_unregistered_after_done"
+    );
+}
+
+#[tokio::test]
+async fn failed_dynamic_instance_remains_visible_as_agents_tombstone() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor.clone()),
+        events_path.clone(),
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "补充 feature A",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "补充 feature A",
+                "input_contract": "handle build.task",
+                "output_contract": "publish analysis.done",
+                "allowed_topics": ["analysis.done"],
+                "forbidden_responsibilities": ["do not coordinate globally"],
+                "success_criteria": ["publish analysis.done"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(2), executor.notify.notified())
+        .await
+        .expect("dynamic worker should receive delivery before simulated failure");
+
+    let instance_id = HatInstanceId::new("builder#2");
+    supervisor.mark_dynamic_instance_failed_and_unregister(
+        &instance_id,
+        DYNAMIC_INSTANCE_RETIREMENT_REASON_DELIVERY_FAILED_AFTER_SPAWN,
+    );
+
+    let after = supervisor.build_agents_snapshot();
+    assert!(
+        after
+            .instances
+            .iter()
+            .all(|instance| instance.instance_id != "builder#2"),
+        "failed dynamic instance must leave the current registry list"
+    );
+
+    let completed = after
+        .completed_dynamic_instances
+        .iter()
+        .find(|instance| instance.instance_id == "builder#2")
+        .expect("failed dynamic instance should have a tombstone");
+    assert_eq!(completed.hat_id, "builder");
+    assert_eq!(completed.final_state, HatInstanceState::Failed);
+    assert_eq!(
+        completed.retirement_reason,
+        DYNAMIC_INSTANCE_RETIREMENT_REASON_DELIVERY_FAILED_AFTER_SPAWN
+    );
+    assert_eq!(
+        completed
+            .role_contract_summary
+            .as_ref()
+            .map(|summary| summary.role_name.as_str()),
+        Some("功能补充"),
+        "failed tombstone must preserve task-derived role identity"
+    );
+    assert_eq!(
+        completed
+            .last_input
+            .as_ref()
+            .map(|input| input.topic.as_str()),
+        Some("build.task"),
+        "failed tombstone should still explain the delivery that reached the instance"
+    );
+
+    let lifecycle_records = runtime_lifecycle_records(&events_path);
+    assert!(
+        lifecycle_records.iter().any(|record| {
+            record.instance_id == instance_id
+                && record.kind == RuntimeLifecycleKind::State
+                && record.state == Some(HatInstanceState::Failed)
+                && record.reason.as_deref()
+                    == Some(DYNAMIC_INSTANCE_RETIREMENT_REASON_DELIVERY_FAILED_AFTER_SPAWN)
+        }),
+        "failed-after-spawn state transition should be durable in runtime.lifecycle"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_worker_prompt_contains_effective_role_contract() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+    let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = PromptCaptureNotifyExecutor {
+        prompts: Arc::clone(&prompts),
+        notify: Arc::clone(&notify),
+        notify_on_instance: "builder#2".to_string(),
+    };
+    let mut supervisor = make_supervisor(
+        topology_builder_config(vec!["analysis.done"]),
+        Arc::new(executor),
+        events_path,
+    );
+
+    supervisor
+        .route_event(topology_spawn_group_event(serde_json::json!({
+            "role": "功能补充",
+            "task": "canonical member task",
+            "role_contract": {
+                "role_name": "功能补充",
+                "objective": "RAW OBJECTIVE SHOULD NOT APPEAR IN PROMPT",
+                "input_contract": "handle build.task as assigned input",
+                "output_contract": "publish analysis.done only",
+                "allowed_topics": ["analysis.done"],
+                "forbidden_responsibilities": ["do not coordinate globally"],
+                "success_criteria": ["publish allowed result"],
+                "identity_source": "task-derived"
+            }
+        })))
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::timeout(Duration::from_secs(2), notify.notified())
+        .await
+        .expect("builder#2 prompt should be captured");
+    let got = prompts.lock().await.clone();
+    let prompt = got.get("builder#2").expect("builder#2 prompt should exist");
+
+    assert!(prompt.contains("### ROLE CONTRACT"));
+    assert!(prompt.contains("identity_source: task-derived"));
+    assert!(prompt.contains("persistence: temporary"));
+    assert!(prompt.contains("source_spawn_request_id: spawn-role-contract-1"));
+    assert!(prompt.contains("Objective:\ncanonical member task"));
+    assert!(prompt.contains("Allowed result topics:\n- analysis.done"));
+    assert!(prompt.contains("Forbidden responsibilities:\n- do not coordinate globally"));
+    assert!(!prompt.contains("RAW OBJECTIVE SHOULD NOT APPEAR IN PROMPT"));
+    assert!(
+        !prompt.contains("Parent-visible dynamic group spawn")
+            && !prompt.contains("topology.spawn_group"),
+        "dynamic worker prompt must not inherit coordinator-only topology spawn instructions"
+    );
+    for heading in crate::headings_for_surface(crate::PromptSurface::CoordinatorOnly) {
+        assert!(
+            !prompt.contains(heading),
+            "dynamic worker prompt must not inherit coordinator-only surface {heading}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn topology_spawn_group_from_non_ralph_hat_is_ignored_or_failed() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.hats.insert(
+        "builder".to_string(),
+        hat_config_with_publishes("Builder", vec!["build.task"], vec!["analysis.done"], 1),
+    );
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut supervisor = make_supervisor(config, Arc::new(executor), events_path.clone());
+
+    let event = Event::new(
+        crate::TOPIC_TOPOLOGY_SPAWN_GROUP,
+        serde_json::json!({
+            "request_id": "create-three-evolution-hats-20260519-002",
+            "hat": "builder",
+            "delivery_topic": "build.task",
+            "instances": [
+                {"role": "功能补充", "task": "补充 feature A"},
+                {"role": "功能完善", "task": "完善 feature B"},
+                {"role": "review", "task": "review the proposal"}
+            ]
+        })
+        .to_string(),
+    )
+    .with_id("spawn-group-foreign")
+    .with_source("writer")
+    .with_source_instance(HatInstanceId::new("writer#1"));
+
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let builder_instances = supervisor
+        .instances_by_hat
+        .get(&HatId::new("builder"))
+        .expect("builder hat should be present")
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        builder_instances,
+        vec!["builder#1".to_string()],
+        "non-ralph source must not spawn new instances"
+    );
+
+    let failed_records = EventHistory::new(&events_path)
+        .filter_by_topic(crate::TOPIC_TOPOLOGY_SPAWN_FAILED)
+        .expect("spawn failed records should be readable");
+    assert_eq!(failed_records.len(), 1);
+    assert!(failed_records[0].payload.contains("coordinator-only"));
 }
 
 #[tokio::test]
@@ -2031,7 +3399,43 @@ async fn task_start_target_instance_is_not_delivered_to_wildcard_hat() {
 }
 
 #[tokio::test]
-async fn busy_ralph_primary_explicit_target_is_redirected_to_secondary() {
+async fn busy_ralph_session_directed_event_stays_on_primary() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let executor = NotifyExecutor {
+        expected_starts: 1,
+        started: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::new(Notify::new()),
+        seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    let mut supervisor = make_supervisor(config, Arc::new(executor.clone()), events_path);
+
+    // 模拟 ralph#1 正在 Running(与重定向测试相同的前置)。
+    supervisor
+        .instance_states
+        .insert(HatInstanceId::new("ralph#1"), HatInstanceState::Running);
+
+    // 会话定向事件(显式 session_strategy=app_server)必须直达 ralph#1:
+    // 改投到 ralph#2 会启动全新会话, 丢失 ralph#1 会话中的 steer 输入等上下文。
+    let event = Event::new("e2e.reply.step2", "step2")
+        .with_id("e-step2-session")
+        .with_target_instance(HatInstanceId::new("ralph#1"))
+        .with_session_strategy(SessionStrategy::AppServer);
+    supervisor
+        .route_event(event)
+        .await
+        .expect("route_event should succeed");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seen = executor.seen.lock().await.clone();
+    assert_eq!(seen, vec!["ralph#1".to_string()]);
+}
+
+    async fn busy_ralph_primary_explicit_target_is_redirected_to_secondary() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 
@@ -2537,6 +3941,40 @@ async fn runtime_capability_catalog_is_injected_only_into_ralph_prompt() {
         "ralph#1 prompt should include capability request contract"
     );
     assert!(
+        ralph_prompt.contains("topology.spawn_group"),
+        "ralph#1 prompt should include parent-visible topology spawn contract"
+    );
+    assert!(
+        ralph_prompt.contains("role_contract")
+            && ralph_prompt.contains("input` MUST be a string")
+            && ralph_prompt.contains("Do NOT put `role_contract` inside `input`"),
+        "topology spawn prompt should document role_contract as an instances[] sibling field, not an input object"
+    );
+    assert!(
+        ralph_prompt.contains("different from `capability.request`"),
+        "coordinator prompt should distinguish parent-visible spawn from isolated child-runs"
+    );
+    assert!(
+        ralph_prompt.contains("### If you receive `topology.spawn.result`"),
+        "ralph#1 prompt should describe how to handle spawn result acknowledgements"
+    );
+    assert!(
+        ralph_prompt.contains("Spawned instances already received direct delivery"),
+        "spawn result guidance should say that delivery already happened"
+    );
+    assert!(
+        ralph_prompt.contains("Do NOT re-emit the delivery topic"),
+        "spawn result guidance should prevent duplicate fanout"
+    );
+    assert!(
+        ralph_prompt.contains("Do NOT use `audience_instances` as a replay mechanism"),
+        "spawn result guidance should prevent audience_instances replay"
+    );
+    assert!(
+        ralph_prompt.contains("### If you receive `topology.spawn.failed`"),
+        "ralph#1 prompt should describe failed topology mutation handling"
+    );
+    assert!(
         ralph_prompt.contains("hat:focused-reviewer"),
         "ralph#1 prompt should include callable capability id"
     );
@@ -2553,6 +3991,184 @@ async fn runtime_capability_catalog_is_injected_only_into_ralph_prompt() {
     assert!(
         !writer_prompt.contains("hat:focused-reviewer"),
         "writer#1 prompt should not receive parent capability catalog entries"
+    );
+    assert!(
+        !writer_prompt.contains("topology.spawn_group"),
+        "writer#1 prompt should not receive coordinator-only topology mutation protocol"
+    );
+    assert!(
+        !writer_prompt.contains("topology.spawn.result"),
+        "writer#1 prompt should not receive coordinator-only spawn result handling"
+    );
+    assert!(
+        !writer_prompt.contains("audience_instances` as a replay mechanism"),
+        "writer#1 prompt should not receive coordinator-only replay guardrail"
+    );
+}
+
+#[tokio::test]
+async fn ralph_prompt_contains_coordinator_only_sections() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = PromptCaptureExecutor {
+        prompts: Arc::clone(&prompts),
+        notify: Arc::clone(&notify),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.core = config.core.with_workspace_root(temp_dir.path());
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+
+    let catalog = vec![crate::CapabilityMetadata {
+        id: "hat:focused-reviewer".to_string(),
+        kind: crate::CapabilityKind::HatCapability,
+        summary: "Focused reviewer micro-run".to_string(),
+        goal: "Review a bounded input".to_string(),
+        when_to_use: "Use when ralph#1 needs a one-off review lens.".to_string(),
+        input_contract: "A bounded text or task description to review.".to_string(),
+        output_contract: "A short review summary.".to_string(),
+        invocation_mode: crate::CapabilityInvocationMode::IsolatedMicroRun,
+    }];
+    let mut supervisor =
+        make_supervisor_with_catalog(config, Arc::new(executor), events_path, catalog);
+
+    let ralph_event = Event::new("task.start", "top-level prompt")
+        .with_id("e-ralph-surface")
+        .with_target_instance(HatInstanceId::from_parts("ralph", "1"));
+    supervisor
+        .route_event(ralph_event)
+        .await
+        .expect("route_event (ralph) should succeed");
+
+    let writer_event = Event::new("build.task", "do it")
+        .with_id("e-worker-surface")
+        .with_target_instance(HatInstanceId::from_parts("writer", "1"));
+    supervisor
+        .route_event(writer_event)
+        .await
+        .expect("route_event (writer) should succeed");
+
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for prompts to be captured");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let got = prompts.lock().await.clone();
+    let ralph_prompt = got
+        .get("ralph#1")
+        .expect("should have captured ralph#1 prompt");
+
+    let expected_coordinator_headings = [
+        crate::PARENT_CAPABILITY_CATALOG_HEADING,
+        "## KEY SEMANTICS (OFFICIAL)",
+        "## OUT-OF-BAND EVENT INJECTION",
+        "## HUMAN CHAT (INPUT VS REPLY)",
+        "## CONFIG (THIS RUN)",
+        "## HATS TOPOLOGY (CONFIGURED)",
+        "## WHAT TO DO",
+    ];
+
+    for heading in expected_coordinator_headings {
+        assert!(
+            crate::headings_for_surface(crate::PromptSurface::CoordinatorOnly).contains(&heading),
+            "{heading} must be registered as coordinator-only prompt surface"
+        );
+        assert!(
+            ralph_prompt.contains(heading),
+            "ralph#1 prompt should include coordinator-only surface {heading}"
+        );
+    }
+
+    assert!(
+        ralph_prompt.contains(crate::EVENT_EMISSION_PROTOCOL_HEADING),
+        "ralph#1 prompt should still include the shared event protocol"
+    );
+}
+
+#[tokio::test]
+async fn worker_prompt_excludes_coordinator_only_sections() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events_path = temp_dir.path().join("events.jsonl");
+
+    let prompts = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+    let notify = Arc::new(Notify::new());
+    let executor = PromptCaptureExecutor {
+        prompts: Arc::clone(&prompts),
+        notify: Arc::clone(&notify),
+    };
+
+    let mut config = RalphConfig::default();
+    config.parallel = base_parallel_config();
+    config.core = config.core.with_workspace_root(temp_dir.path());
+    config.hats.insert(
+        "writer".to_string(),
+        hat_config("Writer", vec!["build.task"], 1),
+    );
+
+    let catalog = vec![crate::CapabilityMetadata {
+        id: "hat:focused-reviewer".to_string(),
+        kind: crate::CapabilityKind::HatCapability,
+        summary: "Focused reviewer micro-run".to_string(),
+        goal: "Review a bounded input".to_string(),
+        when_to_use: "Use when ralph#1 needs a one-off review lens.".to_string(),
+        input_contract: "A bounded text or task description to review.".to_string(),
+        output_contract: "A short review summary.".to_string(),
+        invocation_mode: crate::CapabilityInvocationMode::IsolatedMicroRun,
+    }];
+    let mut supervisor =
+        make_supervisor_with_catalog(config, Arc::new(executor), events_path, catalog);
+
+    let ralph_event = Event::new("task.start", "top-level prompt")
+        .with_id("e-ralph-worker-surface")
+        .with_target_instance(HatInstanceId::from_parts("ralph", "1"));
+    supervisor
+        .route_event(ralph_event)
+        .await
+        .expect("route_event (ralph) should succeed");
+
+    let writer_event = Event::new("build.task", "do it")
+        .with_id("e-worker-no-coordinator-surface")
+        .with_target_instance(HatInstanceId::from_parts("writer", "1"));
+    supervisor
+        .route_event(writer_event)
+        .await
+        .expect("route_event (writer) should succeed");
+
+    tokio::time::timeout(Duration::from_secs(1), notify.notified())
+        .await
+        .expect("Timed out waiting for prompts to be captured");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let got = prompts.lock().await.clone();
+    let writer_prompt = got
+        .get("writer#1")
+        .expect("should have captured writer#1 prompt");
+
+    for heading in crate::headings_for_surface(crate::PromptSurface::CoordinatorOnly) {
+        assert!(
+            !writer_prompt.contains(heading),
+            "writer#1 prompt must not inherit coordinator-only surface {heading}"
+        );
+    }
+
+    assert!(
+        writer_prompt.contains(crate::ALL_HAT_PROMPT_HEADING),
+        "writer#1 prompt should still receive shared all-hat overlay"
+    );
+    assert!(
+        writer_prompt.contains(crate::EVENT_EMISSION_PROTOCOL_HEADING),
+        "writer#1 prompt should still include shared event protocol"
+    );
+    assert!(
+        writer_prompt.contains("### 0. ORIENTATION"),
+        "writer#1 prompt should keep worker-only execution surface"
     );
 }
 
@@ -3497,6 +5113,28 @@ async fn autoscale_spawns_below_cap_and_stops_at_cap() {
             .copied(),
         Some(3),
         "Expected monotonically increasing next instance key"
+    );
+
+    let snapshot = supervisor.build_agents_snapshot();
+    let writer_1 = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == "writer#1")
+        .expect("writer#1 should be present in agents snapshot");
+    let writer_2 = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == "writer#2")
+        .expect("writer#2 should be present in agents snapshot");
+    assert_eq!(
+        writer_1.identity_source,
+        crate::IdentitySource::ConfigDerived,
+        "configured base instance must not be confused with task-derived hats"
+    );
+    assert_eq!(
+        writer_2.identity_source,
+        crate::IdentitySource::RuntimeAutoscale,
+        "autoscaled runtime instance must be marked as runtime-autoscale"
     );
 
     // cap reached：第三个事件不应继续扩实例

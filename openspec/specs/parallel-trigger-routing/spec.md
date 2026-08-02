@@ -159,5 +159,18 @@ When ingesting external events with `turn_action=steer|interrupt`, the system MU
 - **WHEN** the Supervisor ingests an external JSONL event with `turn_action="steer"` and `target_instance="ralph#1"`
 - **THEN** the system MUST deliver the event to `ralph#1` (not rewritten to `ralph#2`)
 
+#### Scenario: Session-directed events are not redirected to secondary ralph
+- **GIVEN** `ralph#1` is `Running` and a secondary `ralph#2` exists
+- **WHEN** the Supervisor ingests an external JSONL event with `session_strategy="app_server"` and `target_instance="ralph#1"` (e.g. a follow-up `turn_action="start"` event that continues the same app-server session)
+- **THEN** the system MUST deliver the event to `ralph#1` (not rewritten to `ralph#2`)
+- **AND** the system MUST NOT create `ralph#2` for this delivery
+
+#### Scenario: Session-directed events keep their session context
+- **GIVEN** `ralph#1` holds an app-server session whose thread history contains earlier `turn/steer` inputs
+- **WHEN** a follow-up session-directed event (`session_strategy="app_server"`, `target_instance="ralph#1"`) is routed while `ralph#1` is still `Running`
+- **THEN** the follow-up event MUST be processed in the same session (steer inputs remain visible to the model)
+- **AND** redirecting the event to a fresh `ralph#2` session MUST NOT happen, because the fresh session would lose the thread history (regression: model fabricates placeholder inputs)
+
 ## Change History
+- 2026-08-02: Added session-directed event scenarios (fix for `steer-live-reply-multi-turn` E2E: session-strategy events were rewritten to `ralph#2`, losing steer context in the fresh session).
 - 2026-01-28: Synced from `openspec/changes/parallel-trigger-routing/specs/parallel-trigger-routing/spec.md`.

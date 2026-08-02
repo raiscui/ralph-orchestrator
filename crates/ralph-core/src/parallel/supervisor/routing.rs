@@ -9,18 +9,18 @@
 
 use super::super::{HatInstanceCommand, HatInstanceHandle, HatJob, JobBackend};
 use super::{ParallelSupervisor, RuntimeDeliveryMode, RuntimeDeliveryObservation};
-use crate::EventParser;
 use crate::config::HatConfig;
 use crate::event_logger::EventHistory;
 use crate::evidence_index::{EvidenceArtifactKind, EvidenceIndexEntry, EvidenceStatus};
 use crate::prompt_overlay;
+use crate::{EffectiveRoleContract, EventParser};
 use anyhow::Context;
 use ralph_proto::{
     Delivery, Event, GateRequest, GateResolve, Hat, HatId, HatInstanceId, HatInstanceState,
     MissingInstancePolicy, QueueDecisionRecord, QueueSelection, RuntimeDeliveryRecord,
     SessionStrategy, TOPIC_DISPATCH_DECISION, TOPIC_GATE_REQUEST, TOPIC_GATE_RESOLVE,
-    TOPIC_GATE_TIMEOUT, TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN, Topic, TopicContract,
-    TurnAction, new_event_id,
+    TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN, Topic, TopicContract, TurnAction,
+    new_event_id,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -217,6 +217,10 @@ impl ParallelSupervisor {
         // =====================================================================
         if let Some(observer) = &self.event_observer {
             observer(&event);
+        }
+
+        if self.handle_topology_spawn_group_event(&event).await? {
+            return Ok(());
         }
 
         // =========================================================================
@@ -634,7 +638,7 @@ impl ParallelSupervisor {
         chosen
     }
 
-    fn hat_is_subscriber(&self, hat_id: &HatId, topic: &Topic) -> bool {
+    pub(super) fn hat_is_subscriber(&self, hat_id: &HatId, topic: &Topic) -> bool {
         if hat_id.as_str() == "ralph" {
             // 并行 Supervisor 始终注册 ralph#1，且订阅 "*" 作为兜底协调者
             return true;
@@ -749,16 +753,12 @@ impl ParallelSupervisor {
     }
 
     fn is_control_plane_topic(topic: &str) -> bool {
-        // 1.3：控制面 topic 特例（绕过 strict target 校验）
+        // 1.3：控制面 topic 特例（绕过 strict target 校验）。
         //
-        // 默认列表（明确列出，避免“隐式约定”）：
-        // - gate.request
-        // - gate.resolve
-        // - gate.timeout
-        matches!(
-            topic,
-            TOPIC_GATE_REQUEST | TOPIC_GATE_RESOLVE | TOPIC_GATE_TIMEOUT
-        ) || topic.starts_with("gate.")
+        // 注意：旁路范围由 runtime protocol SSOT 控制。
+        // 当前只有 gate.* 需要绕过 strict target；其它 reserved/control topic
+        // 仍应按自己的 runtime handler 或路由规则处理。
+        crate::runtime_topic_bypasses_strict_target(topic)
     }
 
     pub(super) fn ensure_event_id(&mut self, event: &mut Event) {
@@ -1079,7 +1079,7 @@ impl ParallelSupervisor {
             .await
     }
 
-    async fn deliver_to_instance_id(
+    pub(super) async fn deliver_to_instance_id(
         &mut self,
         event: Event,
         instance_id: HatInstanceId,
@@ -1496,11 +1496,21 @@ Candidates:\n\
         Ok(())
     }
 
-    fn spawn_dynamic_instance(
+    pub(super) fn spawn_dynamic_instance(
         &mut self,
         hat_id: &HatId,
         source_event: Option<&Event>,
         reason: &str,
+    ) -> anyhow::Result<HatInstanceId> {
+        self.spawn_dynamic_instance_with_effective_role_contract(hat_id, source_event, reason, None)
+    }
+
+    pub(super) fn spawn_dynamic_instance_with_effective_role_contract(
+        &mut self,
+        hat_id: &HatId,
+        source_event: Option<&Event>,
+        reason: &str,
+        effective_role_contract: Option<EffectiveRoleContract>,
     ) -> anyhow::Result<HatInstanceId> {
         let next = self
             .next_instance_seq_by_hat
@@ -1510,12 +1520,19 @@ Candidates:\n\
         *next = next.saturating_add(1);
 
         let instance_id = HatInstanceId::from_parts(hat_id.as_str(), key.to_string());
-        self.spawn_instance(
+        if let Some(contract) = effective_role_contract {
+            self.effective_role_contracts
+                .insert(instance_id.clone(), contract);
+        }
+        if let Err(error) = self.spawn_instance(
             instance_id.clone(),
             true,
             source_event.and_then(|event| event.id.clone()),
             Some(reason),
-        )?;
+        ) {
+            self.effective_role_contracts.remove(&instance_id);
+            return Err(error);
+        }
         Ok(instance_id)
     }
 
@@ -1546,7 +1563,7 @@ Candidates:\n\
             .context("Cannot spawn instance: missing hat id prefix (expected {hat}#{key})")?;
         let hat_id = HatId::new(hat_id_str);
 
-        let (hat, hat_config) = if hat_id.as_str() == "ralph" {
+        let (mut hat, hat_config) = if hat_id.as_str() == "ralph" {
             // 说明:
             // - ralph#2 是按需创建的"协调者备用实例"(busy ralph#1 时接管投递).
             // - 如果不给它注入与 ralph#1 等价的 coordinator 指令,它会退回到极小兜底 prompt,
@@ -1567,6 +1584,19 @@ Candidates:\n\
             let cfg = self.registry.get_config(&hat_id).cloned();
             (hat, cfg)
         };
+
+        if hat_id.as_str() != "ralph"
+            && let Some(contract) = self.effective_role_contracts.get(&instance_id)
+        {
+            let role_contract_section = contract.render_worker_section();
+            let existing = hat.instructions.trim();
+            let instructions = if existing.is_empty() {
+                role_contract_section
+            } else {
+                format!("{role_contract_section}\n\n{existing}")
+            };
+            hat = hat.with_instructions(instructions);
+        }
 
         let job_timeout = self.resolve_job_timeout(hat_config.as_ref());
         let job_output_stale_timeout = self.resolve_output_stale_timeout(hat_config.as_ref());
@@ -1680,6 +1710,7 @@ Candidates:\n\
             return Ok(());
         };
 
+
         if target_instance.as_str() != "ralph#1" {
             return Ok(());
         }
@@ -1691,6 +1722,16 @@ Candidates:\n\
             event.turn_action,
             Some(TurnAction::Steer | TurnAction::Interrupt)
         ) {
+            return Ok(());
+        }
+
+        // 会话定向事件(显式携带 session_strategy)同样必须直达目标实例:
+        // - session_strategy 意味着事件绑定目标实例的会话(例如 app-server thread)。
+        // - 改投到 ralph#2 会启动一个全新会话,丢失 ralph#1 会话里的上下文
+        //   (例如先前 steer 注入的输入),导致“事件已投递但模型看不到历史”。
+        // - 典型例子: `ralph emit e2e.reply.step2 ... --target-instance ralph#1 --session-strategy app_server`
+        //   是同一会话的延续 turn,必须回到 ralph#1。
+        if event.session_strategy.is_some() {
             return Ok(());
         }
 

@@ -613,14 +613,46 @@ impl RalphExecutor {
 
     /// Detects the termination reason from output.
     fn detect_termination_reason(&self, output: &str) -> Option<String> {
-        // 与 runtime 共用同一套 completion 语义,避免报告和真实运行口径分裂。
-        if EventParser::contains_promise(output, "LOOP_COMPLETE") {
+        // 串行模式: stdout 是 agent 原始文本, 直接复用 runtime 的 completion 语义。
+        // 并行模式: stdout 是带前缀的显示行, 且包含事件回显与 prompt 回显(err 行):
+        //   - 事件回显行 payload 可能含 "LOOP_COMPLETE" 说明文本(会触发安全拒绝);
+        //   - err 行是 prompt 文本回显(可能整行就是 LOOP_COMPLETE, 造成假收敛)。
+        // 因此并行模式只检查"协调者 Ralph 的 out 显示行"(agentMessage 展示),
+        // 并与 runtime 共用同一套 completion 语义, 避免口径分裂。
+        let has_parallel_display_lines = output
+            .lines()
+            .any(|line| line.trim_start().starts_with("[ralph#1:out:"));
+        let normalized = if has_parallel_display_lines {
+            output
+                .lines()
+                .filter(|line| line.trim_start().starts_with("[ralph#1:out:"))
+                .map(|line| {
+                    // 剥离 `[ralph#1:out:job=N] ` 前缀
+                    let trimmed = line.trim();
+                    match trimmed
+                        .strip_prefix('[')
+                        .and_then(|rest| rest.find("] ").map(|idx| &rest[idx + 2..]))
+                    {
+                        Some(rest) => rest.trim().to_string(),
+                        None => trimmed.to_string(),
+                    }
+                })
+                // 排除事件回显行(事件 payload 里的 LOOP_COMPLETE 是说明文本, 不是收敛信号)
+                .filter(|line| !line.starts_with("<event"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            output.to_string()
+        };
+
+        if EventParser::contains_promise(&normalized, "LOOP_COMPLETE") {
             return Some("LOOP_COMPLETE".to_string());
         }
-        if output.contains("max iterations") || output.contains("max-iterations") {
+
+        if normalized.contains("max iterations") || normalized.contains("max-iterations") {
             return Some("MAX_ITERATIONS".to_string());
         }
-        if output.contains("timeout") || output.contains("timed out") {
+        if normalized.contains("timeout") || normalized.contains("timed out") {
             return Some("TIMEOUT".to_string());
         }
         None
@@ -797,6 +829,38 @@ mod tests {
 
     #[test]
     fn test_detect_termination_loop_complete() {
+        let executor = RalphExecutor::new(PathBuf::from("/tmp"));
+        let reason = executor.detect_termination_reason("Task done.\nLOOP_COMPLETE");
+        assert_eq!(reason, Some("LOOP_COMPLETE".to_string()));
+    }
+
+    #[test]
+    fn test_detect_termination_parallel_prefixed_line() {
+        // 并行模式显示行带 [instance:stream:job=N] 前缀, 剥离后应能检测到
+        let executor = RalphExecutor::new(PathBuf::from("/tmp"));
+        let output = "[ralph#1:out:job=2] TASK_FEEDBACK[2]: answer: 15\n[ralph#1:out:job=2] LOOP_COMPLETE";
+        let reason = executor.detect_termination_reason(output);
+        assert_eq!(reason, Some("LOOP_COMPLETE".to_string()));
+    }
+
+    #[test]
+    fn test_detect_termination_parallel_ignores_event_and_err_lines() {
+        // 事件回显 payload 含 LOOP_COMPLETE(说明文本)不应触发;
+        // err 行(prompt 回显整行 LOOP_COMPLETE)不应触发假收敛;
+        // 只有 ralph 的 out 显示行独立 LOOP_COMPLETE 才算数。
+        let executor = RalphExecutor::new(PathBuf::from("/tmp"));
+        let output = concat!(
+            "[ralph#1:err:job=1] LOOP_COMPLETE\n",
+            "[ralph#1:out:job=1] <event topic=\"spawn.task\">LOOP_COMPLETE is the promise</event>\n",
+            "[ralph#1:out:job=2] LOOP_COMPLETE\n",
+        );
+        let reason = executor.detect_termination_reason(output);
+        assert_eq!(reason, Some("LOOP_COMPLETE".to_string()));
+    }
+
+    #[test]
+    fn test_detect_termination_parallel_no_ralph_out_line_falls_back_serial() {
+        // 无并行显示行时回退串行语义(纯文本 stdout)
         let executor = RalphExecutor::new(PathBuf::from("/tmp"));
         let reason = executor.detect_termination_reason("Task done.\nLOOP_COMPLETE");
         assert_eq!(reason, Some("LOOP_COMPLETE".to_string()));
