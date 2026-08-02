@@ -7,7 +7,9 @@ use ralph_proto::Event;
 use ralph_tui::state::{TuiMode, TuiState, TuiUpdate};
 use ralph_tui::theme::{TuiTheme, panel_block};
 use ralph_tui::widgets::{
-    content::ContentPane, footer, header, instances, parallel_output::ParallelOutputPane,
+    content::ContentPane,
+    footer, header, instances,
+    parallel_output::{ParallelOutputPane, ParallelOutputStatusPane, split_parallel_output_areas},
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -86,12 +88,12 @@ impl TuiTestHarness {
         let mut state = self.state.lock().unwrap();
 
         // Ensure we have enough iterations
-        while state.iterations.len() <= iteration {
+        while state.output.iterations.len() <= iteration {
             state.start_new_iteration();
         }
 
         // Add lines to the specified iteration
-        if let Some(buffer) = state.iterations.get_mut(iteration) {
+        if let Some(buffer) = state.output.iterations.get_mut(iteration) {
             for line in lines {
                 buffer.append_line(line);
             }
@@ -204,14 +206,14 @@ impl TuiTestHarness {
 
         TuiSnapshot {
             iteration: state.iteration,
-            current_view: state.current_view,
+            current_view: state.output.current_view,
             total_iterations: state.total_iterations(),
-            following_latest: state.following_latest,
-            has_alert: state.new_iteration_alert.is_some(),
-            alert_iteration: state.new_iteration_alert,
-            search_query: state.search_state.query.clone(),
-            search_matches: state.search_state.matches.len(),
-            search_current_match: state.search_state.current_match,
+            following_latest: state.output.following_latest,
+            has_alert: state.output.new_iteration_alert.is_some(),
+            alert_iteration: state.output.new_iteration_alert,
+            search_query: state.search.query.clone(),
+            search_matches: state.search.matches.len(),
+            search_current_match: state.search.current_match,
             pending_hat: state.get_pending_hat_display(),
             show_help: state.show_help,
         }
@@ -347,14 +349,28 @@ impl TuiTestHarness {
                         let inner = block.inner(output_area);
                         f.render_widget(block, output_area);
 
-                        if let Some(instance) = state.parallel.selected_instance()
+                        let output_areas = split_parallel_output_areas(inner);
+                        let selected_instance = state.parallel.selected_instance();
+
+                        if let Some(instance) = selected_instance
                             && let Some(buffer) = instance.current_job_buffer()
                         {
                             let mut content_widget = ParallelOutputPane::new(buffer);
-                            if let Some(query) = &state.search_state.query {
+                            if let Some(query) = &state.search.query {
                                 content_widget = content_widget.with_search(query);
                             }
-                            f.render_widget(content_widget, inner);
+                            f.render_widget(content_widget, output_areas.content_area);
+                        }
+
+                        if output_areas.status_area.height > 0 {
+                            f.render_widget(
+                                ParallelOutputStatusPane::new(
+                                    &state.parallel,
+                                    selected_instance,
+                                    theme,
+                                ),
+                                output_areas.status_area,
+                            );
                         }
 
                         // 下：chat/gates（尽量贴近真实渲染，便于回归）

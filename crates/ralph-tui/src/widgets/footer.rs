@@ -6,7 +6,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
-use std::time::Instant;
 
 /// Footer widget that adapts to terminal width.
 pub struct Footer<'a> {
@@ -32,11 +31,11 @@ impl Widget for Footer<'_> {
         block.render(area, buf);
 
         // Search input mode: show prompt even if query is empty.
-        if self.state.search_state.search_mode {
+        if self.state.search.search_mode {
             let line = Line::from(vec![
                 Span::raw(" "),
                 Span::styled(
-                    format!("/{}", self.state.search_query),
+                    format!("/{}", self.state.search.input),
                     Style::default().fg(self.theme.colors().yellow),
                 ),
             ]);
@@ -45,14 +44,14 @@ impl Widget for Footer<'_> {
         }
 
         // If search state has an active query, render search display
-        if let Some(query) = &self.state.search_state.query {
-            let match_info = if self.state.search_state.matches.is_empty() {
+        if let Some(query) = &self.state.search.query {
+            let match_info = if self.state.search.matches.is_empty() {
                 "no matches".to_string()
             } else {
                 format!(
                     "{}/{}",
-                    self.state.search_state.current_match + 1,
-                    self.state.search_state.matches.len()
+                    self.state.search.current_match + 1,
+                    self.state.search.matches.len()
                 )
             };
 
@@ -74,8 +73,8 @@ impl Widget for Footer<'_> {
         let mut left_spans = vec![Span::raw(" ")];
 
         // Show new iteration alert when viewing history and a new iteration arrived
-        if let Some(iter_num) = self.state.new_iteration_alert
-            && !self.state.following_latest
+        if let Some(iter_num) = self.state.output.new_iteration_alert
+            && !self.state.output.following_latest
         {
             left_spans.push(Span::styled(
                 format!("▶ New: iter {} ", iter_num),
@@ -96,7 +95,7 @@ impl Widget for Footer<'_> {
             left_spans.push(Span::raw(elapsed_display));
         }
 
-        if let Some(status) = &self.state.serial_output_status {
+        if let Some(status) = &self.state.output.serial_output_status {
             left_spans.push(Span::raw(" │ "));
             left_spans.push(Span::styled(
                 status.clone(),
@@ -104,28 +103,10 @@ impl Widget for Footer<'_> {
             ));
         }
 
-        // 并行模式下,footer 直接展示“当前在做什么/当前看的是哪个实例/哪个 job/最近事件/渲染模式”。
-        // 这些字段都来自现有 TUI state,避免为了展示层再维护第二套状态真相源。
+        // 并行模式下,footer 直接展示“当前看的是哪个实例/哪个 job/最近事件/渲染模式”。
+        // 当前在做什么已经迁移到 Output 窗口底部,避免和 footer 抢视觉焦点。
         if self.state.mode == TuiMode::Parallel {
-            let now = Instant::now();
             if let Some(instance) = self.state.parallel.selected_instance() {
-                if let Some(activity) = instance.current_activity_summary(now) {
-                    left_spans.push(Span::styled(
-                        activity,
-                        Style::default().fg(self.theme.colors().green),
-                    ));
-                } else {
-                    let elapsed_display = if let Some(elapsed) = self.state.get_loop_elapsed() {
-                        let total_secs = elapsed.as_secs();
-                        let mins = total_secs / 60;
-                        let secs = total_secs % 60;
-                        format!("Total Time Elapsed: {mins:02}:{secs:02}")
-                    } else {
-                        "Total Time Elapsed: 00:00".to_string()
-                    };
-                    left_spans.push(Span::raw(elapsed_display));
-                }
-
                 left_spans.push(Span::raw(" │ "));
                 left_spans.push(Span::styled(
                     self.state
@@ -162,6 +143,11 @@ impl Widget for Footer<'_> {
                 format!("m:{}", self.state.parallel.output_view_mode.short_label()),
                 Style::default().fg(self.theme.colors().yellow),
             ));
+
+            if let Some(child_summary) = self.state.parallel.child_run_summary_text() {
+                left_spans.push(Span::raw(" "));
+                left_spans.push(Span::styled(child_summary, self.theme.muted()));
+            }
 
             if let Some(last_event) = &self.state.last_event {
                 left_spans.push(Span::raw(" "));
@@ -256,8 +242,8 @@ mod tests {
     fn footer_shows_new_iteration_alert() {
         // Given new_iteration_alert = Some(5) and following_latest = false
         let mut state = TuiState::new();
-        state.new_iteration_alert = Some(5);
-        state.following_latest = false;
+        state.output.new_iteration_alert = Some(5);
+        state.output.following_latest = false;
 
         // When footer renders
         let text = render_to_string(&state);
@@ -274,8 +260,8 @@ mod tests {
     fn footer_no_alert_when_following() {
         // Given following_latest = true (even if new_iteration_alert has a value)
         let mut state = TuiState::new();
-        state.new_iteration_alert = Some(5);
-        state.following_latest = true;
+        state.output.new_iteration_alert = Some(5);
+        state.output.following_latest = true;
 
         // When footer renders
         let text = render_to_string(&state);
@@ -330,8 +316,8 @@ mod tests {
     fn footer_shows_search_query() {
         // Given search_state has an active query
         let mut state = TuiState::new();
-        state.search_state.query = Some("test".to_string());
-        state.search_state.matches = vec![(0, 0), (1, 0)]; // 2 matches
+        state.search.query = Some("test".to_string());
+        state.search.matches = vec![(0, 0), (1, 0)]; // 2 matches
 
         // When footer renders
         let text = render_to_string(&state);
@@ -391,11 +377,6 @@ mod tests {
             text
         );
         assert!(
-            text.contains("Working") && text.contains("Ctrl+C to interrupt"),
-            "should show current activity summary, got: {}",
-            text
-        );
-        assert!(
             text.contains("e:reply.human.message"),
             "should show last event, got: {}",
             text
@@ -408,7 +389,39 @@ mod tests {
     }
 
     #[test]
-    fn footer_shows_codex_style_parallel_activity() {
+    fn footer_shows_parallel_child_run_summary() {
+        use crate::state::parallel::{ChildRunStatus, ChildRunViewState};
+
+        let mut state = TuiState::new_parallel();
+        state.parallel.child_run_order.push("cap-req-1".to_string());
+        state.parallel.child_runs.insert(
+            "cap-req-1".to_string(),
+            ChildRunViewState {
+                key: "cap-req-1".to_string(),
+                request_id: Some("cap-req-1".to_string()),
+                invocation_id: Some("cap-inv-1".to_string()),
+                capability_id: "workflow:default-parallel".to_string(),
+                status: ChildRunStatus::Running,
+                summary: Some("child workflow running".to_string()),
+                artifact: Some(".ralph/capability-invocations/cap-inv-1/invoke.json".to_string()),
+                updated_at: std::time::Instant::now(),
+            },
+        );
+
+        let text = render_to_string_with_width(&state, 220);
+
+        assert!(
+            text.contains("child: 1 running / 0 done / 0 failed"),
+            "footer should show child-run counts, got: {text}"
+        );
+        assert!(
+            text.contains("workflow:default-parallel"),
+            "footer should show latest child-run capability, got: {text}"
+        );
+    }
+
+    #[test]
+    fn footer_does_not_show_parallel_activity_anymore() {
         use crate::state::TuiUpdate;
         use ralph_core::{HatJobOutputChunk, OutputStream};
         use ralph_proto::{HatInstanceId, HatInstanceState};
@@ -427,34 +440,16 @@ mod tests {
             line: "Inspecting current code behavior".to_string(),
         }));
 
-        let view = state
-            .parallel
-            .instances
-            .get_mut(&instance_id)
-            .expect("instance should exist");
-        let activity = view
-            .current_activity
-            .as_mut()
-            .expect("activity should be set");
-        activity.started_at = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(29))
-            .expect("test clock should support subtraction");
-
         let text = render_to_string_with_width(&state, 140);
 
         assert!(
-            text.contains("Inspecting current code behavior"),
-            "should show Codex-style activity label, got: {}",
+            !text.contains("Inspecting current code behavior"),
+            "activity should not live in footer anymore, got: {}",
             text
         );
         assert!(
-            text.contains("29s"),
-            "should show activity elapsed time, got: {}",
-            text
-        );
-        assert!(
-            text.contains("Ctrl+C to interrupt"),
-            "should show the real Ralph interrupt hint, got: {}",
+            !text.contains("Ctrl+C to interrupt"),
+            "footer should no longer show the interrupt hint, got: {}",
             text
         );
     }
@@ -476,8 +471,8 @@ mod tests {
     fn footer_shows_no_matches_when_empty() {
         // Given search with no matches
         let mut state = TuiState::new();
-        state.search_state.query = Some("notfound".to_string());
-        state.search_state.matches = vec![];
+        state.search.query = Some("notfound".to_string());
+        state.search.matches = vec![];
 
         // When footer renders
         let text = render_to_string(&state);

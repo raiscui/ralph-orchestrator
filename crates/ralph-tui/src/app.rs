@@ -8,16 +8,18 @@ use crate::animation;
 use crate::chat::{ChatSubmit, parse_chat_submit};
 use crate::external_event_writer::ExternalEventWriter;
 use crate::input::{Action, map_key};
-use crate::state::{
-    GateStatus, HAT_GRAPH_EDGE_HEAD_LEN, HAT_GRAPH_EDGE_HEAD_STEP_MS, HatGraphRadarPoint,
-    HatGraphRadarRect, ParallelFocus, TuiMode, TuiState, TuiUpdate,
+use crate::state::radar::{
+    HAT_GRAPH_EDGE_HEAD_LEN, HAT_GRAPH_EDGE_HEAD_STEP_MS, HatGraphRadarPoint, HatGraphRadarRect,
     plan_hat_graph_radar_edge_animation,
+};
+use crate::state::{
+    GateStatus, ParallelFocus, TuiMode, TuiState, TuiUpdate,
 };
 use crate::theme::{TuiTheme, panel_block, patch_exabind_panel_border_bg};
 use crate::widgets::{
     content::{ContentPane, SelectionBounds},
     footer, header, help, instances,
-    parallel_output::ParallelOutputPane,
+    parallel_output::{ParallelOutputPane, ParallelOutputStatusPane, split_parallel_output_areas},
 };
 use anyhow::Result;
 use crossterm::{
@@ -30,7 +32,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use ralph_core::truncate_with_ellipsis;
+use ralph_core::{TOPIC_RECOVERABLE_CONTINUE, truncate_with_ellipsis};
 use ralph_proto::{
     GateResolve, GateResolvedBy, HatInstanceId, HatInstanceState, TOPIC_GATE_RESOLVE,
 };
@@ -65,6 +67,8 @@ use unicode_width::UnicodeWidthStr;
 struct ParallelLayoutSnapshot {
     instances_inner: ratatui::layout::Rect,
     output_inner: ratatui::layout::Rect,
+    output_content_area: ratatui::layout::Rect,
+    output_status_area: ratatui::layout::Rect,
     bottom_inner: ratatui::layout::Rect,
     chat_input_area: ratatui::layout::Rect,
     chat_targets_area: ratatui::layout::Rect,
@@ -83,9 +87,9 @@ struct ParallelLayoutSnapshot {
 ///   最终把 reply 顶出当前视口。
 #[derive(Debug, Clone, Copy)]
 struct ParallelPaneAreas {
-    bottom_area: ratatui::layout::Rect,
-    instances_area: ratatui::layout::Rect,
-    output_area: ratatui::layout::Rect,
+    bottom: ratatui::layout::Rect,
+    instances: ratatui::layout::Rect,
+    output: ratatui::layout::Rect,
 }
 
 /// gate 快捷操作（actions chips）的枚举（用于 hit-test 后预填输入框）。
@@ -189,9 +193,9 @@ fn split_parallel_pane_areas(content_area: ratatui::layout::Rect) -> ParallelPan
         .split(main_area);
 
     ParallelPaneAreas {
-        bottom_area,
-        instances_area: horizontal[0],
-        output_area: horizontal[2],
+        bottom: bottom_area,
+        instances: horizontal[0],
+        output: horizontal[2],
     }
 }
 
@@ -538,8 +542,8 @@ fn render_hat_graph_radar_overlay(
     state: &TuiState,
     theme: &TuiTheme,
 ) -> Option<ratatui::layout::Rect> {
-    let radar = state.hat_graph_radar.as_ref()?;
-    let zoomed = state.hat_graph_zoomed;
+    let radar = state.radar.hat_graph_radar.as_ref()?;
+    let zoomed = state.radar.hat_graph_zoomed;
 
     let graph = if zoomed {
         radar.ascii_full.as_str()
@@ -612,7 +616,7 @@ fn render_hat_graph_radar_overlay(
         // - Radar 文本本身是 muted（overlay0）；
         // - base 高亮边选 overlay1：比 overlay0 略亮，仍可见，但明显弱于扫描头。
         let edge_base_fg = theme.colors().overlay1;
-        for anim in state.hat_graph_edge_animations.values() {
+        for anim in state.radar.hat_graph_edge_animations.values() {
             // 目标 box 不 Running：立刻取消/隐藏该动画（你的口径）
             if !running_hat_set.contains(anim.target_hat.as_str()) {
                 continue;
@@ -1032,7 +1036,7 @@ fn extract_output_selection_text(
         return String::new();
     }
 
-    // 说明：selection 坐标是相对 output_inner（0,0 起）的屏幕坐标。
+    // 说明：selection 坐标是相对 output_content_area（0,0 起）的屏幕坐标。
     let (min_x, max_x, min_y, max_y) = selection.bounds();
     let max_x = max_x.min(width.saturating_sub(1));
     let max_y = max_y.min(height.saturating_sub(1));
@@ -1239,9 +1243,15 @@ fn handle_parallel_mouse_down(
     }
 
     // 3) 点击 Output 面板：切换焦点到 Output（后续会在输出区内支持拖拽框选）
-    if contains_point(layout.output_inner, x, y) {
-        let rel_x = x.saturating_sub(layout.output_inner.x);
-        let rel_y = y.saturating_sub(layout.output_inner.y);
+    if contains_point(layout.output_status_area, x, y) {
+        state.parallel.focus = ParallelFocus::Output;
+        *chat_drag_anchor = None;
+        return;
+    }
+
+    if contains_point(layout.output_content_area, x, y) {
+        let rel_x = x.saturating_sub(layout.output_content_area.x);
+        let rel_y = y.saturating_sub(layout.output_content_area.y);
         state.parallel.focus = ParallelFocus::Output;
         state
             .parallel
@@ -1297,13 +1307,13 @@ pub fn dispatch_action(action: Action, state: &mut TuiState, viewport_height: us
         }
         Action::DismissHelp => {
             state.show_help = false;
-            state.search_state.search_mode = false;
-            state.search_query.clear();
+            state.search.search_mode = false;
+            state.search.input.clear();
             state.clear_search();
         }
         Action::StartSearch => {
-            state.search_state.search_mode = true;
-            state.search_query.clear();
+            state.search.search_mode = true;
+            state.search.input.clear();
         }
         Action::SearchNext => {
             state.next_match();
@@ -1313,8 +1323,8 @@ pub fn dispatch_action(action: Action, state: &mut TuiState, viewport_height: us
         }
         Action::ToggleHatGraphZoom => {
             // 右上角 Hat Graph Radar：只改变 UI 尺寸，不影响任何 orchestration 行为。
-            if state.hat_graph_radar.is_some() {
-                state.hat_graph_zoomed = !state.hat_graph_zoomed;
+            if state.radar.hat_graph_radar.is_some() {
+                state.radar.hat_graph_zoomed = !state.radar.hat_graph_zoomed;
             }
         }
         Action::ToggleParallelOutputView => {
@@ -1495,7 +1505,6 @@ impl App {
                                         );
                                     }
 
-                                    continue;
                                 }
                                 Event::Mouse(mouse) => {
                                     match mouse.kind {
@@ -1543,7 +1552,7 @@ impl App {
                                             let y = mouse.row;
 
                                             if matches!(state.mode, TuiMode::Serial) {
-                                                if state.serial_output_selecting
+                                                if state.output.serial_output_selecting
                                                     && let Some(area) = serial_content_area
                                                 {
                                                     let clamped_x = clamp_to_area(x, area.x, area.width);
@@ -1553,7 +1562,6 @@ impl App {
                                                     state.update_serial_output_selection_cursor(
                                                         crate::state::ScreenPos { x: rel_x, y: rel_y },
                                                     );
-                                                    continue;
                                                 }
                                             } else if let Some(layout) = parallel_layout {
 
@@ -1561,16 +1569,16 @@ impl App {
                                                 if state.parallel.output_selecting {
                                                     let clamped_x = clamp_to_area(
                                                         x,
-                                                        layout.output_inner.x,
-                                                        layout.output_inner.width,
+                                                        layout.output_content_area.x,
+                                                        layout.output_content_area.width,
                                                     );
                                                     let clamped_y = clamp_to_area(
                                                         y,
-                                                        layout.output_inner.y,
-                                                        layout.output_inner.height,
+                                                        layout.output_content_area.y,
+                                                        layout.output_content_area.height,
                                                     );
-                                                    let rel_x = clamped_x.saturating_sub(layout.output_inner.x);
-                                                    let rel_y = clamped_y.saturating_sub(layout.output_inner.y);
+                                                    let rel_x = clamped_x.saturating_sub(layout.output_content_area.x);
+                                                    let rel_y = clamped_y.saturating_sub(layout.output_content_area.y);
                                                     state.parallel.focus = ParallelFocus::Output;
                                                     state.parallel.update_output_selection_cursor(crate::state::ScreenPos {
                                                         x: rel_x,
@@ -1603,7 +1611,9 @@ impl App {
                                                 }
 
                                                 // 兜底：拖拽落在哪个区域，就把焦点切过去（后续 chat 框选会复用）。
-                                                if contains_point(layout.output_inner, x, y) {
+                                                if contains_point(layout.output_inner, x, y)
+                                                    || contains_point(layout.output_status_area, x, y)
+                                                {
                                                     state.parallel.focus = ParallelFocus::Output;
                                                 } else if contains_point(layout.bottom_inner, x, y) {
                                                     state.parallel.focus = ParallelFocus::Chat;
@@ -1613,10 +1623,10 @@ impl App {
                                         MouseEventKind::Up(MouseButton::Left) => {
                                             let mut state = self.state.lock().unwrap();
                                             if matches!(state.mode, TuiMode::Serial) {
-                                                if state.serial_output_selecting {
+                                                if state.output.serial_output_selecting {
                                                     state.finish_serial_output_selection();
 
-                                                    if let Some(sel) = state.serial_output_selection
+                                                    if let Some(sel) = state.output.serial_output_selection
                                                         && let Some(area) = serial_content_area
                                                         && let Some(buffer) = state.current_output_buffer()
                                                     {
@@ -1625,9 +1635,9 @@ impl App {
                                                             area.width,
                                                             area.height,
                                                             sel,
-                                                            state.search_state.query.as_deref(),
+                                                            state.search.query.as_deref(),
                                                         );
-                                                        state.serial_output_status =
+                                                        state.output.serial_output_status =
                                                             Some(copy_selection_text_status(&selected_text));
                                                     }
                                                 }
@@ -1644,10 +1654,10 @@ impl App {
                                                     {
                                                         let selected_text = extract_output_selection_text(
                                                             buffer,
-                                                            layout.output_inner.width,
-                                                            layout.output_inner.height,
+                                                            layout.output_content_area.width,
+                                                            layout.output_content_area.height,
                                                             sel,
-                                                            state.search_state.query.as_deref(),
+                                                            state.search.query.as_deref(),
                                                         );
 
                                                         if selected_text.trim().is_empty() {
@@ -1698,13 +1708,13 @@ impl App {
                                     }
 
                                     // 搜索输入模式：追加到 query（并压平换行，保持单行语义）
-                                    if state.search_state.search_mode {
+                                    if state.search.search_mode {
                                         let normalized = paste
                                             .replace('\r', "")
                                             .replace('\n', " ")
                                             .trim_end()
                                             .to_string();
-                                        state.search_query.push_str(&normalized);
+                                        state.search.input.push_str(&normalized);
                                         continue;
                                     }
 
@@ -1735,20 +1745,20 @@ impl App {
                                     let mut state = self.state.lock().unwrap();
 
                                     // 搜索输入模式（串行/并行共用）。
-                                    if state.search_state.search_mode {
+                                    if state.search.search_mode {
                                         match key.code {
                                             KeyCode::Esc => {
-                                                state.search_state.search_mode = false;
-                                                state.search_query.clear();
+                                                state.search.search_mode = false;
+                                                state.search.input.clear();
                                                 state.clear_search();
                                             }
                                             KeyCode::Backspace => {
-                                                state.search_query.pop();
+                                                state.search.input.pop();
                                             }
                                             KeyCode::Enter => {
-                                                let query = state.search_query.trim().to_string();
-                                                state.search_state.search_mode = false;
-                                                state.search_query.clear();
+                                                let query = state.search.input.trim().to_string();
+                                                state.search.search_mode = false;
+                                                state.search.input.clear();
 
                                                 if query.is_empty() {
                                                     state.clear_search();
@@ -1757,7 +1767,7 @@ impl App {
                                                 }
                                             }
                                             KeyCode::Char(c) => {
-                                                state.search_query.push(c);
+                                                state.search.input.push(c);
                                             }
                                             _ => {}
                                         }
@@ -1772,20 +1782,20 @@ impl App {
                                             }
 
                                             if key.code == KeyCode::Char('y') {
-                                                let Some(sel) = state.serial_output_selection else {
-                                                    state.serial_output_status =
+                                                let Some(sel) = state.output.serial_output_selection else {
+                                                    state.output.serial_output_status =
                                                         Some("copy: no selection".to_string());
                                                     continue;
                                                 };
 
                                                 let Some(area) = serial_content_area else {
-                                                    state.serial_output_status =
+                                                    state.output.serial_output_status =
                                                         Some("copy failed: layout not ready".to_string());
                                                     continue;
                                                 };
 
                                                 let Some(buffer) = state.current_output_buffer() else {
-                                                    state.serial_output_status =
+                                                    state.output.serial_output_status =
                                                         Some("copy failed: no output buffer".to_string());
                                                     continue;
                                                 };
@@ -1795,9 +1805,9 @@ impl App {
                                                     area.width,
                                                     area.height,
                                                     sel,
-                                                    state.search_state.query.as_deref(),
+                                                    state.search.query.as_deref(),
                                                 );
-                                                state.serial_output_status =
+                                                state.output.serial_output_status =
                                                     Some(copy_selection_text_status(&selected_text));
                                                 continue;
                                             }
@@ -1856,9 +1866,9 @@ impl App {
                                             if focus != ParallelFocus::Chat {
                                                 if key.code == KeyCode::Char('p') {
                                                     // 并行模式：在非 Chat 输入场景下，`p` 用于切换右上角 Hat Graph Radar 的放大/还原。
-                                                    if state.hat_graph_radar.is_some() {
-                                                        state.hat_graph_zoomed =
-                                                            !state.hat_graph_zoomed;
+                                                    if state.radar.hat_graph_radar.is_some() {
+                                                        state.radar.hat_graph_zoomed =
+                                                            !state.radar.hat_graph_zoomed;
                                                     }
                                                     continue;
                                                 }
@@ -1898,10 +1908,10 @@ impl App {
 
                                                     let selected_text = extract_output_selection_text(
                                                         buffer,
-                                                        layout.output_inner.width,
-                                                        layout.output_inner.height,
+                                                        layout.output_content_area.width,
+                                                        layout.output_content_area.height,
                                                         sel,
-                                                        state.search_state.query.as_deref(),
+                                                        state.search.query.as_deref(),
                                                     );
 
                                                     if selected_text.trim().is_empty() {
@@ -1978,8 +1988,8 @@ impl App {
                                                             state.parallel.extend_output_selection_by_delta(
                                                                 dx,
                                                                 dy,
-                                                                layout.output_inner.width,
-                                                                layout.output_inner.height,
+                                                                layout.output_content_area.width,
+                                                                layout.output_content_area.height,
                                                             );
                                                             continue;
                                                         }
@@ -2119,6 +2129,31 @@ impl App {
                                                                         }
                                                                     }
                                                                 }
+                                                                Ok(ChatSubmit::RecoverableContinue { failure_id }) => {
+                                                                    let payload = failure_id.unwrap_or_default();
+                                                                    let selected_target = state
+                                                                        .parallel
+                                                                        .selected_instance_id()
+                                                                        .map(|id| id.to_string());
+                                                                    let writer = ExternalEventWriter::new();
+                                                                    match writer.append(
+                                                                        TOPIC_RECOVERABLE_CONTINUE,
+                                                                        payload,
+                                                                        selected_target,
+                                                                        None,
+                                                                        None,
+                                                                    ) {
+                                                                        Ok(()) => {
+                                                                            state.parallel.chat_status = Some(format!(
+                                                                                "sent recoverable.continue -> {}",
+                                                                                writer.path().display()
+                                                                            ));
+                                                                        }
+                                                                        Err(e) => {
+                                                                            state.parallel.chat_status = Some(format!("send failed: {e:#}"));
+                                                                        }
+                                                                    }
+                                                                }
                                                                 Err(e) => {
                                                                     state.parallel.chat_status = Some(format!("parse error: {e}"));
                                                                 }
@@ -2216,9 +2251,9 @@ impl App {
                                 let effect = match state.mode {
                                     TuiMode::Parallel => {
                                         let panes = split_parallel_pane_areas(content_area);
-                                        let bottom_area = panes.bottom_area;
-                                        let instances_area = panes.instances_area;
-                                        let output_area = panes.output_area;
+                                        let bottom_area = panes.bottom;
+                                        let instances_area = panes.instances;
+                                        let output_area = panes.output;
 
                                         let instances_inner =
                                             panel_block("Instances", false, &theme).inner(instances_area);
@@ -2273,7 +2308,7 @@ impl App {
                                     && let Some(manager) = effects.as_mut()
                                 {
                                     let panes = split_parallel_pane_areas(content_area);
-                                    let output_area = panes.output_area;
+                                    let output_area = panes.output;
                                     let output_inner = inner_block(output_area);
                                     // 体验取舍：
                                     // - Warp（bg=Reset）下，为了避免边框 cell 参与插值导致“外圈被带色”，
@@ -2304,7 +2339,7 @@ impl App {
                         }
 
                             // 并行模式下：先用“真实的 Output pane 布局”同步渲染宽度，
-                            // 再按更新后的 row_count 做 autoscroll。
+                            // 再按 content viewport 的高度去做 autoscroll。
                             //
                             // 关键顺序:
                             // - 如果先 autoscroll，再重算 output_render_width，
@@ -2313,9 +2348,9 @@ impl App {
                                 TuiMode::Serial => content_area.height as usize,
                                 TuiMode::Parallel => {
                                     let panes = split_parallel_pane_areas(content_area);
-                                    let output_inner = inner_block(panes.output_area);
+                                    let output_inner = inner_block(panes.output);
                                     state.parallel.set_output_render_width(output_inner.width);
-                                    output_inner.height as usize
+                                    split_parallel_output_areas(output_inner).content_area.height as usize
                                 }
                             };
                             if let Some(mut buffer) = state.current_output_buffer_mut()
@@ -2359,10 +2394,10 @@ impl App {
                                 // Render content using ContentPane
                                 if let Some(buffer) = state.current_iteration() {
                                     let mut content_widget = ContentPane::new(buffer, theme);
-                                    if let Some(query) = &state.search_state.query {
+                                    if let Some(query) = &state.search.query {
                                         content_widget = content_widget.with_search(query);
                                     }
-                                    if let Some(sel) = state.serial_output_selection {
+                                    if let Some(sel) = state.output.serial_output_selection {
                                         content_widget = content_widget.with_selection(
                                             SelectionBounds::from_points(
                                                 sel.anchor.x,
@@ -2380,9 +2415,9 @@ impl App {
 
                                 // 布局：上（实例列表 + 输出） / 下（chat + gate）
                                 let panes = split_parallel_pane_areas(content_area);
-                                let bottom_area = panes.bottom_area;
-                                let instances_area = panes.instances_area;
-                                let output_area = panes.output_area;
+                                let bottom_area = panes.bottom;
+                                let instances_area = panes.instances;
+                                let output_area = panes.output;
                                 exabind_instances_area = Some(instances_area);
                                 exabind_output_area = Some(output_area);
                                 exabind_bottom_area = Some(bottom_area);
@@ -2427,14 +2462,17 @@ impl App {
                                 // exabind 风格边框：需要把“外侧背景”刷回 crust，才能让左上斜切角与底边贴边。
                                 patch_exabind_panel_border_bg(f.buffer_mut(), output_area, &theme);
 
-                                // 更新可滚动视图高度（给鼠标滚动/键盘滚动用）
-                                viewport_height = inner.height as usize;
+                                let output_areas = split_parallel_output_areas(inner);
 
-                                if let Some(instance) = state.parallel.selected_instance()
+                                // 更新可滚动视图高度（给鼠标滚动/键盘滚动用）
+                                viewport_height = output_areas.content_area.height as usize;
+
+                                let selected_instance = state.parallel.selected_instance();
+                                if let Some(instance) = selected_instance
                                     && let Some(buffer) = instance.current_job_buffer()
                                 {
                                     let mut content_widget = ParallelOutputPane::new(buffer);
-                                    if let Some(query) = &state.search_state.query {
+                                    if let Some(query) = &state.search.query {
                                         content_widget = content_widget.with_search(query);
                                     }
                                     if let Some(sel) = state.parallel.output_selection {
@@ -2445,13 +2483,19 @@ impl App {
                                             sel.cursor.y,
                                         ));
                                     }
-                                    f.render_widget(content_widget, inner);
+                                    f.render_widget(content_widget, output_areas.content_area);
                                 } else {
                                     let empty = Paragraph::new(Line::from(vec![
                                         Span::raw(" "),
                                         Span::styled("No instance selected", theme.muted()),
                                     ]));
-                                    f.render_widget(empty, inner);
+                                    f.render_widget(empty, output_areas.content_area);
+                                }
+
+                                if output_areas.status_area.height > 0 {
+                                    let status_widget =
+                                        ParallelOutputStatusPane::new(&state.parallel, selected_instance, theme);
+                                    f.render_widget(status_widget, output_areas.status_area);
                                 }
 
                                 // 下：chat + gate（human async chat + gate 面板）
@@ -2509,6 +2553,8 @@ impl App {
                                     parallel_layout = Some(ParallelLayoutSnapshot {
                                         instances_inner: inner_block(instances_area),
                                         output_inner: inner,
+                                        output_content_area: output_areas.content_area,
+                                        output_status_area: output_areas.status_area,
                                         bottom_inner,
                                         chat_input_area: input_area,
                                         chat_targets_area: targets_area,
@@ -3280,12 +3326,12 @@ mod tests {
         state.start_new_iteration();
         state.start_new_iteration();
         state.start_new_iteration();
-        state.current_view = 0;
-        state.following_latest = false;
+        state.output.current_view = 0;
+        state.output.following_latest = false;
 
         dispatch_action(Action::NextIteration, &mut state, 10);
 
-        assert_eq!(state.current_view, 1);
+        assert_eq!(state.output.current_view, 1);
     }
 
     #[test]
@@ -3294,11 +3340,11 @@ mod tests {
         state.start_new_iteration();
         state.start_new_iteration();
         state.start_new_iteration();
-        state.current_view = 2;
+        state.output.current_view = 2;
 
         dispatch_action(Action::PrevIteration, &mut state, 10);
 
-        assert_eq!(state.current_view, 1);
+        assert_eq!(state.output.current_view, 1);
     }
 
     #[test]
@@ -3330,13 +3376,13 @@ mod tests {
             meta_compact: None,
             meta_full: None,
         });
-        assert!(!state.hat_graph_zoomed);
+        assert!(!state.radar.hat_graph_zoomed);
 
         dispatch_action(Action::ToggleHatGraphZoom, &mut state, 10);
-        assert!(state.hat_graph_zoomed);
+        assert!(state.radar.hat_graph_zoomed);
 
         dispatch_action(Action::ToggleHatGraphZoom, &mut state, 10);
-        assert!(!state.hat_graph_zoomed);
+        assert!(!state.radar.hat_graph_zoomed);
     }
 
     #[test]
@@ -3370,11 +3416,11 @@ mod tests {
         buffer.append_line(Line::from("find me"));
         buffer.append_line(Line::from("find me again"));
         state.search("find");
-        assert_eq!(state.search_state.current_match, 0);
+        assert_eq!(state.search.current_match, 0);
 
         dispatch_action(Action::SearchNext, &mut state, 10);
 
-        assert_eq!(state.search_state.current_match, 1);
+        assert_eq!(state.search.current_match, 1);
     }
 
     #[test]
@@ -3385,11 +3431,11 @@ mod tests {
         buffer.append_line(Line::from("find me"));
         buffer.append_line(Line::from("find me again"));
         state.search("find");
-        state.search_state.current_match = 1;
+        state.search.current_match = 1;
 
         dispatch_action(Action::SearchPrev, &mut state, 10);
 
-        assert_eq!(state.search_state.current_match, 0);
+        assert_eq!(state.search.current_match, 0);
     }
 
     // =========================================================================
@@ -3567,11 +3613,11 @@ mod tests {
         handle_serial_mouse_down(mouse, &mut state, area);
 
         let selection = state
-            .serial_output_selection
+            .output.serial_output_selection
             .expect("serial output selection should start on content click");
         assert_eq!(selection.anchor, crate::state::ScreenPos { x: 3, y: 2 });
         assert_eq!(selection.cursor, crate::state::ScreenPos { x: 3, y: 2 });
-        assert!(state.serial_output_selecting);
+        assert!(state.output.serial_output_selecting);
     }
 
     #[test]
@@ -3582,7 +3628,7 @@ mod tests {
         state.extend_serial_output_selection_by_delta(5, 2, 4, 3);
 
         let selection = state
-            .serial_output_selection
+            .output.serial_output_selection
             .expect("selection should remain active");
         assert_eq!(selection.anchor, crate::state::ScreenPos { x: 1, y: 1 });
         assert_eq!(selection.cursor, crate::state::ScreenPos { x: 3, y: 2 });
@@ -3642,15 +3688,15 @@ mod tests {
         //   长 prompt 累积后会少出几行,把 reply 顶出视口。
         let content_area = ratatui::layout::Rect::new(0, 0, 100, 30);
         let panes = split_parallel_pane_areas(content_area);
-        let output_inner = inner_block(panes.output_area);
+        let output_inner = inner_block(panes.output);
 
-        assert_eq!(panes.instances_area.width, PARALLEL_INSTANCES_PANEL_WIDTH);
+        assert_eq!(panes.instances.width, PARALLEL_INSTANCES_PANEL_WIDTH);
         assert_eq!(
-            panes.output_area.x,
+            panes.output.x,
             content_area.x + PARALLEL_INSTANCES_PANEL_WIDTH + PARALLEL_PANE_GAP_WIDTH
         );
         assert_eq!(
-            panes.output_area.width,
+            panes.output.width,
             content_area
                 .width
                 .saturating_sub(PARALLEL_INSTANCES_PANEL_WIDTH + PARALLEL_PANE_GAP_WIDTH)
@@ -3660,6 +3706,28 @@ mod tests {
             content_area
                 .width
                 .saturating_sub(PARALLEL_INSTANCES_PANEL_WIDTH + PARALLEL_PANE_GAP_WIDTH + 2)
+        );
+    }
+
+    #[test]
+    fn split_parallel_output_areas_reserves_bottom_status_rows() {
+        let content_area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        let panes = split_parallel_pane_areas(content_area);
+        let output_inner = inner_block(panes.output);
+        let output_areas = split_parallel_output_areas(output_inner);
+
+        assert_eq!(
+            output_areas.status_area.height, 2,
+            "内层足够高时,Output 底部必须固定保留两行状态条"
+        );
+        assert_eq!(
+            output_areas.content_area.height + output_areas.status_area.height,
+            output_inner.height,
+            "content viewport 必须和 status strip 严格分摊 inner 高度"
+        );
+        assert!(
+            output_areas.content_area.height < output_inner.height,
+            "正文 viewport 必须比完整 inner 更短,否则 act/status 会压住最后几行输出"
         );
     }
 
@@ -3703,6 +3771,8 @@ mod tests {
         let layout = ParallelLayoutSnapshot {
             instances_inner: ratatui::layout::Rect::new(0, 0, 10, 10),
             output_inner: ratatui::layout::Rect::new(0, 0, 0, 0),
+            output_content_area: ratatui::layout::Rect::new(0, 0, 0, 0),
+            output_status_area: ratatui::layout::Rect::new(0, 0, 0, 0),
             bottom_inner: ratatui::layout::Rect::new(20, 0, 60, 10),
             chat_input_area: ratatui::layout::Rect::new(20, 0, 60, 3),
             chat_targets_area: ratatui::layout::Rect::new(20, 3, 60, 1),
@@ -3728,6 +3798,50 @@ mod tests {
             "writer#2"
         );
         assert_eq!(state.parallel.focus, ParallelFocus::Chat);
+    }
+
+    #[test]
+    fn mouse_click_output_status_area_focuses_output_without_starting_selection() {
+        let mut state = TuiState::new_parallel();
+        state
+            .parallel
+            .register_instance(HatInstanceId::from("writer#1"), HatInstanceState::Running);
+
+        let layout = ParallelLayoutSnapshot {
+            instances_inner: ratatui::layout::Rect::new(0, 0, 10, 10),
+            output_inner: ratatui::layout::Rect::new(20, 0, 60, 10),
+            output_content_area: ratatui::layout::Rect::new(20, 0, 60, 8),
+            output_status_area: ratatui::layout::Rect::new(20, 8, 60, 2),
+            bottom_inner: ratatui::layout::Rect::new(20, 12, 60, 10),
+            chat_input_area: ratatui::layout::Rect::new(20, 12, 60, 3),
+            chat_targets_area: ratatui::layout::Rect::new(20, 15, 60, 1),
+            gate_actions_area: ratatui::layout::Rect::new(20, 16, 60, 1),
+            gate_list_area: ratatui::layout::Rect::new(20, 17, 60, 3),
+        };
+
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: layout.output_status_area.x + 1,
+            row: layout.output_status_area.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        let mut anchor = None;
+
+        handle_parallel_mouse_down(mouse, &mut state, layout, &mut anchor);
+
+        assert_eq!(
+            state.parallel.focus,
+            ParallelFocus::Output,
+            "status strip click should still focus Output"
+        );
+        assert!(
+            !state.parallel.output_selecting,
+            "status strip click must not begin output selection"
+        );
+        assert!(
+            state.parallel.output_selection.is_none(),
+            "status strip click must not create a selection anchor"
+        );
     }
 
     #[test]
@@ -3773,6 +3887,8 @@ mod tests {
         let layout = ParallelLayoutSnapshot {
             instances_inner: ratatui::layout::Rect::new(0, 0, 10, 10),
             output_inner: ratatui::layout::Rect::new(0, 0, 0, 0),
+            output_content_area: ratatui::layout::Rect::new(0, 0, 0, 0),
+            output_status_area: ratatui::layout::Rect::new(0, 0, 0, 0),
             bottom_inner: ratatui::layout::Rect::new(20, 0, 60, 10),
             chat_input_area: ratatui::layout::Rect::new(20, 0, 60, 3),
             chat_targets_area: ratatui::layout::Rect::new(20, 3, 60, 1),
@@ -3809,6 +3925,8 @@ mod tests {
         let layout = ParallelLayoutSnapshot {
             instances_inner: ratatui::layout::Rect::new(0, 0, 10, 10),
             output_inner: ratatui::layout::Rect::new(0, 0, 0, 0),
+            output_content_area: ratatui::layout::Rect::new(0, 0, 0, 0),
+            output_status_area: ratatui::layout::Rect::new(0, 0, 0, 0),
             bottom_inner: ratatui::layout::Rect::new(20, 0, 60, 10),
             chat_input_area: ratatui::layout::Rect::new(20, 0, 60, 3),
             chat_targets_area: ratatui::layout::Rect::new(20, 3, 60, 1),

@@ -36,7 +36,7 @@ pub fn render(state: &TuiState, theme: TuiTheme, width: u16) -> Paragraph<'stati
 
     // Priority 1: Iteration counter - ALWAYS shown
     // Uses TUI pagination state (current_view/total_iterations) not Ralph loop iteration
-    let current = state.current_view + 1; // 0-indexed to 1-indexed
+    let current = state.output.current_view + 1; // 0-indexed to 1-indexed
     let total = state.total_iterations();
     let iter_display = format!("[iter {}/{}]", current, total);
     spans.push(Span::raw(iter_display));
@@ -73,7 +73,7 @@ pub fn render(state: &TuiState, theme: TuiTheme, width: u16) -> Paragraph<'stati
     // Priority 2: Mode indicator - ALWAYS shown (compressed at WIDTH_COMPRESS and below)
     // Shows [LIVE] when following latest iteration, [REVIEW] when viewing history
     spans.push(Span::raw(" | "));
-    let mode = if state.following_latest {
+    let mode = if state.output.following_latest {
         if width > WIDTH_COMPRESS {
             Span::styled("[LIVE]", Style::default().fg(theme.colors().green))
         } else {
@@ -157,7 +157,7 @@ mod tests {
         state.start_new_iteration();
         state.start_new_iteration();
         state.start_new_iteration();
-        state.current_view = 2; // Viewing iteration 3
+        state.output.current_view = 2; // Viewing iteration 3
 
         let text = render_to_string(&state);
         assert!(
@@ -174,7 +174,7 @@ mod tests {
         state.start_new_iteration();
         state.start_new_iteration();
         state.start_new_iteration();
-        state.current_view = 0; // Viewing first iteration
+        state.output.current_view = 0; // Viewing first iteration
 
         let text = render_to_string(&state);
         assert!(
@@ -259,8 +259,8 @@ mod tests {
         for _ in 0..10 {
             state.start_new_iteration();
         }
-        state.current_view = 2; // Viewing iteration 3 of 10
-        state.following_latest = true;
+        state.output.current_view = 2; // Viewing iteration 3 of 10
+        state.output.following_latest = true;
 
         state.iteration_started = Some(
             std::time::Instant::now()
@@ -316,8 +316,8 @@ mod tests {
         for _ in 0..10 {
             state.start_new_iteration();
         }
-        state.current_view = 2; // Viewing iteration 3 of 10
-        state.following_latest = true; // In LIVE mode
+        state.output.current_view = 2; // Viewing iteration 3 of 10
+        state.output.following_latest = true; // In LIVE mode
 
         state.iteration_started = Some(
             std::time::Instant::now()
@@ -477,7 +477,7 @@ mod tests {
         for _ in 0..5 {
             state.start_new_iteration();
         }
-        state.current_view = 2; // Viewing iteration 3
+        state.output.current_view = 2; // Viewing iteration 3
 
         let text = render_to_string(&state);
         assert!(
@@ -506,7 +506,7 @@ mod tests {
         // Given following_latest = true
         let mut state = TuiState::new();
         state.start_new_iteration();
-        state.following_latest = true;
+        state.output.following_latest = true;
 
         let text = render_to_string(&state);
         assert!(
@@ -522,8 +522,8 @@ mod tests {
         let mut state = TuiState::new();
         state.start_new_iteration();
         state.start_new_iteration();
-        state.current_view = 0;
-        state.following_latest = false;
+        state.output.current_view = 0;
+        state.output.following_latest = false;
 
         let text = render_to_string(&state);
         assert!(

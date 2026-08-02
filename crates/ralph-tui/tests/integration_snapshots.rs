@@ -108,7 +108,7 @@ fn test_following_latest_behavior() {
     // Create iterations and verify following_latest
     {
         let state = harness.state().lock().unwrap();
-        assert!(state.following_latest, "Should follow latest by default");
+        assert!(state.output.following_latest, "Should follow latest by default");
     }
 
     // Start iterations
@@ -536,14 +536,14 @@ fn test_long_output_scroll_rendering() {
 fn test_parallel_full_layout_renders_instances_output_and_gates() {
     use ralph_core::{HatJobOutputChunk, OutputStream};
     use ralph_proto::{GateKind, GateRequest, HatInstanceId, HatInstanceState, TOPIC_GATE_REQUEST};
-    use ralph_tui::state::TuiUpdate;
+    use ralph_tui::state::{ParallelEvidencePaths, TuiUpdate};
 
     let mut harness = TuiTestHarness::new_parallel().with_terminal_size(100, 20);
 
     let instance_id = HatInstanceId::from("writer#1");
     harness.apply_parallel_update(TuiUpdate::ParallelRegisterInstance {
         instance_id: instance_id.clone(),
-        state: HatInstanceState::Created,
+        state: HatInstanceState::Running,
     });
     harness.apply_parallel_update(TuiUpdate::ParallelOutputChunk(HatJobOutputChunk {
         job_id: 1,
@@ -551,6 +551,15 @@ fn test_parallel_full_layout_renders_instances_output_and_gates() {
         stream: OutputStream::Stdout,
         line: "hello from writer".to_string(),
     }));
+    {
+        let mut state = harness.state().lock().unwrap();
+        state.parallel.evidence_paths = ParallelEvidencePaths {
+            events_path: Some(".ralph/events-20260517-195000.jsonl".to_string()),
+            evidence_index_path: Some(".ralph/evidence-index.jsonl".to_string()),
+            agents_snapshot_path: Some(".ralph/agents.json".to_string()),
+            record_session_path: Some("/tmp/record-session.jsonl".to_string()),
+        };
+    }
 
     // 快照稳定性：避免 Instances 列表显示随时间变化的 "0s/1s"。
     {
@@ -596,6 +605,22 @@ fn test_parallel_full_layout_renders_instances_output_and_gates() {
     assert!(
         ui.contains("hello from writer"),
         "should show output line, got:\n{ui}"
+    );
+    assert!(
+        ui.contains("evidence:"),
+        "should show evidence summary, got:\n{ui}"
+    );
+    assert!(
+        ui.contains(".ralph/events-20260517-195000.jsonl"),
+        "should show current events path, got:\n{ui}"
+    );
+    assert!(
+        ui.contains("act:"),
+        "should show activity line in output footer, got:\n{ui}"
+    );
+    assert!(
+        ui.contains("Working"),
+        "should show current activity at the bottom of Output, got:\n{ui}"
     );
     assert!(
         ui.contains("[consult]"),

@@ -1,20 +1,36 @@
 //! State management for the TUI.
 
+use ratatui::text::Line;
 use ralph_core::HatJobOutputChunk;
 use ralph_proto::{Event, HatId, HatInstanceId, HatInstanceState};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 // ============================================================================
 // 并行模式（Supervisor TUI）state
 // ============================================================================
 
+pub(crate) mod output;
 pub(crate) mod parallel;
+pub(crate) mod radar;
+pub(crate) mod search;
+pub(crate) mod task;
+
+use output::OutputSlice;
+pub use output::IterationBuffer;
+use radar::RadarSlice;
+pub use radar::{
+    HatGraphRadar, HatGraphRadarEdgeAnimation, HatGraphRadarEdgeMeta, HatGraphRadarMeta,
+    HatGraphRadarNodeMeta, HatGraphRadarPoint, HatGraphRadarRect, HatGraphRadarRecentEvent,
+};
 use parallel::output::ParallelOutputBuffer;
 pub use parallel::{
-    ChatEditorState, GateStatus, ParallelFocus, ParallelTuiState, ScreenPos, ScreenSelection,
-    TextPos, TextSelection,
+    ChatEditorState, GateStatus, ParallelEvidencePaths, ParallelFocus, ParallelTuiState, ScreenPos,
+    ScreenSelection, TextPos, TextSelection,
 };
+
+use search::SearchSlice;
+use task::{TaskCounts, TaskSlice, TaskSummary};
 
 /// 当前输出视图的只读 buffer 视图（串行/并行统一抽象）。
 pub enum CurrentOutputBuffer<'a> {
@@ -135,262 +151,6 @@ pub enum TuiMode {
 // - ASCII 图由 ralph-cli 在启动 TUI 时生成并注入，这里只做缓存 + 展示，
 //   避免在 TUI 每帧渲染时重复做 Mermaid→ASCII 的转换。
 
-/// Hat Graph Radar 的“坐标点”（以终端 cell 为单位）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HatGraphRadarPoint {
-    pub x: u16,
-    pub y: u16,
-}
-
-/// Hat Graph Radar 的矩形区域（以终端 cell 为单位）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HatGraphRadarRect {
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
-}
-
-/// Hat Graph Radar 的节点 meta：用于把“某个 hat 的 box”映射到字符画坐标。
-#[derive(Debug, Clone)]
-pub struct HatGraphRadarNodeMeta {
-    /// Mermaid node id（parser identity），例如 `Hat_planner`。
-    pub id: String,
-    /// 节点展示 label（可能包含 emoji/中文）。
-    pub label: String,
-    /// 节点 box 的矩形范围（含边框）。
-    pub box_rect: HatGraphRadarRect,
-}
-
-/// Hat Graph Radar 的边 meta：用于按最新 event 做“逐段点亮”动画。
-#[derive(Debug, Clone)]
-pub struct HatGraphRadarEdgeMeta {
-    pub from: String,
-    pub to: String,
-    pub label: String,
-    /// 有序 path 坐标序列（包含拐点/箭头/box-start marker 等关键格子）。
-    pub path: Vec<HatGraphRadarPoint>,
-}
-
-/// Hat Graph Radar 的完整 meta（nodes + edges）。
-#[derive(Debug, Clone, Default)]
-pub struct HatGraphRadarMeta {
-    pub nodes: Vec<HatGraphRadarNodeMeta>,
-    pub edges: Vec<HatGraphRadarEdgeMeta>,
-}
-
-impl HatGraphRadarMeta {
-    pub fn find_node(&self, id: &str) -> Option<&HatGraphRadarNodeMeta> {
-        self.nodes.iter().find(|n| n.id == id)
-    }
-
-    fn edge_label_matches(edge_label: &str, topic: &str) -> bool {
-        // physical view 里，CLI 可能会把同一对节点之间的多条边折叠成一条：
-        // - label 形如：`integration.applied / integration.blocked / integration.rejected`
-        // Radar 做因果边动画时需要把“单个 topic”匹配到这类“多 topic label”上。
-        if edge_label == topic {
-            return true;
-        }
-
-        edge_label
-            .split(" / ")
-            .any(|candidate| candidate.trim() == topic)
-    }
-
-    pub fn matching_edges(
-        &self,
-        from: &str,
-        label: &str,
-    ) -> impl Iterator<Item = &HatGraphRadarEdgeMeta> {
-        self.edges
-            .iter()
-            .filter(move |e| e.from == from && Self::edge_label_matches(&e.label, label))
-    }
-
-    pub fn matching_edges_exact(
-        &self,
-        from: &str,
-        label: &str,
-        to: &str,
-    ) -> impl Iterator<Item = &HatGraphRadarEdgeMeta> {
-        self.edges.iter().filter(move |e| {
-            e.from == from && e.to == to && Self::edge_label_matches(&e.label, label)
-        })
-    }
-}
-
-// =============================================================================
-// Hat Graph Radar：事件线动画（按 Running 目标驱动）
-// =============================================================================
-//
-// 你最新口径（2026-02-03）：
-// - 线路需要先做 progressive reveal（从 source → target 逐段点亮）；
-// - reveal 完成后，线路应保持“全亮”并持续显示，直到目标 hat 退出 Running（进入 Idle/Done/Failed）；
-// - “指向的目标 box 不再 Running”时，必须立刻取消该线路高亮（不要残留）。
-//
-// 设计取舍：
-// - cause event 采用 best-effort 推断：从“最近收到的业务事件”里找一条能够在 hats graph
-//   中连到该 target hat 的边（from+topic+to 完全匹配）。
-// - 动画本身是纯 UI 行为，不影响 orchestration。
-
-/// Hat Graph Radar 边动画速度：每多少毫秒“点亮一个 cell”。
-pub(crate) const HAT_GRAPH_EDGE_ANIMATION_STEP_MS: u64 = 30;
-/// progressive reveal 的最大时长：用于把“很长的路径”加速到一个可读的时间窗口内。
-const HAT_GRAPH_EDGE_ANIMATION_MAX_REVEAL_MS: u64 = 800;
-
-/// Hat Graph Radar：扫描头（跑动高亮段）的移动速度（每多少毫秒前进一个 cell）。
-///
-/// 说明：
-/// - 这是 reveal 完成后的“锦上添花”动效，目的是让用户一眼看出“这条边仍在生效/仍在运行态”；
-/// - 速度不应跟随 reveal 的 step_ms（reveal 会为长路径自动加速，否则扫描会快到看不见）。
-pub(crate) const HAT_GRAPH_EDGE_HEAD_STEP_MS: u64 = 60;
-
-/// Hat Graph Radar：扫描头的长度（以 cell 数计）。
-pub(crate) const HAT_GRAPH_EDGE_HEAD_LEN: usize = 16;
-
-/// 推断“cause event”的回看窗口：只在这个时间范围内找最近事件（避免匹配到过旧的事件）。
-const HAT_GRAPH_CAUSE_LOOKBACK: Duration = Duration::from_secs(10);
-
-/// 保存最近事件的上限（按条数），避免无限增长。
-const HAT_GRAPH_RECENT_EVENT_MAX: usize = 64;
-
-/// Radar 侧用于推断 “cause event” 的最近事件记录（只存必要信息）。
-#[derive(Debug, Clone)]
-pub struct HatGraphRadarRecentEvent {
-    pub source_hat: HatId,
-    pub topic: String,
-    pub observed_at: Instant,
-}
-
-/// 某个 target hat 当前正在播放的“cause event 边动画”。
-#[derive(Debug, Clone)]
-pub struct HatGraphRadarEdgeAnimation {
-    pub target_hat: HatId,
-    pub source_hat: HatId,
-    pub topic: String,
-    pub started_at: Instant,
-    pub step_ms: u64,
-}
-
-/// Radar 边动画在“当前帧”应如何渲染（纯渲染计划，可单测）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HatGraphRadarEdgeRenderPlan {
-    /// 用 base 色从 path[0..base_steps] 做高亮（reveal 阶段为部分，reveal 后为全量）。
-    pub base_steps: usize,
-    /// 扫描头的起点（沿 path 的索引）。
-    pub head_start: Option<usize>,
-    /// 扫描头的长度（以 cell 数计）。
-    pub head_len: usize,
-    /// 扫描头是否允许环绕（reveal 完成后为 true）。
-    pub head_wrap: bool,
-}
-
-/// 计算 Radar 边动画的渲染计划。
-///
-/// 规则：
-/// - reveal 阶段：base 只亮到当前进度；head 贴着 reveal 前沿（更亮、更醒目）
-/// - reveal 完成后：base 全亮；head 以固定速度循环移动（直到目标 hat 退出 Running 才会被上层清理）
-pub(crate) fn plan_hat_graph_radar_edge_animation(
-    elapsed: Duration,
-    path_len: usize,
-    reveal_step_ms: u64,
-    head_step_ms: u64,
-    head_len: usize,
-) -> HatGraphRadarEdgeRenderPlan {
-    if path_len == 0 {
-        return HatGraphRadarEdgeRenderPlan {
-            base_steps: 0,
-            head_start: None,
-            head_len: 0,
-            head_wrap: false,
-        };
-    }
-
-    let elapsed_ms = elapsed.as_millis();
-    let reveal_step_ms = reveal_step_ms.max(1);
-    let head_step_ms = head_step_ms.max(1);
-
-    let total_steps = (elapsed_ms / u128::from(reveal_step_ms)) as usize;
-    let revealed = total_steps.min(path_len);
-
-    // reveal 阶段：head 贴着前沿，不环绕
-    if revealed < path_len {
-        if revealed == 0 {
-            return HatGraphRadarEdgeRenderPlan {
-                base_steps: 0,
-                head_start: None,
-                head_len: 0,
-                head_wrap: false,
-            };
-        }
-
-        let head_len = head_len.min(revealed);
-        let head_start = revealed.saturating_sub(head_len);
-        return HatGraphRadarEdgeRenderPlan {
-            base_steps: revealed,
-            head_start: Some(head_start),
-            head_len,
-            head_wrap: false,
-        };
-    }
-
-    // reveal 完成：base 全亮；head 循环扫描
-    let reveal_total_ms =
-        u128::from(reveal_step_ms).saturating_mul(u128::try_from(path_len).unwrap_or(u128::MAX));
-    let after_reveal_ms = elapsed_ms.saturating_sub(reveal_total_ms);
-    let head_ticks = (after_reveal_ms / u128::from(head_step_ms)) as usize;
-    let head_start = head_ticks % path_len;
-    let head_len = head_len.min(path_len);
-
-    HatGraphRadarEdgeRenderPlan {
-        base_steps: path_len,
-        head_start: Some(head_start),
-        head_len,
-        head_wrap: true,
-    }
-}
-
-fn sanitize_mermaid_identifier(raw: &str) -> String {
-    // 说明：
-    // - Radar 的 meta 里边/节点引用的是 Mermaid “节点 ID”（例如 Hat_builder）；
-    // - 该规则必须与 `ralph-cli` / `ralph-tui::app.rs` 的生成逻辑一致，否则匹配不到边。
-    //
-    // 规则：保守地只允许 ASCII [A-Za-z0-9_]，其余字符全部移除。
-    let mut out = String::new();
-    for c in raw.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            out.push(c);
-        }
-    }
-
-    if out.is_empty() {
-        "hat".to_string()
-    } else {
-        out
-    }
-}
-
-fn mermaid_hat_node_id(hat_id: &str) -> String {
-    // 与 `crates/ralph-cli/src/hats.rs#mermaid_hat_node_id` / `crates/ralph-tui/src/app.rs` 保持一致：
-    // - 加前缀避免与 Start/Complete 等节点名冲突；
-    // - 避免 hat_id 以数字开头触发 Mermaid 标识符解析歧义。
-    format!("Hat_{}", sanitize_mermaid_identifier(hat_id))
-}
-
-#[derive(Debug, Clone)]
-pub struct HatGraphRadar {
-    /// 小窗（雷达）展示：更紧凑的 ASCII 图（通常 padding=0）。
-    pub ascii_compact: String,
-    /// 大窗（放大）展示：更可读的 ASCII 图（通常默认 padding）。
-    pub ascii_full: String,
-    /// compact 视图的 meta（可选：渲染器不支持/注入失败时允许降级为无高亮/无动画）。
-    pub meta_compact: Option<HatGraphRadarMeta>,
-    /// full 视图的 meta（可选：同上）。
-    pub meta_full: Option<HatGraphRadarMeta>,
-}
-
-/// TUI 的状态更新事件（用于 observer → channel → reducer）。
-#[derive(Debug, Clone)]
 pub enum TuiUpdate {
     /// 并行：注册初始实例（Created）。
     ParallelRegisterInstance {
@@ -408,95 +168,6 @@ pub enum TuiUpdate {
     ParallelEvent(Event),
     /// 并行：UI 内部提示（例如写事件文件失败）。
     ParallelStatus(String),
-}
-
-// ============================================================================
-// TaskSummary - Summary of a single task for TUI display
-// ============================================================================
-
-/// Summary of a task for TUI display.
-/// Contains only the fields needed for rendering.
-#[derive(Debug, Clone, Default)]
-pub struct TaskSummary {
-    /// Task identifier (e.g., "task-1737372000-a1b2").
-    pub id: String,
-    /// Task title/description.
-    pub title: String,
-    /// Task status (e.g., "open", "closed", "blocked").
-    pub status: String,
-}
-
-impl TaskSummary {
-    /// Creates a new task summary.
-    pub fn new(id: impl Into<String>, title: impl Into<String>, status: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            title: title.into(),
-            status: status.into(),
-        }
-    }
-}
-
-// ============================================================================
-// TaskCounts - Aggregate task statistics for TUI display
-// ============================================================================
-
-/// Aggregate task statistics for TUI display.
-#[derive(Debug, Clone, Default)]
-pub struct TaskCounts {
-    /// Total number of tasks.
-    pub total: usize,
-    /// Number of open tasks.
-    pub open: usize,
-    /// Number of closed tasks.
-    pub closed: usize,
-    /// Number of ready (unblocked) tasks.
-    pub ready: usize,
-}
-
-impl TaskCounts {
-    /// Creates new task counts.
-    pub fn new(total: usize, open: usize, closed: usize, ready: usize) -> Self {
-        Self {
-            total,
-            open,
-            closed,
-            ready,
-        }
-    }
-}
-
-// ============================================================================
-// SearchState - Search functionality for TUI content
-// ============================================================================
-
-/// Search state for finding and navigating matches in TUI content.
-/// Tracks the current query, match positions, and navigation index.
-#[derive(Debug, Default)]
-pub struct SearchState {
-    /// Current search query (None when no active search).
-    pub query: Option<String>,
-    /// Match positions as (line_index, char_offset) pairs.
-    pub matches: Vec<(usize, usize)>,
-    /// Index into matches vector for current match.
-    pub current_match: usize,
-    /// Whether search input mode is active (user is typing query).
-    pub search_mode: bool,
-}
-
-impl SearchState {
-    /// Creates a new empty search state.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Clears all search state.
-    pub fn clear(&mut self) {
-        self.query = None;
-        self.matches.clear();
-        self.current_match = 0;
-        self.search_mode = false;
-    }
 }
 
 /// Observable state derived from loop events.
@@ -522,10 +193,6 @@ pub struct TuiState {
     pub show_help: bool,
     /// Whether in scroll mode.
     pub in_scroll_mode: bool,
-    /// Current search query (if in search input mode).
-    pub search_query: String,
-    /// Search direction (true = forward, false = backward).
-    pub search_forward: bool,
     /// Maximum iterations from config.
     pub max_iterations: Option<u32>,
     /// Idle timeout countdown.
@@ -535,32 +202,7 @@ pub struct TuiState {
     /// Value: (HatId, display name including emoji)
     hat_map: HashMap<String, (HatId, String)>,
 
-    // ========================================================================
-    // Iteration Management (new fields for TUI refactor)
-    // ========================================================================
-    /// Content buffers for each iteration.
-    pub iterations: Vec<IterationBuffer>,
-    /// Index of the iteration currently being viewed (0-indexed).
-    pub current_view: usize,
-    /// Whether to automatically follow the latest iteration.
-    pub following_latest: bool,
-    /// Alert about a new iteration (shown when viewing history and new iteration arrives).
-    /// Contains the iteration number to alert about. Cleared when navigating to latest.
-    pub new_iteration_alert: Option<usize>,
-    /// 串行输出视图的当前“光标”（用于鼠标/键盘选择）。
-    pub serial_output_cursor: ScreenPos,
-    /// 串行输出视图的选择区域。
-    pub serial_output_selection: Option<ScreenSelection>,
-    /// 鼠标是否正在串行输出视图内拖拽选择。
-    pub serial_output_selecting: bool,
-    /// 串行输出复制结果提示,显示在 footer 左侧。
-    pub serial_output_status: Option<String>,
 
-    // ========================================================================
-    // Search State
-    // ========================================================================
-    /// Search state for finding and navigating matches in iteration content.
-    pub search_state: SearchState,
 
     // ========================================================================
     // Completion State
@@ -570,25 +212,19 @@ pub struct TuiState {
     /// Frozen elapsed time when loop completed (timer stops at this value).
     pub final_iteration_elapsed: Option<Duration>,
 
-    // ========================================================================
-    // Task Tracking State
-    // ========================================================================
-    /// Aggregate task counts for display in TUI widgets.
-    pub task_counts: TaskCounts,
-    /// Currently active task (if any) for display in TUI widgets.
-    pub active_task: Option<TaskSummary>,
+
 
     // ========================================================================
-    // Hat Graph Radar (Top-right overlay)
+    // 领域切片 (独立变化 + 独立测试)
     // ========================================================================
-    /// 右上角 hats 拓扑雷达图（若 CLI 注入则显示）。
-    pub hat_graph_radar: Option<HatGraphRadar>,
-    /// 是否处于“放大”视图（按键 `p` 切换）。
-    pub hat_graph_zoomed: bool,
-    /// Radar 的“最近业务事件”（用于推断某个 Running hat 的 cause event）。
-    pub hat_graph_recent_events: VecDeque<HatGraphRadarRecentEvent>,
-    /// Radar 的“按 Running 目标驱动”的边动画（target_hat -> animation）。
-    pub hat_graph_edge_animations: HashMap<HatId, HatGraphRadarEdgeAnimation>,
+    /// 任务计数与活跃任务。
+    pub task: TaskSlice,
+    /// Hat Graph Radar 可视化状态机。
+    pub radar: RadarSlice,
+    /// 搜索状态与匹配导航。
+    pub search: SearchSlice,
+    /// 串行输出缓冲(迭代/浏览/选择)。
+    pub output: OutputSlice,
 
     // ========================================================================
     // Parallel Mode State
@@ -611,33 +247,16 @@ impl TuiState {
             last_event_at: None,
             show_help: false,
             in_scroll_mode: false,
-            search_query: String::new(),
-            search_forward: true,
             max_iterations: None,
             idle_timeout_remaining: None,
             hat_map: HashMap::new(),
-            // Iteration management
-            iterations: Vec::new(),
-            current_view: 0,
-            following_latest: true,
-            new_iteration_alert: None,
-            serial_output_cursor: ScreenPos::default(),
-            serial_output_selection: None,
-            serial_output_selecting: false,
-            serial_output_status: None,
-            // Search state
-            search_state: SearchState::new(),
+            task: TaskSlice::default(),
+            radar: RadarSlice::default(),
+            search: SearchSlice::default(),
+            output: OutputSlice::default(),
             // Completion state
             loop_completed: false,
             final_iteration_elapsed: None,
-            // Task tracking state
-            task_counts: TaskCounts::default(),
-            active_task: None,
-            // Hat graph radar
-            hat_graph_radar: None,
-            hat_graph_zoomed: false,
-            hat_graph_recent_events: VecDeque::new(),
-            hat_graph_edge_animations: HashMap::new(),
             // Parallel mode
             parallel: ParallelTuiState::default(),
         }
@@ -664,33 +283,16 @@ impl TuiState {
             last_event_at: None,
             show_help: false,
             in_scroll_mode: false,
-            search_query: String::new(),
-            search_forward: true,
             max_iterations: None,
             idle_timeout_remaining: None,
             hat_map,
-            // Iteration management
-            iterations: Vec::new(),
-            current_view: 0,
-            following_latest: true,
-            new_iteration_alert: None,
-            serial_output_cursor: ScreenPos::default(),
-            serial_output_selection: None,
-            serial_output_selecting: false,
-            serial_output_status: None,
-            // Search state
-            search_state: SearchState::new(),
+            task: TaskSlice::default(),
+            radar: RadarSlice::default(),
+            search: SearchSlice::default(),
+            output: OutputSlice::default(),
             // Completion state
             loop_completed: false,
             final_iteration_elapsed: None,
-            // Task tracking state
-            task_counts: TaskCounts::default(),
-            active_task: None,
-            // Hat graph radar
-            hat_graph_radar: None,
-            hat_graph_zoomed: false,
-            hat_graph_recent_events: VecDeque::new(),
-            hat_graph_edge_animations: HashMap::new(),
             // Parallel mode
             parallel: ParallelTuiState::default(),
         }
@@ -800,7 +402,7 @@ impl TuiState {
                         && state != HatInstanceState::Running
                         && !self.is_hat_running_parallel(hat_id)
                     {
-                        self.hat_graph_edge_animations.remove(&HatId::new(hat_id));
+                        self.radar.hat_graph_edge_animations.remove(&HatId::new(hat_id));
                     }
                 }
             }
@@ -829,123 +431,21 @@ impl TuiState {
     }
 
     fn record_hat_graph_radar_event(&mut self, event: &Event, now: Instant) {
-        // 说明：
-        // - 你明确指出 event 线路动画应是“因果可视化”，不是 gate/human 这类控制面噪音；
-        // - 因此这里只记录“业务事件”，并且必须能推导出发布者 hat（source/source_instance）。
-        let topic = event.topic.as_str();
-        if topic.starts_with("gate.") || topic == "human.message" || topic == "reply.human.message"
-        {
-            return;
-        }
-
-        let source_hat = if let Some(source_hat) = event.source.clone() {
-            source_hat
-        } else if let Some(source_instance) = event.source_instance.as_ref()
-            && let Some(hat_id) = source_instance.split_hat_id()
-        {
-            HatId::new(hat_id)
-        } else {
-            return;
-        };
-
-        self.hat_graph_recent_events
-            .push_back(HatGraphRadarRecentEvent {
-                source_hat,
-                topic: topic.to_string(),
-                observed_at: now,
-            });
-
-        // 容量上限：按条数裁剪（保证常数级内存）。
-        while self.hat_graph_recent_events.len() > HAT_GRAPH_RECENT_EVENT_MAX {
-            let _ = self.hat_graph_recent_events.pop_front();
-        }
+        self.radar.record_event(event, now);
     }
 
+    /// Running hat 跃迁时启动因果边动画(壳协调: 从 parallel 域拿 running 状态)。
     fn maybe_start_hat_graph_edge_animation_for_running_hat(
         &mut self,
         target_hat: HatId,
         now: Instant,
     ) {
-        // 说明：
-        // - 只有 Radar + meta 存在时，才有条件做“因果边动画”；
-        // - 这里使用 meta 做“结构匹配”，避免靠字符串/ANSI 解析导致脆弱。
-        let Some(radar) = self.hat_graph_radar.as_ref() else {
-            return;
-        };
-        let Some(meta) = radar.meta_full.as_ref().or(radar.meta_compact.as_ref()) else {
-            return;
-        };
-
-        // 目标节点：Hat_{id}
-        let target_node_id = mermaid_hat_node_id(target_hat.as_str());
-
-        // 从最近事件里倒序找：谁能在图上连到 target（from+topic+to 完全匹配）。
-        let mut cause: Option<(HatId, String)> = None;
-        for e in self.hat_graph_recent_events.iter().rev() {
-            if now.saturating_duration_since(e.observed_at) > HAT_GRAPH_CAUSE_LOOKBACK {
-                break;
-            }
-
-            let from_node_id = mermaid_hat_node_id(e.source_hat.as_str());
-            let topic = e.topic.as_str();
-            let matches = meta
-                .matching_edges_exact(&from_node_id, topic, &target_node_id)
-                .next()
-                .is_some();
-            if matches {
-                cause = Some((e.source_hat.clone(), e.topic.clone()));
-                break;
-            }
-        }
-
-        let Some((source_hat, topic)) = cause else {
-            return;
-        };
-
-        // 计算 step_ms：
-        // - 默认 `HAT_GRAPH_EDGE_ANIMATION_STEP_MS`（30ms / cell）
-        // - 如果路径很长，则加速（缩小 step_ms），让 reveal 在一个合理窗口内完成
-        let from_node_id = mermaid_hat_node_id(source_hat.as_str());
-        let max_len = meta
-            .matching_edges_exact(&from_node_id, topic.as_str(), &target_node_id)
-            .map(|edge| edge.path.len())
-            .max()
-            .unwrap_or(0);
-
-        let step_ms = if max_len == 0 {
-            HAT_GRAPH_EDGE_ANIMATION_STEP_MS
-        } else {
-            let adaptive = HAT_GRAPH_EDGE_ANIMATION_MAX_REVEAL_MS / max_len as u64;
-            adaptive.clamp(1, HAT_GRAPH_EDGE_ANIMATION_STEP_MS.max(1))
-        };
-
-        self.hat_graph_edge_animations.insert(
-            target_hat.clone(),
-            HatGraphRadarEdgeAnimation {
-                target_hat,
-                source_hat,
-                topic,
-                started_at: now,
-                step_ms,
-            },
-        );
+        self.radar.maybe_start_edge_animation(target_hat, now);
     }
 
-    /// 每帧（render tick）推进 Radar 的可视化状态：
-    /// - 清理过旧的 recent events（用于 cause 推断）
-    /// - 清理无效的边动画（目标不再 Running）
+    /// 每帧推进 Radar 动画状态(壳计算 running_hats 注入)。
     pub(crate) fn tick_hat_graph_radar_animation(&mut self, now: Instant) {
-        // 1) recent events：只保留 lookback 窗口内的（越界的直接丢弃）
-        while let Some(front) = self.hat_graph_recent_events.front() {
-            if now.saturating_duration_since(front.observed_at) > HAT_GRAPH_CAUSE_LOOKBACK {
-                let _ = self.hat_graph_recent_events.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // 2) edge animations：目标不 Running 时移除
-        let running_hats: HashSet<String> = if self.mode == TuiMode::Parallel {
+        let running_hats = if self.mode == TuiMode::Parallel {
             let mut hats = HashSet::new();
             for (instance_id, view) in &self.parallel.instances {
                 if view.state != HatInstanceState::Running {
@@ -955,20 +455,13 @@ impl TuiState {
                     hats.insert(hat_id.to_string());
                 }
             }
-            hats
+            Some(hats)
         } else {
-            HashSet::new()
+            None
         };
-
-        self.hat_graph_edge_animations.retain(|target_hat, _anim| {
-            if self.mode == TuiMode::Parallel {
-                return running_hats.contains(target_hat.as_str());
-            }
-            true
-        });
+        self.radar.tick(now, running_hats.as_ref());
     }
 
-    /// Returns formatted hat display (emoji + name).
     pub fn get_pending_hat_display(&self) -> String {
         self.pending_hat
             .as_ref()
@@ -1006,22 +499,22 @@ impl TuiState {
 
     /// Returns a reference to the current task counts.
     pub fn get_task_counts(&self) -> &TaskCounts {
-        &self.task_counts
+        &self.task.task_counts
     }
 
     /// Returns a reference to the active task, if any.
     pub fn get_active_task(&self) -> Option<&TaskSummary> {
-        self.active_task.as_ref()
+        self.task.active_task.as_ref()
     }
 
     /// Updates the task counts.
     pub fn set_task_counts(&mut self, counts: TaskCounts) {
-        self.task_counts = counts;
+        self.task.task_counts = counts;
     }
 
     /// Sets the active task.
     pub fn set_active_task(&mut self, task: Option<TaskSummary>) {
-        self.active_task = task;
+        self.task.active_task = task;
     }
 
     // ========================================================================
@@ -1030,22 +523,22 @@ impl TuiState {
 
     /// 注入 hats graph radar 的 ASCII 渲染结果（由 CLI 在启动 TUI 时生成）。
     pub fn set_hat_graph_radar(&mut self, radar: HatGraphRadar) {
-        self.hat_graph_radar = Some(radar);
+        self.radar.hat_graph_radar = Some(radar);
     }
 
     /// Returns true if there are any open tasks.
     pub fn has_open_tasks(&self) -> bool {
-        self.task_counts.open > 0
+        self.task.task_counts.open > 0
     }
 
     /// Returns a formatted string for task progress display (e.g., "3/5 tasks").
     pub fn get_task_progress_display(&self) -> String {
-        if self.task_counts.total == 0 {
+        if self.task.task_counts.total == 0 {
             "No tasks".to_string()
         } else {
             format!(
                 "{}/{} tasks",
-                self.task_counts.closed, self.task_counts.total
+                self.task.task_counts.closed, self.task.task_counts.total
             )
         }
     }
@@ -1058,26 +551,65 @@ impl TuiState {
     /// If following_latest is true, current_view is updated to the new iteration.
     /// If not following, sets the new_iteration_alert to notify the user.
     pub fn start_new_iteration(&mut self) {
-        let number = (self.iterations.len() + 1) as u32;
-        self.iterations.push(IterationBuffer::new(number));
-
-        // Auto-follow if enabled
-        if self.following_latest {
-            self.current_view = self.iterations.len().saturating_sub(1);
-        } else {
-            // Alert user about new iteration when reviewing history
-            self.new_iteration_alert = Some(number as usize);
-        }
+        self.output.start_new_iteration();
     }
 
-    /// Returns a reference to the currently viewed iteration buffer.
     pub fn current_iteration(&self) -> Option<&IterationBuffer> {
-        self.iterations.get(self.current_view)
+        self.output.current_iteration()
     }
 
-    /// Returns a mutable reference to the currently viewed iteration buffer.
     pub fn current_iteration_mut(&mut self) -> Option<&mut IterationBuffer> {
-        self.iterations.get_mut(self.current_view)
+        self.output.current_iteration_mut()
+    }
+
+    pub fn clear_serial_output_selection(&mut self) {
+        self.output.clear_serial_output_selection();
+    }
+
+    pub fn start_serial_output_selection(&mut self, pos: ScreenPos) {
+        self.output.start_serial_output_selection(pos);
+    }
+
+    pub fn update_serial_output_selection_cursor(&mut self, pos: ScreenPos) {
+        self.output.update_serial_output_selection_cursor(pos);
+    }
+
+    pub fn finish_serial_output_selection(&mut self) {
+        self.output.finish_serial_output_selection();
+    }
+
+    pub fn extend_serial_output_selection_by_delta(
+        &mut self,
+        dx: i16,
+        dy: i16,
+        max_x: u16,
+        max_y: u16,
+    ) {
+        self.output.extend_serial_output_selection_by_delta(dx, dy, max_x, max_y);
+    }
+
+    pub fn current_iteration_lines_handle(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<Line<'static>>>>> {
+        self.output.current_iteration_lines_handle()
+    }
+
+    pub fn latest_iteration_lines_handle(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<Line<'static>>>>> {
+        self.output.latest_iteration_lines_handle()
+    }
+
+    pub fn navigate_next(&mut self) {
+        self.output.navigate_next();
+    }
+
+    pub fn navigate_prev(&mut self) {
+        self.output.navigate_prev();
+    }
+
+    pub fn total_iterations(&self) -> usize {
+        self.output.total_iterations()
     }
 
     /// 返回“当前可滚动输出视图”的 buffer。
@@ -1109,153 +641,29 @@ impl TuiState {
         }
     }
 
-    pub fn clear_serial_output_selection(&mut self) {
-        self.serial_output_selection = None;
-        self.serial_output_selecting = false;
-    }
-
-    pub fn start_serial_output_selection(&mut self, pos: ScreenPos) {
-        self.serial_output_cursor = pos;
-        self.serial_output_selection = Some(ScreenSelection::new(pos, pos));
-        self.serial_output_selecting = true;
-    }
-
-    pub fn update_serial_output_selection_cursor(&mut self, pos: ScreenPos) {
-        self.serial_output_cursor = pos;
-        if let Some(sel) = self.serial_output_selection.as_mut() {
-            sel.cursor = pos;
-        }
-    }
-
-    pub fn finish_serial_output_selection(&mut self) {
-        self.serial_output_selecting = false;
-    }
-
-    pub fn extend_serial_output_selection_by_delta(
-        &mut self,
-        dx: i16,
-        dy: i16,
-        max_x: u16,
-        max_y: u16,
-    ) {
-        if max_x == 0 || max_y == 0 {
-            return;
-        }
-
-        if self.serial_output_selection.is_none() {
-            self.serial_output_selection = Some(ScreenSelection::new(
-                self.serial_output_cursor,
-                self.serial_output_cursor,
-            ));
-        }
-
-        let Some(sel) = self.serial_output_selection.as_mut() else {
-            return;
-        };
-
-        let next_x = i32::from(sel.cursor.x).saturating_add(i32::from(dx));
-        let next_y = i32::from(sel.cursor.y).saturating_add(i32::from(dy));
-
-        let clamped_x = next_x.clamp(0, i32::from(max_x.saturating_sub(1))) as u16;
-        let clamped_y = next_y.clamp(0, i32::from(max_y.saturating_sub(1))) as u16;
-
-        sel.cursor = ScreenPos {
-            x: clamped_x,
-            y: clamped_y,
-        };
-        self.serial_output_cursor = sel.cursor;
-    }
-
-    /// Returns a shared handle to the current iteration's lines buffer.
-    ///
-    /// This allows stream handlers to write directly to the buffer,
-    /// enabling real-time streaming to the TUI during execution.
-    pub fn current_iteration_lines_handle(
-        &self,
-    ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<Line<'static>>>>> {
-        self.iterations
-            .get(self.current_view)
-            .map(|buffer| buffer.lines_handle())
-    }
-
-    /// Returns a shared handle to the latest iteration's lines buffer.
-    ///
-    /// This should be used when writing output from the currently executing
-    /// iteration, regardless of which iteration the user is viewing.
-    /// This prevents output from being written to the wrong iteration when
-    /// the user is reviewing an older iteration.
-    pub fn latest_iteration_lines_handle(
-        &self,
-    ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<Line<'static>>>>> {
-        self.iterations.last().map(|buffer| buffer.lines_handle())
-    }
-
-    /// Navigates to the next iteration (if not at the last one).
-    /// If reaching the last iteration, re-enables following_latest and clears alerts.
-    pub fn navigate_next(&mut self) {
-        if self.iterations.is_empty() {
-            return;
-        }
-        let max_index = self.iterations.len().saturating_sub(1);
-        if self.current_view < max_index {
-            self.current_view += 1;
-            // Re-enable following when reaching the latest
-            if self.current_view == max_index {
-                self.following_latest = true;
-                self.new_iteration_alert = None;
-            }
-        }
-    }
-
-    /// Navigates to the previous iteration (if not at the first one).
-    /// Disables following_latest when navigating backwards.
-    pub fn navigate_prev(&mut self) {
-        if self.current_view > 0 {
-            self.current_view -= 1;
-            self.following_latest = false;
-        }
-    }
-
-    /// Returns the total number of iterations.
-    pub fn total_iterations(&self) -> usize {
-        self.iterations.len()
-    }
-
-    // ========================================================================
-    // Search Methods
-    // ========================================================================
-
-    /// Searches for the given query in the current iteration's content.
-    /// Populates matches with (line_index, char_offset) pairs.
-    /// Search is case-insensitive.
+    /// 在当前迭代/并行 buffer 中搜索(壳协调: 收集行 → 切片计算 → 跳转)。
     pub fn search(&mut self, query: &str) {
-        self.search_state.query = Some(query.to_string());
-        self.search_state.matches.clear();
-        self.search_state.current_match = 0;
-
-        let query_lower = query.to_lowercase();
-
-        // Collect matches first (avoid borrow conflicts)
-        let matches: Vec<(usize, usize)> = match self.mode {
+        let lines = match self.mode {
             TuiMode::Serial => self
-                .iterations
-                .get(self.current_view)
-                .and_then(|buffer| buffer.lines.lock().ok().map(|lines| lines.clone()))
-                .map(|lines| {
-                    let mut found = Vec::new();
-                    for (line_idx, line) in lines.iter().enumerate() {
-                        let line_text: String =
-                            line.spans.iter().map(|s| s.content.as_ref()).collect();
-                        let line_lower = line_text.to_lowercase();
-
-                        let mut search_start = 0;
-                        while let Some(pos) = line_lower[search_start..].find(&query_lower) {
-                            let char_offset = search_start + pos;
-                            found.push((line_idx, char_offset));
-                            search_start = char_offset + query_lower.len();
-                        }
-                    }
-                    found
+                .output
+                .current_iteration()
+                .map(|buffer| {
+                    buffer
+                        .lines
+                        .lock()
+                        .ok()
+                        .map(|lines| {
+                            lines
+                                .iter()
+                                .map(|line| {
+                                    line.spans
+                                        .iter()
+                                        .map(|span| span.content.as_ref())
+                                        .collect::<String>()
+                                })
+                                .collect::<Vec<String>>()
+                        })
+                        .unwrap_or_default()
                 })
                 .unwrap_or_default(),
             TuiMode::Parallel => {
@@ -1264,82 +672,55 @@ impl TuiState {
                     .selected_instance()
                     .and_then(|i| i.current_job_buffer())
                 else {
-                    self.search_state.matches = Vec::new();
+                    self.search.clear();
                     return;
                 };
-
-                let mut found = Vec::new();
-                for (line_idx, line) in buffer.lines.iter().enumerate() {
-                    let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                    let line_lower = line_text.to_lowercase();
-
-                    let mut search_start = 0;
-                    while let Some(pos) = line_lower[search_start..].find(&query_lower) {
-                        let char_offset = search_start + pos;
-                        found.push((line_idx, char_offset));
-                        search_start = char_offset + query_lower.len();
-                    }
-                }
-                found
+                buffer
+                    .lines
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<String>>()
             }
         };
 
-        self.search_state.matches = matches;
-
-        // Jump to first match if any exist
-        if !self.search_state.matches.is_empty() {
-            self.jump_to_current_match();
-        }
+        self.search.search_lines(query, &lines);
+        self.jump_to_current_match();
     }
 
-    /// Navigates to the next match, cycling back to the first if at the end.
+    /// 前进到下一个匹配。
     pub fn next_match(&mut self) {
-        if self.search_state.matches.is_empty() {
-            return;
-        }
-
-        self.search_state.current_match =
-            (self.search_state.current_match + 1) % self.search_state.matches.len();
+        self.search.next();
         self.jump_to_current_match();
     }
 
-    /// Navigates to the previous match, cycling to the last if at the beginning.
+    /// 后退到上一个匹配。
     pub fn prev_match(&mut self) {
-        if self.search_state.matches.is_empty() {
-            return;
-        }
-
-        if self.search_state.current_match == 0 {
-            self.search_state.current_match = self.search_state.matches.len() - 1;
-        } else {
-            self.search_state.current_match -= 1;
-        }
+        self.search.prev();
         self.jump_to_current_match();
     }
 
-    /// Clears the search state.
+    /// 清空搜索状态。
     pub fn clear_search(&mut self) {
-        self.search_state.clear();
+        self.search.clear();
     }
 
-    /// Jumps to the current match by adjusting scroll_offset to show the match line.
+    /// 跳到当前匹配位置(调整滚动)。
     fn jump_to_current_match(&mut self) {
-        if self.search_state.matches.is_empty() {
+        let Some((line_idx, _)) = self.search.current() else {
             return;
-        }
+        };
 
-        let (line_idx, _) = self.search_state.matches[self.search_state.current_match];
-
-        // Adjust scroll to show the match line
-        // Use a default viewport height for calculation (will be overridden by actual render)
+        // 使用默认视口高度(渲染时会用真实高度覆盖)。
         let viewport_height = 20;
         if let Some(mut buffer) = self.current_output_buffer_mut() {
-            // If the match line is above the current view, scroll up to it
             if line_idx < buffer.scroll_offset() {
                 buffer.set_scroll_offset_clamped(line_idx);
-            }
-            // If the match line is below the current view, scroll down to show it
-            else if line_idx >= buffer.scroll_offset() + viewport_height {
+            } else if line_idx >= buffer.scroll_offset() + viewport_height {
                 buffer.set_scroll_offset_clamped(line_idx.saturating_sub(viewport_height / 2));
             }
         }
@@ -1349,180 +730,6 @@ impl TuiState {
 impl Default for TuiState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ============================================================================
-// IterationBuffer - Content storage for a single iteration
-// ============================================================================
-
-use ratatui::text::Line;
-use std::sync::{Arc, Mutex};
-
-/// Stores formatted output content for a single Ralph iteration.
-/// Each iteration has its own buffer with independent scroll state.
-///
-/// The `lines` field is wrapped in `Arc<Mutex<>>` to allow sharing
-/// with stream handlers during execution, enabling real-time streaming
-/// to the TUI instead of batch transfer after execution completes.
-#[derive(Debug)]
-pub struct IterationBuffer {
-    /// Iteration number (1-indexed for display)
-    pub number: u32,
-    /// Formatted lines of output (shared for streaming)
-    pub lines: Arc<Mutex<Vec<Line<'static>>>>,
-    /// Scroll position within this buffer
-    pub scroll_offset: usize,
-    /// Whether to auto-scroll to bottom as new content arrives.
-    /// Starts true, becomes false when user scrolls up, restored when user
-    /// scrolls to bottom (G key) or manually scrolls down to reach bottom.
-    pub following_bottom: bool,
-}
-
-impl IterationBuffer {
-    /// Creates a new buffer for the given iteration number.
-    pub fn new(number: u32) -> Self {
-        Self {
-            number,
-            lines: Arc::new(Mutex::new(Vec::new())),
-            scroll_offset: 0,
-            following_bottom: true, // Start following bottom for auto-scroll
-        }
-    }
-
-    /// Returns a shared handle to the lines buffer for streaming.
-    ///
-    /// This allows stream handlers to write directly to the buffer,
-    /// enabling real-time streaming to the TUI.
-    pub fn lines_handle(&self) -> Arc<Mutex<Vec<Line<'static>>>> {
-        Arc::clone(&self.lines)
-    }
-
-    /// Appends a line to the buffer.
-    pub fn append_line(&mut self, line: Line<'static>) {
-        if let Ok(mut lines) = self.lines.lock() {
-            lines.push(line);
-        }
-    }
-
-    /// 追加一行，并在超过上限时丢弃最旧的行（近似 ring buffer）。
-    ///
-    /// 说明：
-    /// - 该策略用于“长跑并行输出”，避免内存无限增长。
-    /// - 丢弃旧行时，需要同步调整 scroll_offset，避免越界。
-    pub fn append_line_capped(&mut self, line: Line<'static>, max_lines: usize) {
-        if max_lines == 0 {
-            return;
-        }
-
-        let Ok(mut lines) = self.lines.lock() else {
-            return;
-        };
-
-        lines.push(line);
-        if lines.len() <= max_lines {
-            return;
-        }
-
-        let overflow = lines.len().saturating_sub(max_lines);
-        if overflow == 0 {
-            return;
-        }
-
-        // 移除最旧的 overflow 行
-        lines.drain(0..overflow);
-        self.scroll_offset = self.scroll_offset.saturating_sub(overflow);
-    }
-
-    /// 替换整段输出内容，并在超过上限时丢弃最旧的行。
-    ///
-    /// 说明：
-    /// - 并行 Supervisor TUI 需要“保留原始输出行 → 重新渲染”为 styled lines，
-    ///   因此每次追加输出后，可能会对当前 job 的整段内容做一次全量重渲染。
-    /// - 为了避免内存无限增长，这里同样需要一个按行上限的裁剪策略。
-    pub fn replace_lines_capped(&mut self, mut new_lines: Vec<Line<'static>>, max_lines: usize) {
-        if max_lines == 0 {
-            return;
-        }
-
-        if new_lines.len() > max_lines {
-            let overflow = new_lines.len().saturating_sub(max_lines);
-            new_lines.drain(0..overflow);
-            self.scroll_offset = self.scroll_offset.saturating_sub(overflow);
-        }
-
-        // 防御性：避免 scroll_offset 指向越界位置导致“看起来像空白输出”。
-        if new_lines.is_empty() {
-            self.scroll_offset = 0;
-        } else {
-            self.scroll_offset = self.scroll_offset.min(new_lines.len().saturating_sub(1));
-        }
-
-        if let Ok(mut lines) = self.lines.lock() {
-            *lines = new_lines;
-        }
-    }
-
-    /// Returns the total number of lines in the buffer.
-    pub fn line_count(&self) -> usize {
-        self.lines.lock().map(|l| l.len()).unwrap_or(0)
-    }
-
-    /// Returns a clone of the visible lines based on scroll offset and viewport height.
-    ///
-    /// Note: Returns owned Vec instead of slice due to interior mutability.
-    pub fn visible_lines(&self, viewport_height: usize) -> Vec<Line<'static>> {
-        let Ok(lines) = self.lines.lock() else {
-            return Vec::new();
-        };
-        if lines.is_empty() {
-            return Vec::new();
-        }
-        let start = self.scroll_offset.min(lines.len());
-        let end = (start + viewport_height).min(lines.len());
-        lines[start..end].to_vec()
-    }
-
-    /// Scrolls up by one line.
-    /// Disables auto-scroll since user is moving away from bottom.
-    pub fn scroll_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
-        self.following_bottom = false;
-    }
-
-    /// Scrolls down by one line, respecting the viewport bounds.
-    /// Re-enables auto-scroll if user reaches the bottom.
-    pub fn scroll_down(&mut self, viewport_height: usize) {
-        let max_scroll = self.max_scroll_offset(viewport_height);
-        if self.scroll_offset < max_scroll {
-            self.scroll_offset += 1;
-        }
-        // Re-enable following if user scrolled to or past the bottom
-        if self.scroll_offset >= max_scroll {
-            self.following_bottom = true;
-        }
-    }
-
-    /// Scrolls to the top of the buffer.
-    /// Disables auto-scroll since user is moving away from bottom.
-    pub fn scroll_top(&mut self) {
-        self.scroll_offset = 0;
-        self.following_bottom = false;
-    }
-
-    /// Scrolls to the bottom of the buffer.
-    /// Re-enables auto-scroll since user explicitly went to bottom.
-    pub fn scroll_bottom(&mut self, viewport_height: usize) {
-        self.scroll_offset = self.max_scroll_offset(viewport_height);
-        self.following_bottom = true;
-    }
-
-    /// Calculates the maximum scroll offset for the given viewport height.
-    fn max_scroll_offset(&self, viewport_height: usize) -> usize {
-        self.lines
-            .lock()
-            .map(|l| l.len().saturating_sub(viewport_height))
-            .unwrap_or(0)
     }
 }
 
@@ -1933,9 +1140,9 @@ mod tests {
         let event = Event::new("build.task", "").with_source(HatId::new("builder"));
         state.update(&event);
 
-        assert_eq!(state.hat_graph_recent_events.len(), 1);
+        assert_eq!(state.radar.hat_graph_recent_events.len(), 1);
         let last = state
-            .hat_graph_recent_events
+            .radar.hat_graph_recent_events
             .back()
             .expect("recent event should exist");
         assert_eq!(last.source_hat.as_str(), "builder");
@@ -2005,7 +1212,7 @@ mod tests {
         });
 
         let anim = state
-            .hat_graph_edge_animations
+            .radar.hat_graph_edge_animations
             .get(&HatId::new("builder"))
             .expect("edge animation should be started when builder enters Running");
         assert_eq!(anim.source_hat.as_str(), "planner");
@@ -2019,7 +1226,7 @@ mod tests {
         state.tick_hat_graph_radar_animation(future);
         assert!(
             state
-                .hat_graph_edge_animations
+                .radar.hat_graph_edge_animations
                 .contains_key(&HatId::new("builder")),
             "edge animation should persist while target hat remains Running"
         );
@@ -2031,7 +1238,7 @@ mod tests {
         });
         assert!(
             !state
-                .hat_graph_edge_animations
+                .radar.hat_graph_edge_animations
                 .contains_key(&HatId::new("builder")),
             "edge animation should be cancelled when builder is no longer Running"
         );
@@ -2080,7 +1287,7 @@ mod tests {
         let head_len = 3;
 
         // 0ms：还没开始 reveal
-        let plan = plan_hat_graph_radar_edge_animation(
+        let plan = radar::plan_hat_graph_radar_edge_animation(
             Duration::from_millis(0),
             path_len,
             reveal_step_ms,
@@ -2091,7 +1298,7 @@ mod tests {
         assert_eq!(plan.head_start, None);
 
         // 25ms：reveal 了 2 个 cell，head 贴着前沿（不环绕）
-        let plan = plan_hat_graph_radar_edge_animation(
+        let plan = radar::plan_hat_graph_radar_edge_animation(
             Duration::from_millis(25),
             path_len,
             reveal_step_ms,
@@ -2104,7 +1311,7 @@ mod tests {
         assert!(!plan.head_wrap);
 
         // 100ms：reveal 刚好完成（10*10ms），进入扫描态：base 全亮，head 从起点开始跑
-        let plan = plan_hat_graph_radar_edge_animation(
+        let plan = radar::plan_hat_graph_radar_edge_animation(
             Duration::from_millis(100),
             path_len,
             reveal_step_ms,
@@ -2117,7 +1324,7 @@ mod tests {
         assert!(plan.head_wrap);
 
         // 150ms：after_reveal=50ms，head 前进 1 格
-        let plan = plan_hat_graph_radar_edge_animation(
+        let plan = radar::plan_hat_graph_radar_edge_animation(
             Duration::from_millis(150),
             path_len,
             reveal_step_ms,
@@ -2246,7 +1453,7 @@ mod tests {
 
             // Then iterations.len() == 1 and new IterationBuffer exists
             assert_eq!(state.total_iterations(), 1);
-            assert_eq!(state.iterations[0].number, 1);
+            assert_eq!(state.output.iterations[0].number, 1);
         }
 
         #[test]
@@ -2257,9 +1464,9 @@ mod tests {
             state.start_new_iteration();
 
             assert_eq!(state.total_iterations(), 3);
-            assert_eq!(state.iterations[0].number, 1);
-            assert_eq!(state.iterations[1].number, 2);
-            assert_eq!(state.iterations[2].number, 3);
+            assert_eq!(state.output.iterations[0].number, 1);
+            assert_eq!(state.output.iterations[1].number, 2);
+            assert_eq!(state.output.iterations[2].number, 3);
         }
 
         #[test]
@@ -2269,7 +1476,7 @@ mod tests {
             state.start_new_iteration();
             state.start_new_iteration();
             state.start_new_iteration();
-            state.current_view = 1;
+            state.output.current_view = 1;
 
             // When current_iteration() is called
             let current = state.current_iteration();
@@ -2306,14 +1513,14 @@ mod tests {
             state.start_new_iteration();
             state.start_new_iteration();
             state.start_new_iteration();
-            state.current_view = 1;
-            state.following_latest = false;
+            state.output.current_view = 1;
+            state.output.following_latest = false;
 
             // When navigate_next() is called
             state.navigate_next();
 
             // Then current_view == 2
-            assert_eq!(state.current_view, 2);
+            assert_eq!(state.output.current_view, 2);
         }
 
         #[test]
@@ -2323,13 +1530,13 @@ mod tests {
             state.start_new_iteration();
             state.start_new_iteration();
             state.start_new_iteration();
-            state.current_view = 2;
+            state.output.current_view = 2;
 
             // When navigate_prev() is called
             state.navigate_prev();
 
             // Then current_view == 1
-            assert_eq!(state.current_view, 1);
+            assert_eq!(state.output.current_view, 1);
         }
 
         #[test]
@@ -2339,13 +1546,13 @@ mod tests {
             state.start_new_iteration();
             state.start_new_iteration();
             state.start_new_iteration();
-            state.current_view = 2;
+            state.output.current_view = 2;
 
             // When navigate_next() is called
             state.navigate_next();
 
             // Then current_view stays at 2
-            assert_eq!(state.current_view, 2);
+            assert_eq!(state.output.current_view, 2);
         }
 
         #[test]
@@ -2353,13 +1560,13 @@ mod tests {
             // Given TuiState with current_view = 0
             let mut state = TuiState::new();
             state.start_new_iteration();
-            state.current_view = 0;
+            state.output.current_view = 0;
 
             // When navigate_prev() is called
             state.navigate_prev();
 
             // Then current_view stays at 0
-            assert_eq!(state.current_view, 0);
+            assert_eq!(state.output.current_view, 0);
         }
 
         #[test]
@@ -2369,7 +1576,7 @@ mod tests {
             let state = TuiState::new();
 
             // Then following_latest == true
-            assert!(state.following_latest);
+            assert!(state.output.following_latest);
         }
 
         #[test]
@@ -2379,14 +1586,14 @@ mod tests {
             state.start_new_iteration();
             state.start_new_iteration();
             state.start_new_iteration();
-            state.current_view = 2;
-            state.following_latest = true;
+            state.output.current_view = 2;
+            state.output.following_latest = true;
 
             // When navigate_prev() is called
             state.navigate_prev();
 
             // Then following_latest == false
-            assert!(!state.following_latest);
+            assert!(!state.output.following_latest);
         }
 
         #[test]
@@ -2396,14 +1603,14 @@ mod tests {
             state.start_new_iteration();
             state.start_new_iteration();
             state.start_new_iteration();
-            state.current_view = 1;
-            state.following_latest = false;
+            state.output.current_view = 1;
+            state.output.following_latest = false;
 
             // When navigate_next() reaches the last iteration
             state.navigate_next(); // 1 -> 2 (last)
 
             // Then following_latest == true
-            assert!(state.following_latest);
+            assert!(state.output.following_latest);
         }
 
         #[test]
@@ -2422,12 +1629,12 @@ mod tests {
         #[test]
         fn start_new_iteration_auto_follows_latest() {
             let mut state = TuiState::new();
-            state.following_latest = true;
+            state.output.following_latest = true;
             state.start_new_iteration();
             state.start_new_iteration();
 
             // When following latest, current_view should track new iterations
-            assert_eq!(state.current_view, 1); // Index of second iteration
+            assert_eq!(state.output.current_view, 1); // Index of second iteration
         }
 
         // ========================================================================
@@ -2442,11 +1649,11 @@ mod tests {
             state.start_new_iteration();
 
             // Set different scroll offsets for each iteration
-            state.iterations[0].scroll_offset = 5;
-            state.iterations[1].scroll_offset = 0;
+            state.output.iterations[0].scroll_offset = 5;
+            state.output.iterations[1].scroll_offset = 0;
 
             // When switching between iterations
-            state.current_view = 0;
+            state.output.current_view = 0;
             assert_eq!(
                 state.current_iteration().unwrap().scroll_offset,
                 5,
@@ -2480,7 +1687,7 @@ mod tests {
             // Add content to each iteration
             for i in 0..3 {
                 for j in 0..20 {
-                    state.iterations[i].append_line(Line::from(format!(
+                    state.output.iterations[i].append_line(Line::from(format!(
                         "iter {} line {}",
                         i + 1,
                         j
@@ -2489,25 +1696,25 @@ mod tests {
             }
 
             // Set initial scroll offsets
-            state.iterations[0].scroll_offset = 3;
-            state.iterations[1].scroll_offset = 7;
-            state.iterations[2].scroll_offset = 10;
+            state.output.iterations[0].scroll_offset = 3;
+            state.output.iterations[1].scroll_offset = 7;
+            state.output.iterations[2].scroll_offset = 10;
 
             // When scrolling in iteration 2
-            state.current_view = 1;
+            state.output.current_view = 1;
             state.current_iteration_mut().unwrap().scroll_down(10);
 
             // Then only iteration 2's scroll changed
             assert_eq!(
-                state.iterations[0].scroll_offset, 3,
+                state.output.iterations[0].scroll_offset, 3,
                 "iteration 1 unchanged"
             );
             assert_eq!(
-                state.iterations[1].scroll_offset, 8,
+                state.output.iterations[1].scroll_offset, 8,
                 "iteration 2 scrolled down"
             );
             assert_eq!(
-                state.iterations[2].scroll_offset, 10,
+                state.output.iterations[2].scroll_offset, 10,
                 "iteration 3 unchanged"
             );
         }
@@ -2528,21 +1735,21 @@ mod tests {
             state.start_new_iteration(); // Iteration 3
 
             // Then new_iteration_alert is set to the new iteration number
-            assert_eq!(state.new_iteration_alert, Some(3));
+            assert_eq!(state.output.new_iteration_alert, Some(3));
         }
 
         #[test]
         fn new_iteration_alert_not_set_when_following() {
             // Given following_latest = true
             let mut state = TuiState::new();
-            state.following_latest = true;
+            state.output.following_latest = true;
             state.start_new_iteration();
 
             // When start_new_iteration() is called
             state.start_new_iteration();
 
             // Then new_iteration_alert remains None
-            assert_eq!(state.new_iteration_alert, None);
+            assert_eq!(state.output.new_iteration_alert, None);
         }
 
         #[test]
@@ -2552,16 +1759,16 @@ mod tests {
             state.start_new_iteration();
             state.start_new_iteration();
             state.start_new_iteration();
-            state.current_view = 0;
-            state.following_latest = false;
-            state.new_iteration_alert = Some(3);
+            state.output.current_view = 0;
+            state.output.following_latest = false;
+            state.output.new_iteration_alert = Some(3);
 
             // When navigation restores following_latest = true
             state.navigate_next(); // 0 -> 1
             state.navigate_next(); // 1 -> 2 (last, restores following)
 
             // Then new_iteration_alert is cleared to None
-            assert_eq!(state.new_iteration_alert, None);
+            assert_eq!(state.output.new_iteration_alert, None);
         }
 
         #[test]
@@ -2571,16 +1778,16 @@ mod tests {
             state.start_new_iteration();
             state.start_new_iteration();
             state.start_new_iteration();
-            state.current_view = 0;
-            state.following_latest = false;
-            state.new_iteration_alert = Some(3);
+            state.output.current_view = 0;
+            state.output.following_latest = false;
+            state.output.new_iteration_alert = Some(3);
 
             // When navigate_next() but not reaching last
             state.navigate_next(); // 0 -> 1
 
             // Then alert is still set (not at latest yet)
-            assert_eq!(state.new_iteration_alert, Some(3));
-            assert!(!state.following_latest);
+            assert_eq!(state.output.new_iteration_alert, Some(3));
+            assert!(!state.output.following_latest);
         }
 
         #[test]
@@ -2592,13 +1799,13 @@ mod tests {
             state.navigate_prev(); // Go back, stop following
 
             state.start_new_iteration(); // 3 arrives
-            assert_eq!(state.new_iteration_alert, Some(3));
+            assert_eq!(state.output.new_iteration_alert, Some(3));
 
             // When another iteration arrives
             state.start_new_iteration(); // 4 arrives
 
             // Then alert should show the newest
-            assert_eq!(state.new_iteration_alert, Some(4));
+            assert_eq!(state.output.new_iteration_alert, Some(4));
         }
     }
 
@@ -2625,11 +1832,11 @@ mod tests {
 
             // Then matches.len() >= 3
             assert!(
-                state.search_state.matches.len() >= 3,
+                state.search.matches.len() >= 3,
                 "expected at least 3 matches, got {}",
-                state.search_state.matches.len()
+                state.search.matches.len()
             );
-            assert_eq!(state.search_state.query, Some("error".to_string()));
+            assert_eq!(state.search.query, Some("error".to_string()));
         }
 
         #[test]
@@ -2647,7 +1854,7 @@ mod tests {
 
             // Then all 3 are found
             assert_eq!(
-                state.search_state.matches.len(),
+                state.search.matches.len(),
                 3,
                 "expected 3 case-insensitive matches"
             );
@@ -2663,13 +1870,13 @@ mod tests {
             buffer.append_line(Line::from("match two"));
             buffer.append_line(Line::from("match three"));
             state.search("match");
-            state.search_state.current_match = 2;
+            state.search.current_match = 2;
 
             // When next_match() is called
             state.next_match();
 
             // Then current_match becomes 0 (cycles back)
-            assert_eq!(state.search_state.current_match, 0);
+            assert_eq!(state.search.current_match, 0);
         }
 
         #[test]
@@ -2682,13 +1889,13 @@ mod tests {
             buffer.append_line(Line::from("match two"));
             buffer.append_line(Line::from("match three"));
             state.search("match");
-            state.search_state.current_match = 0;
+            state.search.current_match = 0;
 
             // When prev_match() is called
             state.prev_match();
 
             // Then current_match becomes 2 (cycles back)
-            assert_eq!(state.search_state.current_match, 2);
+            assert_eq!(state.search.current_match, 2);
         }
 
         #[test]
@@ -2726,15 +1933,15 @@ mod tests {
             let buffer = state.current_iteration_mut().unwrap();
             buffer.append_line(Line::from("search term here"));
             state.search("term");
-            assert!(state.search_state.query.is_some());
+            assert!(state.search.query.is_some());
 
             // When clear_search() is called
             state.clear_search();
 
             // Then query = None, matches cleared, search_mode = false
-            assert!(state.search_state.query.is_none());
-            assert!(state.search_state.matches.is_empty());
-            assert!(!state.search_state.search_mode);
+            assert!(state.search.query.is_none());
+            assert!(state.search.matches.is_empty());
+            assert!(!state.search.search_mode);
         }
 
         #[test]
@@ -2749,9 +1956,9 @@ mod tests {
             state.search("xyz");
 
             // Then matches is empty but query is set
-            assert_eq!(state.search_state.query, Some("xyz".to_string()));
-            assert!(state.search_state.matches.is_empty());
-            assert_eq!(state.search_state.current_match, 0);
+            assert_eq!(state.search.query, Some("xyz".to_string()));
+            assert!(state.search.matches.is_empty());
+            assert_eq!(state.search.current_match, 0);
         }
 
         #[test]
@@ -2764,7 +1971,7 @@ mod tests {
             state.search("anything");
 
             // Then no panic, empty matches
-            assert!(state.search_state.matches.is_empty());
+            assert!(state.search.matches.is_empty());
         }
 
         #[test]
@@ -2777,7 +1984,7 @@ mod tests {
             state.next_match();
 
             // Then no panic, current_match stays 0
-            assert_eq!(state.search_state.current_match, 0);
+            assert_eq!(state.search.current_match, 0);
         }
 
         #[test]
@@ -2793,7 +2000,7 @@ mod tests {
 
             // Then finds all 3 matches
             assert_eq!(
-                state.search_state.matches.len(),
+                state.search.matches.len(),
                 3,
                 "should find 3 matches on same line"
             );
@@ -2832,8 +2039,8 @@ mod tests {
             state.start_new_iteration(); // iteration 3
 
             // User navigates back to iteration 1
-            state.current_view = 0;
-            state.following_latest = false;
+            state.output.current_view = 0;
+            state.output.following_latest = false;
 
             // When getting line handles
             let current_handle = state.current_iteration_lines_handle();
@@ -2862,7 +2069,7 @@ mod tests {
             );
 
             // Latest (iteration 3) should have the output
-            let latest_buffer = state.iterations.last().unwrap();
+            let latest_buffer = state.output.iterations.last().unwrap();
             assert_eq!(
                 latest_buffer.lines.lock().unwrap().len(),
                 1,
@@ -2881,8 +2088,8 @@ mod tests {
             }
 
             // User navigates to iteration 3 (index 2)
-            state.current_view = 2;
-            state.following_latest = false;
+            state.output.current_view = 2;
+            state.output.following_latest = false;
 
             // New iteration starts (iteration 7)
             state.start_new_iteration();
@@ -2900,7 +2107,7 @@ mod tests {
             }
 
             // Verify: iteration 3 (what user is viewing) should be unaffected
-            let iteration_3 = &state.iterations[2];
+            let iteration_3 = &state.output.iterations[2];
             assert_eq!(
                 iteration_3.lines.lock().unwrap().len(),
                 0,
@@ -2908,7 +2115,7 @@ mod tests {
             );
 
             // Verify: iteration 7 (latest) should have the output
-            let iteration_7 = state.iterations.last().unwrap();
+            let iteration_7 = state.output.iterations.last().unwrap();
             assert_eq!(
                 iteration_7.lines.lock().unwrap().len(),
                 1,

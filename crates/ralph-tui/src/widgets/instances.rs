@@ -61,6 +61,8 @@ impl Widget for InstancesPane<'_> {
                     .instances
                     .get(id)
                     .and_then(|s| s.current_activity_short_summary(now));
+                let role_label = self.parallel.spawn_role_label(id);
+                let role_contract_badge = self.parallel.spawn_role_contract_badge(id);
                 let age = self
                     .parallel
                     .instances
@@ -80,6 +82,23 @@ impl Widget for InstancesPane<'_> {
                     Span::raw(" "),
                     Span::raw(state),
                 ];
+
+                // 临时角色来自 live `topology.spawn.result`,只用于当前 TUI 可读性。
+                // 它不替代 agents snapshot 的 fixed-role metadata,避免把一次性视角持久化。
+                if let Some(role_label) = role_label {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        format!("role:{role_label}"),
+                        self.theme.muted(),
+                    ));
+                }
+                if let Some(role_contract_badge) = role_contract_badge {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        format!("contract:{role_contract_badge}"),
+                        self.theme.muted(),
+                    ));
+                }
 
                 // job 摘要直接回答“当前在跑第几个 job”。
                 // 这里复用 state 中已有的 job 分段,避免新增第二套状态源。
@@ -188,6 +207,60 @@ mod tests {
         assert!(
             text.contains("a:Inspecting current code behavior"),
             "should show activity summary: {text}"
+        );
+    }
+
+    #[test]
+    fn instances_pane_shows_topology_spawn_role_label() {
+        let mut parallel = ParallelTuiState::default();
+        let instance_id = HatInstanceId::from("builder#2");
+
+        parallel.register_instance(instance_id, HatInstanceState::Running);
+        parallel.apply_event(&ralph_proto::Event::new(
+            ralph_core::TOPIC_TOPOLOGY_SPAWN_RESULT,
+            serde_json::json!({
+                "status": "spawned",
+                "request_id": "spawn-req-1",
+                "hat": "builder",
+                "delivery_topic": "build.task",
+                "spawned": [
+                    {
+                        "index": 0,
+                        "instance_id": "builder#2",
+                        "role": "功能补充",
+                        "fixed_role": false,
+                        "role_contract_summary": {
+                            "role_name": "功能补充",
+                            "objective_preview": "补充 feature A",
+                            "allowed_result_topics": ["analysis.done"],
+                            "identity_source": "task-derived",
+                            "persistence": "temporary",
+                            "contract_schema_version": 1,
+                            "role_contract_hash": "erc-1234567890abcdef",
+                            "source_spawn_request_id": "spawn-req-1"
+                        }
+                    }
+                ],
+                "parent_topology_unchanged": false
+            })
+            .to_string(),
+        ));
+
+        let text = render_to_string(&parallel);
+
+        assert!(
+            text.contains("builder#2"),
+            "should show instance id: {text}"
+        );
+        assert!(
+            text.contains("role:功") && text.contains('补') && text.contains('充'),
+            "should show temporary topology spawn role label: {text}"
+        );
+        assert!(
+            text.contains("task-derived")
+                && text.contains("temporary")
+                && text.contains("erc-12345678"),
+            "should show task-derived role contract badge: {text}"
         );
     }
 }
