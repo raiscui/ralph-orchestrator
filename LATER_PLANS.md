@@ -479,28 +479,420 @@
 - 建议后续落地:
   1. Instances 行补 `last_input.preview` / input topic / current job。
   2. Header 或 Footer 补 selected instance、state、job、last event、stderr visible/hidden。
-  4. 增加一个小型 evidence/status 面板,显示 `.ralph/agents.json`、record-session、events.jsonl、evidence-index 的当前路径。
 - 验证建议:
   - 给 TUI Rendered / TUI Plain / Pretty Rendered / Pretty Plain 加 2x2 regression。
   - 用现有 `tui-validate` 或 ratatui TestBackend snapshot 验证 status 字段实际可见。
 
 
-## [2026-05-17 16:51:58] [Session ID: omx-1779004640353-blcixq] 后续计划更新: TUI 状态摘要已部分落地,剩余 stderr/evidence/last-input 视图
+## [2026-05-17 16:51:58] [Session ID: omx-1779004640353-blcixq] 后续计划更新: TUI 状态摘要已部分落地,剩余 stderr/last-input 视图
 
 - 已完成:
   - Instances 行显示 `job x/y`。
   - Footer 并行模式显示 selected instance、紧凑 job、render mode、last event。
 - 仍未完成,后续建议保留:
-  2. 明确显示 stderr visible/hidden,需要先把 `show_stderr` 从 runner 配置传入 TUI state。
-  3. 增加 evidence/status 面板,显示 record-session、events.jsonl、agents.json、evidence-index 路径。
-  4. 如果要显示 `last_input.preview`,应优先复用 `.ralph/agents.json` 或把 last input 作为正式 TUI update,不要在 widget 中另行推断。
+  1. 明确显示 stderr visible/hidden,需要先把 `show_stderr` 从 runner 配置传入 TUI state。
+  2. 如果要显示 `last_input.preview`,应优先复用 `.ralph/agents.json` 或把 last input 作为正式 TUI update,不要在 widget 中另行推断。
 
-## [2026-05-17 18:18:00] [Session ID: omx-1779004640353-blcixq] 后续建议: TUI stderr 可见性与 evidence 面板仍可继续增强
+## [2026-05-17 18:18:00] [Session ID: omx-1779004640353-blcixq] 后续建议: TUI stderr 可见性与 last-input 视图仍可继续增强
 
 - 已完成:
   - Codex 风格 `current_activity` 状态字段已经落地。
   - Footer / Instances 已能显示当前正在做什么和持续时间。
 - 仍建议后续做:
-  2. 明确显示 stderr visible/hidden,需要先把 `show_stderr` 从 runner 配置传入 TUI state。
-  3. 增加 evidence/status 面板,显示 record-session、events.jsonl、agents.json、evidence-index 路径。
-  4. 如果要显示 `last_input.preview`,应优先复用 `.ralph/agents.json` 或把 last input 作为正式 TUI update。
+  1. 明确显示 stderr visible/hidden,需要先把 `show_stderr` 从 runner 配置传入 TUI state。
+  2. 如果要显示 `last_input.preview`,应优先复用 `.ralph/agents.json` 或把 last input 作为正式 TUI update。
+
+## [2026-05-20 08:05:00] [Session ID: omx-1779158263949-kticiv] 后续建议: parent-visible spawn dogfood worker 收敛
+
+- 背景: `topology.spawn.result` 后重复派发已经通过 record-session dogfood 验证修复,但 no-TUI dogfood 仍出现 `MaxRuntime`。
+- 建议后续单独处理:
+  1. 分析 analyst worker 为什么没有稳定产出 `analysis.done`。
+  2. 检查 worker prompt、gate timeout、read-only tool noise 和失败状态回写。
+  3. 不要把该问题和 topology spawn redelivery 混为一谈。
+- 完成条件:
+  - parent-visible 三实例 dogfood 能自然收敛到 completion candidate 或明确的失败诊断。
+  - record-session 中保留 `topology.spawn_group`、3 条 direct delivery、3 条 worker result 或结构化 failed evidence。
+
+## [2026-05-20 08:05:00] [Session ID: omx-1779158263949-kticiv] 后续建议: task-derived dynamic hat identity / role contract
+
+- 背景: 当前 `topology.spawn_group` 的 `role` 是运行时标签,目标 hat 仍来自已有配置。临时角色默认不写入 `.ralph/agents.json` 一等字段。
+- 建议后续继续设计:
+  1. task-derived dynamic hat identity。
+  2. role contract schema。
+  3. prompt isolation 和 agents snapshot provenance。
+  4. 真实 E2E dogfood,证明 LLM 运行时创建的角色不会污染 worker prompt。
+- 完成条件:
+  - 用户要求新角色时,record/evidence 能直接说明它是固定 role、临时 role,还是无法物化的请求。
+
+## [2026-05-20 08:05:00] [Session ID: omx-1779158263949-kticiv] 后续建议: live Codex multi-agent collaboration E2E
+
+- 背景: `multi_agent_collab_evidence` 支线只证明了 parallel hat instances 的 runtime 入口、focused tests 和 E2E scenario registration。
+- 建议后续如要证明真实模型协作稳定性,单独跑 live Codex E2E:
+  - `cargo run -p ralph-e2e -- codex --filter parallel-hat-instances --keep-workspace --verbose`
+  - 或针对 trigger routing / human approval / spawn instance 的具体场景分别跑。
+- 完成条件:
+  - `.e2e-tests/report.md` / `report.json` 和 record-session 能证明真实 backend 下的 topic、delivery、completion 都收敛。
+
+## [2026-05-20 19:03:00] [Session ID: omx-1779158263949-kticiv] 后续计划: 3-worker live dogfood 产出的候选任务
+
+### 来源
+- `/tmp/ralph-topology-dogfood-bounded-180-rerun-20260520-185717.jsonl`
+- 3 条 `analysis.done`:
+  - `analyst#2`: 功能补充
+  - `analyst#3`: 功能完善
+  - `analyst#4`: review
+
+### 候选任务
+1. 补 topology/capability evidence inspect 能力:
+   - 在 `ralph record summary` 或新 inspect 命令中展示 parent-visible dynamic instances、child-run projection、parent_topology_unchanged、fixed_role 和 last_input。
+   - 目标是让用户不用手写 jq 也能确认“真实例是否跑起来”。
+2. 补 parent-visible spawn replay/integration guardrail:
+   - 断言 `topology.spawn_group` 创建 `.ralph/agents.json` dynamic instances。
+   - 断言 `topology.spawn.result` 后不再重复 publish 原 delivery topic。
+3. 补 TUI/plain 显示验收:
+   - 父级实例列表显示 dynamic hat instance。
+   - child-run 状态以 footer/status 或实例栏 children count 形式可观测。
+   - output frame 给 act 状态预留底部空间,避免遮挡输出。
+4. 单独评估 Claude stream-json adapter capability negotiation:
+   - 不混入当前 parent-visible spawn 收尾。
+   - 需要独立 fixture、parser 单测、smoke_runner 和 CLI integration gates。
+
+### 暂不执行原因
+- 当前用户要求是先看 live dogfood 结果有没有用。
+- 这些内容需要进一步拆 spec 或 code task 后再进入实现。
+
+## [2026-05-21 07:25:47] [Session ID: omx-1779158263949-kticiv] 后续计划更新: topology/capability evidence inspect 已完成
+
+### 已完成
+- `ralph record summary` 已新增 `Evidence Inspect` section。
+- 覆盖 topology、agents snapshot、child-runs、capability events、result topics、termination。
+- 真实 dogfood record 已验证能看到 `analyst#2/#3/#4` dynamic parent-visible instances、`analysis.done=3` 和 `CompletionPromise`。
+
+### 仍保留的后续项
+- parent-visible spawn replay/integration guardrail 仍值得做。
+- TUI/plain 显示验收仍值得做。
+- Claude stream-json adapter capability negotiation 仍应单独立项。
+
+## [2026-05-21 07:38:00] [Session ID: omx-1779158263949-kticiv] 后续计划更新: TUI/plain 显示验收已完成
+
+### 已完成
+- `parallel no-tui/plain` 已能显示 topology/capability 控制面事件摘要。
+- TUI 现有 footer / instances / output status / bottom reserved rows focused tests 已重新验证通过。
+- `specs/unified-evidence-inspect.spec.md` 已补充 display guardrails。
+
+### 仍保留的后续项
+- parent-visible spawn replay/integration guardrail 仍值得做。
+- Claude stream-json adapter capability negotiation 仍应单独立项。
+
+## [2026-05-21 08:10:00] [Session ID: omx-1779158263949-kticiv] 后续计划更新: parent-visible spawn replay/integration guardrail 已完成
+
+### 已完成
+- 新增 CLI integration guardrail,真实运行 `ralph run --no-tui --record-session`。
+- 已证明 `topology.spawn_group` 会创建 parent-visible dynamic builder instances。
+- 已证明 `topology.spawn.result` 后不会追加 redeliver 原始 `build.task`。
+- 已证明 `.ralph/agents.json`、`.ralph/events.jsonl` 和 `record summary --agents-file` 能组成完整证据链。
+
+### 仍保留的后续项
+- Claude stream-json adapter capability negotiation 仍应单独立项。
+- task-derived dynamic hat identity / role contract 仍是后续架构设计项。
+
+## [2026-05-21 19:03:10] [Session ID: omx-1779158263949-kticiv] 后续计划: 实现 task-derived dynamic hat identity / role contract
+
+### 后续事项
+- 按 .omx/plans/task-derived-dynamic-hat-identity-role-contract.md 实现代码。
+- 建议优先使用 `` 或 `` 执行,因为该任务跨 runtime、prompt、evidence 和测试。
+
+### 关键验收提醒
+- 旧 topology.spawn_group payload 必须兼容。
+- EffectiveRoleContract 必须是 downstream 唯一 contract truth source。
+- worker prompt 不得继承 coordinator-only prompt。
+- agents snapshot 只写 summary/hash/source id,不写完整 contract/prompt。
+- 最终需要 live dogfood + `ralph record summary --agents-file .ralph/agents.json` 证明。
+
+## [2026-05-21 21:02:00] [Session ID: omx-1779158263949-kticiv] 后续计划更新: task-derived role contract 已完成,保留 live dogfood 稳定性问题
+
+### 已完成
+- task-derived dynamic hat identity / role contract 已落地。
+- `topology.spawn_group.instances[].role_contract` 已作为 raw hint 接入。
+- runtime canonical `EffectiveRoleContract` 已成为 downstream prompt / agents snapshot / record summary / TUI/plain display 的唯一真相源。
+- 旧 payload 兼容、conflict fail-closed、output allowlist、prompt isolation、summary-only agents snapshot 等 guardrails 已有 focused/integration tests。
+
+### 仍保留的后续项
+1. live 3-worker dogfood 稳定收敛:
+   - 本轮 420 秒 run 是 `Interrupted`,不是自然 completion。
+   - 需要单独分析 worker 长耗时、stderr/stdout event parsing、confessor 干预和结果汇总时机。
+2. dogfood workspace/artifact policy:
+   - worker 在“不要改代码”任务中仍写入 `ralph/log/builder#*/...` 和 `.agent/memories.md`。
+   - 需要明确 read-only dogfood 是否允许写 evidence artifact,以及这些 artifact 是否应隔离到临时 workspace。
+3. `analysis.done` strict dogfood:
+   - 当前 `ralph.yml` builder publishes 是 `build.done/build.blocked`,所以 runtime 正确阻止了 `analysis.done` 越权。
+   - 若要严格验证 `analysis.done`,应使用专门 dogfood config 或目标 hat publishes 包含 `analysis.done`。
+
+### 可删除/视为完成的旧项
+- `task-derived dynamic hat identity / role contract` 作为实现任务已完成。
+- 后续只保留 live dogfood 稳定性和 artifact policy 这两个新问题。
+
+## [2026-05-22 12:09:14] [Session ID: omx-1779158263949-kticiv] 后续计划: agents snapshot 应区分当前 registry 与历史 spawned dynamic instances
+
+### 发现
+- clean live dogfood 已自然收敛,record-session 显示 `builder#2/#3/#4` 均发布 `analysis.done`。
+- 但 `.ralph/agents.json` 最终只展示当前 registry 中尚未被回收的实例,最早完成并被 dynamic idle TTL 回收的 `builder#4` 不在 snapshot 中。
+
+### 为什么后续值得做
+- 用户希望 parent-visible / parent-observable 的实例状态容易确认。
+- 如果 summary 里的 Agents Snapshot 少了已完成但已回收的动态实例,用户容易误判为实例没跑起来。
+
+### 建议方向
+1. 在 record summary 的 Evidence Inspect 中,把 topology.spawn.result 和 Result Topics 作为历史真相源,Agents Snapshot 标注为 current registry sidecar。
+2. 或在 `.ralph/agents.json` 增加 completed/tombstone dynamic instances,至少保留 `instance_id`, `role`, `role_contract_summary`, `final_state`, `last_input`, `completed_at`。
+3. 或在 run shutdown 前写一次 final agents snapshot,但要明确是否包含已 unregister 的 dynamic instances。若不保留 tombstone,final snapshot 仍不能表达完整历史。
+
+### 当前不做原因
+- 本轮用户要求是给 live dogfood 一个 clean config 并验证自然收敛。
+- 该问题属于观测面语义增强,需要单独 spec / guardrail,不应混入本轮临时 dogfood 配置。
+
+## [2026-05-22 12:11:27] [Session ID: omx-1779158263949-kticiv] 后续计划更新: live 3-worker dogfood 稳定收敛已完成
+
+### 已完成
+- 已用 clean dogfood config 验证 3-worker 自然收敛。
+- 已证明 `analysis.done: 3 source_instances=builder#2,builder#3,builder#4`。
+- 已证明 `Termination.reason=CompletionPromise`。
+- 已证明本轮没有走 `capability.request` isolated child-run path。
+
+### 仍保留
+- dogfood workspace/artifact policy 仍值得单独处理。
+- agents snapshot 对已回收 dynamic instances 的历史表达仍值得单独处理。
+
+## [2026-05-22 14:25:19] [Session ID: omx-1779158263949-kticiv] 后续计划更新: agents snapshot completed dynamic tombstone 已完成
+
+### 已完成
+- agents snapshot 现在区分 current registry 与 `completed_dynamic_instances` tombstone。
+- Evidence Inspect 和 `ralph agents` 均能显示 completed dynamic instances。
+- 原先关于“已回收 dynamic instance 从 `.ralph/agents.json` 消失导致误判”的后续项已经落地。
+
+### 仍保留
+- dogfood workspace/artifact policy 仍可单独立项。
+- live dogfood 稳定性如果继续加强,可基于 clean config 模式另起任务。
+
+## [2026-05-22 15:29:08] [Session ID: omx-1779158263949-kticiv] 后续计划: reply.human.message 多行 event 未进入 Result Topics
+
+### 发现
+- clean 3-worker live dogfood 中,coordinator 最终输出了多行 `reply.human.message` XML event。
+- record-session 中可以看到 stdout 写入,但 `record summary` 的 `Result Topics` 未列出 `reply.human.message`。
+
+### 后续建议
+- 如果产品契约要求最终人类摘要也进入 durable bus.publish / Result Topics,应做其中一种:
+  1. Prompt 约束 final `reply.human.message` 必须单行 XML event。
+  2. Runtime parser 支持多行 XML event 聚合解析。
+  3. Evidence Inspect 把 stdout-only reply 与 bus.publish reply 区分展示。
+
+
+## [2026-05-22 15:32:09] [Session ID: omx-1779158263949-kticiv] 后续计划确认: reply.human.message 多行 event 未进入 Result Topics
+
+### 发现
+- clean 3-worker live dogfood 中,coordinator 最终输出了多行 `reply.human.message` XML event。
+- record-session 中可以看到 stdout 写入,但 `record summary` 的 `Result Topics` 未列出 `reply.human.message`。
+
+### 后续建议
+- 如果产品契约要求最终人类摘要也进入 durable bus.publish / Result Topics,应做其中一种:
+  1. Prompt 约束 final `reply.human.message` 必须单行 XML event。
+  2. Runtime parser 支持多行 XML event 聚合解析。
+  3. Evidence Inspect 把 stdout-only reply 与 bus.publish reply 区分展示。
+
+
+## [2026-05-22 19:23:13] [Session ID: omx-1779158263949-kticiv] 后续计划: 六文件 notes / ERRORFIX 续档 continuous-learning
+
+### 发现
+- 本轮收尾时发现 `notes.md` 已超过 1000 行。
+- `ERRORFIX.md` 正好 1000 行,本次又是 bug fix,继续追加会触发续档要求。
+
+### 为什么暂不在本轮执行
+- 当前主任务是 runtime multi-line event parsing 修复,代码与验证已经闭环。
+- 六文件归档必须先执行 continuous-learning 摘要与索引判断,不能未经学习就把文件移入 archive。
+- 当前系统约束不允许随意开启后台子智能体,所以先记录为后续清理任务。
+
+### 建议后续动作
+- 用 continuous-learning 对默认六文件做一次续档整理。
+- 重点处理 `notes.md` 与 `ERRORFIX.md`。
+- 归档前先提炼可复用经验,再决定是否同步到 `EXPERIENCE.md` 或项目索引。
+
+
+## [2026-05-22 20:26:54] [Session ID: omx-1779158263949-kticiv] 后续计划更新: reply.human.message 多行 event durable 记录已验证完成
+
+### 已完成
+- 本次 clean 3-worker live dogfood 已确认 multi-line `reply.human.message` 进入 `record summary Result Topics`。
+- summary 显示 `reply.human.message: 1 source_instances=ralph#1`。
+- 原始 record-session `bus.publish` 统计也显示 `reply.human.message: 1 sources=['ralph#1']`。
+
+### 可视为解决的旧后续项
+- `reply.human.message 多行 event 未进入 Result Topics` 已通过 runtime observer-only drain + live dogfood 验证闭环。
+
+### 仍可继续做但不阻塞本项
+- 将 clean 3-worker dogfood 固化成 repo-local fixture / script,减少未来依赖 `/tmp` 临时配置。
+- dogfood workspace/artifact policy 仍值得单独立项。
+
+## [2026-05-23 16:45:00] [Session ID: omx-1779158263949-kticiv] 后续计划: dynamic hats dogfood 推荐主线
+
+### 来源
+- 用户自然语言 prompt live dogfood: `/tmp/ralph-dynamic-evolution-angle-dogfood-20260523-151612.jsonl`。
+- 最终 reply 推荐主线: `clean-current-runtime-evidence-and-dynamic-role-contract`。
+
+### 建议后续动作
+- 优先生成/推进一个 OpenSpec 主线,范围包括:
+  - runtime protocol SSOT。
+  - dynamic role contract evidence。
+  - topology.spawn_group partial/tombstone 语义。
+  - record-session/evidence inspect correlation。
+  - parallel runtime release gate。
+- 延期但保留:
+  - `tui-mdfried-viewer` 作为 UX 线。
+  - `agent-cli-recoverable-failure-retry` 作为可靠性线。
+  - manifest schema v2 作为治理增强线。
+
+### 注意
+- 本计划来自 dogfood 分析结果,尚未开始实现。
+
+## [2026-05-23 17:24:00] [Session ID: omx-1779158263949-kticiv] 后续计划更新: dynamic hats dogfood 推荐主线已转为 OpenSpec
+
+### 已完成
+- 已创建并验证 `openspec/changes/clean-current-runtime-evidence-and-dynamic-role-contract/`。
+- `proposal`, `design`, `specs`, `tasks` 均已完成。
+- 单项验证 `openspec validate clean-current-runtime-evidence-and-dynamic-role-contract --type change --strict` 已通过。
+
+### 后续仍待
+- 该 OpenSpec 还没有实现代码。
+- 下一步若继续,应按 `tasks.md` 从 runtime protocol SSOT 与 prompt boundary tests 开始。
+- 原延期线仍保留: `tui-mdfried-viewer`, `agent-cli-recoverable-failure-retry`, manifest schema v2。
+
+## [2026-05-25 10:47:10] [Session ID: omx-1779158263949-kticiv] 后续计划: 全量 OpenSpec strict 被无 delta 的 retry change 阻断
+
+### 来源
+- 本轮 3.x 验证时额外运行 `openspec validate --all --strict`。
+
+### 现象
+- 当前 change `clean-current-runtime-evidence-and-dynamic-role-contract` 单项 strict 校验通过。
+- 全量 strict 失败在 unrelated active change: `agent-cli-recoverable-failure-retry`。
+- 失败原因是该 change 目前没有 specs delta: `Change must have at least one delta. No deltas found.`
+
+### 为什么本轮不处理
+- 用户已明确本轮不扩 retry / recoverable CLI failure 分支。
+- 直接修 `agent-cli-recoverable-failure-retry` 会污染当前 runtime evidence 主线。
+
+### 后续建议
+- 等用户重新切到 retry 可靠性线时,补齐 `openspec/changes/agent-cli-recoverable-failure-retry/specs/**/spec.md` delta。
+- 在 retry change 补齐前,当前 change 的有效 gate 以单项 `openspec validate clean-current-runtime-evidence-and-dynamic-role-contract --type change --strict` 为准。
+
+## [2026-05-25 13:05:20] [Session ID: omx-1779158263949-kticiv] 后续计划: record_session.rs 可拆分 aggregate 与 renderer
+
+### 来源
+- 本轮 4.x record summary/evidence correlation 修改集中在 `crates/ralph-cli/src/record_session.rs`。
+
+### 现象
+- `record_session.rs` 已超过 1000 行,同时包含 strict parse、aggregate、Evidence Inspect render、record-session pointer helper 和 tests。
+- 本轮为了不扩散主线,只做了局部改良,没有拆文件。
+
+### 后续建议
+- 在后续专门的整理任务中,可以将该文件拆成:
+  - `record_session/aggregate.rs`
+  - `record_session/evidence_render.rs`
+  - `record_session/pointer.rs`
+- 拆分时保持 public API 不变,优先用现有 tests 做回归护栏。
+
+## [2026-05-26 00:28:00] [Session ID: omx-1779158263949-kticiv] 后续计划更新: dynamic hats runtime evidence 主线已完成并归档
+
+### 已完成
+- `clean-current-runtime-evidence-and-dynamic-role-contract` 已完成实现、验证、主规格同步和 OpenSpec 归档。
+- 归档位置: `openspec/changes/archive/2026-05-26-clean-current-runtime-evidence-and-dynamic-role-contract/`。
+- 这覆盖了此前 `dynamic hats dogfood 推荐主线` 中的 runtime protocol SSOT、dynamic role contract evidence、topology.spawn_group partial/tombstone、record-session/evidence inspect correlation、parallel runtime release gate。
+
+### 仍保留的延期线
+- `agent-cli-recoverable-failure-retry`: 当前仍是 active change,但没有 delta,会阻断 `openspec validate --all --strict`。
+- `tui-mdfried-viewer`: 仍是独立 UX 线,未在本次处理。
+- manifest schema v2: 仍是治理增强线,未在本次处理。
+
+## [2026-05-28 16:57:37] [Session ID: omx-1779954714247-oab9zc] 后续计划更新: agent-cli-recoverable-failure-retry 已完成,不再阻断全量 OpenSpec strict
+
+### 已完成
+- `agent-cli-recoverable-failure-retry` 已完成实现,`tasks.md` 为 34/34 complete。
+- `OPENSPEC_TELEMETRY=0 DO_NOT_TRACK=1 openspec validate agent-cli-recoverable-failure-retry --type change --strict` 已通过。
+- `OPENSPEC_TELEMETRY=0 DO_NOT_TRACK=1 openspec validate --all --strict` 已通过,28 passed,0 failed。
+
+### 可视为解决的旧后续项
+- 2026-05-25 记录的“全量 OpenSpec strict 被无 delta 的 retry change 阻断”已经失效。
+- 2026-05-26 记录的“`agent-cli-recoverable-failure-retry` 当前仍是 active change,但没有 delta,会阻断 `openspec validate --all --strict`”已经失效。
+
+### 仍保留
+- `tui-mdfried-viewer` 仍是独立 UX 线。
+- manifest schema v2 仍是治理增强线。
+- `record_session.rs` 拆分 aggregate / renderer 仍可作为后续整理任务。
+
+## [2026-05-29 17:06:44] [Session ID: native-codex-20260529] 后续计划: example PROMPT.md fixture 应进入 Git 真相源
+
+### 来源
+- recoverable retry staged-only 全量 `cargo test --quiet` 验证。
+
+### 现象
+- `integration_examples` 要求多个 `examples/parallel-*/PROMPT.md` 存在。
+- 当前主工作区确实有这些文件,但 `git ls-files examples` 显示其中 24 个 `PROMPT.md` 未被 Git 跟踪。
+- 因此从 HEAD 创建的干净 worktree 会缺 fixture,导致 full cargo test 失败。
+
+### 后续建议
+- 单独开一个 fixture/governance 小任务,决定这些 `PROMPT.md` 应该正式 tracked,还是测试应改为只扫描 tracked/runnable examples。
+- 不建议混入 recoverable retry commit,否则会扩大提交边界。
+
+## [2026-05-29 17:32:21] [Session ID: native-codex-20260529] 后续计划: 默认 task_plan.md 已超过 1000 行,需单独续档
+
+### 来源
+- 第六次 hook 预检显示 `task_plan.md` 为 1548 行。
+
+### 现象
+- 项目规则要求六文件超过 1000 行后做续档,并配合 continuous-learning。
+- 当前 recoverable retry staged patch 已经收敛,不适合把上下文续档混入同一个 scoped commit。
+
+### 后续建议
+- 在 recoverable retry scoped commit 之后,单独执行上下文续档/continuous-learning 任务。
+- 续档时只处理六文件上下文,不要混入 runtime/recoverable 代码改动。
+
+
+## [2026-05-29 18:02:02] [Session ID: omx-1779004640353-blcixq] 后续计划更新: continuous-learning 续档与 evolution_analysis 承接
+
+### 已完成
+- `task_plan.md` 超过 1000 行的延期项已在本轮 continuous-learning 中处理: 已生成摘要,并准备续档到 `archive/default_history/`。
+- `evolution_analysis` 支线已完成总结,准备归档到 `archive/branch_contexts/evolution_analysis/`。
+
+### 仍应保留的后续项
+- example `PROMPT.md` fixture 真相源仍未处理: 需要决定未跟踪 prompt fixtures 是正式 tracked,还是测试只扫描 tracked/runnable examples。
+- 大文件拆分仍值得做,但应单独开任务并保持 public API 不变:
+  - `crates/ralph-cli/src/record_session.rs`: aggregate / evidence_render / pointer。
+  - `crates/ralph-core/src/parallel/instance.rs`: retry runtime / workspace lifecycle / prompt build / result handling。
+  - `crates/ralph-core/src/parallel/supervisor.rs`: agents snapshot / completion gate / recoverable map / topology/capability runtime。
+  - `crates/ralph-tui/src/app.rs`: layout / hit-test / clipboard / action dispatch / run loop。
+- `tui-mdfried-viewer` 需要先做 spec-code reconciliation,不要直接假设 tasks 中已勾选的 Big Headers / `ratatui-image` 已经存在。
+- 旧 docs tree 的 legacy/archived 边界和搜索污染仍值得治理。
+- runtime/evidence release-fast gate 仍值得固化成脚本或 task runner。
+
+### 当前不立即实施原因
+- 本轮目标是持续学习、续档和经验沉淀。
+- 当前 worktree 仍有大量其它支线改动,不适合把后续工程混入同一轮上下文整理。
+
+
+## [2026-05-29 18:57:29] [Session ID: omx-1779004640353-blcixq] 后续计划更新: example PROMPT.md fixture 真相源已处理
+
+### 已完成
+- 已确认 runnable parallel examples 的 `PROMPT.md` 应作为 committed templates 纳入 Git 真相源。
+- 已更新 `.gitignore` 为 `!examples/parallel-*/PROMPT.md`。
+- 已 staged 24 个 `examples/parallel-*/PROMPT.md`。
+- staged-only clean worktree full `cargo test --quiet` 已通过。
+
+### 后续仍可考虑
+- 如果未来新增新的非 parallel example 且也需要 committed `PROMPT.md`,应显式扩展 `.gitignore` 例外,不要依赖 `git add -f`。
+- 当前不需要修改 `integration_examples.rs`,因为它的 self-contained example 契约是正确的。
+
+## [2026-08-01 11:40:00] [Session ID: omx-1785579233065-awidzo] 备忘: 架构报告其余候选 + flaky 测试
+
+- 候选2(Strong): CLI 运行时(46k 行)收进 core — 杠杆最大,建议单独立项: codex_app_server_session/parallel_runner/autopilot 的运行时外壳推进 core,CLI 只剩命令面。
+- 候选3(Worth exploring): TUI 领域切片 — app.rs 3968 行 + TuiState 50+ pub 方法,按 radar/output/task/chat 切片。
+- 候选4(Worth exploring): Evidence 深模块 — JSONL 知识横跨 8+ 文件,find_file_in_parents 3 处。
+- 候选5(Worth exploring): EventLoop interface 收窄(25+ pub 方法,驱动知识劈成 core/cli 两半)。
+- 候选6(Speculative): e2e 场景声明化(35k 行 harness)。
+- flaky 测试: `integration_record_session::sigint_leaves_record_session_parseable_and_writes_termination_and_pointer` 在并发跑时偶发失败(单独跑通过),SIGINT 时序竞态,值得后续加固。

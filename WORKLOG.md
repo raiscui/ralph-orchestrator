@@ -1,987 +1,462 @@
 # WORKLOG.md
 
-> Previous WORKLOG exceeded 1000 lines and was rolled to `WORKLOG_2026-05-13_1937_prev.md` during the Ralph Phase 1A OpenSpec task.
-
-
-## [2026-05-13 19:37:49] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 任务名称: Ralph Phase 1A runtime evidence index OpenSpec
+## [2026-05-29 00:08:00] [Session ID: omx-1779954714247-oab9zc] 任务名称: WORKLOG 超限续档
 
 ### 任务内容
-- 按 `.omx/plans/ralph-evolution-roadmap-consensus-draft.md` 只推进 Phase 1A minimal evidence index kernel。
-- 启动前重新验证 staged diff 为空。
-- 产出 OpenSpec 和测试计划,不实现 Rust 代码。
+- 因旧 `WORKLOG.md` 达到 1002 行,执行默认上下文续档。
+- 旧文件已移动到 `archive/default_history/WORKLOG_2026-05-29_0008_pre_review.md`。
 
 ### 完成过程
-- 创建 Ralph context snapshot: `.omx/context/runtime-evidence-index-kernel-20260513T110024Z.md`。
-- 创建 OpenSpec change: `openspec/changes/runtime-evidence-index-kernel/`。
-- 写入 `proposal.md`, `design.md`, `specs/runtime-evidence-index-kernel/spec.md`, `tasks.md`, `test-plan.md`。
-- 修复 spec delta 格式,加入 `## ADDED Requirements`。
-- 对本轮文档做 anti-slop / boundary review,确认 Phase 1B CLI / doctor 只作为非目标和 guardrail 出现。
-- 因旧 `WORKLOG.md` 超过 1000 行,追加经验到 `EXPERIENCE.md` 并续档旧 WORKLOG。
-
-### 验证证据
-- `git diff --cached --name-status`: 空。
-- `openspec validate runtime-evidence-index-kernel --type change`: valid。
-- `openspec validate --all --strict`: 25 passed,0 failed。
-- `openspec show runtime-evidence-index-kernel --json --deltas-only`: deltaCount=5。
-- `git diff --check`: 通过,无输出。
+- 先在 `notes.md` 写入 continuous-learning 摘要。
+- 再移动旧 `WORKLOG.md`。
+- 新建当前 `WORKLOG.md`,保留本轮 review 主线入口。
 
 ### 总结感悟
-- Phase 1A 的价值在于把 artifact link 和 correlation contract 钉住,不要提前做 evidence CLI / doctor 平台化能力。
-- OpenSpec change 的 spec 文件必须使用 delta section,例如 `## ADDED Requirements`,否则 validate 会报 `No delta sections found`。
-- 写 Markdown 日志时必须继续使用 quoted heredoc 或安全写入方式,避免反引号触发 shell command substitution。
+- 大范围 review 前要先处理上下文阈值,否则后续记录会污染注意力窗口。
 
-
-## [2026-05-13 22:10:12] [Session ID: 019e20e7-7092-78c1-b5f1-b34db5f243b8] 任务名称: runtime-evidence-index-kernel Phase 1A 实现
+## [2026-05-29 00:16:00] [Session ID: omx-1779954714247-oab9zc] 任务名称: 未提交 recoverable retry 实现 focused review
 
 ### 任务内容
-- 按 OpenSpec change `runtime-evidence-index-kernel` 实现 Phase 1A minimal evidence index kernel。
-- 保持边界: 不实现 evidence CLI / doctor UX,不改变 live topology。
+- Review 当前未提交大功能实现改动,重点检查 `agent-cli-recoverable-failure-retry` 主链路。
+- 先处理 `WORKLOG.md` 超限续档,再做 focused review。
 
 ### 完成过程
-- 新增 `crates/ralph-core/src/evidence_index.rs`。
-- 在 `crates/ralph-core/src/lib.rs` 导出 evidence index public API。
-- 采用 JSONL 作为 v1 index storage,与 record-session / events evidence 流保持一致。
-- 实现最小类型:
-  - `EvidenceIndexEntry`
-  - `EvidenceArtifactKind`
-  - `EvidenceStatus`
-  - `EvidenceIndexWriter`
-  - `EvidenceIndexReader`
-  - `EvidenceLookup`
-  - `EvidenceIndexError`
-- 添加 7 个 contract tests,覆盖 schema、writer/reader、missing marker、parent-child link、record-session artifact、event-log artifact、runtime graph 非真相源 guardrail。
-- 更新 OpenSpec tasks,标记 implementation 和 verification 项完成。
-
-### 验证证据
-- `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed。
-- `cargo test --package ralph-core --lib event_logger::tests::test_runtime_durable_payloads_are_not_truncated -- --exact`: 1 passed。
-- `cargo test --package ralph-core --lib session_recorder::tests::test_record_session_critical_sequence_strict_parseable_after_flush -- --exact`: 1 passed。
-- `cargo test --package ralph-core --lib session_recorder::tests::test_critical_records_flush_to_file_before_recorder_drop -- --exact`: 1 passed。
-- `cargo test --package ralph-cli --bin ralph capability::tests::isolated_invocation_writes_auditable_artifacts_without_parent_topology_mutation -- --exact`: 1 passed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed in smoke runner unit tests; related filtered integration/doc targets completed with 0 failures。
-- `cargo test`: passed,包括 workspace unit tests 和 doctests。
-- `cargo fmt --all -- --check`: passed。
-- `git diff --check`: passed。
-- `openspec validate runtime-evidence-index-kernel --type change`: valid。
-- `openspec validate --all --strict`: 25 passed,0 failed。
-- `cargo clippy --all-targets --all-features`: exit code 0; 输出既有 warning,未发现本轮新增 `evidence_index.rs` warning。
+- 将旧 `WORKLOG.md` 归档到 `archive/default_history/WORKLOG_2026-05-29_0008_pre_review.md`。
+- 读取 code-review skill 和 continuous-learning skill。
+- 使用 CodeGraph 定位 recoverable retry 的入口、调用关系和关键符号。
+- 阅读核心实现区域: classifier / ledger / retry runtime / Supervisor continue / agents snapshot / record summary。
+- 运行 focused gates 和 `git diff --check`。
 
 ### 总结感悟
-- Phase 1A 的实现应保持在 core module,而不是 CLI/doctor 层,这样才能避免 evidence 平台化。
-- JSONL writer/reader 与现有 evidence 流一致,足够支撑后续 request/reply 和 capability v2 的 artifact lookup。
-- 后续 Phase 2/3 接入时,应只调用 writer 登记 artifact link,不要让 index 接管原始证据内容。
+- 当前 worktree 不是单一 feature diff,必须先按功能线拆分再提交。
+- recoverable retry 主链路 focused gates 通过,但并发 ledger append、scheduled retry worktree acquire failure、completed dynamic tombstone recoverable visibility 仍是后续 hardening 点。
 
-
-## [2026-05-13 22:20:17] [Session ID: omx-1778510695653-7pd7o2] 任务名称: runtime-evidence-index-kernel post-audit 收尾
+## [2026-05-29 00:00:00] [Session ID: native-codex-20260529] 任务名称: 4.x Manual continue control path 复核
 
 ### 任务内容
-- 接续上轮 Phase 1A 实现后的 completion audit gate。
-- 复核审计文件、OpenSpec tasks 和核心实现,再重跑关键验证。
+- 接续用户的“继续”,复核 `agent-cli-recoverable-failure-retry` 的 4.x manual continue 控制路径是否仍需继续实现。
+- 不做无意义重复实现,先用 OpenSpec archive 和 focused tests 判断真实状态。
 
 ### 完成过程
-- 读取 `.omx/audits/runtime-evidence-index-kernel-completion-audit.md`,确认审计覆盖 prompt、scope、artifact checklist、验证命令和 known gaps。
-- 读取 `openspec/changes/runtime-evidence-index-kernel/tasks.md`,确认任务全部完成。
-- 读取 `crates/ralph-core/src/evidence_index.rs` 与 `crates/ralph-core/src/lib.rs`,确认 public API 与 Phase 1A 边界一致。
-- 重跑 focused tests、smoke tests、全量测试、OpenSpec validate、format 和 diff gate。
-
-### 验证证据
-- `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed,0 failed。
-- `openspec validate runtime-evidence-index-kernel --type change`: valid。
-- `git diff --check`: exit 0。
-- `cargo fmt --all -- --check`: exit 0。
-- `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
-- `cargo test`: workspace unit tests 与 doctests 通过。
-- `openspec validate --all --strict`: 25 passed,0 failed。
+- 读取当前六文件上下文,发现本线已在历史记录中完成并归档。
+- 读取 archived `tasks.md`,确认 4.x 全部勾选。
+- 查询当前真实测试名,纠正旧测试名导致的 `running 0 tests` 无效验证。
+- 重跑 3 个 Supervisor routing focused tests 和 1 个 Instance lifecycle focused test,全部通过。
 
 ### 总结感悟
-- completion audit 不是文档装饰,而是 Ralph 闭环的一等 evidence artifact。
-- 未来类似实现收尾时,应先写审计,再重跑最小验证门,最后关闭 state。
+- “继续”不能机械回到用户说的章节名,必须先确认该章节在当前 repo 中的真实状态。
+- `cargo test --exact` 出现 `0 tests` 是无效证据,必须改用当前真实测试名重跑。
 
-
-## [2026-05-13 22:31:33] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Ralph completion audit hook 兼容修正
+## [2026-05-29 00:00:00] [Session ID: native-codex-20260529] 任务名称: recoverable retry 实现本体提交前验证
 
 ### 任务内容
-- 响应 Stop hook 的 `missing_completion_audit` 阻塞。
-- 将人类可读 Markdown audit 补为 hook 可解析的结构化 JSON audit。
+- 按 hook 要求继续任务并收集 fresh verification evidence。
+- 由于 4.x 已完成,本轮进入 recoverable retry 实现本体的提交前 scoped review。
 
 ### 完成过程
-- 读取 hook 实现 `/Users/cuiluming/n/lib/node_modules/oh-my-codex/dist/ralph/completion-audit.js`。
-- 确认 hook 只接受 state 内联 audit object 或 repo-relative `.json` artifact。
-- 创建 `.omx/audits/runtime-evidence-index-kernel-completion-audit.json`。
-- 更新 Ralph state,将 completion audit path/evidence path 指向 JSON,并内联 `completion_audit` 对象。
-
-### 验证证据
-- `node --input-type=module ... evaluateRalphCompletionAuditEvidence(...)`: 返回 `complete=true`, `reason=completion_audit_passed`, `source=state`。
-- `omx state read --input '{"mode":"ralph"}' --json`: `active=false`, `current_phase=complete`, `completion_audit_gate=passed`。
-- `omx state list-active --json`: `active_modes=[]`。
+- 刷新当前工作区状态,确认有 167 个改动项,属于多条工作线混杂。
+- 识别 recoverable retry 候选文件边界,排除 topology/TUI/E2E/docs 等无关支线。
+- 运行 recoverable 模块、instance lifecycle、Supervisor routing、CLI agents、record-session、OpenSpec strict 和 diff check 门禁。
 
 ### 总结感悟
-- Ralph completion audit 给人看的 Markdown 不等于 hook 可解析 evidence。
-- Stop hook 的 completion audit 证据必须写成 JSON artifact 或内联 state object。
+- 当前 recoverable retry 主链路证据充足,但提交必须按 scoped file list 执行。
+- 不能因为 focused gates 通过就把 167 项混杂改动一次性提交。
 
-
-## [2026-05-14 11:22:42] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 1A 提交归档与 Phase 2 OpenSpec 准备
+## [2026-05-29 00:00:00] [Session ID: native-codex-20260529] 任务名称: recoverable retry scoped diff 逐文件审查
 
 ### 任务内容
-- 按用户指定顺序继续:
-  - review 当前 diff。
-  - 做本地提交。
-  - archive OpenSpec change。
-  - 准备下一条产品演进线 Phase 2 request/reply answer return 最小闭环。
+- 继续 hook 要求的任务推进,从已通过的 recoverable retry gates 进入提交边界审查。
+- 目标是判断哪些候选文件可整文件提交,哪些必须 patch-stage,防止 167 项混杂改动误入同一 commit。
 
 ### 完成过程
-- Review 了 Phase 1A diff,确认 `.omx/` audit/state 被 ignore,不会进入提交。
-- 做了本地提交 `cadefa8 Build evidence lookup before evidence UX`。
-- 执行 `openspec archive runtime-evidence-index-kernel --yes`,并修正归档生成的主 spec `Purpose TBD`。
-- 做了 archive 提交 `0e00eb7 Archive evidence index contract after kernel landing`。
-- 创建 Phase 2 OpenSpec change `request-reply-answer-evidence`,只产出 proposal/design/spec/tasks/test-plan,未实现代码。
-- 做了 Phase 2 规格提交 `e18536d Specify answer-return evidence before wiring runtime`。
-
-### 验证证据
-- Phase 1A 提交前:
-  - `cargo fmt --all -- --check`: passed。
-  - `git diff --check`: passed。
-  - `openspec validate runtime-evidence-index-kernel --type change`: valid。
-  - `openspec validate --all --strict`: 25 passed,0 failed。
-  - `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed,0 failed。
-  - `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
-  - `cargo test`: workspace unit tests and doctests passed。
-- Archive 后:
-  - `openspec validate --all --strict`: 25 passed,0 failed。
-  - `git diff --check`: passed。
-- Phase 2 OpenSpec:
-  - `openspec validate request-reply-answer-evidence --type change`: valid。
-  - `openspec validate --all --strict`: 26 passed,0 failed。
-  - `git diff --check`: passed。
-- 最终状态:
-  - `git status --short --untracked-files=all`: clean。
-  - active OpenSpec changes: `request-reply-answer-evidence` 和既有无关 `tui-mdfried-viewer`。
+- 用候选 diff stat 和关键词扫描识别混线文件。
+- 用 CodeGraph 刷新 recoverable retry 入口与观察面。
+- 将候选文件分成整文件 stage 高置信、patch-stage、暂缓三类。
+- 跑了一轮 fresh lightweight verification。
 
 ### 总结感悟
-- Phase 1A 已完成并归档,后续实现应从 `openspec/specs/runtime-evidence-index-kernel/spec.md` 读取稳定 contract。
-- Phase 2 的正确切入点不是继续做 CLI UX,而是先把 `reply.hat.message` 的成功、失败、missing/timeout 证据写进 evidence index。
-- OpenSpec CLI 的 PostHog flush 网络错误会出现在 stderr,但本轮相关命令退出码为 0,内容验证通过;不要把遥测 flush 噪声误当规格失败。
+- 当前最大风险不是 recoverable retry 主链路 correctness,而是提交边界污染。
+- `record_session.rs`、`routing_tests.rs`、`agents_snapshot.rs` 这类高扇出观察面文件尤其容易把 topology/capability 支线混进去。
 
-## [2026-05-14 13:04:00] [Session ID: codex-20260514-phase2] 任务名称: Phase 2 request/reply answer evidence runtime wiring
+## [2026-05-29 00:00:00] [Session ID: native-codex-20260529] 任务名称: recoverable retry 第一批 staged 文件验证
 
 ### 任务内容
-- 实现 OpenSpec change `request-reply-answer-evidence` 的 Phase 2 最小 runtime 闭环。
-- 将 `reply.hat.message` requester-return 的成功、失败、missing marker 证据写入 Phase 1A evidence index。
-- 保持 routing 边界: 普通带 `reply` 的 workflow event 不被当成 answer-return evidence,内部 `reply.hat.message` 不自动生成 `reply.human.message`。
+- 继续 patch-stage 计划,先 stage 高置信 recoverable-only 文件。
+- 修复 staged diff check 发现的 OpenSpec whitespace 问题。
 
 ### 完成过程
-- 续档超过 1000 行的 `task_plan.md`,旧文件保存为 `task_plan_2026-05-14_phase1a_phase2_prev.md`。
-- 重读 Phase 2 OpenSpec、`runtime-evidence-index-kernel` 和 `hat-request-reply-channel` 稳定 spec。
-- 在 `ParallelSupervisor` 内部增加 evidence index writer,默认路径为 `.ralph/evidence-index.jsonl`。
-- 在现有 `reply.hat.message` success / fail-closed 路由分支中写入 evidence index entry。
-- 暴露 `ParallelSupervisor::record_missing_answer_evidence()` 作为 missing/timeout marker 的最小显式入口。
-- 补齐 focused tests 覆盖 success、unknown request id、missing source_instance、no reply、missing marker、ordinary workflow boundary、human-visible boundary。
-- 更新 OpenSpec tasks 进度。
-
-### 验证证据
-- `cargo test --package ralph-core --lib parallel::supervisor::routing_tests`: 48 passed。
-- `cargo test --package ralph-core --lib evidence_index::tests`: 7 passed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed,无 warning。
-- `cargo test`: workspace tests and doctests passed。
-- `cargo fmt --all -- --check`: passed。
-- `git diff --check`: passed。
-- `openspec validate request-reply-answer-evidence --type change`: valid。
-- `openspec validate --all --strict`: 26 passed,0 failed。
+- staged 第一批 recoverable-only 文件。
+- 发现 `display.rs` 混有 role_contract / completed_dynamic_instances,降级为 patch-stage。
+- 修复 archived design trailing whitespace 和 stable spec EOF 空白行。
+- 确认上下文文件没有留在 staged index。
+- 跑 fresh focused gates 与 OpenSpec strict。
 
 ### 总结感悟
-- Phase 2 的关键不是新建 request broker,而是把已有 `reply.hat.message` requester-return 分支变成可查证的 evidence producer。
-- Evidence index 的 `producer` 字段必须保持写入者身份,失败原因应留在原始 JSONL artifact 里,不要借字段塞语义。
-- Missing/timeout 先用显式 marker API 收口,不要为了 Phase 2 最小闭环引入 broad lifecycle broker。
+- `git diff --cached --check` 必须在 stage 后立刻跑,因为 archive 生成的 Markdown 也可能带 trailing whitespace。
+- staged index 当前只是第一批候选,还不是完整可提交范围。
 
-## [2026-05-14 14:38:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Archive Phase 2 OpenSpec,收口 continuous-learning,并 dogfood answer evidence
+## [2026-05-29 00:00:00] [Session ID: native-codex-20260529] 任务名称: recoverable retry 第二批低风险 hunks staged
 
 ### 任务内容
-- 按用户指定顺序继续:
-  - archive `request-reply-answer-evidence` OpenSpec change。
-  - 执行 `task_plan` 续档触发的 continuous-learning 收口。
-  - 选择下一条演进线中的 `live runtime answer evidence dogfood`,证明 Phase 2 evidence index 已服务真实 runtime 链路。
-  - 本地提交,不 push。
+- 继续 patch-stage recoverable retry commit 范围。
+- 本轮只处理低风险且依赖必需的 recoverable hunks,避免混入 runtime capability / topology / role contract 支线。
 
 ### 完成过程
-- 已将 `request-reply-answer-evidence` 从 active change 归档到 `openspec/changes/archive/2026-05-14-request-reply-answer-evidence/`。
-- 已生成稳定规格 `openspec/specs/request-reply-answer-evidence/spec.md`,并把 archive 默认生成的 `Purpose TBD` 改成可读的正式 Purpose。
-- 已执行 continuous-learning 收口:
-  - 在 `notes.md` 写入六文件摘要。
-  - 在 `EXPERIENCE.md` 新增 `exp-20260514-request-reply-answer-evidence-boundary`。
-  - 将已覆盖的默认历史文件移动到 `archive/default_history/`。
-  - 将已覆盖的旧支线六文件移动到 `archive/branch_contexts/<topic>/`。
-  - 新增 `archive/manifests/ARCHIVE_MANIFEST__task_plan_rollover_2026-05-14_1358.md`。
-  - 清理 `LATER_PLANS.md` 中已完成的 continuous-learning 待办。
-- 已新增 `crates/ralph-cli/tests/integration_answer_evidence.rs`:
-  - 通过真实 `ralph run --no-tui --record-session` 启动 parallel runtime。
-  - custom backend 按 `RALPH_HAT_INSTANCE_ID` 分流 `ralph#1` 和 `researcher#1`。
-  - 触发 `research.request` -> `reply.hat.message reply="req-dogfood-1"` -> `LOOP_COMPLETE`。
-  - 断言 `.ralph/evidence-index.jsonl` 可按 request id 和 answer id 查到 evidence。
-  - 断言 `.ralph/events.jsonl` 包含 delivered `routing.requester_return` 记录。
-  - 断言 record-session 包含 `_meta.termination` / `CompletionPromise`。
-
-### 验证证据
-- `cargo test`: workspace tests and doctests passed,exit 0。
-- `cargo fmt --all -- --check`: passed。
-- `cargo test -p ralph-cli --test integration_answer_evidence`: 1 passed,0 failed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed,0 failed。
-- `openspec validate --all --strict`: 26 passed,0 failed。
-- `git diff --check`: passed。
-- `git submodule status`: no submodules listed。
+- 初次 synthetic stage 因 marker 过期失败,确认 index 未被破坏。
+- 重新按真实函数边界构造 staged-only patch。
+- staged `config.rs` / `lib.rs` / `parallel-hat-instances` 的 recoverable 内容。
+- 运行 fresh focused tests、OpenSpec strict 和 cached check。
 
 ### 总结感悟
-- Phase 2 的价值点已经从 standalone evidence kernel 前进到真实 runtime dogfood: request/reply answer return 不再只是 core 单测,而是通过 CLI 运行产出 `.ralph/evidence-index.jsonl`、`.ralph/events.jsonl` 和 record-session 证据。
-- answer evidence 的单一真相源仍然是 durable JSONL event log; evidence index 是 lookup surface,不是替代事实源。
-- 下一条自然演进线可以进入 Phase 3: capability invocation / child run evidence 真实串联,但应继续避免热改 live topology。
+- 对混线文件做 staged-only patch 时,要先证明失败不会污染 index。
+- staged scan 必须包含 suspicious keyword 检查,否则容易把 topology/capability 支线混进来。
 
-## [2026-05-14 15:52:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 3 capability child-run evidence 真实串联
+## [2026-05-29 00:00:00] [Session ID: native-codex-20260529] 任务名称: 第三批 staged-only agents snapshot / supervisor recoverable 验证
 
 ### 任务内容
-- 进入 Phase 3: capability invocation / child run evidence 真实串联。
-- 目标是在现有 isolated child/micro-run 路径上补 evidence index linkage,而不是新增第二套 runtime broker 或热改 live topology。
+- 继续补齐 recoverable retry staged commit。
+- 本轮处理 core agents snapshot 和 supervisor recoverable lifecycle。
+- 重点验证 staged index 本身,而不是只验证当前工作区。
 
 ### 完成过程
-- 新建 OpenSpec change `capability-child-run-evidence`,包含 proposal/design/delta spec/tasks/test-plan。
-- 阅读现有 capability invocation 实现后确认最小缺口:
-  - 已有 `invoke.json` / `result.json` / `failed.json` / `resolved-config.yml` / `.ralph/events.jsonl`。
-  - 缺少 `.ralph/evidence-index.jsonl` 中按 invocation id 可查的 durable linkage。
-- 扩展 `crates/ralph-cli/tests/integration_capability.rs`,让真实 `ralph tools capability invoke` 查询 evidence index。
-- 先跑红灯验证,确认测试失败在 evidence lookup 缺失。
-- 在 `crates/ralph-cli/src/capability.rs` 中复用现有 `invoke_isolated_with_runner()` 路径写 evidence index:
-  - `resolved-config.yml` -> `resolved_config`
-  - `invoke.json` -> `capability_invoke_json`
-  - `.ralph/events.jsonl` -> `event_log_jsonl`
-  - `result.json` -> `capability_result_json`
-  - `failed.json` -> `capability_failed_json` + failure status
-- 扩展 capability 单元测试覆盖成功和失败 evidence entries。
-- 更新 OpenSpec tasks 为完成状态。
-
-### 验证证据
-- 红灯:
-  - `cargo test -p ralph-cli --test integration_capability -- --nocapture` 曾失败在 `matches!(evidence_lookup, EvidenceLookup::Entries(_))`。
-- 绿灯:
-  - `cargo test -p ralph-cli capability::tests -- --nocapture`: 4 passed。
-  - `cargo test -p ralph-cli --test integration_capability -- --nocapture`: 2 passed。
-  - `cargo fmt --all -- --check`: passed。
-  - `cargo test -p ralph-cli capability::tests`: 4 passed。
-  - `cargo test -p ralph-cli --test integration_capability`: 2 passed。
-  - `cargo test -p ralph-core smoke_runner`: 12 passed。
-  - `openspec validate capability-child-run-evidence --type change`: valid。
-  - `openspec validate --all --strict`: 27 passed,0 failed。
-  - `git diff --check`: passed。
-  - `cargo test`: workspace tests and doctests passed。
+- 构造 `agents_snapshot.rs` recoverable-only staged patch。
+- 构造 `supervisor.rs` recoverable lifecycle staged patch。
+- 发现并修复 staged-only 临时 worktree 编译错误。
+- 将 `routing.rs` 从整文件污染收窄为 recoverable-only patch。
+- 补齐 config resolver 和 config tests `#[test]` 属性。
+- 临时 worktree 应用 cached patch 后 focused gates 全部通过。
 
 ### 总结感悟
-- Phase 3 的正确落点是改良现有 invocation artifact writer,不是把 capability invocation 扩成新的 runtime 平台。
-- evidence index 仍然只保存 artifact link 和 correlation id; child artifact 与 event log 仍是真相源。
-- 失败路径同样要注册 evidence,否则 audit 会在最需要排查时断链。
+- 对混线工作区,working tree tests 通过不等于 staged commit 可用。
+- 临时 worktree + cached patch 是当前最可靠的提交前证据。
 
-## [2026-05-14 16:21:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 3 OpenSpec archive 与最终验证
+## [2026-05-29 17:06:44] [Session ID: native-codex-20260529] 任务名称: recoverable retry scoped staged patch 完成验证
 
 ### 任务内容
-- Phase 3 实现完成后归档 `capability-child-run-evidence` OpenSpec change。
-- 同步稳定 spec,修正 `capability-invocation` 历史遗留的 `Purpose TBD`。
-- 重新跑完整验证,准备本地提交。
+- 继续上次未完成的 scoped staging 工作。
+- 目标是在大量混杂工作区中,只把 recoverable retry 主线和必要观察面补进 staged index。
 
 ### 完成过程
-- 执行 `openspec archive capability-child-run-evidence --yes`。
-- archive 将 3 个 added requirements 合入 `openspec/specs/capability-invocation/spec.md`。
-- 修正 `openspec/specs/capability-invocation/spec.md` 的 Purpose,明确 capability invocation 的隔离 child/micro-run 与 evidence-index linkage 语义。
-- active OpenSpec changes 回到只有既有无关 `tui-mdfried-viewer`。
-
-### 验证证据
-- `cargo fmt --all -- --check`: passed。
-- `cargo test -p ralph-cli capability::tests`: 5 passed。
-- `cargo test -p ralph-cli --test integration_capability`: 2 passed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed。
-- `cargo test`: workspace tests and doctests passed。
-- `openspec validate --all --strict`: 26 passed,0 failed。
-- `git diff --check`: passed。
+- 用 index-only blob 方式 staged CLI 观察面,避免工作区中 role contract / topology / child-run 支线混入。
+- 补齐 `ralph agents` Recoverable 列和 JSON metadata 断言。
+- 补齐 `record summary --agents-file` 的 recoverable Evidence Inspect 和端到端测试。
+- 补齐 Supervisor recoverable gate / continue / snapshot routing tests。
+- 发现并修复 `integration_record_session` 既有 watch 测试固定 sleep 过短的问题。
+- 使用 staged-only 临时 worktree 完成 focused / smoke / OpenSpec / full cargo test overlay 验证。
 
 ### 总结感悟
-- 对已经完成的 OpenSpec change,及时 archive 能避免 active changes 噪音。
-- archive 后要检查稳定 spec 的 Purpose,否则历史 `TBD` 会继续污染长期规格。
+- 混杂工作区里最可靠的提交证据仍然是 `HEAD + git diff --cached --binary` 的临时 worktree。
+- 纯 staged-only 的 full cargo test 能暴露“未跟踪 fixture 依赖”这类仓库状态风险,这类问题应单独治理,不要混进当前功能提交。
 
-## [2026-05-14 17:49:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 3.1 capability invocation evidence UX
+## [2026-05-29 17:10:44] [Session ID: native-codex-20260529] 任务名称: hook fresh verification for recoverable retry staged patch
 
 ### 任务内容
-- 为 Phase 3 的 capability invocation evidence 增加可用查询入口。
-- 选择 `ralph tools capability inspect <invocation_id>` 作为最小 UX,暂不扩成泛化 `ralph evidence lookup` 子系统。
-- 将 Phase 4 live runtime capability invocation 登记为后续独立演进线。
+- 响应 OMX hook,继续当前 recoverable retry staged patch 任务。
+- 不新增功能,不提交 commit,只刷新 staged-only 验证证据。
 
 ### 完成过程
-- 创建并完成 OpenSpec change `capability-evidence-inspect-ux`。
-- 写入 proposal/design/delta spec/tasks/test-plan。
-- 先补 integration 红灯,证明当前 CLI 不支持 `inspect`。
-- 在 `crates/ralph-cli/src/capability.rs` 增加:
-  - `CapabilityCommands::Inspect`
-  - `CapabilityInspectArgs`
-  - `inspect_capability_evidence_report(...)`
-  - JSON/human 输出结构
-  - `NoEntry` 非零错误
-  - explicit missing marker 的 `missing` 状态保留
-- 扩展 `crates/ralph-cli/tests/integration_capability.rs`:
-  - inspect 真实 invocation id 的 JSON 输出
-  - inspect human 输出
-  - unknown invocation id failure
-- 增加 focused unit test 覆盖 missing marker。
-- Archive OpenSpec change 到 `openspec/changes/archive/2026-05-14-capability-evidence-inspect-ux/`。
-- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步 inspect UX requirement。
-
-### 验证证据
-- 红灯:
-  - `cargo test -p ralph-cli --test integration_capability -- --nocapture` 曾失败于 `unrecognized subcommand 'inspect'`。
-- 绿灯:
-  - `cargo fmt --all -- --check`: passed。
-  - `cargo test -p ralph-cli --test integration_capability`: 4 passed。
-  - `cargo test -p ralph-cli capability::tests`: 6 passed。
-  - `cargo test -p ralph-core smoke_runner`: 12 passed。
-  - `cargo test`: workspace tests and doctests passed。
-  - `openspec validate capability-evidence-inspect-ux --type change`: valid。
-  - `openspec validate --all --strict`: 26 passed,0 failed after archive。
-  - `git diff --check`: passed。
+- 重新检查 staged index 和上下文文件边界。
+- 从 HEAD + cached patch 创建新临时 worktree。
+- 运行 recoverable core、manual continue、agents snapshot、CLI observation、smoke runner 和 OpenSpec strict 验证。
 
 ### 总结感悟
-- Phase 3.1 的正确边界是给 capability invocation evidence 一个稳定 lookup UX,而不是把 evidence kernel 膨胀成新的 doctor/diagnostic 平台。
-- `--json` 是 agent/automation contract,human 输出只是阅读层。
-- Phase 4 进入 live runtime 调用前,先有 inspect UX 是值得的,否则 live path 失败时调试面会太散。
+- 当前 staged patch 的可提交性已有新鲜证据支撑。
+- 纯 full cargo test 的 known blocker 仍是未跟踪 example prompt fixture,不应混入当前 scoped patch。
 
-## [2026-05-15 11:23:44] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 4 live runtime capability invocation 实现与验证
+## [2026-05-29 17:16:28] [Session ID: native-codex-20260529] 任务名称: second hook fresh verification
 
 ### 任务内容
-- 实现真实 parent run 中 `ralph#1` 通过 `capability.request` 触发 isolated capability invocation。
-- result/failure 通过 parent-visible `capability.result` / `capability.failed` event 回传。
-- 复用 Phase 3/3.1 capability invocation artifacts、evidence index 和 inspect UX。
+- 响应第二次 OMX hook。
+- 只运行新的 staged-only 轻量验证,不改功能、不提交。
 
 ### 完成过程
-- 在 core 协议层新增 `capability.request` payload、parent result/failure payload 和 `RuntimeCapabilityInvoker` adapter trait。
-- 在 parallel supervisor 中只处理 `ralph#1` 输出的 `capability.request`,并按 `request_id` 幂等去重。
-- 在 CLI capability module 中注入 runtime invoker,复用现有 `invoke_isolated` child/micro-run path。
-- 新增 `integration_live_capability` dogfood,真实运行 parallel `ralph#1`,抽取 invocation id,并用 `ralph tools capability inspect <id> --json` 查询证据链。
-
-### 验证
-- `openspec validate live-runtime-capability-invocation --type change`: valid。
-- `openspec validate --all --strict`: 27 passed,0 failed。
-- `cargo fmt --all -- --check`: passed。
-- `cargo test -p ralph-cli --test integration_capability`: passed。
-- `cargo test -p ralph-cli --test integration_live_capability`: passed。
-- `cargo test -p ralph-cli capability::tests`: passed。
-- `cargo test -p ralph-core smoke_runner`: passed。
-- `cargo test`: passed。
-- `git diff --check`: passed。
+- 读取适用 skill: recoverable retry skill 与 verification-before-completion skill。
+- 预检 staged index,确认上下文文件未 staged。
+- 新建 staged-only worktree 并运行 recoverable core、manual continue、CLI evidence、OpenSpec strict gates。
 
 ### 总结感悟
-- Phase 4 最稳的边界是 core 只做 runtime action hook,CLI adapter 负责执行 child/micro-run。
-- `capability.result` 同时承载 child lifecycle 和 parent-return 语义,测试必须用 `request_id` 区分 parent-return result。
+- 继续 hook 的正确响应是补 fresh evidence,不是扩大改动。
+- 当前 scoped patch 的 stop condition 仍然是: 等待用户明确是否 commit。
 
-## [2026-05-15 23:25:01] [Session ID: omx-1778510695653-7pd7o2] 任务名称: Phase 4.1 parent-side capability selection UX
+## [2026-05-29 17:21:03] [Session ID: native-codex-20260529] 任务名称: third hook fresh staged-only verification
 
 ### 任务内容
-- 实现 Phase 4.1: parent-side capability policy / selection UX。
-- 让 `ralph#1` 基于 structured capability catalog / metadata 选择可调用能力,而不是靠硬编码隐藏知识。
-- 保持 Phase 4 不变量: parent topology 不热改,调用仍走 isolated child/micro-run。
+- 响应第三次 OMX hook。
+- 执行新的 staged-only 关键验证,不新增代码、不提交。
 
 ### 完成过程
-- 创建并完成 OpenSpec change `parent-capability-selection-ux`,随后归档到 `openspec/changes/archive/2026-05-15-parent-capability-selection-ux/`。
-- 在 core 新增 parent-visible capability catalog renderer,输出稳定 marker、`capability.request` contract 与 bounded metadata。
-- 在 `ParallelSupervisor` 增加 `with_runtime_capability_catalog(...)`,并把 catalog 注入到 Ralph coordinator instructions,不注入普通 worker prompt。
-- 在 CLI parallel runner 中复用已有 `capability_catalog()` 传入 supervisor。
-- 扩展 live capability dogfood: custom backend 必须先从 `ralph#1` stdin prompt 捕获到 catalog marker、request contract 和 `hat:focused-reviewer`,才发 `capability.request`。
-- 稳定 spec `openspec/specs/capability-invocation/spec.md` 新增 parent-side selection catalog、structured bounded metadata、topology isolation 3 条要求。
-
-### 验证证据
-- `openspec validate parent-capability-selection-ux --type change`: valid。
-- `openspec validate --all --strict`: archive 前 27 passed,0 failed;archive 后 26 passed,0 failed。
-- `cargo fmt --all -- --check`: passed。
-- `cargo test -p ralph-core runtime_capability_catalog_is_injected_only_into_ralph_prompt`: 1 passed。
-- `cargo test -p ralph-core parent_capability_catalog_renderer`: 2 passed。
-- `cargo test -p ralph-cli --test integration_live_capability`: 1 passed。
-- `cargo test -p ralph-cli --test integration_capability`: 4 passed。
-- `cargo test -p ralph-cli capability::tests`: 6 passed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed。
-- `cargo test`: workspace tests and doctests passed。
-- `git diff --check`: passed。
-- `git diff --cached --check`: passed。
+- 记录 hook 继续计划。
+- 确认 staged index 未包含上下文文件。
+- 创建 `/tmp/ralph-hook3-fresh.PeT4ld/wt` 并应用 cached patch。
+- 运行 diff/fmt/recoverable/manual continue/record summary/OpenSpec gates。
 
 ### 总结感悟
-- Phase 4.1 的正确落点是 parent-side selection surface,不是新的 invocation protocol。
-- catalog 的真相源必须是 `CapabilityMetadata` 这种结构化 metadata,不能依赖 YAML 注释或完整 prompt body。
-- catalog 注入必须发生在 `spawn_instances()` 前,否则 `ralph#1` prompt 已经定型。
-- prompt pollution 要继续严控: catalog 只给 coordinator,不进普通 hats。
+- 重复 hook 不应该制造额外改动;只补充独立验证证据即可。
+- 当前最干净的下一步仍是等待明确 commit 指令。
 
-## [2026-05-16 11:53:20] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 无配置 `ralph run` 默认并行模式
+## [2026-05-29 17:24:54] [Session ID: native-codex-20260529] 任务名称: fourth hook fresh staged-only verification
 
 ### 任务内容
-- 调整 startup resource bootstrap,让运行目录没有 `ralph.yml` 且没有 `PROMPT.md` 时,默认 resolved config 启用并行模式。
-- 保持显式 `--config` 语义不变: 用户明确传了配置路径时,缺失文件仍不被 bootstrap selector 吞掉。
-- 创建并归档 OpenSpec change `default-bootstrap-parallel-run`,同步稳定 spec `openspec/specs/resource-bootstrap/spec.md`。
+- 响应第四次 OMX hook。
+- 不新增功能、不提交,只补 fresh staged-only evidence。
 
 ### 完成过程
-- 在 `resolve_workflow_with_prompt_template(...)` 的 startup-only 配置合成边界设置 `config.parallel.enabled = true`。
-- 补充 unit test,断言默认 bootstrap resolution 带 inline prompt 且 `parallel.enabled=true`。
-- 补充 integration test,在空 workspace dry-run 后读取 `.ralph/resolved-config.yml`,断言包含 `parallel.enabled=true`。
-- 归档 OpenSpec change 到 `openspec/changes/archive/2026-05-16-default-bootstrap-parallel-run/`。
-- 修正归档 proposal 的 OpenSpec 标准章节,避免留下 `## Why` / `## What Changes` warning。
-
-### 验证证据
-- `openspec validate default-bootstrap-parallel-run --type change`: valid。
-- `cargo test -p ralph-cli startup_resources::tests -- --nocapture`: 8 passed。
-- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 2 passed。
-- `cargo fmt --all -- --check`: passed。
-- `openspec validate --all --strict`: 26 passed,0 failed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed。
-- `cargo test`: workspace tests and doctests passed。
-- `git diff --check`: passed。
+- 读取 verification-before-completion 与 recoverable retry skill。
+- 刷新 staged 边界,确认上下文文件未 staged。
+- 创建 `/tmp/ralph-hook4-fresh.6mas2Y/wt`,应用 cached patch。
+- 运行 diff/fmt/recoverable/agents/record-summary/OpenSpec gates。
 
 ### 总结感悟
-- 这个需求的正确切入点不是生成物理 `ralph.yml`,而是让 startup bootstrap 的 resolved config 承载“默认 ralph.yml”语义。
-- 并行模式应该是隐式无配置启动的默认运行形态,这样 `ralph#1` 能保持 coordinator 角色,并接上后续 capability catalog / runtime evidence 链路。
-- 显式配置路径仍是用户意图,不能因为文件不存在就悄悄改成默认 bootstrap。
+- 当前状态已经是提交前等待确认,重复 hook 只应刷新证据,不应引入额外变更。
 
-## [2026-05-16 13:50:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: internalize-event-emission-protocol
+## [2026-05-29 17:28:50] [Session ID: native-codex-20260529] 任务名称: fifth hook fresh staged-only verification
 
 ### 任务内容
-- 将通用 `<event topic="...">payload</event>` 事件发送格式从执行目录配置收口为 Ralph 内置 prompt contract。
-- 保留执行目录 `ralph.yml` 的 workflow-specific topic、payload 字段、backpressure 与收敛规则。
-- 瘦身 repo 内 `examples/parallel-experimental-dev-engine/ralph.yml` 和外部 `/Users/cuiluming/local_doc/l_dev/my/rust/ralph-example/ralph.yml` 的 generic event-format 教程块。
+- 响应第五次 OMX hook。
+- 不新增功能、不提交,只补 fresh staged-only evidence。
 
 ### 完成过程
-- 新增 `crates/ralph-core/src/event_emission_protocol.rs`,用 `EVENT_EMISSION_PROTOCOL_HEADING` 作为稳定 marker。
-- `HatInstanceActor::build_prompt(...)` 现在按 `hat.publishes` 注入内置事件发送协议。
-- `ParallelSupervisor::build_ralph_coordinator_instructions(...)` 复用同一个 renderer,并把 `ralph emit` 放入独立 `## OUT-OF-BAND EVENT INJECTION` 段落。
-- 增加 focused tests: renderer、publishing hat prompt、ralph coordinator prompt、example dogfood。
-- 保持 `prompt_overlay` 对 shared all-hat overlay 示例的转义回归测试通过。
-
-### 验证证据
-- `cargo test -p ralph-core event_emission_protocol`: 2 passed。
-- `cargo test -p ralph-core ralph_coordinator_event_protocol`: 1 passed。
-- `cargo test -p ralph-cli --test integration_examples test_example_parallel_experimental_dev_engine_uses_builtin_event_protocol`: 1 passed。
-- `cargo fmt --all -- --check`: passed。
-- `cargo test -p ralph-core event_parser::tests`: 35 passed。
-- `cargo test -p ralph-core prompt_overlay`: 8 passed。
-- `openspec validate internalize-event-emission-protocol --type change`: valid。
-- `openspec validate --all --strict`: 27 passed,0 failed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed。
-- `cargo test`: workspace tests and doctests passed。
-- `git diff --check`: passed。
+- 读取 verification-before-completion 与 recoverable retry skill。
+- 预检 staged index 和上下文文件边界。
+- 创建 `/tmp/ralph-hook5-fresh.aNGSVL/wt`,应用 cached patch。
+- 运行 diff/fmt/recoverable/supervisor gate/record-session/smoke/OpenSpec gates。
 
 ### 总结感悟
-- 通用 runtime envelope 属于 Ralph 内置 prompt contract,不应该长期复制在执行目录 `ralph.yml`。
-- workflow 配置仍然必须保留业务 payload 字段,否则只知道如何发事件,不知道事件里应该带什么。
-- coordinator 的 out-of-band `ralph emit` 是特例通道,应与 in-band `<event>` 协议分段说明,避免两套 envelope 文案继续漂移。
+- 重复 hook 的合理动作是补独立证据,而不是扩大已收敛的 patch。
+- 当前最合理的人工下一步仍是确认是否做 scoped commit。
 
-## [2026-05-16 14:49:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: startup bootstrap 与内置事件协议 live dogfood 收口
+## [2026-05-29 17:32:21] [Session ID: native-codex-20260529] 任务名称: sixth hook fresh staged-only verification
 
 ### 任务内容
-- 对 `default-bootstrap-parallel-run` 与 `internalize-event-emission-protocol` 做真实运行收口。
-- 证明无配置启动时,默认并行模式与内置事件发送协议已经在 live `ralph run` 链路中真实生效。
-- 补齐六文件中的动态证据记录,避免只剩代码和测试结论。
+- 响应第六次 OMX hook。
+- 不新增功能、不提交,只补 fresh staged-only evidence。
 
 ### 完成过程
-- 在空工作区先执行无配置 dry-run,读取 `.ralph/bootstrap-selection.json` 与 `.ralph/resolved-config.yml`。
-- 确认 startup selector 选择 `workflow:feature-minimal` 与 `prompt:bootstrap-default-task`,并且 resolved config 已落盘 `parallel.enabled=true`。
-- 基于 startup 产物执行真实 live run,抓取 `ralph#1` prompt 与 `record-session` summary。
-- 确认 live prompt 同时含 `Act as Ralph's startup bootstrap coordinator` 与 `## RALPH EVENT EMISSION PROTOCOL`。
-- 确认 `record summary` 为 `ux_mode: parallel-cli` 且 `Termination: CompletionPromise`。
+- 预检 staged index 和上下文文件边界。
+- 创建 `/tmp/ralph-hook6-fresh.pYr7tH/wt`,应用 cached patch。
+- 运行 diff/fmt/recoverable continue disambiguation/record-session suite/OpenSpec gates。
 
 ### 总结感悟
-- “默认并行模式”最稳的载体是 startup 产出的 resolved config,而不是要求用户维护一份容易过期的执行目录 `ralph.yml`。
-- “事件协议内置化”真正有价值的完成标准,不是 example 变短了,而是 live `ralph#1` prompt 在默认启动链路里已经带上同一份协议真相源。
+- 这一轮补强了 manual continue routing 层面的证据。
+- 当前最合理的下一步仍是人类明确是否执行 scoped commit。
 
-## [2026-05-16 16:12:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 将 startup bootstrap live dogfood 固化为可重复 gate
+## [2026-05-29 17:36:33] [Session ID: native-codex-20260529] 任务名称: seventh hook verification and ultrawork inactive
 
 ### 任务内容
-- 把之前只存在于 `/tmp` 证据链里的 startup bootstrap + 内置事件协议 live dogfood,固化成 repo 内可重复执行的 CLI integration gate。
-- 让 gate 直接证明默认无配置启动、默认并行模式、live `ralph#1` prompt 协议注入、record-session 收敛这 4 个 runtime 事实。
-- 补齐对应 OpenSpec change `bootstrap-live-dogfood-gate`。
+- 响应第七次 OMX hook。
+- 不新增功能、不提交,只补 fresh staged-only evidence。
+- 验证完成后将 ultrawork active 状态置为 false。
 
 ### 完成过程
-- 新建 OpenSpec change,把边界明确成“一条 repo-native 两段 runtime 流”,而不是单次命令或新 E2E 框架。
-- 在 `crates/ralph-cli/tests/integration_startup_resources.rs` 中新增 live gate:
-  - 第一步执行真实 no-config/no-prompt bootstrap dry-run,生成 `.ralph/bootstrap-selection.json` 与 `.ralph/resolved-config.yml`
-  - 第二步只替换 resolved config 的 backend 执行表面,用 custom stdin backend 抓取 live `ralph#1` prompt
-- gate 断言了:
-  - bootstrap selection 资源选择事实
-  - resolved config 含 `parallel.enabled=true`
-  - live prompt 含 `Act as Ralph's startup bootstrap coordinator`
-  - live prompt 含 `## RALPH EVENT EMISSION PROTOCOL`
-  - live prompt 含 `reply.human.message`
-  - record-session 含 `parallel-cli` 与 `CompletionPromise`
-- 清理了误落在仓库根目录的临时 record-session 文件 `...`,避免污染提交。
-
-### 验证证据
-- `openspec validate bootstrap-live-dogfood-gate --type change`: passed。
-- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 3 passed。
-- `openspec validate --all --strict`: 27 passed, 0 failed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed。
-- `cargo test`: passed。
-- `git diff --check`: passed。
+- 读取 ultrawork skill,确认 completion 状态写法。
+- 创建 `/tmp/ralph-hook7-fresh.MS622a/wt`,应用 cached patch。
+- 运行 recoverable exhaustion / retry scheduling / integration_agents / OpenSpec gates。
+- 执行 `omx state write --input '{"mode":"ultrawork","active":false}' --json` 成功。
 
 ### 总结感悟
-- 这条 gate 的正确形态不是“再造一个大 E2E”,而是把已有 bootstrap artifact 和 live prompt capture 两种证据拼成一条窄而真的 runtime 链。
-- 当默认 bootstrap workflow 自带 builtin backend 时,测试要尊重产品边界: 先产出 resolved config,再切换执行表面,而不是硬逼单次命令完成全部证明。
+- 重复 hook 的根因是 OMX ultrawork 状态仍 active。
+- 在 scoped patch 已完成且 fresh evidence 充足时,应按 ultrawork lifecycle 标记 inactive,而不是继续无限追加验证轮次。
 
-## [2026-05-16 17:36:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B继续 - answer evidence inspect UX
+## [2026-05-29 17:56:25] [Session ID: omx-1779004640353-blcixq] 任务名称: recoverable retry scoped commit
 
 ### 任务内容
-- 在已完成的 `reply.hat.message` answer-return runtime evidence 和 live dogfood 基础上,补一个最小 CLI 查询入口。
-- 让 request id / answer id 不再只能靠手动翻 `.ralph/evidence-index.jsonl` 才能查证。
-- 保持边界收敛: 不做泛化 evidence 子系统,不改 runtime routing 语义。
+- 按用户指令执行 recoverable retry 主线的 scoped local commit。
+- 只提交当前 staged index,不提交上下文六文件、不提交 .omx/state、不 push。
 
 ### 完成过程
-- 新建 OpenSpec change `answer-evidence-inspect-ux`,明确命令落点为 `ralph tools answer inspect <correlation_id>`。
-- 新增 `crates/ralph-cli/src/answer.rs`,复用 `EvidenceIndexReader::find_by_correlation(...)`。
-- 在 `tools.rs` 挂接 `Answer` 子命令,在 `main.rs` 注册模块。
-- 扩展 `integration_answer_evidence.rs`,让现有 live dogfood 在同一工作区内继续调用:
-  - `ralph tools answer inspect req-dogfood-1 --json`
-  - `ralph tools answer inspect ans-dogfood-1`
-- 新增 focused unit test,覆盖 explicit missing answer marker 会被保留为 `missing` 而不是误判成失败或 no-entry。
-
-### 验证证据
-- `openspec validate answer-evidence-inspect-ux --type change`: passed。
-- `cargo test -p ralph-cli --test integration_answer_evidence -- --nocapture`: 2 passed。
-- `cargo test -p ralph-cli answer -- --nocapture`: passed。
-- `openspec validate --all --strict`: 27 passed, 0 failed。
-- `cargo test -p ralph-core smoke_runner`: 12 passed。
-- `cargo test`: passed。
-- `git diff --check`: passed。
+- 提交前检查 staged 文件列表、diff check、禁入上下文路径、submodule status。
+- 执行本地 commit: 8bf37643 feat: add recoverable agent cli retry lifecycle。
+- 提交后确认 git diff --cached --name-status 为空,说明 index 已清空。
 
 ### 总结感悟
-- 方向B当前最缺的不是再补一条 runtime gate,而是给已存在的 answer-return evidence 一个最小可查询面。
-- `Entries` / `Missing` / `NoEntry` 这三个 lookup 语义已经足够表达 answer evidence 的第一阶段产品面,没必要现在就扩成通用 evidence 平台。
+- 在混杂工作区里做 scoped commit 时,最稳的真相源是 staged index 和提交后空 index。
+- 未暂存的其它支线仍留在工作区,后续应继续按 changed-files-only 边界处理。
 
-## [2026-05-16 18:20:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B.1 - human-facing answer return 最小闭环 dogfood 规格收口
+
+## [2026-05-29 18:05:45] [Session ID: omx-1779004640353-blcixq] 任务名称: continuous-learning recoverable retry context rollover
 
 ### 任务内容
-- 继续方向B,把“internal answer return 如何显式变成 human-visible answer”收束成一个窄 OpenSpec change。
-- 避免把 `reply.hat.message` 与 `reply.human.message` 混成同一个机制。
-- 为后续 focused gate 实现先锁定产品边界和验证口径。
+- 响应用户显式 `$continuous-learning`。
+- 处理默认 `task_plan.md` 超过 1000 行的上下文续档。
+- 总结默认六文件和 `evolution_analysis` 支线,沉淀可复用经验。
 
 ### 完成过程
-- 盘点了稳定 spec、项目经验、现有 CLI integration、routing guardrail tests 和 live E2E 场景。
-- 确认当前最小缺口不是新 routing 功能,而是一条 repo-native dogfood gate。
-- 新建 `openspec/changes/human-facing-answer-return-dogfood/`,并完成:
-  - `proposal.md`
-  - `design.md`
-  - `specs/request-reply-answer-evidence/spec.md`
-  - `tasks.md`
-  - `test-plan.md`
-- 用 `openspec validate human-facing-answer-return-dogfood --type change` 验证通过。
+- 列出根目录六文件候选,识别默认组和 `evolution_analysis` 支线组。
+- 将 `evolution_analysis` 判定为未轮转旧支线,总结后移动到 `archive/branch_contexts/evolution_analysis/`。
+- 将旧 `task_plan.md` 移动到 `archive/default_history/task_plan_2026-05-29_1804_pre_continuous_learning.md`,并创建新的轻量 `task_plan.md`。
+- 创建归档 manifest: `archive/manifests/ARCHIVE_MANIFEST__continuous_learning_recoverable_retry_2026-05-29_1804.md`。
+- 将 mixed worktree scoped commit 和 spec-code drift 两条经验写入 `EXPERIENCE.md`。
+- 将 `evolution_analysis` 中仍有效后续项承接到 `LATER_PLANS.md`。
 
 ### 总结感悟
-- B.1 最自然的做法不是再发明一条新 reply 通道,而是证明现有两条通道能在同一条 run 里各守其职。
-- 先把“显示层问题、耐久化问题、真正 workflow 问题”三类失败解释拆开,后面实现时就不容易误补丁。
+- scoped commit 的可靠边界是 staged index 和提交后空 index,不是整洁工作区。
+- OpenSpec tasks 的勾选状态必须和当前代码/依赖/测试证据对账,否则容易把计划状态误当实现事实。
+- 六文件超过 1000 行后,最干净的动作是在主线 commit 后做单独 continuous-learning 续档,避免把上下文整理混入功能提交。
 
-## [2026-05-16 18:34:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B.1 - human-facing answer return 最小闭环实现与归档
+
+## [2026-05-29 18:57:29] [Session ID: omx-1779004640353-blcixq] 任务名称: example PROMPT.md fixture 真相源治理
 
 ### 任务内容
-- 为方向B.1补一条 repo-native focused gate,证明 internal `reply.hat.message` 与 explicit `reply.human.message` 能在同一条 runtime run 里闭环。
-- 保持边界不变: internal answer return 不自动 synthesize human reply。
-- 将该边界同步进稳定 spec 并 archive change。
+- 处理 `integration_examples` 在干净 worktree 中依赖未跟踪 `examples/parallel-*/PROMPT.md` 的问题。
+- 判断是应该提交 prompt fixtures,还是修改测试扫描策略。
 
 ### 完成过程
-- 在 `crates/ralph-cli/tests/integration_answer_evidence.rs` 新增:
-  - `write_explicit_human_reply_backend_script(...)`
-  - `parallel_run_dogfoods_explicit_human_facing_answer_after_internal_reply()`
-- 新 gate 断言了:
-  - CLI stdout 出现最终 human-facing payload
-  - `.ralph/events.jsonl` 同时保留 `reply.hat.message` 与 `reply.human.message`
-  - record-session 保留 `reply.human.message` 发布证据
-  - answer inspect 仍可按 internal request id 查到内部 answer evidence
-- 完成 OpenSpec change `human-facing-answer-return-dogfood` 的 proposal / design / delta spec / tasks / test-plan。
-- archive 后把 requirement 同步进 `openspec/specs/request-reply-answer-evidence/spec.md`,并修掉 EOF 空白行格式问题。
+- 读取 `integration_examples.rs`,确认测试锁定 runnable example 自包含契约。
+- 对照 `specs/parallel-real-world-examples-batch-*.spec.md` 和 example README,确认 `ralph.yml`、`PROMPT.md`、`README.md` 是这些 examples 的正式组成。
+- 检查 `.gitignore`,发现全局忽略 `PROMPT.md`,只对 experimental-dev-engine 单独放行。
+- 将规则改为 `!examples/parallel-*/PROMPT.md`,并把 24 个 prompt templates 纳入 scoped staged patch。
+- 在 staged-only clean worktree 中验证 full `cargo test --quiet` 通过。
 
 ### 总结感悟
-- 这条线最值钱的不是“新增了一个 reply 机制”,而是证明现有两条 reply 通道已经能在同一条 run 里正确协作。
-- 当方向B再往前走时,可以默认把这条 gate 当成 request/reply/human-visible answer 的基础回归门禁。
+- 这类 fixture 问题不能通过削弱测试解决,因为测试实际是在守护 example 的用户运行契约。
+- `.gitignore` 的例外规则也属于测试真相源的一部分: 如果 specs 要求文件存在,ignore 规则必须同步允许它被跟踪。
+- 在混杂工作区中,staged-only worktree 是最可靠的验证方式。
 
-## [2026-05-16 18:52:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: capability result 到 explicit human reply 的产品闭环
+
+## [2026-05-30 11:17:22] [Session ID: omx-1779004640353-blcixq] 任务名称: parallel example prompt fixture scoped commit
 
 ### 任务内容
-- 继续产品演进,把 live runtime capability invocation 与 human-visible answer contract 接成一条真实运行链。
-- 保持边界不变:
-  - `capability.result` 是 parent-consumable runtime event
-  - `reply.human.message` 才是面向人的最终回复
-- 通过 repo-native gate 固定这条闭环。
+- 按用户“直接提交”指令,提交 example prompt fixture 真相源修复。
+- 只提交 `.gitignore` 和 24 个 `examples/parallel-*/PROMPT.md`,不提交上下文文件或其它支线改动。
 
 ### 完成过程
-- 新建 OpenSpec change `capability-result-human-reply-dogfood`,并完成 proposal / design / delta spec / tasks / test-plan,随后 archive。
-- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增:
-  - `write_human_reply_backend_script(...)`
-  - `parallel_capability_result_can_become_explicit_human_reply()`
-- 新 gate 断言了:
-  - parent event log 保留 `capability.request`、`capability.result`、`reply.human.message`
-  - CLI stdout 出现最终 human-facing payload
-  - record-session 保留 `reply.human.message` 发布证据
-  - `ralph tools capability inspect <invocation_id> --json` 仍可查证据链
-  - parent config 保持不变
-- archive 后把 requirement 同步进 `openspec/specs/capability-invocation/spec.md`。
+- 提交前检查 staged 文件、diff check、禁入上下文路径和 submodule status。
+- 执行本地 commit: `f41c2bda fix: track parallel example prompt fixtures`。
+- 提交后确认 index 为空,并验证所有 example `PROMPT.md` 已被 Git 跟踪。
 
 ### 总结感悟
-- 这条线证明 capability invocation 不只是“能调子流程”,而是已经能服务真实对人回答的产品链路。
-- 下一阶段如果再演进,更适合继续做“parent policy / multi-step orchestration / richer human answer shaping”,而不是回头重造 reply 机制。
-## [2026-05-16 20:05:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B - multi-step capability result orchestration gate
+- `.gitignore` 例外是 fixture 真相源的一部分。
+- 当测试和 specs 都要求 runnable example 自包含时,正确动作是提交模板 fixture,不是削弱测试。
+
+
+## [2026-06-01 14:33:48] [Session ID: omx-1779004640353-blcixq] 任务名称: git push main to raiscui remote
 
 ### 任务内容
-- 继续 capability invocation 这条产品演进线。
-- 证明 parent run 不只会做单步 `capability.request -> capability.result -> reply.human.message`,还可以基于前一步结果继续发下一步 capability request。
-- 保持产品边界不变: parent topology 不热改,最终 human-facing answer 仍必须显式发 `reply.human.message`。
+- 按用户指令执行 git push。
+- 将当前 `main` 推送到 `raiscui/ralph-orchestrator`。
 
 ### 完成过程
-- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增 `write_multi_step_backend_script(...)`。
-- 新增 focused gate `parallel_parent_run_can_orchestrate_multiple_capability_results_before_final_human_reply()`。
-- gate 断言了:
-  - parent event log 中存在 2 条 `capability.request`
-  - 2 条 `capability.result` 分别对应 `cap-multi-step-1` 与 `cap-multi-step-2`
-  - 两步 invocation 各自拥有不同 `invocation_id`,且都能通过 `ralph tools capability inspect <id> --json` 查到证据链
-  - CLI stdout、`.ralph/events.jsonl` 与 record-session 都保留最终显式 `reply.human.message`
-- 已将 change archive 到 `openspec/changes/archive/2026-05-16-multi-step-capability-result-orchestration/`,并把 requirement 同步进 `openspec/specs/capability-invocation/spec.md`。
+- 预检当前 upstream 为 `my/main`,并确认 index 为空。
+- HTTPS `git push` 因 credential 账号权限失败。
+- 使用 SSH URL `git@github.com:raiscui/ralph-orchestrator.git` 推送同一目标仓库和同一分支。
+- 推送成功,远端 `main` 已更新到 `f41c2bda`。
 
 ### 总结感悟
-- 多步 orchestration 这次不需要新增 runtime 机制,只需要证明现有 parent run 已能用多个 `capability.result` 做连续决策。
-- 下一条线更适合继续做 richer answer shaping、`capability.failed` 分支策略,或受限的多步 parent policy,而不是回头重造 capability runtime。
-## [2026-05-16 20:42:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B.2 - capability.failed 后的 parent fallback orchestration
+- 当前仓库 remote 使用 HTTPS 时可能被 Git credential helper 选到错误账号。
+- 在不修改 remote 配置的情况下,可用 SSH URL 对同一仓库做一次性 push。
+
+## [2026-08-01 10:55:00] [Session ID: omx-1785579233065-awidzo] 任务名称: improve-codebase-architecture 走查与报告
 
 ### 任务内容
-- 继续 capability invocation 这条产品演进线。
-- 证明 parent run 在收到 `capability.failed` 后,仍然可以继续编排 fallback capability step。
-- 保持边界不变: `capability.failed` 仍然只是 parent-consumable runtime event, parent topology 不热改,最终 human-facing answer 仍必须显式发 `reply.human.message`。
+- 走查 ralph-orchestrator 全部 7 个 crate(74k 行 Rust),产出 6 个架构深化候选的 HTML 报告
+- 报告路径: $TMPDIR/architecture-review-20260801-183513.html
 
 ### 完成过程
-- 新建并 archive OpenSpec change `capability-failure-fallback-human-reply-dogfood`。
-- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增:
-  - `write_failure_fallback_backend_script(...)`
-  - `parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply()`
-- 新 gate 断言了:
-  - 第一步无效 `capability.request` 会生成 parent-visible `capability.failed`
-  - parent 后续 turn prompt 能看到 `capability.failed`、失败 `request_id` 和无效 `capability_id`
-  - parent 随后能发 fallback 有效 `capability.request`
-  - fallback `capability.result` 拥有可 inspect 的 `invocation_id`
-  - `.ralph/events.jsonl`、record-session、CLI stdout 都保留 failure -> fallback success -> final explicit human reply 的完整证据链
-- archive 后把 requirement 同步进 `openspec/specs/capability-invocation/spec.md`。
-
-### 验证证据
-- `openspec validate capability-failure-fallback-human-reply-dogfood --type change`
-- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
-- `cargo test -p ralph-cli --test integration_live_capability`
-- `cargo test -p ralph-core smoke_runner`
-- `openspec validate --all --strict`
-- `cargo test`
-- `git diff --check`
+- 子代理通道两次失败(explore agent_type 模型不可用;消息未送达),改为直接探索
+- 收集规模数据 + 具体代码证据(stream_handler 3465 行渲染、CLI 46k 行、TUI 单块、JSONL 知识碎片、EventLoop 宽 interface)
 
 ### 总结感悟
-- B.2 证明的不是“失败会发生”,而是“parent 已经有能力在 failure 之后继续做下一步产品决策”。
-- 下一条线更适合继续推进 `capability.failed` 之后的 richer branching policy,比如按失败类型选择不同 fallback,而不是回头去重造 capability failure transport。
+- 子代理消息通道在此环境不可靠,重要任务应直接执行
+- 候选 1(显示管线)是首选:病灶清晰、风险低、测试面立即收窄
 
-## [2026-05-16 23:31:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: 方向B.3 - structured failure classes for parent branching policy
+## [2026-08-01 11:40:00] [Session ID: omx-1785579233065-awidzo] 任务名称: 候选1 显示管线深化 — ralph-display crate
 
 ### 任务内容
-- 继续 capability invocation failure 演进线。
-- 为 parent-visible `capability.failed` 增加结构化 `failure_class`,让 parent policy 可以基于稳定字段分支。
-- 保持边界不变: 不做 retry engine,不做 planner,不热改 parent topology,最终 human-facing answer 仍必须显式发 `reply.human.message`。
+- 新建 crates/ralph-display: stream_handler.rs(3465 行)从 ralph-adapters 整体迁入,含 4 个 StreamHandler 实现、markdown 渲染、代码高亮
+- ralph-adapters 瘦身: 删 stream_handler.rs,只留进程执行(cli_backend/cli_executor/pty_executor/auto_detect);依赖移除 termimad/ansi-to-tui/ratatui/crossterm/vt100/tree-sitter 系列
+- 依赖方向: adapters → display(trait);tui 不再依赖 adapters(只依赖 display);cli → display
+- 深化 interface: DisplayTarget(意图枚举)+ make_stream_handler 工厂,loop_runner 的 ~100 行选择矩阵删除
+- 可测性: Console/Pretty 输出注入(Box<dyn Write + Send> + new_with_output),弱测试升级为断言输出
+- blanket impl: StreamHandler for Box<dyn StreamHandler>
+- 领域词汇: 根 CONTEXT.md 懒创建,记录展示域术语
 
 ### 完成过程
-- 新增 `CapabilityFailureClass`,并同步到 parent failure event record 与 isolated invocation failure artifact。
-- 在 core parent runtime hook 中分类 malformed request、invoker unavailable 和 generic invoker failure。
-- 在 CLI adapter 中分类 invalid capability id 与 child/micro-run failed。
-- 强化 live failure fallback gate:
-  - parent 第二轮 prompt 必须包含 `invalid_capability_id`。
-  - event log 的 `capability.failed` payload 必须包含 `failure_class == "invalid_capability_id"`。
-  - fallback success 和最终 `reply.human.message` 仍保持独立可审计。
-- OpenSpec change `capability-failure-class-branching-policy` 已 archive 到 `openspec/changes/archive/2026-05-16-capability-failure-class-branching-policy/`。
-- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步新增 structured failure class requirements。
-- 因 `task_plan.md` 超过 1000 行,已执行轻量持续学习续档,并保存旧计划到 `archive/default_history/task_plan_2026-05-16_2314_capability_b3_prev.md`。
-
-### 验证证据
-- `openspec validate capability-failure-class-branching-policy --type change`
-- `cargo test -p ralph-core capability::tests -- --nocapture`
-- `cargo test -p ralph-cli capability::tests -- --nocapture`
-- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_fallback_after_capability_failed_before_final_human_reply`
-- `cargo test -p ralph-cli --test integration_live_capability`
-- `cargo test -p ralph-core smoke_runner`
-- `cargo fmt --all -- --check`
-- `git diff --check`
-- `openspec validate --all --strict`
-- `cargo test`
-- archive 后复跑: `openspec validate --all --strict`, `git diff --check`, `cargo test -p ralph-cli --test integration_live_capability`, `cargo test -p ralph-core smoke_runner`, `cargo test`
+- grilling 5 个决策(边界/范围/工厂形状/注入/交付),用户逐一确认
+- 机械迁移用 shell/python 脚本,源码改动用 apply_patch
+- 编译中修 2 个问题: anyhow 依赖缺失、DisplayVerbosity re-export 遗漏
 
 ### 总结感悟
-- parent policy 的稳定输入必须是结构化字段,不能让后续 orchestration 靠自由文本 `error` 猜测。
-- `capability.failed` 现在有了可扩展分类面,下一步可以自然演进 richer branching policy,但仍不需要热改 parent topology。
+- "接口是测试面"落地: 注入后 Console/Pretty 从"不 panic"测试升级为断言输出
+- 行为语义保持: 工厂复刻矩阵优先级(TUI 优先于 quiet;StreamJson+TTY → pretty)
+- 验证: cargo check --workspace + display 74 / adapters 107 / tui / cli / core 全过;clippy 干净
 
-## [2026-05-17 00:05:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: B.4 - richer branching policy without retry engine
+## [2026-08-01 12:30:00] [Session ID: omx-1785579233065-awidzo] 任务名称: 候选2 执行域深化 — job 执行实现收进 ralph-adapters
 
 ### 任务内容
-- 继续 B.3 的结构化 `failure_class` 演进。
-- 固定 parent 可以根据不同 failure class 选择不同后续策略。
-- 保持边界: 不做 retry engine,不做 planner,不热改 parent topology。
+- git mv codex_app_server_session.rs / codex_mcp_session.rs → adapters/src/job/{app_server,mcp}.rs
+- 新建 job/headless.rs(从 CliHatJobExecutor::execute 提取 headless 进程 spawn 流程)+ job/mod.rs(选择器: app_server > mcp > headless)
+- parallel_runner.rs 删除 592 行 executor 代码,只留 Supervisor 装配 + TUI 转发宿主
+- ralph-display 新增 colors 模块(ANSI 常量归展示 crate)
+- 测试迁移: stdout-only 不变量测试、finalize_output_for_parsing 4 个、apply_role_backend_overlays 1 个 → job 模块
 
 ### 完成过程
-- 新建并 archive OpenSpec change `capability-failure-branching-matrix`。
-- 稳定 spec `openspec/specs/capability-invocation/spec.md` 已同步 class-specific branching requirements。
-- 在 `crates/ralph-cli/tests/integration_live_capability.rs` 新增 malformed diagnostic backend script。
-- 新增 focused gate `parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry()`。
-- gate 断言:
-  - parent 后续 turn 能看到 `malformed_request`。
-  - diagnostic answer 必须显式走 `reply.human.message`。
-  - malformed branch 不需要 fallback capability request/result。
-  - malformed request 不会创建 invocation artifact。
-  - parent config/topology 保持不变。
-- 复用既有 B.3 gate 继续覆盖 `invalid_capability_id -> fallback capability.request` 分支。
-
-### 验证证据
-- `openspec validate capability-failure-branching-matrix --type change`
-- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry -- --nocapture`
-- `cargo test -p ralph-cli --test integration_live_capability parallel_parent_run_can_emit_diagnostic_reply_for_malformed_capability_request_without_retry`
-- `cargo test -p ralph-cli --test integration_live_capability`
-- `openspec validate --all --strict`
-- `cargo fmt --all -- --check`
-- `git diff --check`
-- `cargo test -p ralph-core smoke_runner`
-- `cargo test`
-- archive 后复跑: `openspec validate --all --strict`, `cargo test -p ralph-cli --test integration_live_capability`, `cargo test -p ralph-core smoke_runner`, `cargo test`
+- 提取/拼接用 python 脚本 + 三次结构修复(截断边界、control_rx 插错位置、孤儿属性/derive)
+- 踩坑: 删除区间时孤儿 #[test]/#[derive] 残留;replace 误伤函数参数;ralph_adapters:: → crate:: 全量替换
 
 ### 总结感悟
-- B.4 的产品价值是“分支策略矩阵”,不是“自动重试”。
-- 对 malformed request 这类输入结构错误,最健康的默认策略是 diagnostic no-retry reply,不要让 runtime 盲目 fallback。
+- git mv 保留 rename 跟踪,review 友好
+- 大块代码迁移后必须完整编译 + 测试,孤儿属性是高频错误
+- 执行域现在有单一真相源: 换新后端只动 adapters/src/job/
 
-
-## [2026-05-17 00:44:57] [Session ID: omx-1778510695653-7pd7o2] 任务名称: startup bootstrap resolved config 默认源头调查
+## [2026-08-02 09:40:00] [Session ID: omx-1785579233065-awidzo] 任务名称: 候选4 Evidence 深化 — record_aggregate 下沉 core
 
 ### 任务内容
-- 调查 rustdog 无配置启动时 `.ralph/resolved-config.yml` 为什么没有等同项目根 `ralph.yml`。
-- 对比 runtime artifact、startup bootstrap 源码、内置 preset、稳定 OpenSpec 和 focused/integration tests。
+- core/src/record_aggregate.rs 新模块: Meta* 类型、RecordSessionAggregate、EvidenceInspectAggregate、Evidence 类型、load/aggregate/aggregate_session、strict 错误诊断
+- cli record_session.rs 从 1514 行瘦身到 625 行: 只留渲染层 + agents sidecar + 指针写入
+- 调用点: record_cli/autopilot/capability 改用 aggregate_session 或 core 函数
+- 测试: strict_parse_error + aggregate meta 2 个测试迁 core; 混合测试(聚合+渲染)留 cli
 
 ### 完成过程
-- 确认 rustdog 根目录没有 `ralph.yml`。
-- 确认 `.ralph/bootstrap-selection.json` 选择的是 `workflow:feature-minimal` 与 `prompt:bootstrap-default-task`。
-- 确认 `crates/ralph-cli/src/startup_resources.rs` 中 `DEFAULT_BOOTSTRAP_WORKFLOW_ID` 仍是 `workflow:feature-minimal`。
-- 确认 `crates/ralph-cli/presets/feature-minimal.yml` 的 `cli.backend` 是 `claude`。
-- 确认项目根 `ralph.yml` 的 `cli.backend` 是 `custom`, `command` 是 `codex`。
-- 复核稳定 spec: 当前只要求无配置 bootstrap 和 `parallel.enabled=true`,没有要求 artifact 等同项目根 `ralph.yml`。
-
-### 验证证据
-- `cargo test -p ralph-cli startup_resources -- --nocapture`: 8 passed。
-- `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 3 passed。
+- 事实核查修正报告: find_file_in_parents 是 1 定义 3 使用(非重复); 聚合已在 cli 收敛且 autopilot 复用
+- 真实摩擦: 聚合逻辑在 cli(依赖全是 core 类型), 渲染与聚合混居
 
 ### 总结感悟
-- 当前行为是默认资源契约漂移: 实现和测试仍锁定旧 `feature-minimal`,而产品期望已经演进为 canonical `custom + codex + parallel` 默认配置。
-- 修复时不应让安装后的二进制依赖源码仓库根 `ralph.yml`,而应把 canonical default config 做成内置 startup resource,并让项目根 `ralph.yml` 与它保持同步。
+- 依赖方向是判断下沉的可靠信号: 聚合的依赖全是 core, 渲染的依赖是 cli 的 display 域
+- 混合测试(跨域)留在原处, 纯域测试随代码走 —— 避免测试搬迁时撕裂
 
-## [2026-05-17 10:32:05] [Session ID: omx-1778510695653-7pd7o2] 任务名称: canonical-default-bootstrap-config OpenSpec 草案
+## [2026-08-02 11:20:00] [Session ID: omx-1785579233065-awidzo] 任务名称: 候选3 TUI 领域切片 — TuiState 四切片
 
 ### 任务内容
-- 将“startup bootstrap 默认配置应与 canonical default config 对齐”落成新的 OpenSpec change。
-- 保持边界: 只产出 proposal / design / specs / tasks,不进入代码实现。
+- 新增 state/radar.rs(410 行: 类型 + 状态机 + mermaid_hat_node_id 唯一真相源)、output.rs(338: IterationBuffer + 浏览/选择)、search.rs(80: 纯状态 + 算法)、task.rs(93: 计数)
+- state.rs 2919 → 2126 行(实现区从 ~1900 缩到 ~700);域方法改一行委托
+- update/apply_update 路由: radar 事件委托、running_hats 由壳从 parallel 域计算注入
+- 全库字段路径更新(app/widgets/tests): state.iterations → state.output.iterations 等
+- 修复 3 个语义陷阱: tick 的串行保留语义(Option<running_hats>)、following_latest 默认值、search_query(输入框文本)与 query(已提交查询)区分
 
 ### 完成过程
-- 创建 change: `openspec/changes/canonical-default-bootstrap-config/`。
-- proposal 明确问题本体是默认 bootstrap canonical source 漂移,不是 rustdog 目录读取错误。
-- design 固定技术方向:
-  - canonical source 必须是 embedded startup resource
-  - selector 默认 workflow 要从旧 `feature-minimal` 切走
-  - 对齐 contract 锁定关键 `cli` / `parallel` 字段,不是追求字节级 YAML 一致
-- delta spec 修改 `resource-bootstrap`,把 canonical `custom + codex + parallel` 语义写成 requirement。
-- tasks 将实现拆成 canonical resource、selector 更新、focused/live gate 更新三组。
-
-### 验证证据
-- `openspec validate canonical-default-bootstrap-config --type change`: passed。
-- `openspec status --change canonical-default-bootstrap-config`: 4/4 artifacts complete。
+- 编译器导航法: 段落删除 → 符号错误逐个修 → 括号配平脚本定位
+- 批量替换误伤切片内部引用, 逐个恢复
+- 测试跟随: 238+1 失败(默认值回归) → OutputSlice 手动 Default 修复
 
 ### 总结感悟
-- 这次最重要的是把“默认行为谁说了算”从隐含实现细节提升成正式契约。
-- 只要 canonical source 没钉住,bootstrap、项目根 `ralph.yml` 和 live dogfood gate 就会继续各自漂移。
+- 大文件切片 = 字段/方法移动 + 可见性调整, 批量替换后必须检查切片内部是否被误伤
+- "字段默认值"是最容易丢的行为: 切片 Default 不能盲目 derive
+- 切片后测试直打切片接口是下一步增量(本次保持兼容委托)
 
-## [2026-05-17 15:25:00] [Session ID: omx-1778510695653-7pd7o2] 任务名称: canonical-default-bootstrap-config 实现与归档
+## [2026-08-02 12:10:00] [Session ID: omx-1785579233065-awidzo] 任务名称: e2e live 验证 parallel 场景
 
 ### 任务内容
-- 落地 OpenSpec change `canonical-default-bootstrap-config`。
-- 修复 no-config startup bootstrap 默认 resolved config 仍来自旧 `feature-minimal` / `claude` 的源头漂移。
-- 将默认 bootstrap selector 对齐 canonical `custom + codex + parallel` 默认配置语义。
+- live 跑 parallel-hat-instances + zh(真实 codex 0.146.0): 双双通过, 验证 headless 并行执行 + 触发路由 + 收敛
+- 3 个失败场景(emit-spawn / app-server-idle-start-live / app-server-steer-multi-turn): 用 git worktree 构建 HEAD(baseline)二进制对照, 新旧表现完全一致 → 确认是既有问题(LLM 收敛), 非候选2迁移引入
+- mock 模式: cassettes/e2e 只有 3 个 parallel cassette, 其余场景/串行也因 cassette 缺失失败 → 环境限制
 
 ### 完成过程
-- 在 `crates/ralph-cli/src/startup_resources.rs` 中将默认 workflow 改为 `workflow:default-parallel`。
-- 用编译期嵌入的仓库根 `ralph.yml` 作为 canonical default bootstrap resource 内容。
-- 保留 legacy `workflow:feature-minimal`,但将其设为 `selector_eligible=false`,避免隐式默认选择继续漂回旧源。
-- 强化 unit test,断言 default bootstrap resolved config 的关键字段与 canonical config 一致,并锁住当前 `max_running_jobs=7` gate。
-- 强化 `integration_startup_resources` live gate,比较 root `ralph.yml`、materialized canonical resource 和 `.ralph/resolved-config.yml` 的用户可见 runtime 字段。
-- 修复 OpenSpec delta 分类错误后,成功 archive 到 `openspec/changes/archive/2026-05-17-canonical-default-bootstrap-config/`。
-- 稳定 spec `openspec/specs/resource-bootstrap/spec.md` 已同步 canonical source requirement。
-
-### 验证证据
-- archive 前:
-  - `cargo fmt --all -- --check`
-  - `openspec validate --all --strict`: 27 passed。
-  - `git diff --check`
-  - `cargo test -p ralph-cli startup_resources -- --nocapture`: 8 passed。
-  - `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 3 passed。
-  - `cargo test -p ralph-core smoke_runner`: 12 passed。
-  - `cargo test`: passed。
-- archive 后:
-  - `openspec archive canonical-default-bootstrap-config --yes`: archived as `2026-05-17-canonical-default-bootstrap-config`。
-  - `openspec validate --all --strict`: 26 passed。
-  - `cargo fmt --all -- --check`
-  - `git diff --check`
-  - `cargo test -p ralph-cli startup_resources -- --nocapture`: 8 passed。
-  - `cargo test -p ralph-cli --test integration_startup_resources -- --nocapture`: 3 passed。
-  - `cargo test -p ralph-core smoke_runner`: 12 passed。
-  - `cargo test`: passed。
+- e2e 硬编码 target/release/ralph, 用 mv 交换二进制做 A/B 对照(已恢复)
+- 关键技巧: 改动未提交时, HEAD 即 baseline, git worktree add 构建对照
 
 ### 总结感悟
-- 默认行为应该有一个可审计的 canonical source,不能让 bootstrap selector、项目根配置和 live dogfood gate 各自漂移。
-- OpenSpec delta 中,修改旧 requirement 要匹配 stable spec 标题; 新增 requirement 要放入 `ADDED Requirements`,否则 archive 自动同步会失败。
+- live e2e 失败要区分"回归"与"既有问题": 二进制 A/B 对照是决定性证据
+- e2e 的 LLM 收敛类断言天然波动, 判断回归应优先看事件流完整性(本次 spawn.task→spawn.done 链路正常)
 
-
-## [2026-05-17 16:24:01] [Session ID: omx-1779004640353-blcixq] 任务名称: TUI 与 Codex 直接输出差异排查
+## [2026-08-02 14:50:00] [Session ID: omx-1785579233065-awidzo] 任务名称: 路由语义修复沉淀到 OpenSpec
 
 ### 任务内容
-- 检查 Ralph TUI 输出与 Codex/CLI 直接输出差异。
-- 识别哪些信息被过滤、隐藏、改写或没有接入 TUI 主画面。
-- 给出“不遗漏信息”和“当前状态可见”的改良方向。
+- parallel-trigger-routing spec 增加: "Session-directed events are not redirected to secondary ralph" + "Session-directed events keep their session context"
+- 变更历史注明修复来源(steer-live-reply E2E)
 
 ### 完成过程
-- 复核 `parallel_runner` 的事件转发规则、stdout/stderr TUI observer、CLI/log-mode final states 输出。
-- 复核 TUI Instances 面板只显示 instance id、state、last output age。
-- 复核 `ralph agents` 已有 Last Input 状态字段,但并行 TUI 未完整接入。
-- 复核 Rendered/Plain 的展示层语义,确认 Rendered 会隐藏 `reply.human.message` event wrapper 并显示 payload。
-- 重新运行 focused tests 验证关键行为。
-
-### 验证证据
-- `cargo test --package ralph-cli --bin ralph parallel_runner::tests::parallel_tui_event_forwarding_filters_noise_without_source_or_instance -- --exact`: passed。
-- `cargo test --package ralph-cli --bin ralph parallel_runner::tests::parallel_tui_event_forwarding_allows_events_with_source_instance -- --exact`: passed。
-- `cargo test --package ralph-cli --bin ralph parallel_runner::guardrail_tests::parallel_output_for_event_parsing_is_stdout_only -- --exact`: passed。
-- `cargo test --package ralph-adapters --lib stream_handler::tests::tui_stream_handler::markdown_rendered_mode_shows_reply_human_message_payload -- --exact`: passed。
-- `cargo test --package ralph-adapters --lib stream_handler::tests::tui_stream_handler::pretty_plain_mode_keeps_reply_human_message_event_text -- --exact`: passed。
-- 意外触发的全量 `cargo test` 最终退出码为 0,未观察到 error 输出; 该证据仅作为额外健康信号。
+- 找到最相关 spec(parallel-trigger-routing 已有 turn-action 场景),扩展 session_strategy 场景
+- openspec validate 全过
 
 ### 总结感悟
-- TUI 不应简单变成 stdout 镜像,否则会损失操作面可读性。
-- 更合适的方向是“双层展示”: 默认状态摘要足够清楚,同时提供 raw/audit 视图保证排障时不丢信息。
-- 当前最值得先补的是 selected instance 当前输入、job、last event、stderr 可见性和证据路径。
-
-
-## [2026-05-17 16:29:49] [Session ID: omx-1779004640353-blcixq] 任务名称: TUI 差异排查 hook 后追加验证
-
-### 任务内容
-- 响应 stop hook 要求,在收尾前补充新鲜验证证据。
-- 验证 agents 状态面和并行 TUI full layout 的当前行为。
-
-### 完成过程
-- 读取 ultrawork skill 的收尾规则,确认 direct ultrawork 只要求轻量 evidence。
-- 运行 agents 表格集成测试,确认 last input 信息在 agents 状态面可见。
-- 运行并行 TUI full layout snapshot smoke,确认 instances/output/gates 操作面仍可渲染。
-
-### 验证证据
-- cargo test --package ralph-cli --test integration_agents test_agents_command_prints_table -- --exact: passed。
-- cargo test --package ralph-tui --test integration_snapshots test_parallel_full_layout_renders_instances_output_and_gates -- --exact: passed。
-
-### 总结感悟
-- 新证据进一步支持“真相源存在,但 TUI 主画面聚合不足”的结论。
-- 后续实现时应优先复用 agents snapshot / parallel state,不要另建第二套状态真相源。
-
-
-## [2026-05-17 16:51:58] [Session ID: omx-1779004640353-blcixq] 任务名称: TUI 并行状态摘要最小实现
-
-### 任务内容
-- 将上一轮排查出的 TUI 状态缺口推进为最小代码改良。
-- 让用户在 TUI 主画面更容易看到当前实例、当前 job、最近事件和渲染模式。
-
-### 完成过程
-- 复用 `InstanceViewState.jobs/current_job`,新增 job 摘要 helper。
-- 在 Instances 面板实例行中显示 `job x/y`。
-- 在 Footer 并行模式下显示 selected instance、紧凑 job、render mode 和 last event。
-- 为 Instances 和 Footer 增加 focused tests。
-- 处理 footer 80 列宽度下事件名被截断的问题,将 verbose 摘要改成紧凑摘要。
-
-### 验证证据
-- `cargo fmt --all -- --check`: passed。
-- `cargo test --package ralph-tui --lib widgets::instances::tests::instances_pane_shows_current_job_summary -- --exact`: passed。
-- `cargo test --package ralph-tui --lib widgets::footer::tests::footer_shows_parallel_status_summary -- --exact`: passed。
-- `cargo test --package ralph-tui --test integration_snapshots test_parallel_full_layout_renders_instances_output_and_gates -- --exact`: passed。
-- `cargo test --package ralph-tui`: passed。
-- `cargo test`: passed。
-- `git diff --check`: passed。
-
-### 总结感悟
-- TUI 状态增强应该优先复用现有 state,避免为了展示再建状态真相源。
-- Footer 是窄空间,不适合塞完整英文标签;重要信息要前置并压缩。
-- 这次完成的是“状态摘要”层。raw/audit 视图仍是后续任务。
-
-
-## [2026-05-17 16:55:40] [Session ID: omx-1779004640353-blcixq] 任务名称: notes.md 超限续档与持续学习
-
-### 任务内容
-- 处理默认六文件中 `notes.md` 超过 1000 行的问题。
-- 执行最小 continuous-learning,沉淀 TUI 状态摘要经验。
-
-### 完成过程
-- 列出默认六文件候选并确认只有 `notes.md` 超限。
-- 回读默认六文件最新段落和 `EXPERIENCE.md` 现有 TUI 经验。
-- 将旧 `notes.md` 归档到 `archive/default_history/notes_2026-05-17_1655_tui_status_prev.md`。
-- 新建精简 `notes.md` 续档入口。
-- 追加 `EXPERIENCE.md` 条目 `exp-20260517-parallel-tui-status-summary`。
-- 创建归档 manifest `archive/manifests/ARCHIVE_MANIFEST__default_notes_rollover_2026-05-17_1655.md`。
-
-### 总结感悟
-- 六文件续档要在主任务结束前处理,否则下轮会继续读入超大上下文。
-- 当前场景没有新增 AGENTS 索引需求,因为 `EXPERIENCE.md` 已在 `AGENTS.md` Project Knowledge Index 中登记。
-
-## [2026-05-17 17:10:00] [Session ID: omx-1779004640353-blcixq] 任务名称: Codex 原生状态行是否进入并行 TUI核查
-
-### 任务内容
-- 核查 Codex 原生 `Working...` / `Inspecting current code behavior...` 这类临时状态信息是否会显示在 `ralph run` 并行 TUI 中。
-- 明确区分 stderr 普通行与 Codex TTY 状态条。
-
-### 完成过程
-- 读取普通并行 backend 的 stdout/stderr 读取路径。
-- 读取 Codex app-server runtime 的输出映射路径。
-- 读取并行 TUI 的 stderr 渲染与控制字符处理路径。
-- 运行 focused tests 验证 stderr 默认显示和 TUI stderr 渲染仍成立。
-
-### 验证证据
-- `cargo test --package ralph-cli --bin ralph tests::run_args_show_stderr_defaults_to_true -- --exact`: passed。
-- `cargo test --package ralph-tui --lib state::parallel::tests::parallel_output_stderr_markdown_rendering_matches_renderer_output -- --exact`: passed。
-
-### 总结感悟
-- “stderr 会显示”和“Codex 原生 TTY 状态条会显示”不是一回事。
-- 如果要让 TUI 像 Codex 一样显示当前动作,应设计正式的 `current_activity` / status 字段,而不是依赖解析临时终端控制序列。
-
-## [2026-05-17 18:18:00] [Session ID: omx-1779004640353-blcixq] 任务名称: Codex 风格 current activity 状态显示
-
-### 任务内容
-- 在 `ralph run` 并行 TUI 中显示类似 Codex 的当前活动状态。
-- 覆盖用户关心的 `Working` 和 `Inspecting current code behavior` 这类文案。
-- 保持信息不遗漏: activity 不进入正文,但作为状态字段稳定显示; stderr 普通行仍按原规则显示。
-
-### 完成过程
-- 新增 `ralph-core` activity 文本归一化 helper。
-- 给 `OutputStream` 增加 `Activity` 变体,作为纯状态流。
-- 在 Codex app-server 路径中把 `task_started` 映射为 `Working`,把 reasoning summary 中的活动文案映射为 activity。
-- 在 TUI parallel state 中维护 `current_activity` 与 `state_since`。
-- 在 Footer 显示 `Activity (Ns • Ctrl+C to interrupt)`。
-- 在 Instances 行显示当前 activity 短摘要。
-- 清理 `LATER_PLANS.md` 中已经完成的 current activity 待办,保留 raw/audit 等后续方向。
-
-### 验证证据
-- `cargo test -p ralph-cli`: passed。
-- `cargo fmt --all -- --check`: passed。
-- `cargo test`: passed。
-- `git diff --check`: passed。
-
-### 总结感悟
-- Codex 原生 TTY 状态条不能当 Ralph 的稳定真相源。
-- 更稳的做法是把 app-server lifecycle / reasoning 信号提升为 Ralph 自己的状态流。
-- TUI 的“当前在做什么”应该是状态字段,不是输出正文的一部分。
-
-## [2026-05-17 19:05:00] [Session ID: omx-1779004640353-blcixq] 任务名称: 并行 TUI raw/audit 视图
-
-### 任务内容
-- 新增并行 TUI Output 三态视图: Rendered / Plain / Audit。
-- `v` 键循环切换,Footer 显示 `m:R/P/A`,Output 标题显示模式。
-- Audit 视图显示 `[instance:stream:job=n] line`,并包含 activity 流。
-
-### 验证证据
-- `cargo test -p ralph-tui`: passed。
-- `cargo test`: passed。
-- `cargo fmt --all -- --check`: passed。
-- `git diff --check`: passed。
+- 修复沉淀到 spec 的最佳位置是"同类场景旁"(turn-action 旁加 session-directed)
