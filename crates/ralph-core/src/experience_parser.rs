@@ -195,12 +195,12 @@ mod tests {
 
     #[test]
     fn parse_single_experience_entry() {
-        let markdown = r#"# Experience
+        let markdown = r"# Experience
 
 ### exp-1737372000-a1b2
 > Only the canonical writer may update shared topic files.
 <!-- scope: project | source_topics: memory-axes | source_hats: ralph#1 | status: active | confidence: high | created_at: 2026-03-21T00:00:00Z | updated_at: 2026-03-21T00:10:00Z | supersedes: exp-1000-abcd | replaced_by: exp-2000-bbee -->
-"#;
+";
 
         let entries = parse_experiences(markdown);
         assert_eq!(entries.len(), 1);
@@ -218,13 +218,13 @@ mod tests {
 
     #[test]
     fn parse_multiline_summary() {
-        let markdown = r#"# Experience
+        let markdown = r"# Experience
 
 ### exp-1737372000-a1b2
 > First line
 > Second line
 <!-- scope: role | source_topics: topic-a | source_hats: spec_reviewer | status: active | confidence: medium | created_at: 2026-03-21T00:00:00Z | updated_at: 2026-03-21T00:00:00Z | supersedes:  | replaced_by:  -->
-"#;
+";
 
         let entries = parse_experiences(markdown);
         assert_eq!(entries.len(), 1);
@@ -235,11 +235,11 @@ mod tests {
 
     #[test]
     fn parse_uses_defaults_for_missing_metadata() {
-        let markdown = r#"# Experience
+        let markdown = r"# Experience
 
 ### exp-1737372000-a1b2
 > Summary without explicit metadata.
-"#;
+";
 
         let entries = parse_experiences(markdown);
         assert_eq!(entries.len(), 1);

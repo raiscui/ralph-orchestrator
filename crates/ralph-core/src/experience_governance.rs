@@ -375,8 +375,7 @@ impl CanonicalWriterStore {
             .into_iter()
             .map(|group| self.peek_topic_writer(&group.suffix, None))
             .collect::<Result<Vec<_>, _>>()?;
-        topic_writers
-            .sort_by(|left, right| left.scope.display_name().cmp(&right.scope.display_name()));
+        topic_writers.sort_by_key(|writer| writer.scope.display_name());
 
         Ok(ScopedExperienceInspection {
             legacy_memories_path: self.core.resolve_legacy_memories_path(),

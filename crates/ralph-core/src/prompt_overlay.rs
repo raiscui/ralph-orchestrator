@@ -5,9 +5,7 @@
 //! - 来源文件 `config/all_hat.md` 在编译期静态内嵌.
 
 use crate::config::{AllHatPromptConfig, CoreConfig};
-
-/// 统一注入段落标题，便于测试和日志定位。
-const ALL_HAT_PROMPT_HEADER: &str = "## ALL HAT PROMPT (config/all_hat.md)";
+use crate::prompt_surface::{self, ALL_HAT_PROMPT_HEADING, PromptSurface};
 
 /// `config/all_hat.md` 的编译期内嵌内容。
 ///
@@ -28,9 +26,13 @@ const COMPILED_ALL_HAT_PROMPT: &str = include_str!(concat!(
 /// - `file`: 读取运行时文件（相对路径按 workspace root 解析）
 pub(crate) fn load_all_hat_prompt(core: &CoreConfig) -> Result<Option<String>, String> {
     match &core.all_hat_prompt {
-        AllHatPromptConfig::Compiled => Ok(trim_prompt(COMPILED_ALL_HAT_PROMPT)),
+        AllHatPromptConfig::Compiled => {
+            trim_shared_only_prompt("config/all_hat.md", COMPILED_ALL_HAT_PROMPT)
+        }
         AllHatPromptConfig::Disabled => Ok(None),
-        AllHatPromptConfig::Inline { text } => Ok(trim_prompt(text)),
+        AllHatPromptConfig::Inline { text } => {
+            trim_shared_only_prompt("core.all_hat_prompt.inline", text)
+        }
         AllHatPromptConfig::File { path } => {
             let resolved = core.resolve_path(path);
             let content = std::fs::read_to_string(&resolved).map_err(|error| {
@@ -39,9 +41,43 @@ pub(crate) fn load_all_hat_prompt(core: &CoreConfig) -> Result<Option<String>, S
                     resolved.display()
                 )
             })?;
-            Ok(trim_prompt(&content))
+            trim_shared_only_prompt(
+                &format!("core.all_hat_prompt.file:{}", resolved.display()),
+                &content,
+            )
         }
     }
+}
+
+fn trim_shared_only_prompt(source_name: &str, content: &str) -> Result<Option<String>, String> {
+    audit_shared_only_prompt(source_name, content)?;
+    Ok(trim_prompt(content))
+}
+
+pub(crate) fn audit_shared_only_prompt(source_name: &str, content: &str) -> Result<(), String> {
+    let mut violations = Vec::new();
+
+    for surface in [PromptSurface::CoordinatorOnly, PromptSurface::WorkerOnly] {
+        for heading in prompt_surface::headings_for_surface(surface) {
+            for (line_no, line) in content.lines().enumerate() {
+                if line.trim() == *heading {
+                    violations.push(format!(
+                        "{surface} heading `{heading}` at line {}",
+                        line_no + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{source_name} must be shared-only, but contains forbidden prompt surface(s): {}",
+        violations.join(", ")
+    ))
 }
 
 fn trim_prompt(content: &str) -> Option<String> {
@@ -91,11 +127,11 @@ pub(crate) fn inject_all_hat_prompt(prompt: String, all_hat_prompt: Option<&str>
             // 剩余正文: 去掉第一行以及其后所有空行(主要是 `\n\n`),
             // 由我们统一用 `\n\n` 重新分隔,避免出现多余空白.
             let rest = prompt[line_end..].trim_start_matches(|c| c == '\r' || c == '\n');
-            return format!("{first_line}\n\n{ALL_HAT_PROMPT_HEADER}\n\n{sanitized}\n\n{rest}");
+            return format!("{first_line}\n\n{ALL_HAT_PROMPT_HEADING}\n\n{sanitized}\n\n{rest}");
         }
     }
 
-    format!("{ALL_HAT_PROMPT_HEADER}\n\n{sanitized}\n\n{prompt}")
+    format!("{ALL_HAT_PROMPT_HEADING}\n\n{sanitized}\n\n{prompt}")
 }
 
 /// 把 overlay 里的协议示例改成“展示文本”，避免被模型直接照抄成真实事件。
@@ -131,7 +167,7 @@ mod tests {
     fn inject_all_hat_prompt_adds_overlay_header() {
         let prompt = "base prompt".to_string();
         let merged = inject_all_hat_prompt(prompt, Some("shared guidance"));
-        assert!(merged.contains(ALL_HAT_PROMPT_HEADER));
+        assert!(merged.contains(ALL_HAT_PROMPT_HEADING));
         assert!(merged.contains("shared guidance"));
         assert!(merged.contains("base prompt"));
     }
@@ -151,14 +187,14 @@ mod tests {
             "merged prompt should start with runtime id line"
         );
         assert!(
-            merged.contains(ALL_HAT_PROMPT_HEADER),
+            merged.contains(ALL_HAT_PROMPT_HEADING),
             "merged prompt should still include overlay header"
         );
         let id_pos = merged
             .find("ralph_hat_instance_id:\"writer#1\"")
             .expect("merged prompt must contain runtime id");
         let header_pos = merged
-            .find(ALL_HAT_PROMPT_HEADER)
+            .find(ALL_HAT_PROMPT_HEADING)
             .expect("merged prompt must contain overlay header");
         assert!(
             id_pos < header_pos,
@@ -172,8 +208,83 @@ mod tests {
             .expect("compiled all-hat overlay should load")
             .expect("compiled all-hat overlay should not be empty");
         assert!(
-            overlay.contains("文件上下文位置特殊情况转移"),
+            overlay.contains("Shared file-context location"),
             "compiled overlay should contain content from config/all_hat.md"
+        );
+    }
+
+    #[test]
+    fn all_hat_prompt_contains_only_shared_protocol_surface() {
+        let compiled = load_all_hat_prompt(&CoreConfig::default())
+            .expect("compiled all-hat overlay should pass shared-only audit")
+            .expect("compiled all-hat overlay should not be empty");
+        audit_shared_only_prompt("compiled test overlay", &compiled)
+            .expect("compiled overlay must stay shared-only");
+
+        let mut inline_core = CoreConfig::default();
+        inline_core.all_hat_prompt = AllHatPromptConfig::Inline {
+            text: "## Shared test surface\n\nOnly shared guidance.\n".to_string(),
+        };
+        let inline = load_all_hat_prompt(&inline_core)
+            .expect("inline shared overlay should pass audit")
+            .expect("inline shared overlay should not be empty");
+        audit_shared_only_prompt("inline test overlay", &inline)
+            .expect("inline overlay must stay shared-only");
+
+        let temp_dir = tempdir().expect("tempdir");
+        let overlay_path = temp_dir.path().join("overlay.md");
+        std::fs::write(
+            &overlay_path,
+            "## Shared file surface\n\nOnly shared guidance.\n",
+        )
+        .expect("write overlay");
+
+        let mut file_core = CoreConfig::default().with_workspace_root(temp_dir.path());
+        file_core.all_hat_prompt = AllHatPromptConfig::File {
+            path: "overlay.md".to_string(),
+        };
+        let file = load_all_hat_prompt(&file_core)
+            .expect("file shared overlay should pass audit")
+            .expect("file shared overlay should not be empty");
+        audit_shared_only_prompt("file test overlay", &file)
+            .expect("file overlay must stay shared-only");
+    }
+
+    #[test]
+    fn load_all_hat_prompt_rejects_inline_coordinator_only_surface() {
+        let mut core = CoreConfig::default();
+        core.all_hat_prompt = AllHatPromptConfig::Inline {
+            text: "## Runtime Capability Catalog\n\nCoordinator-only catalog.\n".to_string(),
+        };
+
+        let error = load_all_hat_prompt(&core)
+            .expect_err("inline all-hat overlay must reject coordinator-only headings");
+        assert!(
+            error.contains("coordinator-only heading `## Runtime Capability Catalog`"),
+            "error should identify forbidden coordinator surface: {error}"
+        );
+    }
+
+    #[test]
+    fn load_all_hat_prompt_rejects_file_worker_only_surface() {
+        let temp_dir = tempdir().expect("tempdir");
+        let overlay_path = temp_dir.path().join("overlay.md");
+        std::fs::write(
+            &overlay_path,
+            "### 1. EXECUTE\n\nWorker-only instructions.\n",
+        )
+        .expect("write overlay");
+
+        let mut core = CoreConfig::default().with_workspace_root(temp_dir.path());
+        core.all_hat_prompt = AllHatPromptConfig::File {
+            path: "overlay.md".to_string(),
+        };
+
+        let error = load_all_hat_prompt(&core)
+            .expect_err("file all-hat overlay must reject worker-only headings");
+        assert!(
+            error.contains("worker-only heading `### 1. EXECUTE`"),
+            "error should identify forbidden worker surface: {error}"
         );
     }
 

@@ -21,6 +21,14 @@ fn write_backend_script(path: &Path) -> Result<()> {
     let script = r#"#!/bin/sh
 set -eu
 mkdir -p .ralph/dogfood
+if [ "${RALPH_CAPABILITY_CHILD:-}" = "1" ]; then
+  cat > .ralph/dogfood/capability-child.prompt.txt
+  printf 'focused reviewer child executed
+'
+  printf 'LOOP_COMPLETE
+'
+  exit 0
+fi
 instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
 case "$instance" in
   ralph#1)
@@ -70,6 +78,14 @@ fn write_human_reply_backend_script(path: &Path) -> Result<()> {
     let script = r#"#!/bin/sh
 set -eu
 mkdir -p .ralph/dogfood
+if [ "${RALPH_CAPABILITY_CHILD:-}" = "1" ]; then
+  cat > .ralph/dogfood/capability-child.prompt.txt
+  printf 'focused reviewer child executed
+'
+  printf 'LOOP_COMPLETE
+'
+  exit 0
+fi
 instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
 case "$instance" in
   ralph#1)
@@ -122,6 +138,14 @@ fn write_multi_step_backend_script(path: &Path) -> Result<()> {
     let script = r#"#!/bin/sh
 set -eu
 mkdir -p .ralph/dogfood
+if [ "${RALPH_CAPABILITY_CHILD:-}" = "1" ]; then
+  cat > .ralph/dogfood/capability-child.prompt.txt
+  printf 'focused reviewer child executed
+'
+  printf 'LOOP_COMPLETE
+'
+  exit 0
+fi
 instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
 case "$instance" in
   ralph#1)
@@ -182,6 +206,14 @@ fn write_failure_fallback_backend_script(path: &Path) -> Result<()> {
     let script = r#"#!/bin/sh
 set -eu
 mkdir -p .ralph/dogfood
+if [ "${RALPH_CAPABILITY_CHILD:-}" = "1" ]; then
+  cat > .ralph/dogfood/capability-child.prompt.txt
+  printf 'focused reviewer child executed
+'
+  printf 'LOOP_COMPLETE
+'
+  exit 0
+fi
 instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
 case "$instance" in
   ralph#1)
@@ -243,6 +275,14 @@ fn write_malformed_request_diagnostic_backend_script(path: &Path) -> Result<()> 
     let script = r#"#!/bin/sh
 set -eu
 mkdir -p .ralph/dogfood
+if [ "${RALPH_CAPABILITY_CHILD:-}" = "1" ]; then
+  cat > .ralph/dogfood/capability-child.prompt.txt
+  printf 'focused reviewer child executed
+'
+  printf 'LOOP_COMPLETE
+'
+  exit 0
+fi
 instance="${RALPH_HAT_INSTANCE_ID:-unknown}"
 case "$instance" in
   ralph#1)

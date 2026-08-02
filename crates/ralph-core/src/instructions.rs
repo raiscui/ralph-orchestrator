@@ -277,6 +277,7 @@ mod tests {
             specs_dir: "./specifications/".to_string(),
             guardrails: vec!["Custom rule one".to_string(), "Custom rule two".to_string()],
             all_hat_prompt: AllHatPromptConfig::Compiled,
+            runtime_capabilities_enabled: true,
             workspace_root: std::path::PathBuf::from("."),
         };
         let builder = InstructionBuilder::new("DONE", custom_core);

@@ -294,9 +294,14 @@ fn validate_skill_asset(
 
     let frontmatter = parse_skill_frontmatter(&raw_skill, &label, skill_path)?;
     let skill_name =
-        required_skill_frontmatter_field(&frontmatter.name, &label, skill_path, "name")?;
+        required_skill_frontmatter_field(frontmatter.name.as_ref(), &label, skill_path, "name")?;
 
-    required_skill_frontmatter_field(&frontmatter.description, &label, skill_path, "description")?;
+    required_skill_frontmatter_field(
+        frontmatter.description.as_ref(),
+        &label,
+        skill_path,
+        "description",
+    )?;
 
     if !state.seen_skill_names.insert(skill_name.clone()) {
         return invalid(label, format!("duplicate skill name `{skill_name}`"));
@@ -334,12 +339,12 @@ fn parse_skill_frontmatter(
 
 /// 读取必填 frontmatter 字段。
 fn required_skill_frontmatter_field(
-    value: &Option<String>,
+    value: Option<&String>,
     label: &AssetLabel,
     skill_path: &str,
     field_name: &str,
 ) -> Result<String, GuidanceManifestError> {
-    let Some(value) = value.as_ref().map(String::as_str).map(str::trim) else {
+    let Some(value) = value.map(String::as_str).map(str::trim) else {
         return invalid(
             label.clone(),
             format!("missing skill frontmatter field `{field_name}` in `{skill_path}`"),

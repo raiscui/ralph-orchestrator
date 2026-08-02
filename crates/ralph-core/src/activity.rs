@@ -32,9 +32,7 @@ const STATUS_PREFIXES: [&str; 17] = [
 /// - `Inspecting current code behavior`
 /// - `• Working (11s • esc to interrupt)`
 pub fn normalize_activity_label(raw: &str) -> Option<String> {
-    let Some(first_line) = raw.lines().map(str::trim).find(|line| !line.is_empty()) else {
-        return None;
-    };
+    let first_line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
 
     let cleaned = clean_activity_label(first_line);
     if cleaned.is_empty() {
@@ -42,7 +40,7 @@ pub fn normalize_activity_label(raw: &str) -> Option<String> {
     }
 
     if looks_like_activity(&cleaned) {
-        Some(cleaned.to_string())
+        Some(cleaned)
     } else {
         None
     }

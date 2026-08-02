@@ -3,6 +3,7 @@
 //! 这个模块只定义结构化协议和可审计记录。
 //! 真实执行入口由 CLI / runtime layer 负责,并且 v1 必须保持隔离执行,不能热改父 run topology。
 
+use crate::RoleContract;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ralph_proto::Event;
@@ -30,7 +31,7 @@ pub fn render_parent_capability_catalog(capabilities: &[CapabilityMetadata]) -> 
 
     let mut out = String::new();
     out.push_str(PARENT_CAPABILITY_CATALOG_HEADING);
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(
         "You may invoke a listed runtime capability by emitting exactly one structured event.\n\n",
     );
@@ -38,6 +39,13 @@ pub fn render_parent_capability_catalog(capabilities: &[CapabilityMetadata]) -> 
     out.push_str("<event topic=\"capability.request\">{\"request_id\":\"unique-request-id\",\"capability_id\":\"<capability id>\",\"input\":\"task-specific input\"}</event>\n\n");
     out.push_str("Required payload fields: `request_id`, `capability_id`, `input`.\n");
     out.push_str("Execution isolation: runtime will execute the selected capability as an isolated child or micro-run; do not mutate parent topology.\n\n");
+    out.push_str("Selection guardrails:\n");
+    out.push_str("- Use `capability.request` for isolated child/micro-runs when parent topology should remain unchanged.\n");
+    out.push_str("- Do NOT use `capability.request` when the human asks to create new visible hat instances in the parent TUI.\n");
+    out.push_str(
+        "- For parent-visible multi-instance creation, emit `topology.spawn_group` instead.\n",
+    );
+    out.push_str("- For one parent-visible single-instance delivery, emit a normal workflow event with `target=\"<hat_id>\"` and `spawn_instance=\"true\"`.\n\n");
     out.push_str("Available capabilities:\n");
 
     for capability in capabilities {
@@ -333,6 +341,9 @@ pub struct CapabilityInvocationRecord {
     pub input_contract: String,
     /// 解析出的配置 artifact 相对/绝对路径。
     pub resolved_config_path: String,
+    /// 本次调用对应的 role contract(provenance + output boundary).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_contract: Option<RoleContract>,
     /// 父 topology 是否保持稳定。
     pub parent_topology_unchanged: bool,
 }
@@ -444,6 +455,9 @@ mod tests {
         assert!(rendered.contains("request_id"));
         assert!(rendered.contains("capability_id"));
         assert!(rendered.contains("input"));
+        assert!(rendered.contains("Execution isolation"));
+        assert!(rendered.contains("topology.spawn_group"));
+        assert!(rendered.contains("spawn_instance=\"true\""));
         assert!(rendered.contains("hat:focused-reviewer"));
         assert!(rendered.contains("hat_capability"));
         assert!(rendered.contains("isolated_micro_run"));
