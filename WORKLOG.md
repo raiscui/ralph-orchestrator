@@ -474,3 +474,17 @@
 
 ### 总结感悟
 - 混合工作树的 scoped commit: 先列文件归属, 再按逻辑分组
+
+## [2026-08-02 15:30:00] [Session ID: omx-1785579233065-awidzo] 任务名称: 剩余工作树全量提交
+
+### 任务内容
+- 15 个 commit(会话 6 个 + 用户工作 9 个): ralph_env / topology spawn / capability / e2e 场景 / cli 增强 / docs / proto+tui / 上下文归档 / openspec 归档
+- 排除: .codegraph/.cursor(工具目录)、parallel_rec.jsonl、test(临时文件)
+- 提交后 workspace check 0 warning, core/cli 测试全过
+
+### 完成过程
+- 按用户工作线分组: topology spawn、capability、e2e 场景、cli、docs、上下文
+- 关键发现: ralph_env.rs 被已提交代码引用(job/headless), 必须一并提交
+
+### 总结感悟
+- 提交前检查"未跟踪文件是否被已提交代码引用", 避免 broken checkout
