@@ -8,7 +8,7 @@
 
 use ralph_adapters::{
     CliBackend, CustomBackendError, NoBackendError, detect_backend_default,
-    scrub_codex_parent_session_env,
+    scrub_codex_parent_session_env, scrub_ralph_parent_worker_env,
 };
 use ralph_core::RalphConfig;
 use std::path::PathBuf;
@@ -181,6 +181,7 @@ fn spawn_interactive(backend: &CliBackend, prompt: &str) -> Result<(), SopRunErr
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    scrub_ralph_parent_worker_env(&mut child_command);
     scrub_codex_parent_session_env(&mut child_command, &command);
 
     let mut child = child_command.spawn()?;

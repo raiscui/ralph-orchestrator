@@ -266,7 +266,7 @@ async fn run_doctor<W: Write>(
             reporter.err(
                 "config.load",
                 "config",
-                &format!(
+                format!(
                     "Config invalid: {e}. Fix: create/fix config (e.g. `ralph init --list-presets`)"
                 ),
             )?;
@@ -279,7 +279,7 @@ async fn run_doctor<W: Write>(
             reporter.warn(
                 "config.load",
                 "config",
-                &format!(
+                format!(
                     "Config file not found (using defaults): {}. Fix: `ralph init --list-presets` then `ralph init --preset <name>`",
                     loaded.source_label
                 ),
@@ -288,7 +288,7 @@ async fn run_doctor<W: Write>(
             reporter.ok(
                 "config.load",
                 "config",
-                &format!("Config loaded: {}", loaded.source_label),
+                format!("Config loaded: {}", loaded.source_label),
             )?;
         }
 
@@ -302,7 +302,7 @@ async fn run_doctor<W: Write>(
                     reporter.warn(
                         "config.validate",
                         "config",
-                        &format!(
+                        format!(
                             "Config validated with warnings ({}). Fix: review config or run `ralph hats validate`",
                             warnings.len()
                         ),
@@ -313,7 +313,7 @@ async fn run_doctor<W: Write>(
                 reporter.err(
                     "config.validate",
                     "config",
-                    &format!("Config validation failed: {e}. Fix: review config and rerun"),
+                    format!("Config validation failed: {e}. Fix: review config and rerun"),
                 )?;
             }
         }
@@ -521,13 +521,13 @@ fn check_hat_topology<W: Write>(
             reporter.ok(
                 "hats.starting_event",
                 "hats",
-                &format!("Starting event '{start}' has subscriber ({})", hat.name),
+                format!("Starting event '{start}' has subscriber ({})", hat.name),
             )?;
         } else {
             reporter.err(
                 "hats.starting_event",
                 "hats",
-                &format!(
+                format!(
                     "starting_event '{start}' has no subscribers. Fix: add it to some hat.triggers or unset event_loop.starting_event"
                 ),
             )?;
@@ -547,7 +547,7 @@ fn check_hat_topology<W: Write>(
                 reporter.warn(
                     "hats.orphan_event",
                     "hats",
-                    &format!(
+                    format!(
                         "Event '{topic}' published by '{}' has no hat subscribers. Fix: add a subscriber (hat.triggers) or remove it from publishes",
                         hat.name
                     ),
@@ -567,7 +567,7 @@ fn check_hat_topology<W: Write>(
         reporter.warn(
             "hats.dead_end",
             "hats",
-            &format!(
+            format!(
                 "Hat '{name}' publishes nothing (dead end). Fix: add publishes/default_publishes to keep workflow moving"
             ),
         )?;
@@ -653,7 +653,7 @@ fn check_backend<W: Write>(
                 reporter.ok(
                     "backend.auto_detect",
                     "backend",
-                    &format!("Auto-detected backend: {chosen}"),
+                    format!("Auto-detected backend: {chosen}"),
                 )?;
                 backend = chosen;
             }
@@ -661,7 +661,7 @@ fn check_backend<W: Write>(
                 reporter.err(
                     "backend.auto_detect",
                     "backend",
-                    &format!(
+                    format!(
                         "Backend auto-detect failed: {e}. Fix: install a supported CLI or set cli.backend explicitly"
                     ),
                 )?;
@@ -687,14 +687,14 @@ fn check_backend<W: Write>(
                     reporter.ok(
                         "backend.custom.command_available",
                         "backend",
-                        &format!("Custom backend command available: {command}"),
+                        format!("Custom backend command available: {command}"),
                     )?;
                     true
                 } else {
                     reporter.warn(
                         "backend.custom.version_failed",
                         "backend",
-                        &format!(
+                        format!(
                             "Custom backend command found but `--version` failed: {command}. Fix: verify the command and args in cli.*"
                         ),
                     )?;
@@ -705,7 +705,7 @@ fn check_backend<W: Write>(
                 reporter.err(
                     "backend.custom.command_not_runnable",
                     "backend",
-                    &format!(
+                    format!(
                         "Custom backend command not runnable: {command} ({e}). Fix: ensure it is in PATH and executable"
                     ),
                 )?;
@@ -719,14 +719,14 @@ fn check_backend<W: Write>(
         reporter.ok(
             "backend.available",
             "backend",
-            &format!("Backend available: {backend}"),
+            format!("Backend available: {backend}"),
         )?;
         Ok(true)
     } else {
         reporter.err(
             "backend.available",
             "backend",
-            &format!(
+            format!(
                 "Backend not found in PATH: {backend}. Fix: install the CLI or change cli.backend"
             ),
         )?;
@@ -767,7 +767,7 @@ fn check_context_window_guard<W: Write>(
                 reporter.warn(
                     "context_window.skipped_backend_autodetect_failed",
                     "context_window",
-                    &format!(
+                    format!(
                         "Context window guard skipped: backend auto-detect failed ({e}). Fix: set cli.backend explicitly"
                     ),
                 )?;
@@ -805,7 +805,7 @@ fn check_context_window_guard<W: Write>(
         reporter.skipped(
             "context_window.skipped_not_configured",
             "context_window",
-            &format!(
+            format!(
                 "Skipped context window guard: adapters.{adapter_profile}.context_window_tokens not set. Fix: set `adapters.{adapter_profile}.context_window_tokens: <tokens>` (e.g. 200000)",
             ),
         )?;
@@ -817,7 +817,7 @@ fn check_context_window_guard<W: Write>(
         reporter.err(
             "context_window.size",
             "context_window",
-            &format!(
+            format!(
                 "Context window too small: {window_tokens} tokens (<{CONTEXT_WINDOW_HARD_MIN_TOKENS}) for backend={backend_label}. Fix: use a larger-context model and set adapters.{adapter_profile}.context_window_tokens accordingly"
             ),
         )?;
@@ -826,7 +826,7 @@ fn check_context_window_guard<W: Write>(
         reporter.warn(
             "context_window.size",
             "context_window",
-            &format!(
+            format!(
                 "Context window is small: {window_tokens} tokens (<{CONTEXT_WINDOW_WARN_BELOW_TOKENS}) for backend={backend_label}. Fix: consider a larger-context model (or confirm adapters.{adapter_profile}.context_window_tokens matches your model)"
             ),
         )?;
@@ -834,7 +834,7 @@ fn check_context_window_guard<W: Write>(
         reporter.ok(
             "context_window.size",
             "context_window",
-            &format!("Context window ok: {window_tokens} tokens for backend={backend_label}"),
+            format!("Context window ok: {window_tokens} tokens for backend={backend_label}"),
         )?;
     }
 
@@ -849,7 +849,7 @@ fn check_context_window_guard<W: Write>(
             reporter.skipped(
                 "context_window.prompt_fit.skipped",
                 "context_window",
-                &format!(
+                format!(
                     "Skipped prompt-fit estimate: prompt not readable ({e}). Fix: create/repair {prompt_file} or pass -p/-P when running",
                     prompt_file = config.event_loop.prompt_file
                 ),
@@ -871,14 +871,14 @@ fn check_context_window_guard<W: Write>(
     };
 
     let prompt_tokens_est = estimate_tokens_from_chars(prompt_chars);
-    let ratio = prompt_tokens_est as f64 / window_tokens as f64;
+    let ratio = f64::from(prompt_tokens_est) / f64::from(window_tokens);
     let ratio_pct = (ratio * 100.0).round() as u32;
 
     if ratio >= 1.0 {
         reporter.err(
             "context_window.prompt_fit",
             "context_window",
-            &format!(
+            format!(
                 "Prompt likely exceeds context window: prompt≈{prompt_tokens_est} tok ({prompt_chars} chars), window={window_tokens} tok (backend={backend_label}). Fix: shorten PROMPT.md / reduce memories/scratchpad injection / increase context window"
             ),
         )?;
@@ -886,7 +886,7 @@ fn check_context_window_guard<W: Write>(
         reporter.warn(
             "context_window.prompt_fit",
             "context_window",
-            &format!(
+            format!(
                 "Prompt is large vs context window: prompt≈{prompt_tokens_est} tok ({ratio_pct}%), window={window_tokens} tok (backend={backend_label}). Fix: shorten PROMPT.md / set memories.budget / use a larger-context model"
             ),
         )?;
@@ -894,7 +894,7 @@ fn check_context_window_guard<W: Write>(
         reporter.ok(
             "context_window.prompt_fit",
             "context_window",
-            &format!(
+            format!(
                 "Prompt budget ok: prompt≈{prompt_tokens_est} tok ({ratio_pct}%), window={window_tokens} tok (backend={backend_label})"
             ),
         )?;
@@ -923,7 +923,7 @@ fn build_serial_ralph_prompt_for_estimation(
 fn estimate_tokens_from_chars(chars: usize) -> u32 {
     // 经验值: English-ish 文本约 4 chars ≈ 1 token。
     // 这不是精确计费,只是用于 guardrail 预算与提示。
-    ((chars + 3) / 4) as u32
+    chars.div_ceil(4) as u32
 }
 
 fn check_and_fix_scratchpad<W: Write>(
@@ -936,7 +936,7 @@ fn check_and_fix_scratchpad<W: Write>(
         reporter.err(
             "workspace.scratchpad_path_kind",
             "workspace",
-            &format!(
+            format!(
                 "Scratchpad path has no parent: {}. Fix: set core.scratchpad to a file path",
                 scratchpad_path.display()
             ),
@@ -944,35 +944,33 @@ fn check_and_fix_scratchpad<W: Write>(
         return Ok(());
     };
 
-    if !scratchpad_dir.exists() {
-        if fix {
-            fs::create_dir_all(scratchpad_dir).with_context(|| {
-                format!(
-                    "Failed to create scratchpad dir {}",
-                    scratchpad_dir.display()
-                )
-            })?;
-            reporter.ok(
-                "workspace.scratchpad_dir",
-                "workspace",
-                &format!("Fixed: created scratchpad dir {}", scratchpad_dir.display()),
-            )?;
-        } else {
-            reporter.warn(
-                "workspace.scratchpad_dir",
-                "workspace",
-                &format!(
-                    "Scratchpad dir missing: {}. Fix: mkdir -p {} (or run with --fix)",
-                    scratchpad_dir.display(),
-                    scratchpad_dir.display()
-                ),
-            )?;
-        }
-    } else {
+    if scratchpad_dir.exists() {
         reporter.ok(
             "workspace.scratchpad_dir",
             "workspace",
-            &format!("Scratchpad dir exists: {}", scratchpad_dir.display()),
+            format!("Scratchpad dir exists: {}", scratchpad_dir.display()),
+        )?;
+    } else if fix {
+        fs::create_dir_all(scratchpad_dir).with_context(|| {
+            format!(
+                "Failed to create scratchpad dir {}",
+                scratchpad_dir.display()
+            )
+        })?;
+        reporter.ok(
+            "workspace.scratchpad_dir",
+            "workspace",
+            format!("Fixed: created scratchpad dir {}", scratchpad_dir.display()),
+        )?;
+    } else {
+        reporter.warn(
+            "workspace.scratchpad_dir",
+            "workspace",
+            format!(
+                "Scratchpad dir missing: {}. Fix: mkdir -p {} (or run with --fix)",
+                scratchpad_dir.display(),
+                scratchpad_dir.display()
+            ),
         )?;
     }
 
@@ -981,7 +979,7 @@ fn check_and_fix_scratchpad<W: Write>(
             reporter.err(
                 "workspace.scratchpad_path_kind",
                 "workspace",
-                &format!(
+                format!(
                     "Scratchpad path is a directory: {}. Fix: set core.scratchpad to a file path",
                     scratchpad_path.display()
                 ),
@@ -994,7 +992,7 @@ fn check_and_fix_scratchpad<W: Write>(
             reporter.err(
                 "workspace.scratchpad_writable",
                 "workspace",
-                &format!(
+                format!(
                     "Scratchpad not writable: {} ({e}). Fix: check permissions",
                     scratchpad_path.display()
                 ),
@@ -1003,13 +1001,13 @@ fn check_and_fix_scratchpad<W: Write>(
             reporter.ok(
                 "workspace.scratchpad_writable",
                 "workspace",
-                &format!("Scratchpad writable: {}", scratchpad_path.display()),
+                format!("Scratchpad writable: {}", scratchpad_path.display()),
             )?;
         }
     } else if fix {
         // 只创建空文件,不覆盖既有内容。
         fs::OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .write(true)
             .open(&scratchpad_path)
             .with_context(|| {
@@ -1018,13 +1016,13 @@ fn check_and_fix_scratchpad<W: Write>(
         reporter.ok(
             "workspace.scratchpad_exists",
             "workspace",
-            &format!("Fixed: created scratchpad {}", scratchpad_path.display()),
+            format!("Fixed: created scratchpad {}", scratchpad_path.display()),
         )?;
     } else {
         reporter.warn(
             "workspace.scratchpad_exists",
             "workspace",
-            &format!(
+            format!(
                 "Scratchpad missing: {}. Fix: touch {} (or run with --fix)",
                 scratchpad_path.display(),
                 scratchpad_path.display()
@@ -1055,7 +1053,7 @@ fn check_and_fix_events_marker<W: Write>(
         reporter.err(
             "events_marker.invalid",
             "events_marker",
-            &format!(
+            format!(
                 "Active run marker is invalid/blank: {}. Fix: rewrite it or delete it",
                 marker_path.display()
             ),
@@ -1076,7 +1074,7 @@ fn check_and_fix_events_marker<W: Write>(
             reporter.ok(
                 "events_marker.events_file_writable",
                 "events_marker",
-                &format!("Active events file writable: {}", events_path.display()),
+                format!("Active events file writable: {}", events_path.display()),
             )?;
         }
         Err(e) => {
@@ -1089,7 +1087,7 @@ fn check_and_fix_events_marker<W: Write>(
                         reporter.ok(
                             "events_marker.events_file_writable",
                             "events_marker",
-                            &format!(
+                            format!(
                                 "Fixed: created/writable events file {}",
                                 events_path.display()
                             ),
@@ -1099,7 +1097,7 @@ fn check_and_fix_events_marker<W: Write>(
                         reporter.err(
                             "events_marker.events_file_writable",
                             "events_marker",
-                            &format!(
+                            format!(
                                 "Active events file not writable: {} ({e2}). Fix: check permissions",
                                 events_path.display()
                             ),
@@ -1110,7 +1108,7 @@ fn check_and_fix_events_marker<W: Write>(
                 reporter.warn(
                     "events_marker.events_file_writable",
                     "events_marker",
-                    &format!(
+                    format!(
                         "Active events file not writable: {} ({e}). Fix: check marker/path/permissions (or run with --fix)",
                         events_path.display()
                     ),

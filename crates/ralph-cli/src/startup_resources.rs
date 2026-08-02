@@ -35,13 +35,13 @@ pub(crate) const DEFAULT_BOOTSTRAP_PROMPT_ID: &str = "prompt:bootstrap-default-t
 /// 说明:
 /// - 这是“启动闭环”的兜底 prompt,不是用户任务的替代品。
 /// - 它让 Ralph 可以先启动、观察工作区、给出下一步建议,而不是因为缺少 `PROMPT.md` 直接失败。
-const DEFAULT_BOOTSTRAP_PROMPT: &str = r#"No ralph.yml or PROMPT.md was found in this workspace.
+const DEFAULT_BOOTSTRAP_PROMPT: &str = r"No ralph.yml or PROMPT.md was found in this workspace.
 
 Act as Ralph's startup bootstrap coordinator:
 1. Inspect the current workspace.
 2. Summarize what can be safely inferred.
 3. If there is no concrete task to execute, ask the user for the next task.
-4. Emit LOOP_COMPLETE only after producing a useful startup summary or clear next-step request."#;
+4. Emit LOOP_COMPLETE only after producing a useful startup summary or clear next-step request.";
 
 /// 启动资源类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -274,20 +274,25 @@ pub(crate) fn embedded_catalog() -> &'static [StartupResource] {
     ]
 }
 
+/// 缺失默认 config 的 bootstrap 判定输入。
+pub(crate) struct MissingDefaultConfigBootstrapInput<'a> {
+    pub(crate) config_path: &'a Path,
+    pub(crate) config_was_explicit: bool,
+    pub(crate) has_cli_prompt_text: bool,
+    pub(crate) has_cli_prompt_file: bool,
+    pub(crate) resume: bool,
+}
+
 /// 判断缺失的 config 是否应该进入 bootstrap selector。
 pub(crate) fn should_bootstrap_missing_default_config(
-    config_path: &Path,
-    config_was_explicit: bool,
-    has_cli_prompt_text: bool,
-    has_cli_prompt_file: bool,
-    resume: bool,
+    input: MissingDefaultConfigBootstrapInput<'_>,
 ) -> bool {
-    !config_was_explicit
-        && !resume
-        && !has_cli_prompt_text
-        && !has_cli_prompt_file
-        && config_path == Path::new(DEFAULT_CONFIG_FILE)
-        && !config_path.exists()
+    !input.config_was_explicit
+        && !input.resume
+        && !input.has_cli_prompt_text
+        && !input.has_cli_prompt_file
+        && input.config_path == Path::new(DEFAULT_CONFIG_FILE)
+        && !input.config_path.exists()
 }
 
 /// 解析用户资源根目录。
@@ -352,6 +357,20 @@ pub(crate) fn resolve_default_bootstrap() -> Result<BootstrapResolution> {
     resolve_default_bootstrap_with_root(resolve_resource_root())
 }
 
+/// 解析 workflow preset 的真实配置内容。
+///
+/// 说明:
+/// - 这个 helper 只负责把嵌入式 workflow YAML 变成 `RalphConfig`。
+/// - prompt 注入策略由上层决定,这样 bootstrap / capability 可以共享同一份解析入口。
+fn parse_workflow_preset(workflow: &StartupResource) -> Result<RalphConfig> {
+    let content = workflow
+        .content
+        .with_context(|| format!("Workflow preset {} has no embedded content", workflow.id))?;
+
+    RalphConfig::parse_yaml(content)
+        .with_context(|| format!("Failed to parse workflow preset {}", workflow.id))
+}
+
 /// 使用指定资源根目录解析默认启动配置。
 ///
 /// 说明:
@@ -402,12 +421,7 @@ fn resolve_workflow_with_prompt_template(
     workflow: &StartupResource,
     prompt: &StartupResource,
 ) -> Result<RalphConfig> {
-    let mut config = RalphConfig::parse_yaml(
-        workflow
-            .content
-            .context("Bootstrap workflow has no embedded content")?,
-    )
-    .context("Failed to parse bootstrap workflow")?;
+    let mut config = parse_workflow_preset(workflow)?;
 
     if config.event_loop.prompt.is_none() {
         config.event_loop.prompt = Some(
@@ -431,6 +445,29 @@ fn resolve_workflow_with_prompt_template(
     // ─────────────────────────────────────────────────────────────────────
     config.parallel.enabled = true;
 
+    Ok(config)
+}
+
+/// 将 workflow preset 物化为 capability 可执行的 resolved config。
+///
+/// 说明:
+/// - capability invocation 需要保留 workflow preset 的真实 hats / parallel 结构。
+/// - 这里只替换 task prompt 为 parent 传入的输入,不再回退到空配置 stub。
+pub(crate) fn resolve_workflow_capability_config(
+    workflow_id: &str,
+    input: &str,
+) -> Result<RalphConfig> {
+    let workflow = embedded_catalog()
+        .iter()
+        .find(|entry| entry.id == workflow_id && entry.kind == ResourceKind::WorkflowPreset)
+        .with_context(|| {
+            format!("Workflow capability resource `{workflow_id}` missing from startup catalog")
+        })?;
+
+    let mut config = parse_workflow_preset(workflow)?;
+    config.event_loop.prompt = Some(input.to_string());
+    config.event_loop.prompt_file.clear();
+    config.core.runtime_capabilities_enabled = false;
     Ok(config)
 }
 
@@ -757,42 +794,47 @@ cli:
         let old_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(temp.path()).unwrap();
 
-        assert!(should_bootstrap_missing_default_config(
+        let check =
+            |config_path, config_was_explicit, has_cli_prompt_text, has_cli_prompt_file, resume| {
+                should_bootstrap_missing_default_config(MissingDefaultConfigBootstrapInput {
+                    config_path,
+                    config_was_explicit,
+                    has_cli_prompt_text,
+                    has_cli_prompt_file,
+                    resume,
+                })
+            };
+
+        assert!(check(
             Path::new(DEFAULT_CONFIG_FILE),
             false,
             false,
             false,
             false
         ));
-        assert!(!should_bootstrap_missing_default_config(
+        assert!(!check(
             Path::new(DEFAULT_CONFIG_FILE),
             true,
             false,
             false,
             false
         ));
-        assert!(!should_bootstrap_missing_default_config(
-            Path::new("custom.yml"),
-            false,
-            false,
-            false,
-            false
-        ));
-        assert!(!should_bootstrap_missing_default_config(
+        assert!(!check(Path::new("custom.yml"), false, false, false, false));
+        assert!(!check(
             Path::new(DEFAULT_CONFIG_FILE),
             false,
             true,
             false,
             false
         ));
-        assert!(!should_bootstrap_missing_default_config(
+        assert!(!check(
             Path::new(DEFAULT_CONFIG_FILE),
             false,
             false,
             true,
             false
         ));
-        assert!(!should_bootstrap_missing_default_config(
+        assert!(!check(
             Path::new(DEFAULT_CONFIG_FILE),
             false,
             false,

@@ -14,6 +14,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ralph_core::{MarkdownMemoryStore, Memory, MemoryType};
 use std::path::PathBuf;
 
+use crate::display::byte_index_after_chars;
+
 /// ANSI color codes for terminal output.
 mod colors {
     pub const RESET: &str = "\x1b[0m";
@@ -579,12 +581,9 @@ fn print_memories_table(memories: &[Memory], use_colors: bool) {
         } else {
             memory.tags.join(", ")
         };
-        // Longer content preview (50 chars) for better readability
-        let content_preview = if memory.content.len() > 50 {
-            format!("{}…", &memory.content[..50].replace('\n', " "))
-        } else {
-            memory.content.replace('\n', " ")
-        };
+        // Longer content preview (50 chars) for better readability.
+        // 注意：内容可能包含中文/emoji,必须通过 UTF-8 安全的 helper 截断。
+        let content_preview = truncate_str(&memory.content.replace('\n', " "), 50);
 
         if use_colors {
             println!(
@@ -714,14 +713,15 @@ fn format_memories_as_markdown(memories: &[Memory]) -> String {
 /// Uses a simple heuristic of ~4 characters per token.
 fn truncate_to_budget(content: &str, budget: usize) -> String {
     // Rough estimate: 4 chars per token
-    let char_budget = budget * 4;
+    let char_budget = budget.saturating_mul(4);
 
-    if content.len() <= char_budget {
+    if content.chars().count() <= char_budget {
         return content.to_string();
     }
 
     // Find a good break point (end of a memory block)
-    let truncated = &content[..char_budget];
+    let truncated_end = byte_index_after_chars(content, char_budget);
+    let truncated = &content[..truncated_end];
 
     // Try to find the last complete memory block (ends with -->)
     if let Some(last_complete) = truncated.rfind("-->") {
@@ -742,9 +742,39 @@ fn truncate_to_budget(content: &str, budget: usize) -> String {
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max_len - 1])
+    if max_len == 0 {
+        return String::new();
+    }
+
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+
+    let end = byte_index_after_chars(s, max_len.saturating_sub(1));
+    format!("{}…", &s[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_str_does_not_panic_on_multibyte_boundary() {
+        let s = format!("{}角{}", "x".repeat(49), "y".repeat(10));
+
+        let out = truncate_str(&s, 50);
+
+        for _ in out.chars() {}
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_to_budget_does_not_panic_on_multibyte_boundary() {
+        let content = format!("{}角{}", "x".repeat(199), "y".repeat(10));
+
+        let out = truncate_to_budget(&content, 50);
+
+        for _ in out.chars() {}
+        assert!(out.contains("truncated: budget 50 tokens exceeded"));
     }
 }

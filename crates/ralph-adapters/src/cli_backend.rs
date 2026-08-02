@@ -1,6 +1,8 @@
 //! CLI backend definitions for different AI tools.
 
-use ralph_core::{CliConfig, HatBackend};
+use ralph_core::{
+    CliConfig, HatBackend, ReasoningEffort, RoleArgsConfig, RoleReasoningEffortConfig,
+};
 use serde_json::Value;
 use std::fmt;
 use std::io::Write;
@@ -40,6 +42,15 @@ pub enum PromptMode {
     Arg,
     /// Write prompt to stdin.
     Stdin,
+}
+
+/// Runtime role for applying backend defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliExecutionRole {
+    /// Ralph/coordinator role.
+    Coordinator,
+    /// Non-Ralph worker hat role.
+    Worker,
 }
 
 /// A CLI backend configuration for executing prompts.
@@ -393,6 +404,63 @@ impl CliBackend {
         extract_json_response(stdout)
     }
 
+    /// Applies role-aware reasoning effort defaults when the backend supports it.
+    ///
+    /// 说明:
+    /// - 这里不把默认值塞进 `CliBackend::codex()` 基础构造器,避免所有调用点被一刀切污染。
+    /// - runtime 选出最终 role 和最终 args 后再调用这里,这样 hat-level / CLI args 显式配置能优先。
+    /// - 当前只映射 Codex CLI 的 `model_reasoning_effort`;其他 backend 没有等价参数时保持 no-op。
+    pub fn apply_role_reasoning_effort_defaults(
+        &mut self,
+        role_defaults: &RoleReasoningEffortConfig,
+        role: CliExecutionRole,
+    ) {
+        if !self.is_codex_command() || has_model_reasoning_effort_override(&self.args) {
+            return;
+        }
+
+        let effort = match role {
+            CliExecutionRole::Coordinator => role_defaults.coordinator,
+            CliExecutionRole::Worker => role_defaults.worker,
+        };
+        self.apply_codex_reasoning_effort(effort);
+    }
+
+    /// Appends role-specific CLI arguments.
+    ///
+    /// 说明:
+    /// - 该方法只负责“按角色追加 argv”,不理解参数语义。
+    /// - 调用方应在 runtime custom args 之前调用它,保持 `ralph run -- <args>`
+    ///   这类一次性参数仍有最终覆盖权。
+    /// - 对 Codex 来说,这可以表达 coordinator-only `-c features.hooks=false`;
+    ///   对其他 backend 来说,用户只有在确认该 backend 支持对应参数时才应配置。
+    pub fn apply_role_args(&mut self, role_args: &RoleArgsConfig, role: CliExecutionRole) {
+        let args = match role {
+            CliExecutionRole::Coordinator => &role_args.coordinator,
+            CliExecutionRole::Worker => &role_args.worker,
+        };
+
+        self.args.extend(args.iter().cloned());
+    }
+
+    fn apply_codex_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        self.args.push("--config".to_string());
+        self.args
+            .push(format!("model_reasoning_effort=\"{}\"", effort.as_str()));
+    }
+
+    fn is_codex_command(&self) -> bool {
+        // ------------------------------------------------------------------
+        // 说明:
+        // - 支持 `codex` 与 `/absolute/path/to/codex` 两类 command。
+        // - 不根据 config.backend 判断,因为 repo root `ralph.yml` 使用的是 custom+command=codex。
+        // ------------------------------------------------------------------
+        std::path::Path::new(&self.command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "codex")
+    }
+
     /// Codex in interactive TUI mode (no exec subcommand).
     ///
     /// Unlike headless `codex()`, this runs without `exec` and `--full-auto`
@@ -617,6 +685,17 @@ fn combine_stdout_stderr(stdout: &str, stderr: &str) -> String {
     combined
 }
 
+fn has_model_reasoning_effort_override(args: &[String]) -> bool {
+    // ------------------------------------------------------------------
+    // 说明:
+    // - Codex CLI 的配置覆写既可能是 `--config key=value`,也可能是 `--config=key=value`。
+    // - 对默认注入来说,只要 argv 中已经出现 `model_reasoning_effort`,就视为用户显式配置。
+    // - 这避免我们把默认值追加到用户 override 后面,造成“显式配置被默认值覆盖”的坏行为。
+    // ------------------------------------------------------------------
+    args.iter()
+        .any(|arg| arg.contains("model_reasoning_effort"))
+}
+
 fn extract_json_response(raw_output: &str) -> Option<String> {
     let value = parse_json_object(raw_output)?;
     let response = value.get("response")?.as_str()?.trim();
@@ -760,6 +839,161 @@ mod tests {
         assert_eq!(cmd, "codex");
         assert_eq!(args, vec!["exec", "--full-auto", "test prompt"]);
         assert!(stdin.is_none());
+    }
+
+    #[test]
+    fn codex_reasoning_defaults_use_medium_for_coordinator() {
+        let mut backend = CliBackend::codex();
+
+        backend.apply_role_reasoning_effort_defaults(
+            &RoleReasoningEffortConfig::default(),
+            CliExecutionRole::Coordinator,
+        );
+
+        assert_eq!(
+            backend.args,
+            vec![
+                "exec".to_string(),
+                "--full-auto".to_string(),
+                "--config".to_string(),
+                "model_reasoning_effort=\"medium\"".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_defaults_use_high_for_worker() {
+        let config = CliConfig {
+            backend: "custom".to_string(),
+            command: Some("codex".to_string()),
+            args: vec!["exec".to_string()],
+            ..Default::default()
+        };
+        let mut backend = CliBackend::from_config(&config).unwrap();
+
+        backend.apply_role_reasoning_effort_defaults(
+            &RoleReasoningEffortConfig::default(),
+            CliExecutionRole::Worker,
+        );
+
+        assert_eq!(
+            backend.args,
+            vec![
+                "exec".to_string(),
+                "--config".to_string(),
+                "model_reasoning_effort=\"high\"".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_defaults_do_not_override_explicit_args() {
+        let mut backend = CliBackend::codex();
+        backend.args.extend([
+            "--config".to_string(),
+            "model_reasoning_effort=\"xhigh\"".to_string(),
+        ]);
+
+        backend.apply_role_reasoning_effort_defaults(
+            &RoleReasoningEffortConfig::default(),
+            CliExecutionRole::Worker,
+        );
+
+        let override_count = backend
+            .args
+            .iter()
+            .filter(|arg| arg.contains("model_reasoning_effort"))
+            .count();
+        assert_eq!(override_count, 1);
+        assert!(
+            backend
+                .args
+                .contains(&"model_reasoning_effort=\"xhigh\"".to_string())
+        );
+    }
+
+    #[test]
+    fn reasoning_defaults_ignore_non_codex_backends() {
+        let mut backend = CliBackend::claude();
+        let before = backend.args.clone();
+
+        backend.apply_role_reasoning_effort_defaults(
+            &RoleReasoningEffortConfig::default(),
+            CliExecutionRole::Coordinator,
+        );
+
+        assert_eq!(backend.args, before);
+    }
+
+    #[test]
+    fn role_args_append_only_for_coordinator_role() {
+        let mut backend = CliBackend::codex();
+        let role_args = RoleArgsConfig {
+            coordinator: vec!["-c".to_string(), "features.hooks=false".to_string()],
+            worker: Vec::new(),
+        };
+
+        backend.apply_role_args(&role_args, CliExecutionRole::Coordinator);
+
+        assert_eq!(
+            backend.args,
+            vec![
+                "exec".to_string(),
+                "--full-auto".to_string(),
+                "-c".to_string(),
+                "features.hooks=false".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn role_args_do_not_leak_to_worker_role() {
+        let mut backend = CliBackend::codex();
+        let before = backend.args.clone();
+        let role_args = RoleArgsConfig {
+            coordinator: vec!["-c".to_string(), "features.hooks=false".to_string()],
+            worker: Vec::new(),
+        };
+
+        backend.apply_role_args(&role_args, CliExecutionRole::Worker);
+
+        assert_eq!(
+            backend.args, before,
+            "worker role should not receive coordinator-only hook override"
+        );
+    }
+
+    #[test]
+    fn role_args_can_act_as_reasoning_override_before_defaults() {
+        let mut backend = CliBackend::codex();
+        let role_args = RoleArgsConfig {
+            coordinator: vec![
+                "--config".to_string(),
+                "model_reasoning_effort=\"low\"".to_string(),
+            ],
+            worker: Vec::new(),
+        };
+
+        backend.apply_role_args(&role_args, CliExecutionRole::Coordinator);
+        backend.apply_role_reasoning_effort_defaults(
+            &RoleReasoningEffortConfig::default(),
+            CliExecutionRole::Coordinator,
+        );
+
+        let override_count = backend
+            .args
+            .iter()
+            .filter(|arg| arg.contains("model_reasoning_effort"))
+            .count();
+        assert_eq!(
+            override_count, 1,
+            "role_args 中的显式 reasoning override 不应被默认值重复追加"
+        );
+        assert!(
+            backend
+                .args
+                .contains(&"model_reasoning_effort=\"low\"".to_string())
+        );
     }
 
     #[test]

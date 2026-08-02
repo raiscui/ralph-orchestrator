@@ -94,6 +94,8 @@ fn assert_bootstrap_runtime_fields_match(
         &["cli", "backend"][..],
         &["cli", "command"][..],
         &["cli", "prompt_mode"][..],
+        &["cli", "reasoning_effort", "coordinator"][..],
+        &["cli", "reasoning_effort", "worker"][..],
         &["cli", "args"][..],
         &["parallel", "enabled"][..],
         &["parallel", "autoscale", "max_running_jobs"][..],

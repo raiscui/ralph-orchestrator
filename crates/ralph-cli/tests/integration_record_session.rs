@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use ralph_core::{
-    AgentInstanceSnapshot, AgentLastInput, AgentRecoverableFailureSummary, AgentsSnapshot, Record,
-    SessionRecorder,
+    AgentCompletedDynamicInstanceSnapshot, AgentInstanceSnapshot, AgentLastInput, AgentsSnapshot,
+    IdentitySource, Record, RoleContractSummary, RolePersistence, SessionRecorder,
+    TopologySpawnGroupResult, TopologySpawnedInstance,
 };
-use ralph_proto::HatInstanceState;
+use ralph_proto::{Event, HatInstanceState};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,10 +15,10 @@ fn write_min_parallel_config(path: &Path) -> Result<()> {
     // 说明:
     // - `--idle-start` 仅在 parallel.enabled=true 时允许.
     // - 本测试只验证 record-session 的中断契约,因此不需要 hats/backend 可用.
-    let content = r#"
+    let content = r"
 parallel:
   enabled: true
-"#;
+";
     fs::write(path, content.trim_start())?;
     Ok(())
 }
@@ -32,10 +33,10 @@ fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> Resul
             );
         }
 
-        if let Ok(content) = fs::read_to_string(path) {
-            if content.contains(needle) {
-                return Ok(());
-            }
+        if let Ok(content) = fs::read_to_string(path)
+            && content.contains(needle)
+        {
+            return Ok(());
         }
 
         std::thread::sleep(Duration::from_millis(20));
@@ -211,37 +212,31 @@ fn record_watch_auto_locates_latest_pointer_and_streams_lines() -> Result<()> {
     let nested = temp_path.join("a/b/c");
     fs::create_dir_all(&nested)?;
 
-    let stdout_path = temp_path.join("watch.stdout");
-    let stdout_file = fs::File::create(&stdout_path)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ralph"))
-        .args(["record", "watch", "--from-start", "--interval-ms", "50"])
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .args([
+            "record",
+            "watch",
+            "--from-start",
+            "--interval-ms",
+            "50",
+            "--until-event",
+            "_meta.session_start",
+            "--timeout-secs",
+            "2",
+        ])
         .current_dir(&nested)
-        .stdout(Stdio::from(stdout_file))
-        .spawn()?;
+        .stdout(Stdio::piped())
+        .output()?;
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let captured_stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
-        if captured_stdout.contains("_meta.session_start") {
-            break;
-        }
-
-        if let Some(status) = child.try_wait()? {
-            panic!(
-                "watch process exited before streaming expected line: status={status}, stdout={captured_stdout}"
-            );
-        }
-
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    let _ = child.kill();
-    let _status = child.wait()?;
-
-    let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "watch should exit after matching _meta.session_start, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         stdout.contains("_meta.session_start"),
-        "watch should stream existing lines, got: {stdout}"
+        "watch should stream existing lines"
     );
 
     Ok(())
@@ -323,7 +318,7 @@ fn record_watch_timeout_exits_two_in_quiet_mode() -> Result<()> {
 }
 
 #[test]
-fn record_summary_agents_file_shows_recoverable_failure_evidence() -> Result<()> {
+fn record_summary_agents_file_shows_current_and_completed_dynamic_evidence() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let temp_path = temp_dir.path();
     let ralph_dir = temp_path.join(".ralph");
@@ -341,35 +336,84 @@ fn record_summary_agents_file_shows_recoverable_failure_evidence() -> Result<()>
         Some("/tmp/ralph-test-bin"),
         Some("0.0.0-test"),
     ));
+
+    let spawn_result = TopologySpawnGroupResult {
+        status: "spawned".to_string(),
+        request_id: "spawn-summary-1".to_string(),
+        hat: "builder".to_string(),
+        delivery_topic: "build.task".to_string(),
+        spawned: vec![TopologySpawnedInstance {
+            index: 0,
+            instance_id: "builder#4".to_string(),
+            role: "review".to_string(),
+            fixed_role: Some(true),
+            role_contract_summary: Some(RoleContractSummary {
+                role_name: "review".to_string(),
+                objective_preview: "review".to_string(),
+                allowed_result_topics: vec!["analysis.done".to_string()],
+                identity_source: IdentitySource::TaskDerived,
+                persistence: RolePersistence::Fixed,
+                contract_schema_version: 1,
+                role_contract_hash: "erc-aaaabbbbccccdddd".to_string(),
+                source_spawn_request_id: "spawn-summary-1".to_string(),
+            }),
+        }],
+        failed: Vec::new(),
+        parent_topology_unchanged: false,
+    };
+    recorder.record_bus_event(&Event::new(
+        ralph_core::TOPIC_TOPOLOGY_SPAWN_RESULT,
+        serde_json::to_string(&spawn_result)?,
+    ));
+    recorder.record_bus_event(
+        &Event::new("analysis.done", r#"{"ok":true}"#).with_source_instance("builder#4"),
+    );
     recorder.record_meta(Record::meta_termination("CompletionPromise", 2, 3.5, 4));
     recorder.flush().ok();
 
     let agents_path = ralph_dir.join("agents.json");
     let snapshot = AgentsSnapshot {
-        generated_at: "2026-05-28T00:00:00Z".to_string(),
+        generated_at: "2026-05-25T00:00:00Z".to_string(),
         instances: vec![AgentInstanceSnapshot {
-            instance_id: "writer#1".to_string(),
-            hat_id: "writer".to_string(),
+            instance_id: "ralph#1".to_string(),
+            hat_id: "ralph".to_string(),
             state: HatInstanceState::Idle,
             is_dynamic: false,
-            last_input: Some(AgentLastInput {
-                ts: "2026-05-28T00:00:00Z".to_string(),
-                topic: "build.task".to_string(),
-                preview: "retryable job".to_string(),
-            }),
-            recoverable_failures: vec![AgentRecoverableFailureSummary {
-                failure_id: "failure-writer-429".to_string(),
-                job_id: 7,
-                status: "retry_scheduled".to_string(),
-                failure_kind: "retry_limit_exceeded".to_string(),
-                attempt: 1,
-                max_attempts: 3,
-                retry_after_ms: Some(30_000),
-                next_retry_at: Some("2026-05-28T00:00:30Z".to_string()),
-                ledger_path: ".ralph/recoverable-failures.jsonl".to_string(),
-                stderr_preview: Some("ERROR: exceeded retry limit, last status: 429".to_string()),
-            }],
+            identity_source: IdentitySource::ConfigDerived,
+            fixed_role_label: None,
+            fixed_role_reason: None,
+            role_contract_summary: None,
+            last_input: None,
+            recoverable_failures: Vec::new(),
         }],
+        completed_dynamic_instances: vec![AgentCompletedDynamicInstanceSnapshot {
+            instance_id: "builder#4".to_string(),
+            hat_id: "builder".to_string(),
+            final_state: HatInstanceState::Done,
+            identity_source: IdentitySource::TaskDerived,
+            fixed_role_label: Some("review".to_string()),
+            fixed_role_reason: Some(
+                "topology.spawn_group member marked fixed_role=true".to_string(),
+            ),
+            role_contract_summary: Some(RoleContractSummary {
+                role_name: "review".to_string(),
+                objective_preview: "review".to_string(),
+                allowed_result_topics: vec!["analysis.done".to_string()],
+                identity_source: IdentitySource::TaskDerived,
+                persistence: RolePersistence::Fixed,
+                contract_schema_version: 1,
+                role_contract_hash: "erc-aaaabbbbccccdddd".to_string(),
+                source_spawn_request_id: "spawn-summary-1".to_string(),
+            }),
+            last_input: Some(AgentLastInput {
+                ts: "2026-05-25T00:00:01Z".to_string(),
+                topic: "build.task".to_string(),
+                preview: "review task".to_string(),
+            }),
+            completed_at: "2026-05-25T00:00:02Z".to_string(),
+            retirement_reason: "dynamic_instance_unregistered_after_done".to_string(),
+        }],
+        child_runs: Vec::new(),
     };
     fs::write(&agents_path, serde_json::to_string_pretty(&snapshot)?)?;
 
@@ -390,17 +434,18 @@ fn record_summary_agents_file_shows_recoverable_failure_evidence() -> Result<()>
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Evidence Inspect"));
-    assert!(stdout.contains("Agents Snapshot"));
-    assert!(stdout.contains("Recoverable Failures"));
-    assert!(stdout.contains("recoverable_failures: 1"));
-    assert!(stdout.contains("failure_id=failure-writer-429"));
-    assert!(stdout.contains("status=retry_scheduled"));
-    assert!(stdout.contains("attempt=1/3"));
-    assert!(stdout.contains("ledger=.ralph/recoverable-failures.jsonl"));
-    assert!(stdout.contains("ERROR: exceeded retry limit, last status: 429"));
+    assert!(stdout.contains("semantic_source: record-session _meta.termination"));
+    assert!(stdout.contains("reason: CompletionPromise"));
+    assert!(stdout.contains("instances: 1 (current registry)"));
+    assert!(stdout.contains("Completed Dynamic Instances"));
+    assert!(stdout.contains("completed_dynamic_instances: 1"));
+    assert!(stdout.contains("builder#4"));
+    assert!(stdout.contains("role_contract_hash=erc-aaaabbbb"));
+    assert!(stdout.contains("source_spawn_request_id=spawn-summary-1"));
+    assert!(stdout.contains("Dynamic Result Coverage"));
+    assert!(stdout.contains("covered=analysis.done"));
+    assert!(stdout.contains("missing=-"));
 
     Ok(())
 }

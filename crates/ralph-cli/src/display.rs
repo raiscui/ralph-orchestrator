@@ -109,6 +109,26 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     truncate_prefix_bytes(s, max_len.saturating_sub(1))
 }
 
+/// 返回保留前 `max_chars` 个 Unicode scalar 后的合法 byte 边界。
+///
+/// 说明:
+/// - Rust `str` 的切片边界必须是 UTF-8 字符边界。
+/// - 调用方如果拿“字符预算”直接当 byte index,中文/emoji 会触发运行时 panic。
+/// - 这个 helper 是 preview / budget truncation 共用的安全边界计算入口。
+pub fn byte_index_after_chars(s: &str, max_chars: usize) -> usize {
+    s.char_indices()
+        .nth(max_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(s.len())
+}
+
+/// 生成单行预览文本,并用共享 UTF-8 安全截断逻辑控制长度。
+pub fn preview_one_line(s: &str, max_len: usize) -> String {
+    // 预览输出需要保持单行,否则 dry-run / debug / table 输出会破坏布局。
+    let one_line = s.replace('\n', " ");
+    truncate(&one_line, max_len)
+}
+
 /// 将字符串截断到最多 `prefix_max_bytes` 个字节(尽量接近)，并追加 "..."。
 ///
 /// 关键点：永远用 `char_indices()` 找到合法 UTF-8 边界后再切片，避免在多字节字符中间切片导致 panic。
@@ -295,22 +315,37 @@ pub fn print_agents_table(snapshot: &AgentsSnapshot, use_colors: bool) {
     // Header
     if use_colors {
         println!(
-            "{BOLD}{DIM}Instance        | Hat     | State    | Dynamic | Recoverable          | Last Input{RESET}"
+            "{BOLD}{DIM}Instance        | Hat     | State    | Dynamic | Source            | Fixed Role       | Role Contract        | Recoverable          | Last Input{RESET}"
         );
         println!(
-            "{DIM}---------------+---------+----------+---------+----------------------+----------------------------------------{RESET}"
+            "{DIM}---------------+---------+----------+---------+-------------------+------------------+----------------------+----------------------+----------------------------------------{RESET}"
         );
     } else {
         println!(
-            "Instance        | Hat     | State    | Dynamic | Recoverable          | Last Input"
+            "Instance        | Hat     | State    | Dynamic | Source            | Fixed Role       | Role Contract        | Recoverable          | Last Input"
         );
         println!(
-            "---------------|---------|----------|---------|----------------------|----------------------------------------"
+            "---------------|---------|----------|---------|-------------------|------------------|----------------------|----------------------|----------------------------------------"
         );
     }
 
     for inst in &snapshot.instances {
         let dynamic = if inst.is_dynamic { "yes" } else { "no" };
+        let identity_source = inst.identity_source.to_string();
+        let fixed_role = inst.fixed_role_label.as_deref().unwrap_or("-");
+        let role_contract = inst
+            .role_contract_summary
+            .as_ref()
+            .map(|summary| {
+                format!(
+                    "v{}:{}:{}:{}",
+                    summary.contract_schema_version,
+                    summary.persistence,
+                    short_role_contract_hash(&summary.role_contract_hash),
+                    truncate(&summary.source_spawn_request_id, 18)
+                )
+            })
+            .unwrap_or_else(|| "-".to_string());
         let recoverable = format_recoverable_summary(&inst.recoverable_failures);
         let last = inst
             .last_input
@@ -334,26 +369,141 @@ pub fn print_agents_table(snapshot: &AgentsSnapshot, use_colors: bool) {
             };
 
             println!(
-                "{CYAN}{:<14}{RESET} | {MAGENTA}{:<7}{RESET} | {state_color}{:<8}{RESET} | {:<7} | {:<20} | {}",
+                "{CYAN}{:<14}{RESET} | {MAGENTA}{:<7}{RESET} | {state_color}{:<8}{RESET} | {:<7} | {:<17} | {:<16} | {:<20} | {:<20} | {}",
                 inst.instance_id,
                 inst.hat_id,
                 inst.state.as_str(),
                 dynamic,
+                identity_source,
+                fixed_role,
+                role_contract,
                 recoverable,
                 last
             );
         } else {
             println!(
-                "{:<14} | {:<7} | {:<8} | {:<7} | {:<20} | {}",
+                "{:<14} | {:<7} | {:<8} | {:<7} | {:<17} | {:<16} | {:<20} | {:<20} | {}",
                 inst.instance_id,
                 inst.hat_id,
                 inst.state.as_str(),
                 dynamic,
+                identity_source,
+                fixed_role,
+                role_contract,
                 recoverable,
                 last
             );
         }
     }
+
+    if !snapshot.completed_dynamic_instances.is_empty() {
+        println!(
+            "\nCompleted dynamic instances: {}",
+            snapshot.completed_dynamic_instances.len()
+        );
+
+        if use_colors {
+            println!(
+                "{BOLD}{DIM}Instance        | Hat     | Final    | Source            | Fixed Role       | Role Contract        | Last Input | Completed At{RESET}"
+            );
+            println!(
+                "{DIM}---------------+---------+----------+-------------------+------------------+----------------------+------------+--------------------------{RESET}"
+            );
+        } else {
+            println!(
+                "Instance        | Hat     | Final    | Source            | Fixed Role       | Role Contract        | Last Input | Completed At"
+            );
+            println!(
+                "---------------|---------|----------|-------------------|------------------|----------------------|------------|--------------------------"
+            );
+        }
+
+        for inst in &snapshot.completed_dynamic_instances {
+            let identity_source = inst.identity_source.to_string();
+            let fixed_role = inst.fixed_role_label.as_deref().unwrap_or("-");
+            let role_contract = inst
+                .role_contract_summary
+                .as_ref()
+                .map(|summary| {
+                    format!(
+                        "v{}:{}:{}:{}",
+                        summary.contract_schema_version,
+                        summary.persistence,
+                        short_role_contract_hash(&summary.role_contract_hash),
+                        truncate(&summary.source_spawn_request_id, 18)
+                    )
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let last_topic = inst
+                .last_input
+                .as_ref()
+                .map(|input| input.topic.as_str())
+                .unwrap_or("-");
+            let completed_at = truncate(&inst.completed_at, 24);
+
+            if use_colors {
+                println!(
+                    "{CYAN}{:<14}{RESET} | {MAGENTA}{:<7}{RESET} | {GRAY}{:<8}{RESET} | {:<17} | {:<16} | {:<20} | {:<10} | {}",
+                    inst.instance_id,
+                    inst.hat_id,
+                    inst.final_state.as_str(),
+                    identity_source,
+                    fixed_role,
+                    role_contract,
+                    last_topic,
+                    completed_at
+                );
+            } else {
+                println!(
+                    "{:<14} | {:<7} | {:<8} | {:<17} | {:<16} | {:<20} | {:<10} | {}",
+                    inst.instance_id,
+                    inst.hat_id,
+                    inst.final_state.as_str(),
+                    identity_source,
+                    fixed_role,
+                    role_contract,
+                    last_topic,
+                    completed_at
+                );
+            }
+        }
+    }
+
+    if !snapshot.child_runs.is_empty() {
+        let running = snapshot
+            .child_runs
+            .iter()
+            .filter(|run| run.status.as_str() == "running")
+            .count();
+        let done = snapshot
+            .child_runs
+            .iter()
+            .filter(|run| run.status.as_str() == "done")
+            .count();
+        let failed = snapshot
+            .child_runs
+            .iter()
+            .filter(|run| run.status.as_str() == "failed")
+            .count();
+        let latest = snapshot.child_runs.last().map(|run| {
+            let id = run
+                .invocation_id
+                .as_deref()
+                .unwrap_or(run.request_id.as_str());
+            format!("{}:{}:{}", run.status.as_str(), run.capability_id, id)
+        });
+
+        let summary = format!(
+            "Child runs: running={running} done={done} failed={failed} latest={}",
+            latest.unwrap_or_else(|| "-".to_string())
+        );
+
+        println!("\n{summary}");
+    }
+}
+
+fn short_role_contract_hash(value: &str) -> String {
+    value.chars().take(12).collect()
 }
 
 fn format_recoverable_summary(failures: &[ralph_core::AgentRecoverableFailureSummary]) -> String {
@@ -440,6 +590,28 @@ mod tests {
 
         // 验证输出是合法 UTF-8(迭代 chars 不应 panic)
         for _ in out.chars() {}
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn test_byte_index_after_chars_returns_valid_utf8_boundary() {
+        let s = "设置设置";
+
+        let index = byte_index_after_chars(s, 3);
+
+        assert!(s.is_char_boundary(index));
+        assert_eq!(&s[..index], "设置设");
+    }
+
+    #[test]
+    fn test_preview_one_line_is_utf8_safe_and_removes_newlines() {
+        // 让中文字符卡在 byte 预算附近,同时确认换行被规范化成单行预览。
+        let s = format!("{}角\n{}", "x".repeat(39), "y".repeat(10));
+
+        let out = preview_one_line(&s, 40);
+
+        for _ in out.chars() {}
+        assert!(!out.contains('\n'));
         assert!(out.ends_with("..."));
     }
 

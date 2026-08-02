@@ -1,6 +1,8 @@
 use anyhow::Result;
 use ralph_core::{
+    AgentChildRunSnapshot, AgentChildRunStatus, AgentCompletedDynamicInstanceSnapshot,
     AgentInstanceSnapshot, AgentLastInput, AgentRecoverableFailureSummary, AgentsSnapshot,
+    IdentitySource, RoleContractSummary, RolePersistence,
 };
 use ralph_proto::HatInstanceState;
 use std::fs;
@@ -24,6 +26,10 @@ fn test_agents_command_prints_table() -> Result<()> {
             hat_id: "writer".to_string(),
             state: HatInstanceState::Running,
             is_dynamic: false,
+            identity_source: IdentitySource::ConfigDerived,
+            fixed_role_label: None,
+            fixed_role_reason: None,
+            role_contract_summary: None,
             last_input: Some(AgentLastInput {
                 ts: "2026-02-01T00:00:01Z".to_string(),
                 topic: "build.task".to_string(),
@@ -31,6 +37,8 @@ fn test_agents_command_prints_table() -> Result<()> {
             }),
             recoverable_failures: Vec::new(),
         }],
+        completed_dynamic_instances: Vec::new(),
+        child_runs: Vec::new(),
     };
     fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
 
@@ -78,6 +86,49 @@ fn test_agents_command_prints_json() -> Result<()> {
 }
 
 #[test]
+fn test_agents_command_prints_fixed_role_label_when_present() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+
+    let ralph_dir = temp_path.join(".ralph");
+    fs::create_dir_all(&ralph_dir)?;
+
+    let snapshot_path = ralph_dir.join("agents.json");
+    let snapshot = AgentsSnapshot {
+        generated_at: "2026-02-01T00:00:00Z".to_string(),
+        instances: vec![AgentInstanceSnapshot {
+            instance_id: "builder#2".to_string(),
+            hat_id: "builder".to_string(),
+            state: HatInstanceState::Running,
+            is_dynamic: true,
+            identity_source: IdentitySource::RuntimeAutoscale,
+            fixed_role_label: Some("review".to_string()),
+            fixed_role_reason: Some("coordinator promoted this role".to_string()),
+            role_contract_summary: None,
+            last_input: None,
+            recoverable_failures: Vec::new(),
+        }],
+        completed_dynamic_instances: Vec::new(),
+        child_runs: Vec::new(),
+    };
+    fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .arg("agents")
+        .current_dir(temp_path)
+        .output()?;
+
+    assert!(output.status.success(), "Command should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Fixed Role"));
+    assert!(stdout.contains("builder#2"));
+    assert!(stdout.contains("review"));
+
+    Ok(())
+}
+
+#[test]
 fn test_agents_command_prints_recoverable_summary() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let temp_path = temp_dir.path();
@@ -93,6 +144,10 @@ fn test_agents_command_prints_recoverable_summary() -> Result<()> {
             hat_id: "writer".to_string(),
             state: HatInstanceState::Idle,
             is_dynamic: false,
+            identity_source: IdentitySource::ConfigDerived,
+            fixed_role_label: None,
+            fixed_role_reason: None,
+            role_contract_summary: None,
             last_input: None,
             recoverable_failures: vec![AgentRecoverableFailureSummary {
                 failure_id: "failure-writer-429".to_string(),
@@ -107,6 +162,8 @@ fn test_agents_command_prints_recoverable_summary() -> Result<()> {
                 stderr_preview: Some("ERROR: exceeded retry limit, last status: 429".to_string()),
             }],
         }],
+        completed_dynamic_instances: Vec::new(),
+        child_runs: Vec::new(),
     };
     fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
 
@@ -157,6 +214,186 @@ fn test_agents_command_prints_recoverable_summary() -> Result<()> {
 }
 
 #[test]
+fn test_agents_command_prints_role_contract_summary() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+
+    let ralph_dir = temp_path.join(".ralph");
+    fs::create_dir_all(&ralph_dir)?;
+
+    let snapshot_path = ralph_dir.join("agents.json");
+    let snapshot = AgentsSnapshot {
+        generated_at: "2026-02-01T00:00:00Z".to_string(),
+        instances: vec![AgentInstanceSnapshot {
+            instance_id: "builder#2".to_string(),
+            hat_id: "builder".to_string(),
+            state: HatInstanceState::Running,
+            is_dynamic: true,
+            identity_source: IdentitySource::TaskDerived,
+            fixed_role_label: None,
+            fixed_role_reason: None,
+            role_contract_summary: Some(RoleContractSummary {
+                role_name: "功能补充".to_string(),
+                objective_preview: "补充 feature A".to_string(),
+                allowed_result_topics: vec!["analysis.done".to_string()],
+                identity_source: IdentitySource::TaskDerived,
+                persistence: RolePersistence::Temporary,
+                contract_schema_version: 1,
+                role_contract_hash: "erc-1234567890abcdef".to_string(),
+                source_spawn_request_id: "spawn-dogfood-1".to_string(),
+            }),
+            last_input: None,
+            recoverable_failures: Vec::new(),
+        }],
+        completed_dynamic_instances: Vec::new(),
+        child_runs: Vec::new(),
+    };
+    fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .arg("agents")
+        .current_dir(temp_path)
+        .output()?;
+
+    assert!(output.status.success(), "Command should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Role Contract"));
+    assert!(stdout.contains("task-derived"));
+    assert!(stdout.contains("v1:temporary:erc-12345678:spawn-dogfood-1"));
+
+    Ok(())
+}
+
+#[test]
+fn test_agents_command_prints_child_run_summary_without_fake_instance() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+
+    let ralph_dir = temp_path.join(".ralph");
+    fs::create_dir_all(&ralph_dir)?;
+
+    let snapshot_path = ralph_dir.join("agents.json");
+    let snapshot = AgentsSnapshot {
+        generated_at: "2026-02-01T00:00:00Z".to_string(),
+        instances: Vec::new(),
+        completed_dynamic_instances: Vec::new(),
+        child_runs: vec![AgentChildRunSnapshot {
+            request_id: "cap-req-1".to_string(),
+            invocation_id: Some("cap-inv-1".to_string()),
+            capability_id: "workflow:default-parallel".to_string(),
+            status: AgentChildRunStatus::Running,
+            summary: Some("running child workflow".to_string()),
+            artifact: Some(".ralph/capability-invocations/cap-inv-1/invoke.json".to_string()),
+            updated_at: "2026-02-01T00:00:01Z".to_string(),
+        }],
+    };
+    fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .arg("agents")
+        .current_dir(temp_path)
+        .output()?;
+
+    assert!(output.status.success(), "Command should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Child runs:"));
+    assert!(stdout.contains("running=1"));
+    assert!(stdout.contains("workflow:default-parallel"));
+    assert!(
+        !stdout.contains("cap-inv-1 |"),
+        "child-run summary must not be rendered as an instance row"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_agents_command_prints_completed_dynamic_instances_separately() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+
+    let ralph_dir = temp_path.join(".ralph");
+    fs::create_dir_all(&ralph_dir)?;
+
+    let snapshot_path = ralph_dir.join("agents.json");
+    let snapshot = AgentsSnapshot {
+        generated_at: "2026-02-01T00:00:00Z".to_string(),
+        instances: vec![AgentInstanceSnapshot {
+            instance_id: "builder#2".to_string(),
+            hat_id: "builder".to_string(),
+            state: HatInstanceState::Idle,
+            is_dynamic: true,
+            identity_source: IdentitySource::TaskDerived,
+            fixed_role_label: None,
+            fixed_role_reason: None,
+            role_contract_summary: Some(RoleContractSummary {
+                role_name: "功能补充".to_string(),
+                objective_preview: "补充 feature A".to_string(),
+                allowed_result_topics: vec!["analysis.done".to_string()],
+                identity_source: IdentitySource::TaskDerived,
+                persistence: RolePersistence::Temporary,
+                contract_schema_version: 1,
+                role_contract_hash: "erc-1234567890abcdef".to_string(),
+                source_spawn_request_id: "spawn-dogfood-1".to_string(),
+            }),
+            last_input: None,
+            recoverable_failures: Vec::new(),
+        }],
+        completed_dynamic_instances: vec![AgentCompletedDynamicInstanceSnapshot {
+            instance_id: "builder#4".to_string(),
+            hat_id: "builder".to_string(),
+            final_state: HatInstanceState::Done,
+            identity_source: IdentitySource::TaskDerived,
+            fixed_role_label: Some("review".to_string()),
+            fixed_role_reason: Some("coordinator promoted this role".to_string()),
+            role_contract_summary: Some(RoleContractSummary {
+                role_name: "review".to_string(),
+                objective_preview: "review the proposal".to_string(),
+                allowed_result_topics: vec!["analysis.done".to_string()],
+                identity_source: IdentitySource::TaskDerived,
+                persistence: RolePersistence::Fixed,
+                contract_schema_version: 1,
+                role_contract_hash: "erc-fedcba0987654321".to_string(),
+                source_spawn_request_id: "spawn-dogfood-1".to_string(),
+            }),
+            last_input: Some(AgentLastInput {
+                ts: "2026-02-01T00:00:01Z".to_string(),
+                topic: "build.task".to_string(),
+                preview: "review".to_string(),
+            }),
+            completed_at: "2026-02-01T00:00:02Z".to_string(),
+            retirement_reason: "dynamic_instance_unregistered_after_done".to_string(),
+        }],
+        child_runs: Vec::new(),
+    };
+    fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .arg("agents")
+        .current_dir(temp_path)
+        .output()?;
+
+    assert!(output.status.success(), "Command should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("builder#2"));
+    assert!(stdout.contains("Completed dynamic instances: 1"));
+    assert!(stdout.contains("builder#4"));
+    assert!(stdout.contains("review"));
+    assert!(stdout.contains("done"));
+    assert!(
+        stdout
+            .find("Completed dynamic instances")
+            .is_some_and(|section| stdout[section..].contains("builder#4")),
+        "completed instance should be rendered in its own section: {stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_agents_command_finds_snapshot_in_parent_directories() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let temp_path = temp_dir.path();
@@ -172,6 +409,10 @@ fn test_agents_command_finds_snapshot_in_parent_directories() -> Result<()> {
             hat_id: "writer".to_string(),
             state: HatInstanceState::Running,
             is_dynamic: false,
+            identity_source: IdentitySource::ConfigDerived,
+            fixed_role_label: None,
+            fixed_role_reason: None,
+            role_contract_summary: None,
             last_input: Some(AgentLastInput {
                 ts: "2026-02-01T00:00:01Z".to_string(),
                 topic: "build.task".to_string(),
@@ -179,6 +420,8 @@ fn test_agents_command_finds_snapshot_in_parent_directories() -> Result<()> {
             }),
             recoverable_failures: Vec::new(),
         }],
+        completed_dynamic_instances: Vec::new(),
+        child_runs: Vec::new(),
     };
     fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
 
@@ -216,6 +459,10 @@ fn test_agents_command_watch_prints_output_at_least_once() -> Result<()> {
             hat_id: "writer".to_string(),
             state: HatInstanceState::Running,
             is_dynamic: false,
+            identity_source: IdentitySource::ConfigDerived,
+            fixed_role_label: None,
+            fixed_role_reason: None,
+            role_contract_summary: None,
             last_input: Some(AgentLastInput {
                 ts: "2026-02-01T00:00:01Z".to_string(),
                 topic: "build.task".to_string(),
@@ -223,6 +470,8 @@ fn test_agents_command_watch_prints_output_at_least_once() -> Result<()> {
             }),
             recoverable_failures: Vec::new(),
         }],
+        completed_dynamic_instances: Vec::new(),
+        child_runs: Vec::new(),
     };
     fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
 
