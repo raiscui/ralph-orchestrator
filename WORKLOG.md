@@ -488,3 +488,8 @@
 
 ### 总结感悟
 - 提交前检查"未跟踪文件是否被已提交代码引用", 避免 broken checkout
+
+## [2026-08-02 15:45:00] [Session ID: omx-1785579233065-awidzo] 任务名称: .gitignore 清理 + 推送 my/main
+
+- .gitignore 增加 .codegraph/ .cursor/ parallel_rec.jsonl test
+- git push my main: f41c2bd..6afcdea(17 commits)推送完成, 本地与远端同步
