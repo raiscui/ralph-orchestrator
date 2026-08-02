@@ -252,11 +252,11 @@ def test_delete_todo(client):
 ## Monitoring Progress
 
 ```bash
-# Watch Ralph's progress
-ralph status
+# Check runtime workflow state
+ralph state status
 
-# Monitor in real-time
-watch -n 5 'ralph status'
+# Monitor recent events in real-time
+watch -n 5 'ralph events --last 20'
 
 # Check logs
 tail -f .agent/logs/ralph.log

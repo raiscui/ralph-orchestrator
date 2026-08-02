@@ -210,7 +210,7 @@ secrets/
 credentials/
 
 # Ralph workspace
-.agent/metrics/
+.ralph/diagnostics/
 .agent/logs/
 ```
 
@@ -307,7 +307,7 @@ logging.info(json.dumps({
    ```
 
 2. **Investigation**
-   - Review .agent/metrics/state\_\*.json
+   - Review `ralph state status` and `ralph state read <mode> --json`
    - Check system logs
    - Examine Git history
    - Analyze agent outputs

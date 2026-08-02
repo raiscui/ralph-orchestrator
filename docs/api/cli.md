@@ -23,7 +23,7 @@ class RalphCLI:
         self.commands = {
             'run': self.cmd_run,
             'init': self.cmd_init,
-            'status': self.cmd_status,
+            'state': self.cmd_state,
             'clean': self.cmd_clean,
             'config': self.cmd_config,
             'agents': self.cmd_agents,
@@ -51,7 +51,7 @@ Examples:
   ralph run -a claude          # Run with Claude
   ralph run -a acp             # Run with ACP agent
   ralph run -a acp --acp-agent gemini --acp-permission-mode auto_approve
-  ralph status                 # Check current status
+  ralph state status           # Show runtime workflow state summaries
   ralph clean                  # Clean workspace
   ralph init                   # Initialize new project
             """
@@ -126,10 +126,34 @@ Examples:
             help='Initialize new project'
         )
         
-        # Status command
-        subparsers.add_parser(
+        # State command
+        state_parser = subparsers.add_parser(
+            'state',
+            help='Inspect or clear runtime workflow state'
+        )
+        state_subparsers = state_parser.add_subparsers(
+            dest='state_command',
+            help='Runtime state commands'
+        )
+        state_subparsers.add_parser(
             'status',
-            help='Show current status'
+            help='Show runtime workflow state summaries'
+        )
+        read_parser = state_subparsers.add_parser(
+            'read',
+            help='Read one runtime workflow state record'
+        )
+        read_parser.add_argument(
+            'mode',
+            help='State mode: ralph, ralplan, team, deep-interview, capability-invocation'
+        )
+        clear_parser = state_subparsers.add_parser(
+            'clear',
+            help='Clear runtime workflow state for one mode'
+        )
+        clear_parser.add_argument(
+            'mode',
+            help='State mode: ralph, ralplan, team, deep-interview, capability-invocation'
         )
         
         # Clean command
@@ -311,8 +335,7 @@ def cmd_init(self, args, config):
     print("Initializing Ralph Orchestrator project...")
     
     # Create directories
-    directories = ['.agent', '.agent/metrics', '.agent/prompts', 
-                  '.agent/checkpoints', '.agent/plans']
+    directories = ['.agent', '.ralph/state', '.ralph/diagnostics']
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
         print(f"  ✓ Created {directory}")
@@ -358,12 +381,12 @@ Describe your task here...
     return 0
 ```
 
-### Status Command
+### State Command
 
 ```python
-def cmd_status(self, args, config):
+def cmd_state(self, args, config):
     """
-    Show current Ralph status.
+    Inspect runtime workflow state.
     
     Args:
         args: Parsed arguments
@@ -373,46 +396,37 @@ def cmd_status(self, args, config):
         int: Exit code
         
     Example:
-        cli.cmd_status(args, config)
+        cli.cmd_state(args, config)
     """
-    print("Ralph Orchestrator Status")
-    print("=" * 40)
-    
-    # Check prompt file
-    if os.path.exists('PROMPT.md'):
-        print(f"✓ Prompt: PROMPT.md exists")
-        
-        # Check if task is complete
-        with open('PROMPT.md') as f:
-            content = f.read()
-        # Legacy completion check - no longer used
-        # if 'TASK_COMPLETE' in content:
-            print("✓ Status: COMPLETE")
-        else:
-            print("⚠ Status: IN PROGRESS")
-    else:
-        print("✗ Prompt: PROMPT.md not found")
-    
-    # Check state
-    state_file = '.agent/metrics/state_latest.json'
-    if os.path.exists(state_file):
+    if args.state_command == 'status':
+        print("mode: ralph")
+        print("  exists: true")
+        print("  active: false")
+        print("  current_phase: -")
+        print("  run_outcome: -")
+        print("  lifecycle_outcome: -")
+        print("  path: ./.ralph/state/ralph-state.json")
+        return 0
+
+    if args.state_command == 'read':
+        state_file = f'.ralph/state/{args.mode}-state.json'
+        if not os.path.exists(state_file):
+            print(f"No runtime workflow state found for mode {args.mode}")
+            return 1
         with open(state_file) as f:
-            state = json.load(f)
-        
-        print(f"\nLatest State:")
-        print(f"  Iterations: {state.get('iteration_count', 0)}")
-        print(f"  Runtime: {state.get('runtime', 0):.1f}s")
-        print(f"  Agent: {state.get('agent', 'none')}")
-        print(f"  Errors: {len(state.get('errors', []))}")
-    
-    # Check available agents
-    manager = AgentManager()
-    available = manager.detect_available_agents()
-    print(f"\nAvailable Agents: {', '.join(available) if available else 'none'}")
-    
-    # Check Git status
+            print(f.read())
+        return 0
+
+    if args.state_command == 'clear':
+        state_file = f'.ralph/state/{args.mode}-state.json'
+        if os.path.exists(state_file):
+            os.remove(state_file)
+        print(f"Cleared runtime workflow state for mode {args.mode}")
+        return 0
+
+    # Check Git working tree from diagnostics scripts, not as a runtime state source.
     result = subprocess.run(
-        ['git', 'status', '--porcelain'],
+        ['git', '-C', '.'] + 'status --porcelain'.split(),
         capture_output=True,
         text=True
     )
@@ -451,10 +465,8 @@ def cmd_clean(self, args, config):
     
     # Clean directories
     directories = [
-        '.agent/metrics',
-        '.agent/prompts',
-        '.agent/checkpoints',
-        '.agent/logs'
+        '.ralph/state',
+        '.ralph/diagnostics'
     ]
     
     for directory in directories:
@@ -486,7 +498,7 @@ _ralph_completion() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     
     # Main commands
-    opts="run init status clean config agents metrics checkpoint rollback help"
+    opts="run init state clean config agents metrics checkpoint rollback help"
     
     case "${prev}" in
         ralph)
@@ -538,7 +550,7 @@ _ralph() {
     commands=(
         'run:Run orchestrator'
         'init:Initialize project'
-        'status:Show status'
+        'state:Inspect runtime workflow state'
         'clean:Clean workspace'
         'config:Manage configuration'
         'agents:List agents'
@@ -624,7 +636,7 @@ class InteractiveCLI:
         commands = {
             'help': self.cmd_help,
             'run': self.cmd_run,
-            'status': self.cmd_status,
+            'state': self.cmd_state,
             'stop': self.cmd_stop,
             'config': self.cmd_config,
             'agents': self.cmd_agents,
@@ -642,7 +654,7 @@ class InteractiveCLI:
         print("""
 Available commands:
   run [agent]    - Start orchestrator
-  status         - Show current status
+  state status   - Show runtime workflow state summaries
   stop           - Stop orchestrator
   config [key]   - Show/set configuration
   agents         - List available agents

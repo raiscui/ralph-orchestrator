@@ -34,12 +34,20 @@ The isolated child execution MUST use its own resolved configuration artifact an
 - **WHEN** an isolated workflow capability run completes
 - **THEN** Ralph MUST return a structured capability result or failure artifact to the parent run
 
+#### Scenario: Workflow capability preserves child record-session evidence
+- **WHEN** a workflow capability executes its isolated child run
+- **THEN** Ralph MUST pass a child `--record-session` path for that run
+- **AND** the invocation artifact directory MUST preserve the resulting child record-session JSONL
+- **AND** the evidence index MUST link that record-session to the capability invocation id
+
 ---
 
 ### Requirement: Hat capability invocation MUST use an isolated transient execution model
 When `ralph#1` selects a hat capability during a live run, Ralph MUST execute it through an isolated transient execution model rather than mutating the live `HatRegistry` of the active parent run.
 
 The transient execution MAY be implemented as a micro-run or equivalent isolated child session, but it MUST preserve the stability of the parent topology.
+
+By default, the transient execution MUST be a real child execution. Ralph MUST NOT silently route a live `hat:*` capability invocation through dry-run preview mode.
 
 #### Scenario: Hat capability does not require live registry mutation
 - **WHEN** `ralph#1` invokes a hat capability that was not part of the parent run's startup topology
@@ -48,6 +56,16 @@ The transient execution MAY be implemented as a micro-run or equivalent isolated
 #### Scenario: Hat capability produces a parent-consumable result
 - **WHEN** an isolated hat capability execution completes
 - **THEN** Ralph MUST emit a structured capability result or failure artifact that the parent run can consume
+
+#### Scenario: Hat capability default execution is not dry-run preview
+- **WHEN** `ralph#1` invokes a `hat:*` capability during a live run
+- **THEN** Ralph MUST launch the isolated child without adding `--dry-run`
+- **AND** the child configuration MUST disable runtime capability invocation to prevent recursive capability calls
+
+#### Scenario: Hat capability preview is explicit
+- **WHEN** an operator asks for a capability preview for inspect/debug purposes
+- **THEN** Ralph MAY use `ralph run --dry-run`
+- **AND** the preview mode MUST be visible in the CLI invocation rather than inferred from the `hat:*` capability id
 
 ---
 
@@ -75,6 +93,13 @@ The evidence index MUST link to existing durable artifacts and MUST NOT replace 
 - **THEN** `.ralph/evidence-index.jsonl` MUST contain entries for the invocation id
 - **AND** those entries MUST include `capability_invoke_json`, `capability_result_json`, `resolved_config`, and `event_log_jsonl`
 - **AND** each entry MUST point to the durable artifact path written by the invocation
+
+#### Scenario: successful workflow child-run record-session is discoverable by invocation id
+
+- **GIVEN** `ralph tools capability invoke` executes a workflow capability through an isolated child run
+- **WHEN** the invocation succeeds and the child run writes a record-session JSONL
+- **THEN** `.ralph/evidence-index.jsonl` MUST contain a `record_session_jsonl` entry for the invocation id
+- **AND** that entry MUST point to the child record-session under `.ralph/capability-invocations/<invocation_id>/`
 
 #### Scenario: failed child-run artifacts are discoverable by invocation id
 
@@ -422,4 +447,3 @@ A `capability.failed` event with `failure_class = malformed_request` MUST remain
 - **WHEN** it emits a diagnostic `reply.human.message`
 - **THEN** the parent event log MUST preserve both the malformed failure event and the diagnostic human reply as separate events
 - **AND** no fallback capability result MUST be required for that diagnostic branch
-

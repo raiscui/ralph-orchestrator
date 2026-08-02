@@ -61,7 +61,8 @@ chmod +x ralph ralph_orchestrator.py
 1. Check iteration progress and logs:
 
    ```bash
-   ralph status
+   ralph state status
+   ralph events --last 20
    ```
 
 2. Break down complex tasks:
@@ -118,7 +119,7 @@ chmod +x ralph ralph_orchestrator.py
 1. Check error pattern:
 
    ```bash
-   cat .agent/metrics/state_*.json | jq '.errors'
+   ralph state status --mode ralph --json | jq '.statuses[0].error'
    ```
 
 2. Clear workspace and retry:
@@ -399,13 +400,13 @@ Ralph's loop detection triggers when agent output is ≥90% similar to any of th
 1. Remove corrupted file:
 
    ```bash
-   rm .agent/metrics/state_latest.json
+   ralph state clear ralph
    ```
 
-2. Restore from backup:
+2. Inspect the current runtime workflow record:
 
    ```bash
-   cp .agent/metrics/state_*.json .agent/metrics/state_latest.json
+   ralph state read ralph --json
    ```
 
 3. Reset state:
@@ -414,28 +415,28 @@ Ralph's loop detection triggers when agent output is ≥90% similar to any of th
    ralph clean
    ```
 
-#### Missing Metrics
+#### Missing Diagnostics
 
-**Problem**: No metrics being collected
+**Problem**: No diagnostics or runtime state is being collected
 
 **Solutions**:
 
-1. Check metrics directory:
+1. Check runtime state and diagnostics directories:
 
    ```bash
-   ls -la .agent/metrics/
+   ls -la .ralph/state .ralph/diagnostics
    ```
 
-2. Create directory if missing:
+2. Run a state summary:
 
    ```bash
-   mkdir -p .agent/metrics
+   ralph state status
    ```
 
 3. Check permissions:
 
    ```bash
-   chmod 755 .agent/metrics
+   chmod 755 .ralph .ralph/state .ralph/diagnostics
    ```
 
 ## Error Messages
@@ -582,8 +583,11 @@ echo ""
 echo "Git status:"
 git status --short
 echo ""
-echo "Ralph status:"
-./ralph status
+echo "Ralph workflow state:"
+ralph state status
+echo ""
+echo "Recent Ralph events:"
+ralph events --last 10
 echo ""
 echo "Recent errors:"
 grep ERROR .agent/logs/*.log 2>/dev/null | tail -5

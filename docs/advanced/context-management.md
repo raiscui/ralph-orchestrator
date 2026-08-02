@@ -311,7 +311,7 @@ def monitor_context_usage():
             )
     
     # Save metrics
-    with open('.agent/metrics/context_usage.json', 'w') as f:
+    with open('.ralph/diagnostics/context-usage.json', 'w') as f:
         json.dump(usage, f, indent=2)
     
     return usage

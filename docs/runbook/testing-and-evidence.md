@@ -37,6 +37,36 @@ cargo test -p ralph-core kiro
 
 They use recorded fixtures instead of live API calls.
 
+## Runtime Evidence Lane Release-Fast Gate
+
+Use this focused command set when changing runtime protocol, dynamic hats,
+record-session evidence, agents snapshots, or evidence-index correlation:
+
+```bash
+openspec validate clean-current-runtime-evidence-and-dynamic-role-contract --type change --strict
+cargo test -p ralph-core evidence_index --lib --quiet
+cargo test -p ralph-cli --test integration_topology_spawn parallel_parent_visible_spawn_materializes_dynamic_agents_without_redelivery --quiet
+cargo test -p ralph-core smoke_runner --quiet
+openspec validate --all --strict
+```
+
+If the change touches live backend behavior, also run the focused Codex E2E:
+
+```bash
+bash scripts/run-parallel-hat-instances-codex.sh
+```
+
+The integration topology-spawn guardrail is the replay dogfood for this lane.
+It must retain durable evidence in:
+
+- `.ralph/events.jsonl`
+- `.ralph/agents.json`
+- `.ralph/evidence-index.jsonl`
+- the requested `--record-session` JSONL
+
+Do not treat stdout or a terminal screenshot as enough proof if those durable
+artifacts do not contain the expected spawn/result/termination evidence.
+
 ## Record-Session Evidence
 
 Record sessions while debugging or validating orchestration behavior:

@@ -44,12 +44,22 @@ Print coordinator-friendly summaries:
 ralph tools capability summaries
 ```
 
-Invoke explicitly:
+Invoke explicitly. This performs a real isolated capability execution by default:
 
 ```bash
 ralph tools capability invoke \
   --id hat:focused-reviewer \
   --input "review this patch" \
+  --json
+```
+
+Preview the resolved child configuration without executing it:
+
+```bash
+ralph tools capability invoke \
+  --id hat:focused-reviewer \
+  --input "review this patch" \
+  --preview \
   --json
 ```
 
@@ -70,6 +80,7 @@ Each invocation writes an audit folder:
 .ralph/capability-invocations/<invocation_id>/
   invoke.json
   resolved-config.yml
+  child-record-session.jsonl  # workflow child run evidence, when available
   result.json      # on success
   failed.json      # on failure
 ```
@@ -81,13 +92,38 @@ topics:
 - `capability.result`
 - `capability.failed`
 
+For workflow capabilities, the isolated child run is started with
+`--record-session`. The resulting `child-record-session.jsonl` is linked from
+`.ralph/evidence-index.jsonl` with artifact kind `record_session_jsonl`.
+
 ## Topology Boundary
 
 Runtime capability invocation must not mutate the parent `HatRegistry`, parent
 `EventLoop`, or active parallel `Supervisor` topology.
 
-The v1 implementation proves this by creating isolated artifacts and running a
-child dry-run. Parent config files are not rewritten.
+The implementation proves this by creating isolated artifacts and running the
+child in a separate process. Parent config files are not rewritten.
+
+For inspect/debug workflows, `ralph tools capability invoke --preview` keeps the
+old dry-run behavior visible and explicit.
+
+If a human asks for new instances to appear in the parent TUI, do not use
+`capability.request`. Use the topology mutation protocol instead:
+
+- `topology.spawn_group` creates real parent-visible dynamic `HatInstance`
+  entries.
+- spawned instances receive direct delivery through the request's
+  `delivery_topic`.
+- `topology.spawn.result` is only an acknowledgement; it must not cause the
+  coordinator to re-emit the original `delivery_topic`.
+- `audience_instances` is not a replay or instance-creation mechanism.
+
+This keeps the two evidence lanes separate:
+
+- capability lane: isolated child/micro-run artifacts under
+  `.ralph/capability-invocations/<invocation_id>/`
+- topology lane: parent runtime lifecycle/delivery evidence plus
+  `.ralph/agents.json` dynamic instances
 
 ## v1 / v2 Route
 

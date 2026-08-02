@@ -80,7 +80,7 @@
 ## M
 
 **Metrics**
-: Performance and execution data collected in `.agent/metrics/` including timing, errors, and resource usage.
+: Performance and execution data captured through diagnostics, especially `.ralph/diagnostics/*/performance.jsonl`, when diagnostics are enabled.
 
 **MkDocs**
 : Static site generator used for Ralph's documentation, configured in `mkdocs.yml`.
@@ -123,7 +123,7 @@
 ## S
 
 **State**
-: Current execution status including iteration count, errors, and metrics, saved in `.agent/metrics/state_latest.json`.
+: Runtime workflow record saved under `.ralph/state/` and inspected with `ralph state status` or `ralph state read <mode>`.
 
 **State Manager**
 : Component responsible for saving, loading, and updating execution state across iterations.
@@ -196,8 +196,8 @@
 **`.agent/`**
 : Ralph's workspace directory containing all operational data.
 
-**`.agent/metrics/`**
-: Storage for execution metrics and state files.
+**`.ralph/diagnostics/`**
+: Opt-in diagnostic evidence directory containing agent output, orchestration events, trace logs, performance samples, and error records.
 
 **`.agent/prompts/`**
 : Archive of historical prompt iterations.
@@ -219,14 +219,14 @@
 **`ralph init`**
 : Initialize a new Ralph project with default structure.
 
-**`ralph status`**
-: Check current execution status and metrics.
+**`ralph state status`**
+: Show runtime workflow state summaries.
 
 **`ralph clean`**
 : Clean workspace and reset state.
 
 **`ralph agents`**
-: List available AI agents on the system.
+: List active hat instances in parallel mode.
 
 ## Environment Variables
 

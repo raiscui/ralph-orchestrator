@@ -139,11 +139,11 @@ ralph run
 ### How do I monitor progress?
 
 ```bash
-# Check status
-ralph status
+# Check runtime workflow state
+ralph state status
 
-# Watch in real-time
-watch -n 5 'ralph status'
+# Watch recent events in real-time
+watch -n 5 'ralph events --last 20'
 
 # View logs
 tail -f .agent/logs/ralph.log
@@ -271,7 +271,7 @@ cd project2 && ralph run
 
 - name: Check completion
   run: |
-    ralph status
+    ralph state status
 ```
 
 ### Can Ralph modify files outside the project?

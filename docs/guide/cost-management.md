@@ -167,14 +167,15 @@ Access detailed cost breakdowns:
 import json
 from pathlib import Path
 
-# Load metrics
-metrics_dir = Path('.agent/metrics')
+# Load diagnostic performance exports
+metrics_dir = Path('.ralph/diagnostics')
 total_cost = 0
 
-for metric_file in metrics_dir.glob('metrics_*.json'):
+for metric_file in metrics_dir.glob('*/performance.jsonl'):
     with open(metric_file) as f:
-        data = json.load(f)
-        total_cost += data.get('cost', 0)
+        for line in f:
+            data = json.loads(line)
+            total_cost += data.get('cost', 0)
 
 print(f"Total cost: ${total_cost:.2f}")
 ```
@@ -192,11 +193,12 @@ from pathlib import Path
 costs = []
 iterations = []
 
-for metric_file in sorted(Path('.agent/metrics').glob('*.json')):
+for metric_file in sorted(Path('.ralph/diagnostics').glob('*/performance.jsonl')):
     with open(metric_file) as f:
-        data = json.load(f)
-        costs.append(data.get('total_cost', 0))
-        iterations.append(data.get('iteration', 0))
+        for line in f:
+            data = json.loads(line)
+            costs.append(data.get('total_cost', 0))
+            iterations.append(data.get('iteration', 0))
 
 plt.plot(iterations, costs)
 plt.xlabel('Iteration')
@@ -330,7 +332,7 @@ python ralph_orchestrator.py --prompt batch.md  # $10
 COST_LIMIT=25.0
 CURRENT_COST=$(python -c "
 import json
-with open('.agent/metrics/state_latest.json') as f:
+with open('reports/current-cost.json') as f:
     print(json.load(f)['total_cost'])
 ")
 
@@ -348,7 +350,7 @@ Implement circuit breakers:
 import json
 import sys
 
-with open('.agent/metrics/state_latest.json') as f:
+with open('reports/current-cost.json') as f:
     state = json.load(f)
     
 if state['total_cost'] > state['max_cost'] * 0.9:
@@ -405,8 +407,8 @@ Track costs in real-time:
 # Terminal 1: Run orchestration
 python ralph_orchestrator.py --verbose
 
-# Terminal 2: Monitor costs
-watch -n 5 'tail -n 20 .agent/metrics/state_latest.json'
+# Terminal 2: Monitor the current cost report produced by your backend/exporter
+watch -n 5 'tail -n 20 reports/current-cost.json'
 ```
 
 ### 3. Optimize Iteratively
@@ -429,7 +431,7 @@ Keep records for analysis:
 ```bash
 # Save cost report after each run
 python ralph_orchestrator.py && \
-  cp .agent/metrics/state_latest.json "reports/run_$(date +%Y%m%d_%H%M%S).json"
+  cp reports/current-cost.json "reports/run_$(date +%Y%m%d_%H%M%S).json"
 ```
 
 ## Troubleshooting

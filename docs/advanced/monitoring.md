@@ -12,7 +12,7 @@ Ralph's monitoring system collects and routes execution data through multiple ch
                            📊 Metrics Collection Flow
 
                                                                         ┌────────────────────┐
-                                                                   ┌──> │ .agent/metrics/    │
+                                                                   ┌──> │ .ralph/diagnostics/│
                                                                    │    └────────────────────┘
 ┌─────────────────┐     ┌──────────────────┐     ┌───────────────┐ │    ┌────────────────────┐
 │   Orchestrator  │ ──> │ Iteration Events │ ──> │    Metrics    │ ┼──> │   .agent/logs/     │
@@ -28,46 +28,41 @@ Ralph's monitoring system collects and routes execution data through multiple ch
 ```
 graph { label: "📊 Metrics Collection Flow"; flow: east; }
 [ Orchestrator ] -> [ Iteration Events ] -> [ Metrics Collector ]
-[ Metrics Collector ] -> [ .agent/metrics/ ]
+[ Metrics Collector ] -> [ .ralph/diagnostics/ ]
 [ Metrics Collector ] -> [ .agent/logs/ ]
 [ Metrics Collector ] -> [ Console ]
 ```
 
 </details>
 
-### State Files
+### Runtime State Files
 
-Ralph automatically generates state files in `.agent/metrics/`:
+Ralph stores workflow state under `.ralph/state/`. Use `ralph state status` for a summary and `ralph state read <mode> --json` when automation needs the raw record.
 
 ```json
 {
-  "iteration_count": 15,
-  "runtime": 234.5,
-  "start_time": "2025-09-07T15:44:35",
-  "agent": "claude",
-  "prompt_file": "PROMPT.md",
-  "status": "running",
-  "errors": [],
-  "checkpoints": [5, 10, 15],
-  "last_output_size": 2048
+  "mode": "ralph",
+  "active": false,
+  "current_phase": null,
+  "run_outcome": null,
+  "lifecycle_outcome": null
 }
 ```
 
 ### Real-time Status
 
 ```bash
-# Check current status
-./ralph status
+# Check current workflow state
+ralph state status
 
 # Output:
-Ralph Orchestrator Status
-=========================
-Status: RUNNING
-Current Iteration: 15
-Runtime: 3m 54s
-Agent: claude
-Last Checkpoint: iteration 15
-Errors: 0
+mode: ralph
+  exists: false
+  active: -
+  current_phase: -
+  run_outcome: -
+  lifecycle_outcome: -
+  path: ./.ralph/state/ralph-state.json
 ```
 
 ### Execution Logs
@@ -133,7 +128,7 @@ class MetricsCollector:
 
     def export_metrics(self):
         """Export metrics to JSON"""
-        with open('.agent/metrics/custom.json', 'w') as f:
+        with open('.ralph/diagnostics/custom-metrics.json', 'w') as f:
             json.dump(self.metrics, f, indent=2)
 ```
 
@@ -143,13 +138,13 @@ class MetricsCollector:
 
 ```bash
 # Continuous monitoring
-watch -n 5 './ralph status'
+watch -n 5 'ralph state status'
 
 # Tail logs
 tail -f .agent/logs/ralph.log
 
 # Monitor metrics
-watch -n 10 'cat .agent/metrics/state_*.json | jq .'
+watch -n 10 'ralph state status --json | jq .'
 ```
 
 ### 2. Git History Monitoring
@@ -193,8 +188,12 @@ while true; do
     echo "=== RALPH ORCHESTRATOR MONITOR ==="
     echo ""
 
-    # Status
-    ./ralph status
+    # Runtime workflow state
+    ralph state status
+    echo ""
+
+    # Recent orchestration events
+    ralph events --last 10
     echo ""
 
     # Recent errors
@@ -227,13 +226,13 @@ app = Flask(__name__)
 
 @app.route('/metrics')
 def metrics():
-    # Get latest state file
-    state_files = glob.glob('.agent/metrics/state_*.json')
+    # Get runtime workflow state files
+    state_files = glob.glob('.ralph/state/*-state.json')
     if state_files:
         latest = max(state_files)
         with open(latest) as f:
             return jsonify(json.load(f))
-    return jsonify({'status': 'no data'})
+    return jsonify({'result': 'no data'})
 
 @app.route('/')
 def dashboard():
@@ -271,7 +270,7 @@ if __name__ == '__main__':
 ```python
 # Monitor for errors
 def check_errors():
-    with open('.agent/metrics/state_latest.json') as f:
+    with open('.ralph/state/ralph-state.json') as f:
         state = json.load(f)
 
     if state.get('errors'):
@@ -301,41 +300,35 @@ curl -X POST -H 'Content-type: application/json' \
 
 ## Performance Analysis
 
-### Iteration Analysis
+### Runtime State Snapshot
 
 ```python
-# Analyze iteration performance
-import pandas as pd
-import matplotlib.pyplot as plt
+# Analyze current runtime workflow state
+import json
+import subprocess
 
-def analyze_iterations():
-    # Load metrics
-    metrics = []
-    for file in glob.glob('.agent/metrics/state_*.json'):
-        with open(file) as f:
-            metrics.append(json.load(f))
+def summarize_runtime_state(mode='ralph'):
+    raw = subprocess.check_output(
+        ['ralph', 'state', 'status', '--mode', mode, '--json'],
+        text=True,
+    )
+    status = json.loads(raw)['statuses'][0]
 
-    # Create DataFrame
-    df = pd.DataFrame(metrics)
-
-    # Plot iteration times
-    plt.figure(figsize=(10, 6))
-    plt.plot(df['iteration_count'], df['runtime'])
-    plt.xlabel('Iteration')
-    plt.ylabel('Cumulative Runtime (seconds)')
-    plt.title('Ralph Execution Performance')
-    plt.savefig('.agent/performance.png')
-
-    # Statistics
-    print(f"Average iteration time: {df['runtime'].diff().mean():.2f}s")
-    print(f"Total iterations: {df['iteration_count'].max()}")
-    print(f"Error rate: {len(df[df['errors'].notna()]) / len(df):.2%}")
+    print(f"Mode: {status['mode']}")
+    print(f"Exists: {status['exists']}")
+    print(f"Active: {status['active']}")
+    print(f"Current phase: {status['current_phase']}")
+    print(f"Run outcome: {status['run_outcome']}")
+    print(f"State path: {status['path']}")
 ```
 
 ### Cost Tracking
 
 ```python
 # Estimate API costs
+import json
+import subprocess
+
 def calculate_costs():
     costs = {
         'claude': 0.01,    # $ per call
@@ -343,12 +336,18 @@ def calculate_costs():
         'q': 0.0           # Free
     }
 
+    raw = subprocess.check_output(
+        ['ralph', 'state', 'read', 'ralph', '--json'],
+        text=True,
+    )
+    payload = json.loads(raw)
+    record = payload.get('record') or {}
+    custom_state = record.get('state') or {}
+
     total_cost = 0
-    for file in glob.glob('.agent/metrics/state_*.json'):
-        with open(file) as f:
-            state = json.load(f)
-            agent = state.get('agent', 'claude')
-            total_cost += costs.get(agent, 0)
+    for run in custom_state.get('runs', []):
+        agent = run.get('agent', 'claude')
+        total_cost += costs.get(agent, 0)
 
     print(f"Estimated cost: ${total_cost:.2f}")
     return total_cost
@@ -405,13 +404,13 @@ grep "Using agent:" .agent/logs/*.log | \
 def health_check():
     """Comprehensive health check"""
     health = {
-        'status': 'healthy',
+        'health_state': 'healthy',
         'checks': []
     }
 
     # Check prompt file exists
     if not os.path.exists('PROMPT.md'):
-        health['status'] = 'unhealthy'
+        health['health_state'] = 'unhealthy'
         health['checks'].append('PROMPT.md missing')
 
     # Check agent availability
@@ -425,11 +424,12 @@ def health_check():
     stat = os.statvfs('.')
     free_space = stat.f_bavail * stat.f_frsize / (1024**3)  # GB
     if free_space < 1:
-        health['status'] = 'warning'
+        health['health_state'] = 'warning'
         health['checks'].append(f'Low disk space: {free_space:.2f}GB')
 
-    # Check Git status
-    result = subprocess.run(['git', 'status', '--porcelain'],
+    # Check Git working tree
+    git_cmd = ['git', '-C', '.'] + 'status --porcelain'.split()
+    result = subprocess.run(git_cmd,
                           capture_output=True, text=True)
     if result.stdout:
         health['checks'].append('Uncommitted changes present')
@@ -443,7 +443,7 @@ def health_check():
 
 | Symptom              | Check                         | Solution                         |
 | -------------------- | ----------------------------- | -------------------------------- |
-| High iteration count | `.agent/metrics/state_*.json` | Review prompt clarity            |
+| High iteration count | `ralph state status`          | Review prompt clarity            |
 | Slow performance     | Iteration times in logs       | Check agent response times       |
 | Memory issues        | System monitor                | Increase limits or add swap      |
 | Repeated errors      | Error patterns in logs        | Fix underlying issue             |

@@ -21,7 +21,7 @@ class MetricsCollector:
         collector.save()
     """
     
-    def __init__(self, metrics_dir: str = '.agent/metrics'):
+    def __init__(self, metrics_dir: str = '.ralph/diagnostics/custom-metrics'):
         """
         Initialize metrics collector.
         
@@ -212,15 +212,16 @@ class StateManager:
         state.save()
     """
     
-    def __init__(self, state_dir: str = '.agent/metrics'):
+    def __init__(self, state_dir: str = '.ralph/state', mode: str = 'ralph'):
         """
         Initialize state manager.
         
         Args:
             state_dir (str): Directory for state files
+            mode (str): Runtime workflow state mode
         """
         self.state_dir = state_dir
-        self.state_file = os.path.join(state_dir, 'state_latest.json')
+        self.state_file = os.path.join(state_dir, f'{mode}-state.json')
         self.state = self.load() or self.initialize_state()
     
     def initialize_state(self) -> dict:
@@ -345,12 +346,12 @@ class MetricsAnalyzer:
     Analyze collected metrics.
     
     Example:
-        analyzer = MetricsAnalyzer('.agent/metrics')
+        analyzer = MetricsAnalyzer('.ralph/diagnostics/custom-metrics')
         report = analyzer.generate_report()
         print(report)
     """
     
-    def __init__(self, metrics_dir: str = '.agent/metrics'):
+    def __init__(self, metrics_dir: str = '.ralph/diagnostics/custom-metrics'):
         """
         Initialize metrics analyzer.
         

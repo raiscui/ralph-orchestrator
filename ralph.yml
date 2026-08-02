@@ -22,6 +22,7 @@
 event_loop:
   prompt_file: "PROMPT.md"
   completion_promise: "LOOP_COMPLETE"
+  complete_publishes: "workflow.complete"
   max_iterations: 50
   max_runtime_seconds: 3600
   checkpoint_interval: 5
@@ -31,6 +32,14 @@ cli:
   backend: "custom"
   command: "codex"
   prompt_mode: "arg"
+  reasoning_effort:
+    coordinator: "medium"
+    worker: "high"
+  role_args:
+    coordinator:
+      - "-c"
+      - "features.hooks=false"
+    worker: []
   args:
     - "exec"
     - "--sandbox"
@@ -69,14 +78,14 @@ parallel:
     hooks: allow
 
 hats:
-  builder:
-    name: "Builder"
-    description: "Implements one task and records an internal monologue for the confession phase."
+  worker:
+    name: "Worker"
+    description: "Handles one assigned task and records an internal monologue for the confession phase."
     triggers: ["build.task"]
     publishes: ["build.done", "build.blocked"]
     default_publishes: "build.done"
     instructions: |
-      ## BUILDER PHASE
+      ## WORKER PHASE
       Implement the task. Record your thinking as memories for the confession phase:
       ```bash
       ralph tools memory add "shortcut: used X instead of Y because..." -t decision
@@ -114,7 +123,7 @@ hats:
       You are NOT rewarded for saying the work is good.
       You ARE rewarded for surfacing problems, uncertainties, and shortcuts.
       ### Read First
-      1. Search for builder's internal monologue: `ralph tools memory search "shortcut OR uncertainty OR assumption"`
+      1. Search for worker's internal monologue: `ralph tools memory search "shortcut OR uncertainty OR assumption"`
       2. The code/changes produced (git diff, recent commits)
       3. The original task requirements
       ### Create ConfessionReport Memory
@@ -139,7 +148,7 @@ hats:
     name: "Confession Handler"
     description: "Verifies one claim and decides whether to continue iterating or finish."
     triggers: ["confession.issues_found", "confession.clean"]
-    publishes: ["build.task", "escalate.human"]
+    publishes: ["build.task", "escalate.human", "workflow.complete"]
     instructions: |
       ## HANDLER PHASE
       Search for confession memories: `ralph tools memory search "confession" --tags confession`
@@ -157,11 +166,11 @@ hats:
       Do not output the completion promise on this path.
 
       If you were triggered by `confession.clean`:
-      1. Be skeptical. Verify at least one positive claim from the builder's work.
+      1. Be skeptical. Verify at least one positive claim from the worker's work.
       2. If your verification passes AND the `confidence` from the event is >= 80:
          - Ensure all tasks are closed: `ralph tools task list` should show no open tasks.
          - Commit changes with a descriptive message summarizing the work done.
-         - Output the completion promise.
+         - Publish `workflow.complete` with a concise summary. Do NOT output the completion promise yourself.
       3. If your verification fails OR `confidence` < 80:
          - Create a fix task and publish `build.task`.
 

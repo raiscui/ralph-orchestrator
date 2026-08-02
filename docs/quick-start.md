@@ -218,7 +218,7 @@ If your task runs indefinitely:
 
 - Check that your prompt includes clear completion criteria
 - Ensure the agent can modify files and work towards completion
-- Review iteration logs in `.agent/metrics/`
+- Review runtime state with `ralph state status`, or enable diagnostics and inspect `.ralph/diagnostics/`
 
 ## Getting Help
 

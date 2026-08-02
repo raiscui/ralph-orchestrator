@@ -41,23 +41,23 @@ hats:
 
 ## Use Cases
 
-| Use Case | Why Different Backends Help |
-|----------|----------------------------|
-| **AWS Infrastructure** | Kiro has built-in AWS MCP tools |
-| **Code Review** | Different model = different perspective |
-| **Research/Exploration** | Kiro can access internal wikis via MCP |
-| **High-stakes coding** | Use most capable model (Claude Opus) |
-| **Cost optimization** | Use cheaper model for simple tasks |
+| Use Case                 | Why Different Backends Help             |
+| ------------------------ | --------------------------------------- |
+| **AWS Infrastructure**   | Kiro has built-in AWS MCP tools         |
+| **Code Review**          | Different model = different perspective |
+| **Research/Exploration** | Kiro can access internal wikis via MCP  |
+| **High-stakes coding**   | Use most capable model (Claude Opus)    |
+| **Cost optimization**    | Use cheaper model for simple tasks      |
 
 ## Design Considerations
 
 ### 1. Hatless Ralph's Backend
 
-| Option | Description |
-|--------|-------------|
-| **A: Config default** | Ralph uses `cli.backend` (current behavior) |
-| **B: Always Claude** | Ralph is hardcoded to Claude for consistency |
-| **C: Configurable** | New `ralph.backend` field |
+| Option                | Description                                  |
+| --------------------- | -------------------------------------------- |
+| **A: Config default** | Ralph uses `cli.backend` (current behavior)  |
+| **B: Always Claude**  | Ralph is hardcoded to Claude for consistency |
+| **C: Configurable**   | New `ralph.backend` field                    |
 
 **Recommendation:** Option A (config default) — keeps it simple, user controls Ralph's backend via existing config.
 
@@ -116,11 +116,11 @@ Options:
 
 ### 5. PTY vs Non-PTY
 
-| Backend | Execution Mode |
-|---------|---------------|
-| Claude | PTY (interactive TUI) |
-| Kiro | Process (headless) |
-| Gemini | Process (headless) |
+| Backend | Execution Mode        |
+| ------- | --------------------- |
+| Claude  | PTY (interactive TUI) |
+| Kiro    | Process (headless)    |
+| Gemini  | Process (headless)    |
 
 Mixed backends require handling both execution modes in the same run.
 
@@ -213,15 +213,15 @@ Agents are JSON files stored in:
 
 ### Key Configuration Options
 
-| Field | Purpose |
-|-------|---------|
-| `prompt` | High-level context (can use `file://` for external) |
-| `model` | Which Claude model to use |
-| `tools` | Available tools (`@builtin`, `@server_name`, etc.) |
+| Field          | Purpose                                             |
+| -------------- | --------------------------------------------------- |
+| `prompt`       | High-level context (can use `file://` for external) |
+| `model`        | Which Claude model to use                           |
+| `tools`        | Available tools (`@builtin`, `@server_name`, etc.)  |
 | `allowedTools` | Tools usable without user prompting (glob patterns) |
-| `mcpServers` | MCP server configurations |
-| `resources` | File paths the agent can access |
-| `hooks` | Lifecycle event handlers |
+| `mcpServers`   | MCP server configurations                           |
+| `resources`    | File paths the agent can access                     |
+| `hooks`        | Lifecycle event handlers                            |
 
 ### Invoking a Kiro Agent
 
@@ -254,13 +254,13 @@ hats:
 
 ### What This Enables
 
-| Capability | How |
-|------------|-----|
-| **Per-hat MCP servers** | Each Kiro agent has its own `mcpServers` |
-| **Per-hat models** | builder uses Sonnet, researcher uses Haiku |
+| Capability                   | How                                                |
+| ---------------------------- | -------------------------------------------------- |
+| **Per-hat MCP servers**      | Each Kiro agent has its own `mcpServers`           |
+| **Per-hat models**           | builder uses Sonnet, researcher uses Haiku         |
 | **Per-hat tool permissions** | Restrict builder to write, researcher to read-only |
-| **Per-hat prompts** | Agent-level system prompts in Kiro config |
-| **Per-hat resources** | Scope file access per agent |
+| **Per-hat prompts**          | Agent-level system prompts in Kiro config          |
+| **Per-hat resources**        | Scope file access per agent                        |
 
 ### Flow
 
@@ -333,26 +333,26 @@ hats:
 
 ### Backend Types Summary
 
-| Type | Config Syntax | Invocation |
-|------|---------------|------------|
-| **Named** | `backend: "claude"` | `claude --dangerously-skip-permissions` |
-| **Kiro (default)** | `backend: "kiro"` | `kiro-cli chat --no-interactive --trust-all-tools` |
-| **Kiro (agent)** | `backend: { type: "kiro", agent: "builder" }` | `kiro-cli --agent builder --no-interactive --trust-all-tools` |
-| **Gemini** | `backend: "gemini"` | `gemini --approval-mode yolo --output-format json -p` |
-| **Codex** | `backend: "codex"` | `codex exec --full-auto` |
-| **Amp** | `backend: "amp"` | `amp --dangerously-allow-all -x` |
-| **Custom** | `backend: { command: "...", args: [...] }` | Whatever you specify |
+| Type               | Config Syntax                                 | Invocation                                                    |
+| ------------------ | --------------------------------------------- | ------------------------------------------------------------- |
+| **Named**          | `backend: "claude"`                           | `claude --dangerously-skip-permissions`                       |
+| **Kiro (default)** | `backend: "kiro"`                             | `kiro-cli chat --no-interactive --trust-all-tools`            |
+| **Kiro (agent)**   | `backend: { type: "kiro", agent: "builder" }` | `kiro-cli --agent builder --no-interactive --trust-all-tools` |
+| **Gemini**         | `backend: "gemini"`                           | `gemini --approval-mode yolo --output-format json -p`         |
+| **Codex**          | `backend: "codex"`                            | `codex exec --full-auto`                                      |
+| **Amp**            | `backend: "amp"`                              | `amp --dangerously-allow-all -x`                              |
+| **Custom**         | `backend: { command: "...", args: [...] }`    | Whatever you specify                                          |
 
 ### Why Mix Backends?
 
-| Scenario | Best Backend | Why |
-|----------|--------------|-----|
-| Complex coding | Claude | Best at reasoning, long context |
-| AWS infrastructure | Kiro + agent | Native AWS MCP tools |
-| Quick research | Gemini | Fast, good at summarization |
-| Code review | Different model | Fresh perspective catches different issues |
-| Internal tools | Custom | Integrate proprietary agents |
-| Cost optimization | Haiku via Kiro | Cheaper for simple tasks |
+| Scenario           | Best Backend    | Why                                        |
+| ------------------ | --------------- | ------------------------------------------ |
+| Complex coding     | Claude          | Best at reasoning, long context            |
+| AWS infrastructure | Kiro + agent    | Native AWS MCP tools                       |
+| Quick research     | Gemini          | Fast, good at summarization                |
+| Code review        | Different model | Fresh perspective catches different issues |
+| Internal tools     | Custom          | Integrate proprietary agents               |
+| Cost optimization  | Haiku via Kiro  | Cheaper for simple tasks                   |
 
 ### Config Schema
 
@@ -425,12 +425,12 @@ Hat triggered
 
 With mixed backends, need to handle different execution modes:
 
-| Backend | Execution Mode | Notes |
-|---------|---------------|-------|
-| Claude | PTY | Rich TUI, interactive |
-| Kiro | Process | Headless, no TUI |
-| Gemini | Process | Headless |
-| Custom | Configurable | Depends on tool |
+| Backend | Execution Mode | Notes                 |
+| ------- | -------------- | --------------------- |
+| Claude  | PTY            | Rich TUI, interactive |
+| Kiro    | Process        | Headless, no TUI      |
+| Gemini  | Process        | Headless              |
+| Custom  | Configurable   | Depends on tool       |
 
 **Options:**
 1. **Single executor, switch modes** — Simpler, one at a time
@@ -447,12 +447,12 @@ Reference documentation for each supported backend to assist with per-hat implem
 
 ### Claude (Anthropic)
 
-| Resource | URL |
-|----------|-----|
-| **Official Docs** | https://docs.anthropic.com/en/docs/claude-code/overview |
-| **GitHub** | https://github.com/anthropics/claude-code |
-| **Best Practices** | https://www.anthropic.com/engineering/claude-code-best-practices |
-| **Settings Reference** | `~/.claude/settings.json`, `.claude/settings.json` |
+| Resource               | URL                                                              |
+| ---------------------- | ---------------------------------------------------------------- |
+| **Official Docs**      | https://docs.anthropic.com/en/docs/claude-code/overview          |
+| **GitHub**             | https://github.com/anthropics/claude-code                        |
+| **Best Practices**     | https://www.anthropic.com/engineering/claude-code-best-practices |
+| **Settings Reference** | `~/.claude/settings.json`, `.claude/settings.json`               |
 
 **Key flags:**
 - `--dangerously-skip-permissions` — Skip approval prompts (autonomous mode)
@@ -466,13 +466,13 @@ Reference documentation for each supported backend to assist with per-hat implem
 
 ### Kiro (AWS)
 
-| Resource | URL |
-|----------|-----|
-| **Official Docs** | https://kiro.dev/docs/cli/ |
-| **Custom Agents** | https://kiro.dev/docs/cli/custom-agents/ |
+| Resource                   | URL                                                              |
+| -------------------------- | ---------------------------------------------------------------- |
+| **Official Docs**          | https://kiro.dev/docs/cli/                                       |
+| **Custom Agents**          | https://kiro.dev/docs/cli/custom-agents/                         |
 | **Agent Config Reference** | https://kiro.dev/docs/cli/custom-agents/configuration-reference/ |
-| **Subagents** | https://kiro.dev/docs/cli/chat/subagents/ |
-| **Migration from Q** | https://kiro.dev/docs/cli/migrating-from-q/ |
+| **Subagents**              | https://kiro.dev/docs/cli/chat/subagents/                        |
+| **Migration from Q**       | https://kiro.dev/docs/cli/migrating-from-q/                      |
 
 **Key flags:**
 - `--agent <name>` — Use custom agent configuration
@@ -500,12 +500,12 @@ Reference documentation for each supported backend to assist with per-hat implem
 
 ### Gemini (Google)
 
-| Resource | URL |
-|----------|-----|
-| **Official Docs** | https://developers.google.com/gemini-code-assist/docs/gemini-cli |
-| **GitHub** | https://github.com/google-gemini/gemini-cli |
-| **Google AI Studio** | https://aistudio.google.com |
-| **Gemini API Docs** | https://ai.google.dev/gemini-api/docs |
+| Resource             | URL                                                              |
+| -------------------- | ---------------------------------------------------------------- |
+| **Official Docs**    | https://developers.google.com/gemini-code-assist/docs/gemini-cli |
+| **GitHub**           | https://github.com/google-gemini/gemini-cli                      |
+| **Google AI Studio** | https://aistudio.google.com                                      |
+| **Gemini API Docs**  | https://ai.google.dev/gemini-api/docs                            |
 
 **Key flags:**
 - `--yolo` — Dangerous mode (skip approvals)
@@ -521,14 +521,14 @@ Reference documentation for each supported backend to assist with per-hat implem
 
 ### Codex (OpenAI)
 
-| Resource | URL |
-|----------|-----|
-| **Official Docs** | https://developers.openai.com/codex/cli/ |
+| Resource          | URL                                                |
+| ----------------- | -------------------------------------------------- |
+| **Official Docs** | https://developers.openai.com/codex/cli/           |
 | **CLI Reference** | https://developers.openai.com/codex/cli/reference/ |
-| **CLI Features** | https://developers.openai.com/codex/cli/features/ |
-| **Quickstart** | https://developers.openai.com/codex/quickstart/ |
-| **GitHub** | https://github.com/openai/codex |
-| **Models** | https://developers.openai.com/codex/models/ |
+| **CLI Features**  | https://developers.openai.com/codex/cli/features/  |
+| **Quickstart**    | https://developers.openai.com/codex/quickstart/    |
+| **GitHub**        | https://github.com/openai/codex                    |
+| **Models**        | https://developers.openai.com/codex/models/        |
 
 **Key flags:**
 - `exec` (or `e`) — Scripted/CI mode, non-interactive
@@ -541,7 +541,7 @@ Reference documentation for each supported backend to assist with per-hat implem
 - MCP servers configurable via `codex mcp` commands
 
 **Key features:**
-- Default model: gpt-5-codex (macOS/Linux), gpt-5 (Windows)
+- Default model: gpt-5.5 (macOS/Linux), gpt-5.5 (Windows)
 - Image support (PNG, JPEG) for design specs
 - Built in Rust for speed
 
@@ -549,19 +549,19 @@ Reference documentation for each supported backend to assist with per-hat implem
 
 ### Amp (Sourcegraph)
 
-| Resource | URL |
-|----------|-----|
-| **Owner's Manual** | https://ampcode.com/manual |
-| **Examples & Guides** | https://github.com/sourcegraph/amp-examples-and-guides |
-| **CLI Guide** | https://github.com/sourcegraph/amp-examples-and-guides/blob/main/guides/cli/README.md |
-| **NPM Package** | https://www.npmjs.com/package/@sourcegraph/amp |
+| Resource              | URL                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------- |
+| **Owner's Manual**    | https://ampcode.com/manual                                                            |
+| **Examples & Guides** | https://github.com/sourcegraph/amp-examples-and-guides                                |
+| **CLI Guide**         | https://github.com/sourcegraph/amp-examples-and-guides/blob/main/guides/cli/README.md |
+| **NPM Package**       | https://www.npmjs.com/package/@sourcegraph/amp                                        |
 
 **Key flags:**
 - `-x` or `--execute` — Execute mode (send message, wait, exit)
 - `--dangerously-allow-all` — Allow all tools without approval
 
 **Agent modes:**
-- `smart` — State-of-the-art models (Claude Opus 4.5, GPT-5.1)
+- `smart` — State-of-the-art models (Claude Opus 4.5, GPT-5.5)
 - `rush` — Fast/efficient models (Claude Haiku 4.5)
 
 **Configuration:**
@@ -579,11 +579,11 @@ Reference documentation for each supported backend to assist with per-hat implem
 
 ## Quick Reference: Backend Invocations
 
-| Backend | Autonomous Invocation |
-|---------|----------------------|
-| **Claude** | `claude --dangerously-skip-permissions` (stdin) |
-| **Kiro** | `kiro-cli chat --no-interactive --trust-all-tools "prompt"` |
+| Backend          | Autonomous Invocation                                                  |
+| ---------------- | ---------------------------------------------------------------------- |
+| **Claude**       | `claude --dangerously-skip-permissions` (stdin)                        |
+| **Kiro**         | `kiro-cli chat --no-interactive --trust-all-tools "prompt"`            |
 | **Kiro + agent** | `kiro-cli --agent builder --no-interactive --trust-all-tools "prompt"` |
-| **Gemini** | `gemini --yolo -p "prompt"` |
-| **Codex** | `codex exec --full-auto "prompt"` |
-| **Amp** | `amp --dangerously-allow-all -x "prompt"` |
+| **Gemini**       | `gemini --yolo -p "prompt"`                                            |
+| **Codex**        | `codex exec --full-auto "prompt"`                                      |
+| **Amp**          | `amp --dangerously-allow-all -x "prompt"`                              |

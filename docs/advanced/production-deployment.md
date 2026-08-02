@@ -327,27 +327,29 @@ jobs:
 # metrics_exporter.py
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 import json
-import glob
+import subprocess
 
 # Define metrics
-iteration_counter = Counter('ralph_iterations_total', 'Total iterations')
-error_counter = Counter('ralph_errors_total', 'Total errors')
-runtime_gauge = Gauge('ralph_runtime_seconds', 'Current runtime')
+state_exists = Gauge('ralph_state_exists', 'Whether the Ralph runtime state exists')
+state_active = Gauge('ralph_state_active', 'Whether Ralph is currently active')
+state_error = Gauge('ralph_state_error', 'Whether the Ralph state reports an error')
 iteration_duration = Histogram('ralph_iteration_duration_seconds', 'Iteration duration')
 
+def read_ralph_status():
+    """Read current Ralph runtime state through the supported CLI."""
+    raw = subprocess.check_output(
+        ['ralph', 'state', 'status', '--mode', 'ralph', '--json'],
+        text=True,
+    )
+    return json.loads(raw)['statuses'][0]
+
 def collect_metrics():
-    """Collect metrics from Ralph state files"""
-    state_files = glob.glob('.agent/metrics/state_*.json')
-    if state_files:
-        latest = max(state_files)
-        with open(latest) as f:
-            state = json.load(f)
-            
-        iteration_counter.inc(state.get('iteration_count', 0))
-        runtime_gauge.set(state.get('runtime', 0))
-        
-        if state.get('errors'):
-            error_counter.inc(len(state['errors']))
+    """Collect metrics from Ralph runtime state."""
+    status = read_ralph_status()
+
+    state_exists.set(1 if status.get('exists') else 0)
+    state_active.set(1 if status.get('active') else 0)
+    state_error.set(1 if status.get('error') else 0)
 
 if __name__ == '__main__':
     # Start metrics server
@@ -579,20 +581,16 @@ def health():
         else:
             status = 'unhealthy'
         
-        # Check last state
-        state_files = glob.glob('.agent/metrics/state_*.json')
-        if state_files:
-            latest = max(state_files)
-            with open(latest) as f:
-                state = json.load(f)
-        else:
-            state = {}
+        # Check last runtime state through the supported CLI
+        state = read_ralph_status()
         
         return jsonify({
             'status': status,
-            'iteration': state.get('iteration_count', 0),
-            'runtime': state.get('runtime', 0),
-            'errors': len(state.get('errors', []))
+            'state_exists': state.get('exists', False),
+            'active': state.get('active'),
+            'current_phase': state.get('current_phase'),
+            'run_outcome': state.get('run_outcome'),
+            'error': state.get('error')
         })
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
