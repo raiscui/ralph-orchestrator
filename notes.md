@@ -767,3 +767,24 @@
 ### 候选6: e2e 场景脚本化
 - e2e 复用 core EventParser/SessionPlayer(好 seam 证据)
 - scenarios/memory.rs 2278 行脚本式场景;reporter 2254
+
+## [2026-08-03 18:40:00] [Session ID: omx-1785634382266-fz89ur] 笔记: emit-spawn 声明化失败根因定位
+
+### 现象
+- 声明式 parallel-emit-spawn-instance 失败 120s(事件全空, ralph#1 第一轮 running)
+- 命令式 2/2 通过(21-30s)
+
+### 假设
+- 声明式 YAML 硬编码 deepseek-v4-flash; 命令式用 codex_e2e_model()(RALPH_E2E_CODEX_MODEL=gpt-5.5)
+- deepseek 对英文复杂规则 prompt 遵循差(与 hat-instances(en) 同模式) → emit 从未发生
+
+### 证据
+- env: RALPH_E2E_CODEX_MODEL=gpt-5.5
+- emit-spawn-instance.yaml: `- deepseek-v4-flash`
+- 命令式 emit_spawn_instance.rs: `let model = super::codex_e2e_model();`
+- hat-instances(en) 240s 失败同样是 deepseek 英文遵循差(已确认)
+
+### 结论(待验证)
+- 修复: declarative render_config 支持 {model} 占位符 → 渲染 codex_e2e_model()
+- emit-spawn YAML 改用 {model} → 与命令式逐字节等价(模型维度)
+- 该修复同时惠及 hat-instances.yaml/zh(它们也硬编码 deepseek)

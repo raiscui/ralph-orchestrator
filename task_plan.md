@@ -308,3 +308,63 @@
 - [x] zh 声明式 ✅ 51.4s 通过(通道恢复后; 与命令式 2/2 通过同速) → 声明化等价性最终确认
 - [x] en 声明式 ❌ 240s: deepseek 对英文复杂规则 prompt 遵循差(zh 中文遵循好), 命令式 en 默认模型 39.8s 通过 → 模型兼容性问题, 非声明化
 - [ ] en 换默认模型(now provider)后可补验
+
+## [2026-08-03 18:30:00] [Session ID: omx-1785634382266-fz89ur] [记录类型]: 候选6 收尾 - 剩余 parallel 场景处理
+
+### 背景
+用户指令: "不考虑 en, 处理剩余 parallel 场景"。hat-instances(en) 声明化后 deepseek 英文遵循差导致 live 失败,用户明确放弃该场景。
+
+### 剩余未声明化 parallel 场景清单
+1. `parallel-emit-spawn-instance` - YAML 已写好但被回退命令式(120s 失败待查)
+2. `parallel-starting-event-inference` + `-multi-candidate` (starting_event_inference.rs 528 行)
+3. `parallel-app-server-idle-start` (fake codex shim, 876 行)
+4. `parallel-app-server-steer-multi-turn` (fake codex shim, 808 行)
+5. 26 个 example 场景(parallel_*_example.rs, 共 10333 行)
+
+### 待办
+- [ ] 手动验证 emit-spawn: 从 YAML 生成 ralph.yml+PROMPT.md 跑 ralph, 确认 ralph#1 是否 emit
+- [ ] 声明化 starting-event-inference ×2 (需 schema 支持 first_entry / event_absent 断言)
+- [ ] 评估 fake shim 场景声明化(write_files + PATH 能力)
+- [ ] 评估 26 个 example 场景声明化(config_file 能力 vs 保留命令式)
+- [ ] 修复 main.rs 重复 import 与缩进
+- [ ] 提交 scoped commits
+
+## [2026-08-03 21:00:00] [Session ID: omx-1785634382266-fz89ur] [记录类型]: emit-spawn 声明化修复完成
+
+### 根因(双因素)
+1. YAML 硬编码 deepseek-v4-flash, 命令式用 codex_e2e_model()(env=gpt-5.5) → 模型差异
+2. ralph_prompt 块缩进错误(2 空格 vs 需要 8 空格) → YAML 解析后 config 截断在 max_runtime_seconds, ralph_prompt/hats 全部丢失
+
+### 修复
+- declarative render_config 支持 {model} 占位符 → codex_e2e_model()(pub(crate))
+- emit-spawn/hat-instances(en/zh) YAML 统一用 {model}
+- emit-spawn YAML 重写缩进 + 硬编码 marker/question/answer(命令式本来就是常量)
+- 回归测试: render_config_expands_backend_and_model_placeholders / emit_spawn_yaml_renders_full_config
+
+### 验证
+- declarative 9 tests 全过
+- live: parallel-emit-spawn-instance ✅ 49.6s(此前 120s 失败)
+
+### 待办(剩余 parallel 场景)
+- [ ] starting-event-inference ×2 声明化(需 schema: first_entry / event_absent 断言)
+- [ ] fake shim ×2(app-server-idle-start / steer-multi-turn)评估
+- [ ] 26 个 example 场景评估
+
+## [2026-08-03 22:10:00] [Session ID: omx-1785634382266-fz89ur] [记录类型]: example 场景批量声明化完成
+
+### 完成
+- [x] 23 个 example 场景声明化(example 引用 + write_files/path_prefix 能力)
+- [x] human-approval-gate 声明化(wait_event + --json emit + event_order)
+- [x] steer-live-reply / steer-multi-turn-live YAML 补提交
+- [x] all_scenario_yamls_parse 回归测试(39 个 YAML)
+- [x] 520 tests 全过 / clippy 干净
+- [x] live: trigger-routing 82s / audit 56s / pr-review 62.6s 通过
+
+### 决策: 3 个命令式保留
+- experimental-dev-engine: 依赖 git seed/commit 工作流, 不适合声明化
+- app-server-idle-start(fake shim) / app-server-steer-multi-turn(fake shim):
+  300 行 fake codex python 脚本嵌入 YAML 收益低, live 版已声明化; 保留命令式作确定性回归
+
+### 限制
+- codex 账户额度不足(¥0.03, 需 ¥0.15+): release-checklist / human-approval-gate
+  等剩余场景 live 验证被 403 阻塞, 非声明化问题; 额度恢复后补验

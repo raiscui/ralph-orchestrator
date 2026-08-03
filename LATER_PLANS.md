@@ -896,3 +896,11 @@
 - 候选5(Worth exploring): EventLoop interface 收窄(25+ pub 方法,驱动知识劈成 core/cli 两半)。
 - 候选6(Speculative): e2e 场景声明化(35k 行 harness)。
 - flaky 测试: `integration_record_session::sigint_leaves_record_session_parseable_and_writes_termination_and_pointer` 在并发跑时偶发失败(单独跑通过),SIGINT 时序竞态,值得后续加固。
+
+## [2026-08-03 22:10:00] [Session ID: omx-1785634382266-fz89ur] 候选6 收尾待办
+
+- [ ] codex 账户额度恢复后补验 live: release-checklist / human-approval-gate 等
+      21 个未验证的声明式 example 场景(账户 403 预扣费额度失败, 非声明化问题)
+- [ ] 评估 fake shim ×2(app-server-idle-start / app-server-steer-multi-turn)声明化:
+      需 write_files 嵌入 300 行 python, 当前保留命令式; 若 YAML 维护性可接受再做
+- [ ] 候选6 全部完成时: 从 LATER_PLANS 移除本条目
