@@ -51,7 +51,6 @@ use ralph_e2e::{
     MemorySearchScenario,
     MockCliError,
     MockConfig,
-    ParallelAppServerIdleStartLiveScenario,
     ParallelAppServerIdleStartScenario,
     // Tier 8: Parallel Runtime
     ParallelAppServerSteerLiveReplyMultiTurnScenario,
@@ -329,7 +328,11 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(ParallelStartingEventInferenceScenario::new_multi_candidate()),
         Box::new(ParallelEmitSpawnInstanceScenario::new()),
         Box::new(ParallelAppServerIdleStartScenario::new()),
-        Box::new(ParallelAppServerIdleStartLiveScenario::new()),
+        // app-server-idle-start-live 已声明化(候选6 inject 试点)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-app-server-idle-start-live",
+            include_str!("../scenarios/app-server-idle-start-live.yaml"),
+        )),
         Box::new(ParallelAppServerSteerMultiTurnScenario::new()),
         Box::new(ParallelAppServerSteerMultiTurnLiveScenario::new()),
         Box::new(ParallelAppServerSteerLiveReplyMultiTurnScenario::new()),

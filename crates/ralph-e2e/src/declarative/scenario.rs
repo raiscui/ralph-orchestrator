@@ -41,6 +41,18 @@ pub struct DeclarativeSetup {
     pub max_iterations: Option<u32>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// 额外 CLI 参数(如 --no-tui / --idle-start)。
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// prompt 来源: inline(默认)或 config(使用 event_loop.ralph_prompt)。
+    #[serde(default)]
+    pub prompt_source: Option<String>,
+    /// 注入时序(parallel 场景: 在 ralph 运行期间并发执行)。
+    #[serde(default)]
+    pub inject: Vec<DeclarativeInjectStep>,
+    /// 额外环境变量(透传给 ralph 进程)。
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 /// expect: 期望(映射到内置断言)。
@@ -86,6 +98,42 @@ pub struct DeclarativeEventExpect {
     pub topic: String,
     #[serde(default)]
     pub min_count: usize,
+}
+
+/// 注入时序步骤(type 字段区分: wait / sleep / assert / emit)。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DeclarativeInjectStep {
+    /// 等待实例达到状态。
+    Wait {
+        instance: String,
+        /// idle / running / running_then_idle。
+        state: String,
+        #[serde(default = "default_wait_timeout")]
+        timeout_secs: u64,
+    },
+    /// 等待固定时长。
+    Sleep {
+        secs: u64,
+    },
+    /// 断言实例处于某状态(不等待)。
+    Assert {
+        instance: String,
+        state: String,
+    },
+    /// 执行 `ralph emit`。
+    Emit {
+        topic: String,
+        payload: String,
+        #[serde(default)]
+        target_instance: Option<String>,
+        #[serde(default)]
+        session_strategy: Option<String>,
+    },
+}
+
+fn default_wait_timeout() -> u64 {
+    30
 }
 
 /// 事件 payload 子串断言。
@@ -170,18 +218,23 @@ impl TestScenario for DeclarativeScenarioRunner {
             ScenarioError::SetupError(format!("failed to write ralph.yml: {e}"))
         })?;
 
-        // prompt: 内联或文件。
-        let prompt = if let Some(text) = &self.spec.setup.prompt {
-            PromptSource::Inline(text.clone())
-        } else if let Some(file) = &self.spec.setup.prompt_file {
-            let content = std::fs::read_to_string(self.base_dir.join(file)).map_err(|e| {
-                ScenarioError::SetupError(format!("failed to read prompt file {file}: {e}"))
-            })?;
-            PromptSource::Inline(content)
-        } else {
-            return Err(ScenarioError::SetupError(
-                "declarative scenario requires setup.prompt or setup.prompt_file".to_string(),
-            ));
+        // prompt: 内联 / 文件 / config(ralph_prompt)。
+        let prompt = match self.spec.setup.prompt_source.as_deref() {
+            Some("config") => PromptSource::Config,
+            _ => {
+                if let Some(text) = &self.spec.setup.prompt {
+                    PromptSource::Inline(text.clone())
+                } else if let Some(file) = &self.spec.setup.prompt_file {
+                    let content = std::fs::read_to_string(self.base_dir.join(file)).map_err(|e| {
+                        ScenarioError::SetupError(format!("failed to read prompt file {file}: {e}"))
+                    })?;
+                    PromptSource::Inline(content)
+                } else {
+                    return Err(ScenarioError::SetupError(
+                        "declarative scenario requires setup.prompt, setup.prompt_file, or prompt_source: config".to_string(),
+                    ));
+                }
+            }
         };
 
         let timeout = self
@@ -196,7 +249,7 @@ impl TestScenario for DeclarativeScenarioRunner {
             prompt,
             max_iterations: self.spec.setup.max_iterations.unwrap_or(10),
             timeout,
-            extra_args: vec![],
+            extra_args: self.spec.setup.extra_args.clone(),
         })
     }
 
@@ -206,11 +259,32 @@ impl TestScenario for DeclarativeScenarioRunner {
         config: &ScenarioConfig,
     ) -> Result<TestResult, ScenarioError> {
         let start = std::time::Instant::now();
+
+        // 注入时序: 在 ralph 运行期间并发执行(wait/sleep/assert/emit)。
+        let inject_task = if !self.spec.setup.inject.is_empty() {
+            let workspace = executor.workspace().clone();
+            let ralph_bin = executor.ralph_binary();
+            let steps = self.spec.setup.inject.clone();
+            Some(tokio::spawn(async move {
+                run_inject_sequence(&ralph_bin, &workspace, &steps).await
+            }))
+        } else {
+            None
+        };
+
+        let extra_env: Vec<(String, String)> = self.spec.setup.env.clone().into_iter().collect();
         let execution = executor
-            .run(config)
+            .run_with_extra_env(config, &extra_env)
             .await
             .map_err(|e| ScenarioError::ExecutionError(format!("ralph execution failed: {e}")))?;
         let duration = start.elapsed();
+
+        // 注入任务收尾: 失败即场景失败(注入是场景契约的一部分)。
+        if let Some(task) = inject_task {
+            task.await
+                .map_err(|e| ScenarioError::ExecutionError(format!("inject task panicked: {e}")))?
+                .map_err(|e| ScenarioError::ExecutionError(format!("inject failed: {e}")))?;
+        }
 
         let mut assertions = Vec::new();
         let expect = &self.spec.expect;
@@ -409,6 +483,161 @@ fn output_contains(result: &ExecutionResult, needle: &str) -> crate::models::Ass
     if ok { builder.passed() } else { builder.failed() }.build()
 }
 
+// ---------------------------------------------------------------------------
+// 注入时序执行器(wait/sleep/assert/emit)。
+// ---------------------------------------------------------------------------
+
+async fn run_inject_sequence(
+    ralph_bin: &std::path::Path,
+    workspace: &std::path::Path,
+    steps: &[DeclarativeInjectStep],
+) -> Result<(), String> {
+    let mut seen_running: bool = false;
+    for step in steps {
+        match step {
+            DeclarativeInjectStep::Wait {
+                instance,
+                state,
+                timeout_secs,
+            } => {
+                wait_instance(workspace, instance, state, &mut seen_running, *timeout_secs).await?;
+            }
+            DeclarativeInjectStep::Sleep { secs } => {
+                tokio::time::sleep(std::time::Duration::from_secs(*secs)).await;
+            }
+            DeclarativeInjectStep::Assert { instance, state } => {
+                let current = read_instance_state(workspace, instance)?;
+                let ok = match state.as_str() {
+                    "idle" => current.as_deref() == Some("idle"),
+                    "running" => current.as_deref() == Some("running"),
+                    other => {
+                        return Err(format!("unsupported assert state: {other}"));
+                    }
+                };
+                if !ok {
+                    return Err(format!(
+                        "assert failed: {} expected {} got {:?}",
+                        instance, state, current
+                    ));
+                }
+            }
+            DeclarativeInjectStep::Emit {
+                topic,
+                payload,
+                target_instance,
+                session_strategy,
+            } => {
+                emit_event(
+                    ralph_bin,
+                    workspace,
+                    topic,
+                    payload,
+                    target_instance.as_deref(),
+                    session_strategy.as_deref(),
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 读取实例状态(agents.json 轮询)。
+async fn wait_instance(
+    workspace: &std::path::Path,
+    instance: &str,
+    state: &str,
+    seen_running: &mut bool,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        // agents.json 可能尚未生成(ralph 刚启动): 读取失败视为"未知状态", 继续等。
+        let current = match read_instance_state(workspace, instance) {
+            Ok(state) => state,
+            Err(_) => None,
+        };
+        if let Some(ref current) = current {
+            if current == "running" {
+                *seen_running = true;
+            }
+            let ok = match state {
+                "idle" => current == "idle",
+                "running" => current == "running",
+                "running_then_idle" => *seen_running && current == "idle",
+                other => return Err(format!("unsupported wait state: {other}")),
+            };
+            if ok {
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timeout waiting for {instance} state {state} (last={current:?})"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// 从 .ralph/agents.json 读取实例状态。
+fn read_instance_state(
+    workspace: &std::path::Path,
+    instance: &str,
+) -> Result<Option<String>, String> {
+    let path = workspace.join(".ralph").join("agents.json");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read agents.json: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse agents.json: {e}"))?;
+    let state = value
+        .get("instances")
+        .and_then(|instances| instances.as_array())
+        .and_then(|list| {
+            list.iter().find(|i| {
+                i.get("instance_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| id == instance)
+            })
+        })
+        .and_then(|i| i.get("state").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+    Ok(state)
+}
+
+/// 执行 `ralph emit`。
+async fn emit_event(
+    ralph_bin: &std::path::Path,
+    workspace: &std::path::Path,
+    topic: &str,
+    payload: &str,
+    target_instance: Option<&str>,
+    session_strategy: Option<&str>,
+) -> Result<(), String> {
+    use tokio::process::Command;
+
+    let mut cmd = Command::new(ralph_bin);
+    cmd.arg("emit").arg(topic).arg(payload).current_dir(workspace);
+    if let Some(target) = target_instance {
+        cmd.arg("--target-instance").arg(target);
+    }
+    if let Some(strategy) = session_strategy {
+        cmd.arg("--session-strategy").arg(strategy);
+    }
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("failed to run ralph emit: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ralph emit failed: status={:?}, stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +702,49 @@ mod tests {
             &["pass".to_string(), "lint".to_string()],
         );
         assert!(!bad.passed);
+    }
+
+    #[test]
+    fn read_instance_state_parses_agents_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let ralph = dir.path().join(".ralph");
+        std::fs::create_dir_all(&ralph).unwrap();
+        std::fs::write(
+            ralph.join("agents.json"),
+            r#"{"generated_at":"t","instances":[{"instance_id":"ralph#1","state":"idle"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_instance_state(dir.path(), "ralph#1").unwrap(),
+            Some("idle".to_string())
+        );
+        assert_eq!(read_instance_state(dir.path(), "ghost").unwrap(), None);
+        // 文件缺失 → 错误(由 wait 容错转为"未知状态")
+        let empty = tempfile::tempdir().unwrap();
+        assert!(read_instance_state(empty.path(), "ralph#1").is_err());
+    }
+
+    #[test]
+    fn wait_instance_tolerates_missing_agents_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let ralph = dir.path().join(".ralph");
+        std::fs::create_dir_all(&ralph).unwrap();
+        // 先写 idle, 再写 running, 再写 idle(running_then_idle 语义)
+        std::fs::write(
+            ralph.join("agents.json"),
+            r#"{"instances":[{"instance_id":"ralph#1","state":"idle"}]}"#,
+        )
+        .unwrap();
+        let mut seen = false;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(wait_instance(
+            dir.path(),
+            "ralph#1",
+            "running_then_idle",
+            &mut seen,
+            2,
+        ));
+        assert!(result.is_err(), "idle-only history cannot satisfy running_then_idle");
     }
 
     #[test]

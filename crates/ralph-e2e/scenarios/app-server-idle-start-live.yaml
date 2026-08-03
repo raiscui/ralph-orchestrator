@@ -1,0 +1,101 @@
+# app-server-idle-start-live 声明化(候选6 inject 试点)
+# 语义与命令式场景等价: idle-start 跨 max_runtime 窗口 + 两次 human.message 注入。
+id: parallel-app-server-idle-start-live
+description: Validates REAL codex app-server keeps idle-start session alive across pre/post-first-message max_runtime windows (declarative inject)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  prompt_source: config
+  max_iterations: 10
+  timeout_secs: 240
+  extra_args: ["--no-tui", "--idle-start"]
+  env:
+    RALPH_CODEX_APP_SERVER_TRACE: "1"
+  config: |
+    cli:
+      backend: "codex"
+
+    event_loop:
+      ralph_prompt: |
+        # E2E: parallel-app-server-idle-start-live (REAL codex app-server)
+
+        你处于 idle-start 模式.
+        启动时不要做任何事,只等待收到 human.message.
+
+        要求(必须严格遵守):
+        - 不要调用任何工具,不要读写任何文件,不要提出问题。
+        - 只输出下面定义的行,每行独占一行,不要添加任何解释性文字。
+
+        当 human.message 包含 `phase: warmup` 时,你必须只输出:
+        MARKER: E2E_IDLE_START_MARKER_42
+        IDLE_START_WARMUP_ACK
+        WAITING_FOR_SECOND_MESSAGE
+
+        当 human.message 包含 `phase: finish` 时,你必须只输出:
+        MARKER: E2E_IDLE_START_MARKER_42
+        TASK_REQUEST[1]: question: 121+43=?
+        TASK_EXECUTE[1]: addition
+        TASK_FEEDBACK[1]: answer: 164
+        TASK_REQUEST[2]: question: 10+5=?
+        TASK_EXECUTE[2]: addition
+        TASK_FEEDBACK[2]: answer: 15
+        LOOP_COMPLETE
+
+        当 phase 不匹配时,你必须只输出:
+        UNKNOWN_PHASE
+      completion_promise: "LOOP_COMPLETE"
+      max_iterations: 6
+      max_runtime_seconds: 6
+
+    parallel:
+      enabled: true
+      autoscale:
+        max_running_jobs: 2
+        dynamic_idle_ttl_secs: 30
+      permissions:
+        worktree: allow
+        hooks: allow
+
+    hats: {}
+
+  inject:
+    # 等 ralph#1 待机(agents.json)
+    - type: wait
+      instance: ralph#1
+      state: idle
+      timeout_secs: 30
+    # 等待超过 max_runtime_seconds(6s), 验证 idle-start 期间不计时
+    - type: sleep
+      secs: 7
+    - type: assert
+      instance: ralph#1
+      state: idle
+    # warmup 注入: 只触发 ack, 不 LOOP_COMPLETE
+    - type: emit
+      topic: human.message
+      payload: "marker: E2E_IDLE_START_MARKER_42; phase: warmup"
+      target_instance: ralph#1
+      session_strategy: app_server
+    # 等 warmup turn 完整跑过(running → idle)
+    - type: wait
+      instance: ralph#1
+      state: running_then_idle
+      timeout_secs: 90
+    # 再次等待超过 max_runtime, 验证首条消息后也不会被收掉
+    - type: sleep
+      secs: 7
+    # finish 注入: 输出答案 + LOOP_COMPLETE
+    - type: emit
+      topic: human.message
+      payload: "marker: E2E_IDLE_START_MARKER_42; phase: finish; question: 121+43=?; question: 10+5=?"
+      target_instance: ralph#1
+      session_strategy: app_server
+expect:
+  termination: LOOP_COMPLETE
+  output_contains:
+    - "E2E_IDLE_START_MARKER_42"
+    - "IDLE_START_WARMUP_ACK"
+    - "WAITING_FOR_SECOND_MESSAGE"
+    - "answer: 164"
+    - "answer: 15"
+    - "[app-server-rpc]"
