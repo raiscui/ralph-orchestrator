@@ -261,16 +261,14 @@ impl TestScenario for DeclarativeScenarioRunner {
         let start = std::time::Instant::now();
 
         // 注入时序: 在 ralph 运行期间并发执行(wait/sleep/assert/emit)。
-        let inject_task = if !self.spec.setup.inject.is_empty() {
+        let inject_task = (!self.spec.setup.inject.is_empty()).then(|| {
             let workspace = executor.workspace().clone();
             let ralph_bin = executor.ralph_binary();
             let steps = self.spec.setup.inject.clone();
-            Some(tokio::spawn(async move {
+            tokio::spawn(async move {
                 run_inject_sequence(&ralph_bin, &workspace, &steps).await
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
         let extra_env: Vec<(String, String)> = self.spec.setup.env.clone().into_iter().collect();
         let execution = executor
@@ -553,10 +551,7 @@ async fn wait_instance(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         // agents.json 可能尚未生成(ralph 刚启动): 读取失败视为"未知状态", 继续等。
-        let current = match read_instance_state(workspace, instance) {
-            Ok(state) => state,
-            Err(_) => None,
-        };
+        let current = read_instance_state(workspace, instance).unwrap_or_default();
         if let Some(ref current) = current {
             if current == "running" {
                 *seen_running = true;
