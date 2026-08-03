@@ -69,6 +69,12 @@ pub struct DeclarativeExpect {
     /// 事件 topic 最小出现次数。
     #[serde(default)]
     pub events: Vec<DeclarativeEventExpect>,
+    /// 事件 payload 必须包含的子串。
+    #[serde(default)]
+    pub event_payload_contains: Vec<DeclarativePayloadContains>,
+    /// 事件 payload 必须命中至少一个关键字。
+    #[serde(default)]
+    pub event_payload_keywords: Vec<DeclarativePayloadKeywords>,
     /// 输出必须包含的文本。
     #[serde(default)]
     pub output_contains: Vec<String>,
@@ -80,6 +86,20 @@ pub struct DeclarativeEventExpect {
     pub topic: String,
     #[serde(default)]
     pub min_count: usize,
+}
+
+/// 事件 payload 子串断言。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeclarativePayloadContains {
+    pub topic: String,
+    pub contains: String,
+}
+
+/// 事件 payload 关键字断言(任一命中)。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeclarativePayloadKeywords {
+    pub topic: String,
+    pub keywords: Vec<String>,
 }
 
 /// 声明式场景 runner: 实现 TestScenario, 让现有 harness 直接支持。
@@ -229,6 +249,20 @@ impl TestScenario for DeclarativeScenarioRunner {
         for needle in &expect.output_contains {
             assertions.push(output_contains(&execution, needle));
         }
+        for payload_expect in &expect.event_payload_contains {
+            assertions.push(event_payload_contains(
+                &execution,
+                &payload_expect.topic,
+                &payload_expect.contains,
+            ));
+        }
+        for keyword_expect in &expect.event_payload_keywords {
+            assertions.push(event_payload_keywords(
+                &execution,
+                &keyword_expect.topic,
+                &keyword_expect.keywords,
+            ));
+        }
 
         let all_passed = assertions.iter().all(|a| a.passed);
 
@@ -317,6 +351,56 @@ fn total_events_at_least(result: &ExecutionResult, min: usize) -> crate::models:
     if ok { builder.passed() } else { builder.failed() }.build()
 }
 
+fn event_payload_contains(
+    result: &ExecutionResult,
+    topic: &str,
+    needle: &str,
+) -> crate::models::Assertion {
+    let event = result.events.iter().find(|e| e.topic == topic);
+    let ok = event.map(|e| e.payload.contains(needle)).unwrap_or(false);
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "Event '{topic}' payload contains '{needle}'"
+    ))
+    .expected(format!("Payload containing '{needle}'"))
+    .actual(match event {
+        Some(e) => format!("Payload: {}", truncate_payload(&e.payload)),
+        None => "Event not found".to_string(),
+    });
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+fn event_payload_keywords(
+    result: &ExecutionResult,
+    topic: &str,
+    keywords: &[String],
+) -> crate::models::Assertion {
+    let event = result.events.iter().find(|e| e.topic == topic);
+    let ok = event
+        .map(|e| {
+            let payload = e.payload.to_lowercase();
+            keywords.iter().any(|k| payload.contains(&k.to_lowercase()))
+        })
+        .unwrap_or(false);
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "Event '{topic}' payload hits a keyword"
+    ))
+    .expected(format!("Payload with one of {keywords:?}"))
+    .actual(match event {
+        Some(e) => format!("Payload: {}", truncate_payload(&e.payload)),
+        None => "Event not found".to_string(),
+    });
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+fn truncate_payload(payload: &str) -> String {
+    let max = 50;
+    if payload.chars().count() <= max {
+        payload.to_string()
+    } else {
+        payload.chars().take(max).collect::<String>() + "..."
+    }
+}
+
 fn output_contains(result: &ExecutionResult, needle: &str) -> crate::models::Assertion {
     let ok = result.stdout.contains(needle);
     let builder = crate::scenarios::AssertionBuilder::new(format!("Output contains {needle:?}"))
@@ -358,6 +442,37 @@ mod tests {
         let r = sample_result(1, vec!["a", "b", "c"], None);
         assert!(total_events_at_least(&r, 3).passed);
         assert!(!total_events_at_least(&r, 4).passed);
+    }
+
+    #[test]
+    fn event_payload_contains_matches_substring() {
+        let r = sample_result(1, vec!["test.event"], None);
+        // 需要带 payload 的事件: 手工构造
+        let mut r2 = r;
+        r2.events[0].payload = "Test payload data".to_string();
+        assert!(event_payload_contains(&r2, "test.event", "Test payload").passed);
+        assert!(!event_payload_contains(&r2, "test.event", "missing").passed);
+        assert!(!event_payload_contains(&r2, "other.event", "Test").passed);
+    }
+
+    #[test]
+    fn event_payload_keywords_hits_any() {
+        let mut r = sample_result(1, vec!["build.done"], None);
+        r.events[0].payload = "tests: pass".to_string();
+        let ok = event_payload_keywords(
+            &r,
+            "build.done",
+            &["pass".to_string(), "lint".to_string()],
+        );
+        assert!(ok.passed);
+        let mut r2 = sample_result(1, vec!["build.done"], None);
+        r2.events[0].payload = "nothing here".to_string();
+        let bad = event_payload_keywords(
+            &r2,
+            "build.done",
+            &["pass".to_string(), "lint".to_string()],
+        );
+        assert!(!bad.passed);
     }
 
     #[test]

@@ -31,10 +31,8 @@ use ralph_e2e::{
     Backend as LibBackend,
     BackendUnavailableScenario,
     // Tier 3: Events
-    BackpressureScenario,
     // Tier 2: Orchestration Loop
     // Tier 1: Connectivity
-    EventsScenario,
     // Tier 5: Hat Collections
     HatBackendOverrideScenario,
     HatEventRoutingScenario,
@@ -290,8 +288,16 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
             include_str!("../scenarios/completion.yaml"),
         )),
         // Tier 3: Events (backend-agnostic)
-        Box::new(EventsScenario::new()),
-        Box::new(BackpressureScenario::new()),
+        // events 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "events",
+            include_str!("../scenarios/events.yaml"),
+        )),
+        // backpressure 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "backpressure",
+            include_str!("../scenarios/backpressure.yaml"),
+        )),
         // Tier 4: Capabilities (backend-agnostic)
         Box::new(ToolUseScenario::new()),
         Box::new(StreamingScenario::new()),
