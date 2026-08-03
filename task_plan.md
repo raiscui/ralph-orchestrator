@@ -436,3 +436,23 @@ vendor 122.6s / multi-region 110.8s / trigger-routing 82s(此前)
 - revops 首次失败(ralph#1 跳过 4-lane 直接聚合)为模型波动, 重跑通过
 - regional 首次失败为 payload 截断问题(已修复), 修复后通过
 - human-approval-gate 首次失败为 ralph#2 改投(已加 session_strategy), 修复后通过
+
+## [2026-08-04 01:30:00] [Session ID: omx-1785634382266-fz89ur] [记录类型]: 继续工作 - profile 缩进修复 + 核心场景 minimax 补验
+
+### 发现并修复的 bug
+- {profile_args} 缩进错误(8 空格 vs serde 剥离后的 4 空格):
+  导致 5 个内嵌 config 场景生成的 ralph.yml cli 段缩进错乱, -p 未生效
+  (hat-instances 503 "under group Codex Mix" 的根因)
+- hat-instances 实例可见口径: 命令式用 out:job/err:job/state 任一命中,
+  声明式只写了 out:job 严格匹配(writer#1 可能未实际跑 job)
+  → 新增 output_contains_any
+- 集成回归测试: 5 个内嵌 config 场景注入 profile 后缩进正确 + YAML 合法
+
+### minimax 下核心 parallel 场景补验(全部通过)
+- emit-spawn-instance 25.8s(此前 gpt-5.5 49.6s)
+- starting-event-inference 58.6s + multi-candidate 30.6s
+- app-server-steer-multi-turn-live 22.6s / steer-live-reply 35.6s / idle-start-live 33.0s
+- hat-instances-zh 66.2s(en 仍为模型英文遵循问题, 同 deepseek, 用户已确认不考虑)
+
+### 提交
+6b4c175 缩进修复 + output_contains_any
