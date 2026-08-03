@@ -65,7 +65,6 @@ use ralph_e2e::{
     ParallelExperimentalDevEngineExampleScenario,
     ParallelFieldEnablementRolloutExampleScenario,
     ParallelFinanceCloseControlRoomExampleScenario,
-    ParallelHatInstancesScenario,
     ParallelHiringDebriefPanelExampleScenario,
     ParallelHumanApprovalGateExampleScenario,
     ParallelIncidentResponseWarRoomExampleScenario,
