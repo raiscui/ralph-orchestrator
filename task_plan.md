@@ -271,3 +271,11 @@
 - [x] live 验证: 声明版 PASS(71.1s); 断言子集表达力足够(response/exit_code/no_timeout/iterations/scratchpad/termination/events/output_contains)
 - [x] 提交 b9d909d 已推送
 - [ ] 后续: 批量迁移(connect/multi-iter/hats 核心)→ parallel 注入时序(声明+钩子)
+
+## [2026-08-03 02:45:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: 候选6 批量迁移第一批
+
+- [x] connectivity/multi-iter/completion 迁移为 YAML(4 个声明场景: +single-iter)
+- [x] schema 扩展: exact_iterations / min_total_events; 断言单测 3 个
+- [x] live 验证: connectivity 8s / single-iter 71s / completion 通过; multi-iter 在 deepseek 下慢(非声明化问题)
+- [x] 提交 430a07a 已推送
+- [ ] 后续: EventsScenario/BackpressureScenario 等简单场景 → 复杂场景(hats/memory/parallel 注入)需扩展 schema(注入序列/自定义断言)
