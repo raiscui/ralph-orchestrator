@@ -87,6 +87,18 @@ pub struct DeclarativeExpect {
     /// 事件 payload 必须命中至少一个关键字。
     #[serde(default)]
     pub event_payload_keywords: Vec<DeclarativePayloadKeywords>,
+    /// 按 hat 聚合的最小 job 运行次数(parallel)。
+    #[serde(default)]
+    pub hat_run_counts: std::collections::HashMap<String, usize>,
+    /// 按实例的最小 job 运行次数(parallel)。
+    #[serde(default)]
+    pub instance_run_counts: std::collections::HashMap<String, usize>,
+    /// agents.json 快照断言(parallel)。
+    #[serde(default)]
+    pub agents_snapshot: Option<DeclarativeAgentsSnapshot>,
+    /// 必须存在的产物文件(相对 workspace)。
+    #[serde(default)]
+    pub artifacts: Vec<String>,
     /// 输出必须包含的文本。
     #[serde(default)]
     pub output_contains: Vec<String>,
@@ -148,6 +160,15 @@ pub struct DeclarativePayloadContains {
 pub struct DeclarativePayloadKeywords {
     pub topic: String,
     pub keywords: Vec<String>,
+}
+
+/// agents.json 快照断言。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeclarativeAgentsSnapshot {
+    #[serde(default)]
+    pub min_instances: usize,
+    #[serde(default)]
+    pub hat_ids: Vec<String>,
 }
 
 /// 声明式场景 runner: 实现 TestScenario, 让现有 harness 直接支持。
@@ -335,6 +356,21 @@ impl TestScenario for DeclarativeScenarioRunner {
                 &keyword_expect.keywords,
             ));
         }
+        for (hat, min_runs) in &expect.hat_run_counts {
+            assertions.push(hat_run_count_at_least(&execution, hat, *min_runs));
+        }
+        for (instance, min_runs) in &expect.instance_run_counts {
+            assertions.push(instance_run_count_at_least(&execution, instance, *min_runs));
+        }
+        if let Some(snapshot_expect) = &expect.agents_snapshot {
+            assertions.push(agents_snapshot_matches(
+                executor.workspace(),
+                snapshot_expect,
+            ));
+        }
+        for artifact in &expect.artifacts {
+            assertions.push(artifact_exists(executor.workspace(), artifact));
+        }
 
         let all_passed = assertions.iter().all(|a| a.passed);
 
@@ -471,6 +507,94 @@ fn truncate_payload(payload: &str) -> String {
     } else {
         payload.chars().take(max).collect::<String>() + "..."
     }
+}
+
+fn hat_run_count_at_least(
+    result: &ExecutionResult,
+    hat: &str,
+    min_runs: usize,
+) -> crate::models::Assertion {
+    let counts = crate::scenarios::parallel::job_run_counts::JobRunCounts::from_stdout(&result.stdout);
+    let runs = counts.runs_for_hat(hat);
+    let ok = runs >= min_runs;
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "Hat {hat} job runs >= {min_runs}"
+    ))
+    .expected(format!("at least {min_runs} runs"))
+    .actual(format!("{runs} runs"));
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+fn instance_run_count_at_least(
+    result: &ExecutionResult,
+    instance: &str,
+    min_runs: usize,
+) -> crate::models::Assertion {
+    let counts = crate::scenarios::parallel::job_run_counts::JobRunCounts::from_stdout(&result.stdout);
+    let runs = counts.runs_for_instance(instance);
+    let ok = runs >= min_runs;
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "Instance {instance} job runs >= {min_runs}"
+    ))
+    .expected(format!("at least {min_runs} runs"))
+    .actual(format!("{runs} runs"));
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+fn agents_snapshot_matches(
+    workspace: &std::path::Path,
+    expect: &DeclarativeAgentsSnapshot,
+) -> crate::models::Assertion {
+    let path = workspace.join(".ralph").join("agents.json");
+    let content = std::fs::read_to_string(&path);
+    let (ok, actual) = match content {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => {
+                let instances = value
+                    .get("instances")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let count = instances.len();
+                let hat_ids = expect.hat_ids.clone();
+                let missing: Vec<String> = hat_ids
+                    .iter()
+                    .filter(|hid| {
+                        !instances.iter().any(|i| {
+                            i.get("hat_id").and_then(|v| v.as_str()) == Some(hid.as_str())
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                let ok = count >= expect.min_instances && missing.is_empty();
+                let actual = if missing.is_empty() {
+                    format!("instance_count={count}")
+                } else {
+                    format!("instance_count={count}, missing={missing:?}")
+                };
+                (ok, actual)
+            }
+            Err(e) => (false, format!("invalid JSON: {e}")),
+        },
+        Err(e) => (false, format!("missing: {e}")),
+    };
+    let builder = crate::scenarios::AssertionBuilder::new("Agents snapshot written")
+        .expected(format!(
+            "agents.json contains >= {} instances and hats {:?}",
+            expect.min_instances, expect.hat_ids
+        ))
+        .actual(actual);
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+fn artifact_exists(workspace: &std::path::Path, artifact: &str) -> crate::models::Assertion {
+    let ok = workspace.join(artifact).exists();
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "Artifact exists: {artifact}"
+    ))
+    .expected("file exists")
+    .actual(if ok { "found".to_string() } else { "missing".to_string() });
+    if ok { builder.passed() } else { builder.failed() }.build()
 }
 
 fn output_contains(result: &ExecutionResult, needle: &str) -> crate::models::Assertion {

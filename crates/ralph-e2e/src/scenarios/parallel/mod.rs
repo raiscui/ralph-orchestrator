@@ -13,7 +13,7 @@ mod app_server_steer_multi_turn;
 mod app_server_steer_multi_turn_live;
 mod emit_spawn_instance;
 mod hat_instances;
-mod job_run_counts;
+pub mod job_run_counts;
 mod starting_event_inference;
 
 pub use app_server_idle_start::ParallelAppServerIdleStartScenario;

@@ -11,12 +11,12 @@ use std::collections::{HashMap, HashSet};
 /// - 同一个 job 会输出多行，因此必须按 job_id 去重。
 /// - 这里不依赖 `.ralph/events*.jsonl`，因为很多 hat 不一定会 publish 事件，但仍可能运行 job。
 #[derive(Debug, Default, Clone)]
-pub(in crate::scenarios) struct JobRunCounts {
+pub(crate) struct JobRunCounts {
     jobs_by_instance: HashMap<String, HashSet<u64>>,
 }
 
 impl JobRunCounts {
-    pub(in crate::scenarios) fn from_stdout(stdout: &str) -> Self {
+    pub(crate) fn from_stdout(stdout: &str) -> Self {
         let mut out = Self::default();
 
         for line in stdout.lines() {
@@ -31,7 +31,7 @@ impl JobRunCounts {
         out
     }
 
-    pub(in crate::scenarios) fn runs_for_instance(&self, instance_id: &str) -> usize {
+    pub(crate) fn runs_for_instance(&self, instance_id: &str) -> usize {
         self.jobs_by_instance
             .get(instance_id)
             .map(|s| s.len())
@@ -43,7 +43,7 @@ impl JobRunCounts {
     /// 说明：
     /// - 并行 autoscale 可能产生动态实例（例如 `spec_writer#2`）。
     /// - 因此在断言“某个 hat 总共跑了多少次”时，应按 hat 名聚合，而不是只盯某个固定实例号。
-    pub(in crate::scenarios) fn runs_for_hat(&self, hat_name: &str) -> usize {
+    pub(crate) fn runs_for_hat(&self, hat_name: &str) -> usize {
         let prefix = format!("{hat_name}#");
 
         self.jobs_by_instance
@@ -53,7 +53,7 @@ impl JobRunCounts {
             .sum()
     }
 
-    pub(in crate::scenarios) fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         // 稳定排序：便于在失败时阅读（避免 HashMap 顺序抖动）
         let mut pairs = self
             .jobs_by_instance
@@ -69,7 +69,7 @@ impl JobRunCounts {
             .join(", ")
     }
 
-    pub(in crate::scenarios) fn hat_summary(&self) -> String {
+    pub(crate) fn hat_summary(&self) -> String {
         let mut by_hat: HashMap<String, usize> = HashMap::new();
 
         for (instance_id, jobs) in &self.jobs_by_instance {
@@ -88,7 +88,7 @@ impl JobRunCounts {
     }
 }
 
-pub(in crate::scenarios) fn parse_parallel_job_line(line: &str) -> Option<(String, u64)> {
+pub(crate) fn parse_parallel_job_line(line: &str) -> Option<(String, u64)> {
     // 期望格式：
     // - [writer#1:out:job=12] ...
     // - [writer#1:err:job=12] ...

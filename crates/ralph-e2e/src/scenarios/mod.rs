@@ -49,7 +49,7 @@ mod hats;
 mod incremental;
 mod memory;
 mod orchestration;
-mod parallel;
+pub mod parallel;
 mod parallel_audit_evidence_pack_example;
 mod parallel_customer_advisory_board_prep_example;
 mod parallel_customer_onboarding_activation_example;

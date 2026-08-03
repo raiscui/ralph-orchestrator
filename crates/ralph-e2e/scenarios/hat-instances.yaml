@@ -1,0 +1,182 @@
+# parallel-hat-instances 声明化(en; 与命令式等价)
+# 说明: no_new_jobs_started_after_loop_complete 暂未映射(复杂时序断言)。
+id: parallel-hat-instances
+description: Validates parallel-trigger-routing in parallel runtime (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  max_iterations: 20
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+  config: |
+    # Parallel hat instances E2E config for {backend}
+    cli:
+      backend: custom
+      command: codex
+      args:
+        - exec
+        - -m
+        - deepseek-v4-flash
+        - --full-auto
+        # 降低推理强度/总结输出（避免 E2E 噪音与延迟）。
+        - -c
+        - 'model_reasoning_effort="low"'
+        - -c
+        - 'model_reasoning_summary="none"'
+        # E2E 场景不需要 MCP client 能力，关闭可减少启动噪音。
+        - -c
+        - 'rmcp_client=false'
+        # live E2E 必须隔离本机 Codex Stop hook,否则 app-server turn 可能被 hook 反复拉回。
+        - -c
+        - 'features.hooks=false'
+
+
+    event_loop:
+      completion_promise: "LOOP_COMPLETE"
+      # workflow entry/exit（官方并行语义锚点）
+      starting_event: "build.task"
+      complete_publishes: "routing.escalate"
+      max_iterations: 12
+      # 并行模式下如果模型不输出 completion promise，必须有硬退出护栏，避免 E2E 卡死
+      max_runtime_seconds: 240
+
+    parallel:
+      enabled: true
+      autoscale:
+        max_running_jobs: 4
+        dynamic_idle_ttl_secs: 30
+
+      # E2E 场景中不启用 ask gate，避免“等待 human”导致卡住
+      permissions:
+        worktree: allow
+        hooks: allow
+
+    hats:
+      writer:
+        name: "Writer"
+        description: "Writes a short output and emits build.done."
+        instances: 2
+        triggers: ["build.task"]
+        publishes: ["build.done"]
+        instructions: |
+          You are Writer.
+
+          IMPORTANT (E2E harness):
+          - Do NOT run tests, do NOT run shell commands/tools, do NOT edit files.
+          - Print exactly ONE short stdout line per job.
+          - Emit exactly ONE build.done event per job.
+          - Keep output concise. Do NOT print long loops.
+
+          Task ID rule:
+          - If payload contains "task_id: 2", emit `task_id: 2`.
+          - Otherwise emit `task_id: 1`.
+
+          writer ok
+          <event topic="build.done">
+          task_id: 1
+          status: ok
+          </event>
+
+          Do NOT output LOOP_COMPLETE.
+
+      tester:
+        name: "Tester"
+        description: "Emits test.done and dispatches the second task to writer#2."
+        instances: 1
+        triggers: ["build.task"]
+        publishes: ["test.done", "build.task"]
+        instructions: |
+          You are Tester.
+
+          IMPORTANT (E2E harness):
+          - Do NOT run tests, do NOT run shell commands/tools, do NOT edit files.
+          - Print exactly ONE short stdout line per job so the harness can count job runs.
+
+          Rule:
+          - Only when payload contains "task_id: 1":
+            1) Print one short line that includes the word "tester"
+            2) Emit ONE test.done event:
+
+            <event topic="test.done">
+            status: ok
+            </event>
+
+            3) Emit ONE build.task event targeting writer#2 (instance-direct):
+
+            <event topic="build.task" target_instance="writer#2">
+            task_id: 2
+            Task: Second task must run on writer#2
+            </event>
+
+          - For any other payload, emit NO events.
+
+          Do NOT output LOOP_COMPLETE.
+
+      collector:
+        name: "Collector"
+        description: "Consumes build/test events and closes workflow via strict target failure."
+        instances: 1
+        triggers: ["build.done", "test.done"]
+        publishes: ["build.task", "routing.escalate"]
+        instructions: |
+          You are Collector.
+
+          IMPORTANT (E2E harness):
+          - Do NOT run tests, do NOT run shell commands/tools, do NOT edit files.
+          - Print exactly ONE short stdout line per job.
+          - Do NOT wrap `<event ...>` blocks in markdown fences.
+
+          Rules:
+          - Your single stdout line MUST include:
+            - the word "collector"
+            - and the topics you received in this job (comma-separated, e.g. "build.done,test.done")
+          - If the "Incoming Events" section contains BOTH substrings:
+            - "topic=build.done"
+            - "task_id: 2"
+            then you MUST emit EXACTLY ONE invalid build.task event targeting ghost_hat (hat id, not instance id).
+            Copy-paste this block exactly (no extra attributes, no code fences):
+
+            <event topic="build.task" target="ghost_hat">
+            Task: This must be rejected and should trigger routing.escalate
+            </event>
+
+          - Do NOT emit routing.escalate manually.
+          - Otherwise emit NO events.
+
+  prompt: |
+    You are running an E2E test for Ralph's PARALLEL runtime.
+
+    Goal:
+    - Follow the configured workflow (starting_event + complete_publishes).
+    - When you emit the workflow entry event (starting_event: build.task), the payload MUST include the line `task_id: 1`.
+    - Do NOT implement code, do NOT run tools/shell commands, do NOT edit files.
+    - In this E2E test, `routing.escalate` is EXPECTED (invalid target is deliberate).
+    - You MUST output `LOOP_COMPLETE` on its own line and stop when you observe the completion candidate event `routing.escalate`.
+    - Do NOT retry or emit follow-up events when you see `routing.escalate`.
+
+expect:
+  termination: LOOP_COMPLETE
+  output_contains:
+    - "[supervisor] instances"
+    - "[writer#1:out:job="
+    - "[writer#2:out:job="
+    - "[tester#1:out:job="
+  events:
+    - topic: build.task
+      min_count: 2
+    - topic: build.done
+      min_count: 2
+    - topic: test.done
+      min_count: 1
+    - topic: routing.escalate
+      min_count: 1
+  hat_run_counts:
+    ralph: 2
+    writer: 2
+    tester: 1
+    collector: 2
+  instance_run_counts:
+    writer#2: 1
+  agents_snapshot:
+    min_instances: 3
+    hat_ids: [writer, tester, collector]

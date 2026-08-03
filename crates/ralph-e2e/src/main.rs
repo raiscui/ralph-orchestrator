@@ -322,8 +322,16 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         Box::new(AuthFailureScenario::new()),
         Box::new(BackendUnavailableScenario::new()),
         // Tier 8: Parallel Runtime (experimental)
-        Box::new(ParallelHatInstancesScenario::new()),
-        Box::new(ParallelHatInstancesScenario::new_zh()),
+        // parallel-hat-instances(en) 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-hat-instances",
+            include_str!("../scenarios/hat-instances.yaml"),
+        )),
+        // parallel-hat-instances-zh 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-hat-instances-zh",
+            include_str!("../scenarios/hat-instances-zh.yaml"),
+        )),
         Box::new(ParallelStartingEventInferenceScenario::new()),
         Box::new(ParallelStartingEventInferenceScenario::new_multi_candidate()),
         Box::new(ParallelEmitSpawnInstanceScenario::new()),
