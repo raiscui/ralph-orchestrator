@@ -263,3 +263,11 @@
 - [x] adapters PtyPromptExecutor(PTY+CliExecutor 双路径/角色参数/展示工厂)
 - [x] 测试: core 645+ / adapters 126 / cli 171+ 全过; 串行真实 run(deepseek) 27.9s CompletionPromise
 - [x] 提交 3ff4b47 + 01ece15, 已推送
+
+## [2026-08-03 02:10:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: 候选6 试点完成
+
+- [x] declarative 基础设施: YAML schema + runner(实现 TestScenario, 无缝集成)
+- [x] single-iter 迁移为 YAML(命令式保留为逃生舱)
+- [x] live 验证: 声明版 PASS(71.1s); 断言子集表达力足够(response/exit_code/no_timeout/iterations/scratchpad/termination/events/output_contains)
+- [x] 提交 b9d909d 已推送
+- [ ] 后续: 批量迁移(connect/multi-iter/hats 核心)→ parallel 注入时序(声明+钩子)
