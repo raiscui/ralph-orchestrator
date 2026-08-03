@@ -302,3 +302,9 @@
 - [x] 失败排查: 声明式 0/4 vs 命令式 2/2 → 根因 = deepseek-v4-flash 在 app-server 通道间歇 503(nowcoding distributor), 非声明化问题(诊断: trace.jsonl error notification)
 - [x] 提交 3b75f31 + import 清理已推送
 - [ ] 通道恢复后补一次 hat-instances 声明版 live 验证(或换默认模型)
+
+## [2026-08-03 17:40:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: hat-instances 声明式重测
+
+- [x] zh 声明式 ✅ 51.4s 通过(通道恢复后; 与命令式 2/2 通过同速) → 声明化等价性最终确认
+- [x] en 声明式 ❌ 240s: deepseek 对英文复杂规则 prompt 遵循差(zh 中文遵循好), 命令式 en 默认模型 39.8s 通过 → 模型兼容性问题, 非声明化
+- [ ] en 换默认模型(now provider)后可补验
