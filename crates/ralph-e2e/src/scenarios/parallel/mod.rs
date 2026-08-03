@@ -39,6 +39,7 @@ pub(in crate::scenarios) use job_run_counts::{JobRunCounts, parse_parallel_job_l
 
 const RALPH_E2E_CODEX_MODEL_ENV: &str = "RALPH_E2E_CODEX_MODEL";
 const DEFAULT_RALPH_E2E_CODEX_MODEL: &str = "gpt-5.5";
+const RALPH_E2E_CODEX_PROFILE_ENV: &str = "RALPH_E2E_CODEX_PROFILE";
 
 /// 解析 live Codex E2E 使用的模型名。
 ///
@@ -47,6 +48,18 @@ const DEFAULT_RALPH_E2E_CODEX_MODEL: &str = "gpt-5.5";
 /// - 默认值跟当前仓库开发机 Codex 配置保持一致；需要切换 provider/model 时只改环境变量。
 pub(crate) fn codex_e2e_model() -> String {
     codex_e2e_model_from_lookup(|name| std::env::var(name).ok())
+}
+
+/// 解析 live Codex E2E 使用的 profile(-p <profile>, 如 minimax)。
+///
+/// 说明:
+/// - 通过 env `RALPH_E2E_CODEX_PROFILE` 指定 codex profile, 用于切换账户/provider。
+/// - 未设置或为空时返回 None(不注入 -p 参数, 使用默认账户)。
+pub(crate) fn codex_e2e_profile() -> Option<String> {
+    std::env::var(RALPH_E2E_CODEX_PROFILE_ENV)
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|profile| !profile.is_empty())
 }
 
 fn codex_e2e_model_from_lookup(lookup: impl FnOnce(&str) -> Option<String>) -> String {
@@ -80,7 +93,7 @@ pub(in crate::scenarios) fn read_agents_snapshot(
 /// - 直接把整份 stdout 丢给 `EventParser`，可能拿不到纯净 event。
 /// - 这里先剥掉所有 out 行前缀，再复用共享 parser。
 /// - 若 out 行中没有命中，再回退到整份 stdout，兼容少数非标准输出形态。
-pub(in crate::scenarios) fn extract_last_parallel_out_payload_for_topic(
+pub(crate) fn extract_last_parallel_out_payload_for_topic(
     stdout: &str,
     topic: &str,
 ) -> Option<String> {
@@ -174,6 +187,10 @@ pub(in crate::scenarios) fn patch_example_config_for_codex_e2e(
     }
 
     let model = codex_e2e_model();
+    // profile 注入(-p <profile>, 如 minimax): 切换账户/provider 时使用。
+    let profile_args = codex_e2e_profile()
+        .map(|profile| format!("    - -p\n    - {profile}"))
+        .unwrap_or_default();
     let cli_block = format!(
         r#"cli:
   # E2E: 覆写 Codex 参数,降噪/提速(不影响仓库 example 原文件).
@@ -181,6 +198,7 @@ pub(in crate::scenarios) fn patch_example_config_for_codex_e2e(
   command: codex
   args:
     - exec
+{profile_args}
     - -m
     - {model}
     - --full-auto

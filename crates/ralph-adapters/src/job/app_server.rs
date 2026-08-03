@@ -147,13 +147,14 @@ fn build_codex_app_server_process_args(options: &CodexAppServerOptions) -> Vec<S
     // 注意: `codex app-server`(截至 0.146)只支持 `--listen` 与 `--config`,
     // 不接受 `--profile`。直接透传会导致 app-server 启动即失败:
     //   error: unexpected argument '--profile' found
-    // profile 的等价语义(模型/provider 等)应通过 `--config key=value` 表达。
-    // 若未来 codex app-server 支持 --profile,可在此恢复透传。
+    // profile 的等价语义(模型/provider 等)通过读取 `~/.codex/<profile>.config.toml`
+    // 转成 `--config key=value` 表达; 未来 codex app-server 若支持 --profile 可恢复透传。
     if let Some(profile) = &options.profile {
-        tracing::warn!(
-            profile = %profile,
-            "codex app-server does not support --profile (codex <= 0.146); profile ignored, use --config overrides instead"
-        );
+        // profile 覆写优先注入(在显式 -c 之前), 显式参数优先于 profile 配置。
+        for config in profile_to_config_overrides(profile, codex_home().as_deref()) {
+            args.push("--config".to_string());
+            args.push(config);
+        }
     }
 
     // 让 app-server 进程本身也继承 `codex exec -c ...` 的配置覆写。
@@ -164,6 +165,93 @@ fn build_codex_app_server_process_args(options: &CodexAppServerOptions) -> Vec<S
     }
 
     args
+}
+
+/// 把 codex profile(`~/.codex/<profile>.config.toml`)的关键配置转成 `--config key=value`。
+///
+/// 说明:
+/// - app-server(<=0.146)不支持 `--profile`,但支持 `--config` 覆写。
+/// - 我们只提取模型/provider 相关字段,避免把 notify/personality 等非运行时配置带进 app-server。
+/// - profile 文件缺失或不可解析时返回空(与"未配置 profile"行为一致)。
+fn profile_to_config_overrides(profile: &str, codex_home: Option<&std::path::Path>) -> Vec<String> {
+    let Some(home) = codex_home else {
+        return Vec::new();
+    };
+    let path = home.join(format!("{profile}.config.toml"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        tracing::warn!(profile = %profile, path = %path.display(), "profile config missing");
+        return Vec::new();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        tracing::warn!(profile = %profile, "profile config is not valid TOML");
+        return Vec::new();
+    };
+    let Some(table) = value.as_table() else {
+        return Vec::new();
+    };
+
+    let mut overrides = Vec::new();
+    // 顶层模型/provider 字段(model / model_provider / model_reasoning_* 等)。
+    for (key, value) in table {
+        if is_model_config_key(key)
+            && let Some(rendered) = toml_value_to_config(key, value)
+        {
+            overrides.push(rendered);
+        }
+    }
+    // model_providers.<name>.*: 自定义 provider 定义(base_url / env_key / wire_api 等)。
+    if let Some(toml::Value::Table(providers)) = table.get("model_providers") {
+        for (provider_name, provider) in providers {
+            if let Some(fields) = provider.as_table() {
+                for (field, value) in fields {
+                    if let Some(rendered) =
+                        toml_value_to_config(&format!("model_providers.{provider_name}.{field}"), value)
+                    {
+                        overrides.push(rendered);
+                    }
+                }
+            }
+        }
+    }
+    overrides
+}
+
+/// 是否是需要注入 app-server 的模型/provider 相关配置键。
+fn is_model_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        "model"
+            | "model_provider"
+            | "model_reasoning_effort"
+            | "model_reasoning_summary"
+            | "model_context_window"
+            | "model_auto_compact_token_limit"
+            | "model_temperature"
+            | "model_max_output_tokens"
+    )
+}
+
+/// 把 TOML 值渲染为 `key=value` 的 --config 参数。
+fn toml_value_to_config(key: &str, value: &toml::Value) -> Option<String> {
+    let rendered = match value {
+        toml::Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        // 数组/表等复杂值不通过 --config 注入。
+        _ => return None,
+    };
+    Some(format!("{key}={rendered}"))
+}
+
+/// 定位 codex 配置目录($CODEX_HOME 或 ~/.codex)。
+fn codex_home() -> Option<std::path::PathBuf> {
+    if let Ok(home) = std::env::var("CODEX_HOME") {
+        return Some(std::path::PathBuf::from(home));
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|home| std::path::PathBuf::from(home).join(".codex"))
 }
 
 #[derive(Debug)]
@@ -1753,8 +1841,8 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_app_server_process_args_ignores_profile_but_forwards_config_overrides() {
-        // codex app-server(<= 0.146)不支持 --profile: 必须忽略, 只透传 --config。
+    fn build_codex_app_server_process_args_forwards_config_overrides() {
+        // codex app-server(<= 0.146)不支持 --profile: 转成 --config 透传。
         let options = CodexAppServerOptions {
             profile: Some("e2e".to_string()),
             config_overrides: vec![
@@ -1778,6 +1866,61 @@ mod tests {
             ]
         );
         assert!(!args.contains(&"--profile".to_string()), "profile must not be forwarded");
+    }
+
+    #[test]
+    fn profile_to_config_overrides_extracts_model_and_provider() {
+        // 用临时目录充当 CODEX_HOME, 避免依赖真实用户配置与进程级 env。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.config.toml"),
+            r#"
+model = "TestModel"
+model_provider = "custom"
+model_reasoning_effort = "high"
+notify = ["ignored"]
+
+[model_providers.custom]
+base_url = "https://example.com/v1"
+wire_api = "responses"
+experimental_bearer_token = "sk-test"
+"#,
+        )
+        .unwrap();
+
+        let overrides = profile_to_config_overrides("test", Some(dir.path()));
+        eprintln!("DEBUG overrides={overrides:?}");
+
+        assert!(overrides.contains(&"model=\"TestModel\"".to_string()));
+        assert!(overrides.contains(&"model_provider=\"custom\"".to_string()));
+        assert!(overrides.contains(&"model_reasoning_effort=\"high\"".to_string()));
+        assert!(
+            overrides
+                .contains(&"model_providers.custom.base_url=\"https://example.com/v1\"".to_string())
+        );
+        assert!(
+            overrides
+                .contains(&"model_providers.custom.wire_api=\"responses\"".to_string())
+        );
+        assert!(
+            overrides.contains(
+                &"model_providers.custom.experimental_bearer_token=\"sk-test\"".to_string()
+            )
+        );
+        // notify 等非模型字段不应注入。
+        assert!(!overrides.iter().any(|o| o.starts_with("notify")));
+    }
+
+    #[test]
+    fn profile_to_config_overrides_missing_profile_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let overrides = profile_to_config_overrides("does-not-exist", Some(dir.path()));
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn profile_to_config_overrides_none_home_is_empty() {
+        assert!(profile_to_config_overrides("test", None).is_empty());
     }
 
     #[test]

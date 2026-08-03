@@ -14,6 +14,7 @@ setup:
       command: codex
       args:
         - exec
+        {profile_args}
         - -m
         - {model}
         - --full-auto

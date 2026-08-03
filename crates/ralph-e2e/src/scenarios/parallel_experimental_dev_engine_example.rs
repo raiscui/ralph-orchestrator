@@ -121,6 +121,10 @@ impl ParallelExperimentalDevEngineExampleScenario {
         if backend == Backend::Codex {
             // 注意：该 example 需要更高权限来跑 git/文件写入，因此保留 `--sandbox danger-full-access`。
             let model = super::parallel::codex_e2e_model();
+            // profile 注入(-p <profile>, 如 minimax): 切换账户/provider 时使用。
+            let profile_args = super::parallel::codex_e2e_profile()
+                .map(|profile| format!("    - \"-p\"\n    - \"{profile}\""))
+                .unwrap_or_default();
             let cli_block = format!(
                 r#"cli:
   # E2E: 覆写 Codex 参数,降噪/提速(不影响仓库 example 原文件).
@@ -129,6 +133,7 @@ impl ParallelExperimentalDevEngineExampleScenario {
   prompt_mode: "arg"
   args:
     - "exec"
+{profile_args}
     - "-m"
     - "{model}"
     - "--sandbox"
