@@ -5,15 +5,10 @@
 //! functions for PTY execution and termination handling.
 
 use anyhow::{Context, Result};
-use ralph_adapters::{
-    CliBackend, CliExecutionRole, CliExecutor, OutputFormat as BackendOutputFormat, PtyConfig,
-    PtyExecutor,
-};
-use ralph_display::{
-    DisplayTarget, DisplayVerbosity, MarkdownRenderMode, make_stream_handler,
-};
+use ralph_adapters::{CliBackend, PtyPromptExecutor};
+use ralph_display::{DisplayVerbosity, MarkdownRenderMode, TuiLineBuffer};
 use ralph_core::{
-    EventLogger, EventLoop, EventParser, EventRecord, HatBackend, RalphConfig, Record,
+    EventLogger, EventLoop, EventRecord, RalphConfig, Record,
     SessionRecorder, SummaryWriter, TerminationReason,
 };
 use ralph_proto::{Event, HatId, TerminalWrite, UxEvent};
@@ -24,20 +19,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::display::{
     build_tui_hat_map, preview_one_line, print_iteration_separator, print_termination,
 };
 use crate::process_management;
 use crate::{ColorMode, Verbosity};
-
-/// Outcome of executing a prompt via PTY or CLI executor.
-pub(crate) struct ExecutionOutcome {
-    pub output: String,
-    pub success: bool,
-    pub termination: Option<TerminationReason>,
-}
 
 pub(crate) fn clear_scratchpad_for_fresh_run(
     scratchpad_path: &std::path::Path,
@@ -69,24 +57,6 @@ pub(crate) fn clear_scratchpad_for_fresh_run(
     Ok(())
 }
 
-fn backend_name_for_timeout(hat_backend: &HatBackend) -> String {
-    match hat_backend {
-        HatBackend::Named(name) => name.clone(),
-        HatBackend::NamedWithArgs { backend_type, .. } => backend_type.clone(),
-        HatBackend::KiroAgent { .. } => "kiro".to_string(),
-        HatBackend::Custom { command, .. } => {
-            // 兼容两类输入：
-            // 1) 路径形式："/usr/bin/codex" -> "codex"
-            // 2) 带参数的命令： "ollama run llama3" -> "ollama"
-            let base_command = command.split_whitespace().next().unwrap_or(command);
-            std::path::Path::new(base_command)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("custom")
-                .to_string()
-        }
-    }
-}
 
 /// Core loop implementation supporting both fresh start and continue modes.
 ///
@@ -124,9 +94,6 @@ pub async fn run_loop_impl(
     } else {
         false
     };
-    // Always use PTY for real-time streaming output (vs buffered CliExecutor)
-    let use_pty = true;
-
     // 输出渲染策略：默认渲染 Markdown；`--plain` 强制纯文本。
     let render_mode = MarkdownRenderMode::from_plain(plain);
 
@@ -262,24 +229,6 @@ pub async fn run_loop_impl(
     let default_backend =
         CliBackend::from_config(&config.cli).map_err(|e| anyhow::Error::new(e))?;
 
-    // Create PTY executor if using interactive mode
-    let mut pty_executor = if use_pty {
-        let idle_timeout_secs = if user_interactive {
-            config.cli.idle_timeout_secs
-        } else {
-            0
-        };
-        let pty_config = PtyConfig {
-            interactive: user_interactive,
-            idle_timeout_secs,
-            workspace_root: config.core.workspace_root.clone(),
-            ..PtyConfig::from_env()
-        };
-        Some(PtyExecutor::new(default_backend.clone(), pty_config))
-    } else {
-        None
-    };
-
     // Create termination signal for TUI shutdown
     let (terminated_tx, terminated_rx) = tokio::sync::watch::channel(false);
 
@@ -377,629 +326,149 @@ pub async fn run_loop_impl(
     };
     debug!(execution_mode = %exec_mode, "Execution mode configured");
 
-    // Track the last hat to detect hat changes for logging
-    let mut last_hat: Option<HatId> = None;
 
-    // Track consecutive fallback attempts to prevent infinite loops
-    let mut consecutive_fallbacks: u32 = 0;
-    const MAX_FALLBACK_ATTEMPTS: u32 = 3;
 
-    // Helper closure to handle termination (writes summary, prints status)
-    let handle_termination = |reason: &TerminationReason,
-                              state: &ralph_core::LoopState,
-                              scratchpad: &str| {
-        // best-effort：写入 termination 元信息，便于 cassette 诊断/回放
-        if let Some(recorder) = &session_recorder {
-            let reason_str = format!("{reason:?}");
-            recorder.record_meta(Record::meta_termination(
-                &reason_str,
-                state.iteration,
-                recorder.elapsed().as_secs_f64(),
-                recorder.ux_write_count(),
-            ));
-            let _ = recorder.flush();
-        }
-
-        // Per spec: Write summary file on termination
-        let summary_writer = SummaryWriter::default();
-        let scratchpad_path = std::path::Path::new(scratchpad);
-        let scratchpad_opt = if scratchpad_path.exists() {
-            Some(scratchpad_path)
-        } else {
-            None
-        };
-
-        // Get final commit SHA if available
-        let final_commit = get_last_commit_info();
-
-        if let Err(e) = summary_writer.write(reason, state, scratchpad_opt, final_commit.as_deref())
-        {
-            warn!("Failed to write summary file: {}", e);
-        }
-
-        // Print termination info to console (skip in TUI mode - TUI handles display)
-        if !enable_tui {
-            print_termination(reason, state, use_colors);
-        }
-    };
-
-    // Main orchestration loop
-    loop {
-        // Check for interrupt signal at start of each iteration
-        // This catches TUI Ctrl+C (via interrupt_tx) before printing iteration separator
-        if *interrupt_rx.borrow() {
-            let reason = TerminationReason::Interrupted;
-            let terminate_event = event_loop.publish_terminate_event(&reason);
-            log_terminate_event(
-                &mut event_logger,
-                event_loop.state().iteration,
-                &terminate_event,
-            );
-            handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-            // Signal TUI to exit immediately on interrupt
-            let _ = terminated_tx.send(true);
-            return Ok(reason);
-        }
-
-        // Check termination before execution
-        if let Some(reason) = event_loop.check_termination() {
-            // Per spec: Publish loop.terminate event to observers
-            let terminate_event = event_loop.publish_terminate_event(&reason);
-            log_terminate_event(
-                &mut event_logger,
-                event_loop.state().iteration,
-                &terminate_event,
-            );
-            handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-            // Wait for user to exit TUI (press 'q') on natural completion
-            if let Some(handle) = tui_handle.take() {
-                let _ = handle.await;
-            }
-            return Ok(reason);
-        }
-
-        // Get next hat to execute, with fallback recovery if no pending events
-        let hat_id = match event_loop.next_hat() {
-            Some(id) => {
-                // Reset fallback counter on successful event routing
-                consecutive_fallbacks = 0;
-                id.clone()
-            }
-            None => {
-                // No pending events - try to recover by injecting a fallback event
-                // This triggers the built-in planner to assess the situation
-                consecutive_fallbacks += 1;
-
-                if consecutive_fallbacks > MAX_FALLBACK_ATTEMPTS {
-                    warn!(
-                        attempts = consecutive_fallbacks,
-                        "Fallback recovery exhausted after {} attempts, terminating",
-                        MAX_FALLBACK_ATTEMPTS
-                    );
-                    let reason = TerminationReason::Stopped;
-                    let terminate_event = event_loop.publish_terminate_event(&reason);
-                    log_terminate_event(
-                        &mut event_logger,
-                        event_loop.state().iteration,
-                        &terminate_event,
-                    );
-                    handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-                    // Wait for user to exit TUI (press 'q') on natural completion
-                    if let Some(handle) = tui_handle.take() {
-                        let _ = handle.await;
-                    }
-                    return Ok(reason);
-                }
-
-                if event_loop.inject_fallback_event() {
-                    // Fallback injected successfully, continue to next iteration
-                    // The planner will be triggered and can either:
-                    // - Dispatch more work if tasks remain
-                    // - Output LOOP_COMPLETE if done
-                    // - Determine what went wrong and recover
-                    continue;
-                }
-
-                // Fallback not possible (no planner hat or doesn't subscribe to task.resume)
-                warn!("No hats with pending events and fallback not available, terminating");
-                let reason = TerminationReason::Stopped;
-                // Per spec: Publish loop.terminate event to observers
-                let terminate_event = event_loop.publish_terminate_event(&reason);
-                log_terminate_event(
-                    &mut event_logger,
-                    event_loop.state().iteration,
-                    &terminate_event,
-                );
-                handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-                // Wait for user to exit TUI (press 'q') on natural completion
-                if let Some(handle) = tui_handle.take() {
-                    let _ = handle.await;
-                }
-                return Ok(reason);
-            }
-        };
-
-        let iteration = event_loop.state().iteration + 1;
-
-        // Determine which hat to display in iteration separator
-        // When Ralph is coordinating (hat_id == "ralph"), show the active hat being worked on
-        let display_hat = if hat_id.as_str() == "ralph" {
-            event_loop.get_active_hat_id()
-        } else {
-            hat_id.clone()
-        };
-
-        // Per spec: Print iteration demarcation separator
-        // "Each iteration must be clearly demarcated in the output so users can
-        // visually distinguish where one iteration ends and another begins."
-        // Skip when TUI is enabled - TUI has its own header showing iteration info
-        if tui_state.is_none() {
-            print_iteration_separator(
-                iteration,
-                display_hat.as_str(),
-                event_loop.state().elapsed(),
-                config.event_loop.max_iterations,
-                use_colors,
-            );
-        }
-
-        // Log hat changes with appropriate messaging
-        // Skip in TUI mode - TUI shows hat info in header, and stdout would corrupt display
-        if last_hat.as_ref() != Some(&hat_id) {
-            if tui_state.is_none() {
-                if hat_id.as_str() == "ralph" {
-                    info!("I'm Ralph. Let's do this.");
-                } else {
-                    info!("Putting on my {} hat.", hat_id);
-                }
-            }
-            last_hat = Some(hat_id.clone());
-        }
-        debug!(
-            "Iteration {}/{} - {} active",
-            iteration, config.event_loop.max_iterations, hat_id
-        );
-
-        // Build prompt for this hat
-        let prompt = match event_loop.build_prompt(&hat_id) {
-            Some(p) => p,
-            None => {
-                error!("Failed to build prompt for hat '{}'", hat_id);
-                continue;
-            }
-        };
-
-        // In verbose mode, print the full prompt before execution
-        if verbosity == Verbosity::Verbose {
-            eprintln!("\n{}", "=".repeat(80));
-            eprintln!("PROMPT FOR {} (iteration {})", hat_id, iteration);
-            eprintln!("{}", "-".repeat(80));
-            eprintln!("{}", prompt);
-            eprintln!("{}\n", "=".repeat(80));
-        }
-
-        // ------------------------------------------------------------------
-        // 选择本轮实际使用的 backend（hat-level backend 优先于全局 cli.backend）。
-        //
-        // 关键点：
-        // - 串行/PTY 模式下，PtyExecutor 会被复用；因此每轮必须能切换 backend。
-        // - timeout 必须与“真正使用的 backend”一致，否则会出现误杀或不生效。
-        // - `ralph run -- <custom args>` 视为“按次追加”，应当追加到最终 backend args 的末尾。
-        // ------------------------------------------------------------------
-        let hat_backend_opt = event_loop.get_hat_backend(&display_hat);
-
-        let (mut effective_backend, backend_name_for_timeout): (CliBackend, String) =
-            match hat_backend_opt {
-                Some(hat_backend) => match CliBackend::from_hat_backend(hat_backend) {
-                    Ok(hat_backend_instance) => {
-                        debug!(
-                            hat = %display_hat.as_str(),
-                            backend = ?hat_backend,
-                            "Using hat-level backend"
-                        );
-                        (hat_backend_instance, backend_name_for_timeout(hat_backend))
-                    }
-                    Err(e) => {
-                        warn!(
-                            hat = %display_hat.as_str(),
-                            "Failed to create backend from hat configuration: {e}. Falling back to global backend."
-                        );
-                        (default_backend.clone(), config.cli.backend.clone())
-                    }
-                },
-                None => {
-                    debug!(
-                        hat = %display_hat.as_str(),
-                        backend = %config.cli.backend,
-                        "Using global backend"
-                    );
-                    (default_backend.clone(), config.cli.backend.clone())
-                }
-            };
-
-        // 角色化 reasoning 默认:
-        // - `display_hat=ralph` 时,这一轮是 coordinator turn,默认 medium。
-        // - 非 Ralph hat 作为当前活跃 worker 时,默认 high。
-        // - 若 backend/命令行已经显式带了 `model_reasoning_effort`,adapter 会保留显式值。
-        let cli_role = if display_hat.as_str() == "ralph" {
-            CliExecutionRole::Coordinator
-        } else {
-            CliExecutionRole::Worker
-        };
-        effective_backend.apply_role_args(&config.cli.role_args, cli_role);
-
-        if !custom_args.is_empty() {
-            effective_backend.args.extend(custom_args.iter().cloned());
-        }
-
-        effective_backend
-            .apply_role_reasoning_effort_defaults(&config.cli.reasoning_effort, cli_role);
-
-        // Execute the prompt (interactive or autonomous mode)
-        // Get per-adapter timeout from config (based on the actual backend used).
-        let adapter_settings = config.adapter_settings(&backend_name_for_timeout);
-        let timeout =
-            (adapter_settings.timeout > 0).then(|| Duration::from_secs(adapter_settings.timeout));
-        let output_stale_timeout = (adapter_settings.output_stale_timeout_secs > 0)
-            .then(|| Duration::from_secs(adapter_settings.output_stale_timeout_secs));
-
-        // For TUI mode, get the shared lines buffer for this iteration.
-        // The buffer is owned by TuiState's IterationBuffer, so writes from
-        // TuiStreamHandler appear immediately in the TUI (real-time streaming).
-        let tui_lines: Option<Arc<std::sync::Mutex<Vec<ratatui::text::Line<'static>>>>> =
-            if let Some(ref state) = tui_state {
-                // Start new iteration and get handle to the LATEST iteration's lines buffer.
-                // We must use latest_iteration_lines_handle() instead of current_iteration_lines_handle()
-                // because the user may be viewing an older iteration while a new one executes.
+    // =====================================================================
+    // 装配串行执行器(候选5: 进程执行通过 PromptExecutor port 注入)
+    // =====================================================================
+    let tui_lines_provider: Option<Arc<dyn Fn() -> Option<TuiLineBuffer> + Send + Sync>> =
+        tui_state.as_ref().map(|state| {
+            let state = state.clone();
+            let provider: Arc<dyn Fn() -> Option<TuiLineBuffer> + Send + Sync> = Arc::new(move || {
                 if let Ok(mut s) = state.lock() {
                     s.start_new_iteration();
                     s.latest_iteration_lines_handle()
                 } else {
                     None
                 }
-            } else {
-                None
-            };
+            });
+            provider
+        });
 
-        // Race execution against interrupt signal for immediate termination on Ctrl+C
-        let interrupt_rx_for_pty = interrupt_rx.clone();
-        let tui_lines_for_pty = tui_lines.clone();
-        let execute_future = async {
-            // Gemini 这类“最终只产出一个结构化 JSON 响应”的 headless backend，
-            // 在自动化路径下更适合走 `CliExecutor`：
-            // - stdout/stderr 可天然分离
-            // - 可以在执行器里提取最终 `response`
-            // - 避免 PTY 把 stderr 日志和 stdout JSON 混在一起
-            let should_force_buffered_headless = effective_backend.emits_structured_response()
-                && !user_interactive
-                && tui_lines_for_pty.is_none();
-
-            if use_pty && !should_force_buffered_headless {
-                execute_pty(
-                    pty_executor.as_mut(),
-                    &effective_backend,
-                    &config,
-                    &prompt,
-                    user_interactive,
-                    interrupt_rx_for_pty,
-                    verbosity,
-                    render_mode,
-                    tui_lines_for_pty,
-                )
-                .await
-            } else {
-                let executor = CliExecutor::new(effective_backend.clone());
-                let result = executor
-                    .execute(
-                        &prompt,
-                        stdout(),
-                        timeout,
-                        output_stale_timeout,
-                        verbosity == Verbosity::Verbose,
-                    )
-                    .await?;
-                Ok(ExecutionOutcome {
-                    output: result.output,
-                    success: result.success,
-                    termination: None,
-                })
-            }
-        };
-
-        // 说明:
-        // - PTY executor 已经会监听同一个 interrupt_rx,并在收到中断时负责终止子进程。
-        // - 这里不要再用“kill 自己所在进程组”的方式强杀,否则会导致 `_meta.termination` 来不及落盘.
-        let outcome = execute_future.await?;
-
-        if let Some(reason) = outcome.termination {
-            let terminate_event = event_loop.publish_terminate_event(&reason);
-            log_terminate_event(
-                &mut event_logger,
-                event_loop.state().iteration,
-                &terminate_event,
-            );
-            handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-            if reason == TerminationReason::Interrupted {
-                // Ctrl+C/SIGTERM: 立即退出 TUI,避免卡在“按 q 退出”的自然完成语义.
-                let _ = terminated_tx.send(true);
-                return Ok(reason);
-            }
-            // Wait for user to exit TUI (press 'q') on natural completion
-            if let Some(handle) = tui_handle.take() {
-                let _ = handle.await;
-            }
-            return Ok(reason);
-        }
-
-        let output = outcome.output;
-        let success = outcome.success;
-
-        // best-effort：将本轮“用于事件解析”的输出写入 cassette（stdout-only）
-        if let Some(recorder) = &session_recorder
-            && !output.is_empty()
-        {
-            let offset_ms = recorder.elapsed().as_millis() as u64;
-            recorder.record_meta(Record::meta_iteration(
-                iteration,
-                offset_ms,
-                hat_id.as_str(),
-            ));
-            recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(
-                output.as_bytes(),
-                true,
-                offset_ms,
-            )));
-        }
-
-        // Note: TUI lines are now written directly to IterationBuffer during streaming,
-        // so no post-execution transfer is needed.
-
-        // Log events from output before processing
-        log_events_from_output(
-            &mut event_logger,
-            iteration,
-            &hat_id,
-            &output,
-            event_loop.registry(),
-        );
-
-        // Process output
-        if let Some(reason) = event_loop.process_output(&hat_id, &output, success) {
-            // Per spec: Log "All done! {promise} detected." when completion promise found
-            if reason == TerminationReason::CompletionPromise {
-                info!(
-                    "All done! {} detected.",
-                    config.event_loop.completion_promise
-                );
-            }
-            // Per spec: Publish loop.terminate event to observers
-            let terminate_event = event_loop.publish_terminate_event(&reason);
-            log_terminate_event(
-                &mut event_logger,
-                event_loop.state().iteration,
-                &terminate_event,
-            );
-            handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-            // Wait for user to exit TUI (press 'q') on natural completion
-            if let Some(handle) = tui_handle.take() {
-                let _ = handle.await;
-            }
-            return Ok(reason);
-        }
-
-        // Read events from JSONL that agent may have written
-        if let Err(e) = event_loop.process_events_from_jsonl() {
-            warn!(error = %e, "Failed to read events from JSONL");
-        }
-
-        // Precheck validation: Warn if no pending events after processing output
-        // Per EventLoop doc: "Use has_pending_events after process_output to detect
-        // if the LLM failed to publish an event."
-        if !event_loop.has_pending_events() {
-            let expected = event_loop.get_hat_publishes(&hat_id);
-            debug!(
-                hat = %hat_id.as_str(),
-                expected_topics = ?expected,
-                "No pending events after iteration. Agent may have failed to publish a valid event. \
-                 Expected one of: {:?}. Loop will terminate on next iteration.",
-                expected
-            );
-        }
-
-        // Note: Interrupt handling moved into tokio::select! above for immediate termination
-    }
-}
-
-/// Executes a prompt in PTY mode with raw terminal handling.
-/// Converts PTY termination type to loop termination reason.
-///
-/// In interactive mode, idle timeout signals "iteration complete" rather than
-/// "loop stopped", allowing the event loop to process output and continue.
-///
-/// # Arguments
-/// * `termination_type` - The PTY executor's termination type
-/// * `interactive` - Whether running in interactive mode
-///
-/// # Returns
-/// * `None` - Continue processing (iteration complete)
-/// * `Some(TerminationReason)` - Stop the loop
-fn convert_termination_type(
-    termination_type: ralph_adapters::TerminationType,
-    interactive: bool,
-) -> Option<TerminationReason> {
-    match termination_type {
-        ralph_adapters::TerminationType::Natural => None,
-        ralph_adapters::TerminationType::IdleTimeout => {
-            if interactive {
-                // In interactive mode, idle timeout signals iteration complete,
-                // not loop termination. Let output be processed for events.
-                info!("PTY idle timeout in interactive mode, iteration complete");
-                None
-            } else {
-                warn!("PTY idle timeout reached, terminating loop");
-                Some(TerminationReason::Stopped)
-            }
-        }
-        ralph_adapters::TerminationType::UserInterrupt
-        | ralph_adapters::TerminationType::ForceKill => Some(TerminationReason::Interrupted),
-    }
-}
-
-async fn execute_pty(
-    executor: Option<&mut PtyExecutor>,
-    backend: &CliBackend,
-    config: &RalphConfig,
-    prompt: &str,
-    interactive: bool,
-    interrupt_rx: tokio::sync::watch::Receiver<bool>,
-    verbosity: Verbosity,
-    render_mode: MarkdownRenderMode,
-    tui_lines: Option<Arc<std::sync::Mutex<Vec<ratatui::text::Line<'static>>>>>,
-) -> Result<ExecutionOutcome> {
-    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-
-    // Use provided executor or create a new one
-    // If executor is provided, TUI is connected and owns raw mode management
-    let tui_connected = executor.is_some();
-    let mut temp_executor;
-    let exec = if let Some(e) = executor {
-        // 复用同一个 PTY executor 时，必须在每轮执行前更新 backend，
-        // 否则 hat-level backend/args 在 PTY 模式下会被“首轮 backend”锁死。
-        e.set_backend(backend.clone());
-        e
-    } else {
-        let idle_timeout_secs = if interactive {
-            config.cli.idle_timeout_secs
-        } else {
-            0
-        };
-        let pty_config = PtyConfig {
-            interactive,
-            idle_timeout_secs,
-            workspace_root: config.core.workspace_root.clone(),
-            ..PtyConfig::from_env()
-        };
-        temp_executor = PtyExecutor::new(backend.clone(), pty_config);
-        &mut temp_executor
+    let display_verbosity = match verbosity {
+        Verbosity::Quiet => DisplayVerbosity::Quiet,
+        Verbosity::Normal => DisplayVerbosity::Normal,
+        Verbosity::Verbose => DisplayVerbosity::Verbose,
     };
 
-    // Set TUI mode flag when TUI is connected (tui_lines is Some)
-    // This replaces the broken output_rx.is_none() detection in PtyExecutor
-    if tui_lines.is_some() {
-        exec.set_tui_mode(true);
-    }
+    let mut executor = PtyPromptExecutor::new(
+        default_backend,
+        render_mode,
+        display_verbosity,
+        None,
+        config.cli.role_args.clone(),
+        config.cli.reasoning_effort,
+        custom_args,
+        user_interactive,
+        config.core.workspace_root.clone(),
+        config.clone(),
+        tui_lines_provider,
+    );
 
-    // Enter raw mode for interactive mode to capture keystrokes
-    // Skip if TUI is connected - TUI owns raw mode and will manage it
-    if interactive && !tui_connected {
-        enable_raw_mode().context("Failed to enable raw mode")?;
-    }
-
-    // Use scopeguard to ensure raw mode is restored on any exit path
-    // Skip if TUI is connected - TUI owns raw mode
-    let _guard = scopeguard::guard((interactive, tui_connected), |(is_interactive, tui)| {
-        if is_interactive && !tui {
-            let _ = disable_raw_mode();
-        }
-    });
-
-    // Run PTY executor with shared interrupt channel
-    // Raw interactive mode only when not using TUI (TUI handles its own terminal);
-    // 其余情况把"展示意图"交给 display 工厂,选择矩阵不再泄漏到调用者。
-    let result = if interactive && tui_lines.is_none() {
-        exec.run_interactive(prompt, interrupt_rx).await
-    } else {
-        // 表达"我要什么",而不是"用哪个 handler":
-        // - TUI 模式 → 共享行缓冲
-        // - 控制台模式 → 由 stream_json/tty 决定美化与否
-        let target = match tui_lines {
-            Some(lines) => DisplayTarget::Tui(lines),
-            None => DisplayTarget::Console {
-                stream_json: backend.output_format == BackendOutputFormat::StreamJson,
-                tty: stdout().is_terminal(),
+    let mut last_hat_for_display: Option<HatId> = None;
+    let reason = event_loop
+        .run(
+            &mut executor,
+            interrupt_rx,
+            user_interactive,
+            ralph_core::RunHooks {
+                before_execute: Some(Box::new(|iteration, display_hat, prompt, elapsed| {
+                    // 分隔符展示(非 TUI 模式; TUI 有自己的 header)
+                    if tui_state.is_none() {
+                        print_iteration_separator(
+                            iteration,
+                            display_hat.as_str(),
+                            elapsed,
+                            config.event_loop.max_iterations,
+                            use_colors,
+                        );
+                    }
+                    // hat 切换日志
+                    if last_hat_for_display.as_ref() != Some(display_hat) {
+                        if tui_state.is_none() {
+                            if display_hat.as_str() == "ralph" {
+                                info!("I'm Ralph. Let's do this.");
+                            } else {
+                                info!("Putting on my {} hat.", display_hat);
+                            }
+                        }
+                        last_hat_for_display = Some(display_hat.clone());
+                    }
+                    // verbose: 完整打印本轮 prompt
+                    if verbosity == Verbosity::Verbose {
+                        eprintln!("\n{}", "=".repeat(80));
+                        eprintln!("PROMPT FOR {} (iteration {})", display_hat, iteration);
+                        eprintln!("{}", "-".repeat(80));
+                        eprintln!("{}", prompt);
+                        eprintln!("{}\n", "=".repeat(80));
+                    }
+                })),
+                after_execute: Some(Box::new(|iteration, hat_id, out| {
+                    // record-session 迭代记录(stdout-only)
+                    if let Some(recorder) = &session_recorder
+                        && !out.output.is_empty()
+                    {
+                        let offset_ms = recorder.elapsed().as_millis() as u64;
+                        recorder.record_meta(Record::meta_iteration(
+                            iteration,
+                            offset_ms,
+                            hat_id.as_str(),
+                        ));
+                        recorder.record_ux_event(&UxEvent::TerminalWrite(TerminalWrite::new(
+                            out.output.as_bytes(),
+                            true,
+                            offset_ms,
+                        )));
+                    }
+                })),
             },
-        };
-        let display_verbosity = match verbosity {
-            Verbosity::Quiet => DisplayVerbosity::Quiet,
-            Verbosity::Normal => DisplayVerbosity::Normal,
-            Verbosity::Verbose => DisplayVerbosity::Verbose,
-        };
-        let mut handler = make_stream_handler(target, display_verbosity, render_mode);
-        exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-            .await
+        )
+        .await;
+
+    // ------------------------------------------------------------------
+    // 善后: 终止元信息 / summary / 终端展示 / TUI 退出
+    // ------------------------------------------------------------------
+    if let Some(recorder) = &session_recorder {
+        let reason_str = format!("{reason:?}");
+        recorder.record_meta(Record::meta_termination(
+            &reason_str,
+            event_loop.state().iteration,
+            recorder.elapsed().as_secs_f64(),
+            recorder.ux_write_count(),
+        ));
+        let _ = recorder.flush();
+    }
+    let summary_writer = SummaryWriter::default();
+    let scratchpad_path = std::path::Path::new(&config.core.scratchpad);
+    let scratchpad_opt = if scratchpad_path.exists() {
+        Some(scratchpad_path)
+    } else {
+        None
     };
-
-    match result {
-        Ok(pty_result) => {
-            let termination = convert_termination_type(pty_result.termination, interactive);
-
-            // Use extracted_text for event parsing when available (NDJSON backends like Claude),
-            // otherwise fall back to stripped_output (non-JSON backends or interactive mode).
-            // This fixes event parsing for Claude's stream-json output where event tags like
-            // <event topic="..."> are inside JSON string values and not directly visible.
-            let output_for_parsing = if pty_result.extracted_text.is_empty() {
-                pty_result.stripped_output
-            } else {
-                pty_result.extracted_text
-            };
-            Ok(ExecutionOutcome {
-                output: output_for_parsing,
-                success: pty_result.success,
-                termination,
-            })
-        }
-        Err(e) => {
-            // PTY allocation may have failed - log and continue with error
-            warn!("PTY execution failed: {}, continuing with error status", e);
-            Err(anyhow::Error::new(e))
-        }
+    let final_commit = get_last_commit_info();
+    if let Err(e) = summary_writer.write(
+        &reason,
+        event_loop.state(),
+        scratchpad_opt,
+        final_commit.as_deref(),
+    ) {
+        warn!("Failed to write summary file: {}", e);
     }
+    if !enable_tui {
+        print_termination(&reason, event_loop.state(), use_colors);
+    }
+
+    // TUI 退出: 中断立即退出; 自然完成等用户按 q
+    if reason == TerminationReason::Interrupted {
+        let _ = terminated_tx.send(true);
+    }
+    if let Some(handle) = tui_handle.take() {
+        let _ = handle.await;
+    }
+
+    Ok(reason)
 }
 
-/// Logs events parsed from output to the event history file.
-fn log_events_from_output(
-    logger: &mut EventLogger,
-    iteration: u32,
-    hat_id: &HatId,
-    output: &str,
-    registry: &ralph_core::HatRegistry,
-) {
-    let parser = EventParser::new();
-    let events = parser.parse(output);
-
-    for event in events {
-        // Determine which hat will be triggered by this event
-        let triggered = registry.find_by_trigger(event.topic.as_str());
-
-        // Per spec: Log "Published {topic} -> triggers {hat}" at DEBUG level
-        if let Some(triggered_hat) = triggered {
-            debug!("Published {} -> triggers {}", event.topic, triggered_hat);
-        } else {
-            debug!("Published {} -> no hat triggered", event.topic);
-        }
-
-        let record = EventRecord::new(iteration, hat_id.to_string(), &event, triggered);
-
-        if let Err(e) = logger.log(&record) {
-            warn!("Failed to log event {}: {}", event.topic, e);
-        }
-    }
-}
-
-/// Logs the loop.terminate system event to the event history.
-///
-/// Per spec: loop.terminate is an observer-only event published on loop exit.
-fn log_terminate_event(logger: &mut EventLogger, iteration: u32, event: &Event) {
-    // loop.terminate is published by the orchestrator, not a hat
-    // No hat can trigger on it (it's observer-only)
-    let record = EventRecord::new(iteration, "loop", event, None::<&HatId>);
-
-    if let Err(e) = logger.log(&record) {
-        warn!("Failed to log loop.terminate event: {}", e);
-    }
-}
-
-/// Gets the last commit info (short SHA and subject) for the summary file.
 fn get_last_commit_info() -> Option<String> {
     let output = Command::new("git")
         .args(["log", "-1", "--format=%h: %s"])
@@ -1014,16 +483,6 @@ fn get_last_commit_info() -> Option<String> {
     }
 }
 
-/// Resolves prompt content with proper precedence.
-///
-/// Precedence (highest to lowest):
-/// 1. CLI -p "text" (inline prompt text)
-/// 2. CLI -P path (prompt file path)
-/// 3. Config event_loop.prompt (inline prompt text)
-/// 4. Config event_loop.prompt_file (prompt file path)
-/// 5. Default PROMPT.md
-///
-/// Note: CLI overrides are already applied to config before this function is called.
 pub(crate) fn resolve_prompt_content(
     event_loop_config: &ralph_core::EventLoopConfig,
 ) -> Result<String> {
@@ -1101,92 +560,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_idle_timeout_interactive_mode_continues() {
-        // Given: interactive mode and IdleTimeout termination
-        let termination_type = ralph_adapters::TerminationType::IdleTimeout;
-        let interactive = true;
-
-        // When: converting termination type
-        let result = convert_termination_type(termination_type, interactive);
-
-        // Then: should return None (allow iteration to continue)
-        assert!(
-            result.is_none(),
-            "Interactive mode idle timeout should return None to allow iteration progression"
-        );
-    }
-
-    #[test]
-    fn test_idle_timeout_autonomous_mode_stops() {
-        // Given: autonomous mode and IdleTimeout termination
-        let termination_type = ralph_adapters::TerminationType::IdleTimeout;
-        let interactive = false;
-
-        // When: converting termination type
-        let result = convert_termination_type(termination_type, interactive);
-
-        // Then: should return Some(Stopped)
-        assert_eq!(
-            result,
-            Some(TerminationReason::Stopped),
-            "Autonomous mode idle timeout should return Stopped"
-        );
-    }
-
-    #[test]
-    fn test_natural_termination_always_continues() {
-        // Given: Natural termination in any mode
-        let termination_type = ralph_adapters::TerminationType::Natural;
-
-        // When/Then: should return None regardless of mode
-        assert!(
-            convert_termination_type(termination_type.clone(), true).is_none(),
-            "Natural termination should continue in interactive mode"
-        );
-        assert!(
-            convert_termination_type(termination_type, false).is_none(),
-            "Natural termination should continue in autonomous mode"
-        );
-    }
-
-    #[test]
-    fn test_user_interrupt_always_terminates() {
-        // Given: UserInterrupt termination in any mode
-        let termination_type = ralph_adapters::TerminationType::UserInterrupt;
-
-        // When/Then: should return Interrupted regardless of mode
-        assert_eq!(
-            convert_termination_type(termination_type.clone(), true),
-            Some(TerminationReason::Interrupted),
-            "UserInterrupt should terminate in interactive mode"
-        );
-        assert_eq!(
-            convert_termination_type(termination_type, false),
-            Some(TerminationReason::Interrupted),
-            "UserInterrupt should terminate in autonomous mode"
-        );
-    }
-
-    #[test]
-    fn test_force_kill_always_terminates() {
-        // Given: ForceKill termination in any mode
-        let termination_type = ralph_adapters::TerminationType::ForceKill;
-
-        // When/Then: should return Interrupted regardless of mode
-        assert_eq!(
-            convert_termination_type(termination_type.clone(), true),
-            Some(TerminationReason::Interrupted),
-            "ForceKill should terminate in interactive mode"
-        );
-        assert_eq!(
-            convert_termination_type(termination_type, false),
-            Some(TerminationReason::Interrupted),
-            "ForceKill should terminate in autonomous mode"
-        );
-    }
-
-    #[test]
     fn guardrail_scratchpad_clear_truncates_but_does_not_delete() {
         // ------------------------------------------------------------------
         // 目标:

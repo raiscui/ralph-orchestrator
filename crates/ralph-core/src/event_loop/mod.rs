@@ -3,10 +3,12 @@
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
 mod loop_state;
+mod prompt_executor;
 #[cfg(test)]
 mod tests;
 
 pub use loop_state::LoopState;
+pub use prompt_executor::{PromptExecutor, PromptOutput, RunHooks};
 
 use crate::config::{HatBackend, InjectMode, RalphConfig};
 use crate::event_parser::EventParser;
@@ -18,7 +20,7 @@ use crate::instructions::InstructionBuilder;
 use crate::prompt_overlay;
 use ralph_proto::{Event, EventBus, Hat, HatId};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Skill content injected when memories are enabled.
 ///
@@ -1281,6 +1283,214 @@ impl EventLoop {
         );
 
         event
+    }
+    /// 串行模式的完整循环入口(窄 interface)。
+    ///
+    /// 说明:
+    /// - 循环骨架(中断/终止检查、hat 选择与 fallback、prompt 构建、执行、输出处理、
+    ///   事件落盘)全部收在这里; 调用者通过 `executor` port 注入进程执行,
+    ///   通过 `hooks` 注入展示/记录副作用。
+    /// - 终止后的"善后"(summary 写入、终端展示、TUI 退出等)由调用者根据返回值处理。
+    pub async fn run(
+        &mut self,
+        executor: &mut dyn PromptExecutor,
+        interrupt_rx: tokio::sync::watch::Receiver<bool>,
+        interactive: bool,
+        mut hooks: RunHooks<'_>,
+    ) -> TerminationReason {
+        let mut event_logger = crate::event_logger::EventLogger::default_path();
+        let mut last_hat: Option<HatId> = None;
+        let mut consecutive_fallbacks: u32 = 0;
+        const MAX_FALLBACK_ATTEMPTS: u32 = 3;
+
+        loop {
+            // 1) 中断检查(每轮开始): TUI Ctrl+C / 信号处理通过 interrupt_rx 通知。
+            if *interrupt_rx.borrow() {
+                let reason = TerminationReason::Interrupted;
+                let ev = self.publish_terminate_event(&reason);
+                Self::log_terminate_event(&mut event_logger, self.state().iteration, &ev);
+                return reason;
+            }
+
+            // 2) 终止检查(completion promise / 迭代上限 / 连续失败等)。
+            if let Some(reason) = self.check_termination() {
+                let ev = self.publish_terminate_event(&reason);
+                Self::log_terminate_event(&mut event_logger, self.state().iteration, &ev);
+                return reason;
+            }
+
+            // 3) 选择下一个 hat; 无 pending 事件时做 fallback 恢复。
+            let hat_id = match self.next_hat() {
+                Some(id) => {
+                    consecutive_fallbacks = 0;
+                    id.clone()
+                }
+                None => {
+                    consecutive_fallbacks += 1;
+                    if consecutive_fallbacks > MAX_FALLBACK_ATTEMPTS {
+                        warn!("Fallback recovery exhausted, terminating");
+                        let reason = TerminationReason::Stopped;
+                        let ev = self.publish_terminate_event(&reason);
+                        Self::log_terminate_event(&mut event_logger, self.state().iteration, &ev);
+                        return reason;
+                    }
+                    if self.inject_fallback_event() {
+                        continue;
+                    }
+                    warn!("No hats with pending events and fallback not available, terminating");
+                    let reason = TerminationReason::Stopped;
+                    let ev = self.publish_terminate_event(&reason);
+                    Self::log_terminate_event(&mut event_logger, self.state().iteration, &ev);
+                    return reason;
+                }
+            };
+
+            let iteration = self.state().iteration + 1;
+            // Ralph 协调时展示"活跃 hat"而非 ralph 自身。
+            let display_hat = if hat_id.as_str() == "ralph" {
+                self.get_active_hat_id()
+            } else {
+                hat_id.clone()
+            };
+
+            // hat 切换日志(供调用者展示"戴上 xx hat")。
+            if last_hat.as_ref() != Some(&hat_id) {
+                info!(
+                    hat = %hat_id,
+                    "Iteration {}/{} - {} active",
+                    iteration,
+                    self.config.event_loop.max_iterations,
+                    hat_id
+                );
+                last_hat = Some(hat_id.clone());
+            }
+
+            // 4) 构建 prompt。
+            let Some(prompt) = self.build_prompt(&hat_id) else {
+                error!("Failed to build prompt for hat '{}'", hat_id);
+                continue;
+            };
+
+            // 5) 迭代前钩子(分隔符 / verbose prompt 展示)。
+            if let Some(hook) = hooks.before_execute.as_mut() {
+                hook(iteration, &display_hat, &prompt, self.state().elapsed());
+            }
+
+            // 5.5) 通知执行器开始新迭代(TUI 行缓冲换代等)。
+            executor.on_iteration_started(iteration);
+
+            // 6) 执行(prompt → 输出), backend 按 hat-level 覆盖。
+            let backend = self.get_hat_backend(&display_hat).cloned();
+            let out = match executor
+                .execute_prompt(
+                    &prompt,
+                    interactive,
+                    &hat_id,
+                    backend.as_ref(),
+                    interrupt_rx.clone(),
+                )
+                .await
+            {
+                Ok(out) => out,
+                Err(e) => {
+                    error!("Prompt execution failed: {e}, continuing");
+                    self.process_output(&hat_id, "", false);
+                    continue;
+                }
+            };
+
+            // 7) 执行器级终止(交互 idle timeout 已由实现方归一化到 PromptOutput)。
+            if out.canceled {
+                let reason = TerminationReason::Interrupted;
+                let ev = self.publish_terminate_event(&reason);
+                Self::log_terminate_event(&mut event_logger, self.state().iteration, &ev);
+                return reason;
+            }
+            if out.timed_out {
+                let reason = TerminationReason::Stopped;
+                let ev = self.publish_terminate_event(&reason);
+                Self::log_terminate_event(&mut event_logger, self.state().iteration, &ev);
+                return reason;
+            }
+
+            // 8) 迭代后钩子(record-session 落盘等)。
+            if let Some(hook) = hooks.after_execute.as_mut() {
+                hook(iteration, &hat_id, &out);
+            }
+
+            // 9) 事件落盘 + 状态更新。
+            Self::log_events_from_output(
+                &mut event_logger,
+                iteration,
+                &hat_id,
+                &out.output,
+                &self.registry,
+            );
+            if let Some(reason) = self.process_output(&hat_id, &out.output, out.success) {
+                if reason == TerminationReason::CompletionPromise {
+                    info!(
+                        "All done! {} detected.",
+                        self.config.event_loop.completion_promise
+                    );
+                }
+                let ev = self.publish_terminate_event(&reason);
+                Self::log_terminate_event(&mut event_logger, self.state().iteration, &ev);
+                return reason;
+            }
+
+            // 10) 读取 agent 可能写入的 JSONL 事件。
+            if let Err(e) = self.process_events_from_jsonl() {
+                warn!(error = %e, "Failed to read events from JSONL");
+            }
+
+            // 11) 预检: 处理后无 pending 事件时给出诊断。
+            if !self.has_pending_events() {
+                let expected = self.get_hat_publishes(&hat_id);
+                debug!(
+                    hat = %hat_id.as_str(),
+                    expected_topics = ?expected,
+                    "No pending events after iteration. Agent may have failed to publish a valid event"
+                );
+            }
+        }
+    }
+
+    /// 将本轮解析到的事件写入 debug events.jsonl。
+    fn log_events_from_output(
+        logger: &mut crate::event_logger::EventLogger,
+        iteration: u32,
+        hat_id: &HatId,
+        output: &str,
+        registry: &crate::hat_registry::HatRegistry,
+    ) {
+        let parser = crate::event_parser::EventParser::new();
+        let events = parser.parse(output);
+
+        for event in events {
+            let triggered = registry.find_by_trigger(event.topic.as_str());
+            let record = crate::event_logger::EventRecord::new(
+                iteration,
+                hat_id.to_string(),
+                &event,
+                triggered,
+            );
+            if let Err(e) = logger.log(&record) {
+                warn!("Failed to log event {}: {}", event.topic, e);
+            }
+        }
+    }
+
+    /// 将 loop.terminate 系统事件写入 debug events.jsonl。
+    fn log_terminate_event(
+        logger: &mut crate::event_logger::EventLogger,
+        iteration: u32,
+        event: &Event,
+    ) {
+        let record =
+            crate::event_logger::EventRecord::new(iteration, "loop", event, None::<&HatId>);
+        if let Err(e) = logger.log(&record) {
+            warn!("Failed to log loop.terminate event: {}", e);
+        }
     }
 }
 

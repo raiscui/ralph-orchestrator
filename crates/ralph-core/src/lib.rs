@@ -75,6 +75,7 @@ pub use config::{
     WorkspaceStrategy,
 };
 pub use diagnostics::DiagnosticsCollector;
+pub use event_loop::{PromptExecutor, PromptOutput, RunHooks};
 pub use event_emission_protocol::{
     EVENT_EMISSION_PROTOCOL_HEADING, RuntimeTopicClass, RuntimeTopicClassification,
     classify_runtime_topic, is_allowed_role_result_topic, is_reserved_hat_trigger,

@@ -9,6 +9,9 @@
 pub mod colors;
 pub mod stream_handler;
 
+/// TUI 共享行缓冲(展示层类型真相源)。
+pub type TuiLineBuffer = std::sync::Arc<std::sync::Mutex<Vec<ratatui::text::Line<'static>>>>;
+
 pub use stream_handler::{
     ConsoleStreamHandler, DisplayTarget, DisplayVerbosity, MarkdownRenderMode,
     PrettyStreamHandler, QuietStreamHandler, SessionResult, StreamHandler, TuiStreamHandler,

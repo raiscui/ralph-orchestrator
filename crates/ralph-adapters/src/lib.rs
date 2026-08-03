@@ -30,6 +30,7 @@ mod cli_executor;
 mod codex_env;
 mod pty_executor;
 pub mod job;
+pub mod prompt_executor;
 pub mod pty_handle;
 mod ralph_env;
 
@@ -46,6 +47,7 @@ pub use codex_env::{
     CODEX_PARENT_SESSION_ENV_VARS, is_codex_command, scrub_codex_parent_session_env,
     scrub_codex_parent_session_env_tokio,
 };
+pub use prompt_executor::PtyPromptExecutor;
 pub use pty_executor::{
     CtrlCAction, CtrlCState, PtyConfig, PtyExecutionResult, PtyExecutor, TerminationType,
 };
