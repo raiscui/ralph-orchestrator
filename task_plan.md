@@ -279,3 +279,11 @@
 - [x] live 验证: connectivity 8s / single-iter 71s / completion 通过; multi-iter 在 deepseek 下慢(非声明化问题)
 - [x] 提交 430a07a 已推送
 - [ ] 后续: EventsScenario/BackpressureScenario 等简单场景 → 复杂场景(hats/memory/parallel 注入)需扩展 schema(注入序列/自定义断言)
+
+## [2026-08-03 03:05:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: 候选6 第二批迁移完成
+
+- [x] events/backpressure 迁移为 YAML(schema 扩展 event_payload_contains/keywords)
+- [x] 6 个声明场景: connectivity/single-iter/multi-iter/completion/events/backpressure
+- [x] 断言单测 5 个; live 验证 events 14.2s PASS
+- [x] 提交 0cb2e66 已推送
+- [ ] 剩余 41 个场景: 下一批可迁 events 类简单场景 → 复杂场景(hats/memory/capabilities/parallel)需 inject 序列 + 自定义断言钩子
