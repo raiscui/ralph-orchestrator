@@ -94,7 +94,6 @@ use ralph_e2e::{
     ReportFormat as LibReportFormat,
     ReportWriter,
     RunConfig,
-    SingleIterScenario,
     // Tier 4: Capabilities
     StreamingScenario,
     TerminalReporter,
@@ -274,7 +273,11 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
         // Tier 1: Connectivity (backend-agnostic)
         Box::new(ConnectivityScenario::new()),
         // Tier 2: Orchestration Loop (backend-agnostic)
-        Box::new(SingleIterScenario::new()),
+        // single-iter 已声明化(候选6 试点)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "single-iter",
+            include_str!("../scenarios/single-iter.yaml"),
+        )),
         Box::new(MultiIterScenario::new()),
         Box::new(CompletionScenario::new()),
         // Tier 3: Events (backend-agnostic)

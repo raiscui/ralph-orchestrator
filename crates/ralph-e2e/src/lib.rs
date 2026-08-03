@@ -146,6 +146,7 @@ pub mod mock_cli;
 mod models;
 pub mod reporter;
 pub mod runner;
+pub mod declarative;
 pub mod scenarios;
 pub mod workspace;
 
