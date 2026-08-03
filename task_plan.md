@@ -295,3 +295,10 @@
 - [x] 单测 7 个(agents.json 解析/wait 容错/payload/迭代/终止); clippy 干净
 - [x] 提交 1d7fc04 + clippy 清理已推送
 - [ ] 剩余: 其他 parallel 场景(steer/emit-spawn/hat-instances)可按 inject 模式迁移; 或候选6 收尾
+
+## [2026-08-03 17:20:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: hat-instances 声明化 + 通道故障排查
+
+- [x] hat-instances en/zh 迁移 YAML(运行计数/agents 快照断言, config/prompt 逐字节等价验证)
+- [x] 失败排查: 声明式 0/4 vs 命令式 2/2 → 根因 = deepseek-v4-flash 在 app-server 通道间歇 503(nowcoding distributor), 非声明化问题(诊断: trace.jsonl error notification)
+- [x] 提交 3b75f31 + import 清理已推送
+- [ ] 通道恢复后补一次 hat-instances 声明版 live 验证(或换默认模型)
