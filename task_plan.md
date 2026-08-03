@@ -287,3 +287,11 @@
 - [x] 断言单测 5 个; live 验证 events 14.2s PASS
 - [x] 提交 0cb2e66 已推送
 - [ ] 剩余 41 个场景: 下一批可迁 events 类简单场景 → 复杂场景(hats/memory/capabilities/parallel)需 inject 序列 + 自定义断言钩子
+
+## [2026-08-03 16:15:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: 候选6 inject 里程碑完成
+
+- [x] inject 时序声明化(type: wait/sleep/assert/emit), app-server-idle-start-live 迁移 YAML
+- [x] live 验证: 29.6s PASS(与命令式 29.5s 等价); 修 workspace 未就绪容错
+- [x] 单测 7 个(agents.json 解析/wait 容错/payload/迭代/终止); clippy 干净
+- [x] 提交 1d7fc04 + clippy 清理已推送
+- [ ] 剩余: 其他 parallel 场景(steer/emit-spawn/hat-instances)可按 inject 模式迁移; 或候选6 收尾
