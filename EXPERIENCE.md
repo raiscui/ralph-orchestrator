@@ -420,3 +420,54 @@
 - 验证锚点:
   - 支线归档位置: archive/branch_contexts/evolution_analysis/。
   - 后续入口: LATER_PLANS.md 中 tui-mdfried-viewer spec-code reconciliation 项。
+
+### exp-20260803-deep-module-deepening-patterns
+> 架构深化(浅模块 → 深模块)的可复用模式: 依赖方向决定下沉归属、port 收窄 interface、切片默认值陷阱、批量替换误伤。
+<!-- scope: project | source_topics: architecture_deepening,ralph_display,job_executor,tui_slices,event_loop_run | source_hats: codex | status: active | confidence: high | created_at: 2026-08-03T01:30:00+08:00 | updated_at: 2026-08-03T01:30:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 计划重构一个"接口宽、知识散"的模块(EventLoop 25+ pub 方法、TuiState 82 方法、CLI 46k 行等)。
+- 已验证规律:
+  - 依赖方向是下沉归属的可靠信号: 某段逻辑的依赖全在 A crate,却住在 B crate,就应该下沉到 A(record_aggregate 的聚合依赖全是 core,从 cli 下沉)。
+  - 跨 crate 执行缝隙用 port 收窄: core 定义 trait(参数只用 core 类型), adapters 实现, cli 装配。候选2 HatJobExecutor 与候选5 PromptExecutor 同一模式, 依赖方向保持 core ← adapters ← cli。
+  - 切片(按领域拆大 struct)时, `Default` 不能盲目 derive: 字段默认值(如 following_latest=true)是最容易丢的行为, 必须手动实现。
+  - 批量字段路径替换会误伤切片内部(self.iterations → self.output.iterations), 替换后必须检查各切片 impl 内引用。
+  - 回调参数化解决"闭包借用被重构对象"问题: hooks 回调把需要的值(elapsed 等)作为参数传入, 而不是闭包捕获 &mut 目标。
+- 关键边界:
+  - core 不能依赖 adapters/display/tui(依赖方向); "把驱动收进 core"只有在执行通过 port 注入时才成立。
+  - 切片的"兼容委托"是过渡手段: 先保签名行为零变化, 调用者渐进迁移后再删委托。
+- 验证锚点:
+  - 候选1-5 提交: b7dd54e/74c4f29/c21cf83/54534f2/3ff4b47。
+  - 串行 run 实测: EventLoop::run + PtyPromptExecutor 27.9s CompletionPromise。
+
+### exp-20260803-e2e-detection-must-match-display-layer
+> e2e 从进程 stdout 检测协议时, 必须匹配显示层格式(前缀/回显); "产品已收敛但测试报失败"先怀疑检测口径。
+<!-- scope: project | source_topics: e2e_detection,parallel_convergence,session_directed_routing | source_hats: codex | status: active | confidence: high | created_at: 2026-08-03T01:30:00+08:00 | updated_at: 2026-08-03T01:30:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - e2e 场景报 LOOP_COMPLETE detected 失败, 但 human-log/record 显示协调者已输出 LOOP_COMPLETE。
+- 已验证规律:
+  - 并行模式 stdout 显示行带 `[instance:stream:job=N]` 前缀, 且包含事件回显与 prompt 回显(err 行); 检测必须只取协调者 out 行 + 剥前缀 + 排除 `<event` 行。
+  - 事件回显 payload 含 "LOOP_COMPLETE" 说明文本会触发 promise_in_event_tags 的安全拒绝 → 检测必须过滤事件行。
+  - 会话定向事件(带 session_strategy)不得被 rewrite_target_for_busy_ralph 改投 ralph#2: 改投到新会话丢失 steer 上下文(模型编造占位输入)。
+  - select! 公平调度下, 外部事件读取可能先于实例 StateChanged 处理 → 路由看到旧状态 → 会话定向事件的豁免是正确修复。
+- 关键边界:
+  - 区分"产品 bug"与"测试口径 bug"的决定性证据: supervisor 内部检测结果(临时 eprintln 直出)+ 新旧二进制 A/B 对照。
+- 验证锚点:
+  - 修复提交 cf2310b; live 场景 app-server 5/5 + emit-spawn 全绿。
+
+### exp-20260803-model-instruction-length-following
+> 多模型兼容规律: 长指令 + 多层约束 → 模型遵循漂移; 短指令 + 格式示例 → 完美遵循。ralph 协议对弱指令模型应"示例驱动"。
+<!-- scope: project | source_topics: deepseek_compat,ralph_prompt,model_following | source_hats: codex | status: active | confidence: high | created_at: 2026-08-03T01:30:00+08:00 | updated_at: 2026-08-03T01:30:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 换模型后 ralph 协调者行为漂移(输出模板占位、发 human.message、事件链不完整)。
+- 已验证规律:
+  - deepseek-v4-flash 对 20k 字符多层约束 prompt 响应漂移; 对简短指令 + 事件格式示例精确遵循(最小实验验证)。
+  - ralph_prompt 极简版(5 条短规则 + 1 个事件示例)让 deepseek 完整闭环: task×3 → result×3 → reviewed×3 → integration → complete → LOOP_COMPLETE(599s)。
+  - 平台 bug 排查: codex app-server(≤0.146)不接受 --profile, 透传会导致 app-server 启动失败 → 修复为 warn 忽略。
+- 关键边界:
+  - 极简协议牺牲窗口控制/backpressure(deepseek 版本); 默认模型保留完整协议。
+  - `-p deepseek` 是 codex profile(deepseek.config.toml), 不是模型名参数。
+- 验证锚点:
+  - ralph-example 极简 ralph_prompt + demo-check.sh 10/10; COMPARISON.md 性能对比生成。
