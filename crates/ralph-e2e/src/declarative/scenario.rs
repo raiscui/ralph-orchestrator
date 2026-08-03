@@ -55,6 +55,12 @@ pub struct DeclarativeExpect {
     /// iterations_within 上限。
     #[serde(default)]
     pub max_iterations: Option<u32>,
+    /// 精确迭代数。
+    #[serde(default)]
+    pub exact_iterations: Option<u32>,
+    /// 事件总数下限(跨 topic)。
+    #[serde(default)]
+    pub min_total_events: usize,
     #[serde(default)]
     pub scratchpad_updated: bool,
     /// 终止原因(LOOP_COMPLETE / MAX_ITERATIONS / ...)。
@@ -201,6 +207,12 @@ impl TestScenario for DeclarativeScenarioRunner {
         if let Some(max) = expect.max_iterations {
             assertions.push(Assertions::iterations_within(&execution, max));
         }
+        if let Some(exact) = expect.exact_iterations {
+            assertions.push(iterations_exact(&execution, exact));
+        }
+        if expect.min_total_events > 0 {
+            assertions.push(total_events_at_least(&execution, expect.min_total_events));
+        }
         if expect.scratchpad_updated {
             assertions.push(scratchpad_updated(&execution));
         }
@@ -284,10 +296,74 @@ fn event_count_at_least(
     if ok { builder.passed() } else { builder.failed() }.build()
 }
 
+fn iterations_exact(result: &ExecutionResult, expected: u32) -> crate::models::Assertion {
+    let ok = result.iterations == expected;
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "Completed in {expected} iterations"
+    ))
+    .expected(format!("{expected} iterations"))
+    .actual(format!("{} iterations", result.iterations));
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+fn total_events_at_least(result: &ExecutionResult, min: usize) -> crate::models::Assertion {
+    let count = result.events.len();
+    let ok = count >= min;
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "At least {min} events emitted"
+    ))
+    .expected(format!("at least {min} events"))
+    .actual(format!("{count} events"));
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
 fn output_contains(result: &ExecutionResult, needle: &str) -> crate::models::Assertion {
     let ok = result.stdout.contains(needle);
     let builder = crate::scenarios::AssertionBuilder::new(format!("Output contains {needle:?}"))
         .expected(format!("stdout contains {needle:?}"))
         .actual(if ok { "found".to_string() } else { "missing".to_string() });
     if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::ExecutionResult;
+    use std::time::Duration;
+
+    fn sample_result(iterations: u32, events: Vec<&str>, termination: Option<&str>) -> ExecutionResult {
+        ExecutionResult {
+            exit_code: Some(0),
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            duration: Duration::from_secs(1),
+            scratchpad: Some("content".to_string()),
+            events: events.into_iter().map(|t| crate::executor::EventRecord { topic: t.to_string(), payload: String::new(), source_instance: None }).collect(),
+            iterations,
+            termination_reason: termination.map(|s| s.to_string()),
+            timed_out: false,
+        }
+    }
+
+    #[test]
+    fn iterations_exact_matches() {
+        let ok = iterations_exact(&sample_result(3, vec![], None), 3);
+        assert!(ok.passed);
+        let bad = iterations_exact(&sample_result(2, vec![], None), 3);
+        assert!(!bad.passed);
+    }
+
+    #[test]
+    fn total_events_at_least_counts_all_topics() {
+        let r = sample_result(1, vec!["a", "b", "c"], None);
+        assert!(total_events_at_least(&r, 3).passed);
+        assert!(!total_events_at_least(&r, 4).passed);
+    }
+
+    #[test]
+    fn termination_matches_checks_reason() {
+        let r = sample_result(1, vec![], Some("LOOP_COMPLETE"));
+        assert!(termination_matches(&r, "LOOP_COMPLETE").passed);
+        assert!(!termination_matches(&r, "MAX_ITERATIONS").passed);
+    }
 }

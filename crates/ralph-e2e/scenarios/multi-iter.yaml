@@ -1,0 +1,37 @@
+# multi-iter 声明化(与命令式 MultiIterScenario 等价)
+id: multi-iter
+description: Verifies multi-iteration event progression (declarative)
+tier: "Tier 2: Orchestration Loop"
+backends: [claude, kiro, opencode, codex]
+setup:
+  config: |
+    # Multi-iteration test config
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 3
+      completion_promise: "LOOP_COMPLETE"
+  prompt: |
+    You are testing Ralph orchestration with multiple iterations.
+
+    Your task requires emitting events using this EXACT XML format in your text output:
+
+    <event topic="TOPIC_NAME">
+    payload content here
+    </event>
+
+    Complete these phases:
+    1. First, emit: <event topic="phase.init">Starting phase 1</event>
+    2. Then emit: <event topic="phase.process">Processing in phase 2</event>
+    3. Finally emit: <event topic="phase.complete">Done</event>
+
+    IMPORTANT: You MUST include the literal XML tags above in your response text.
+    After all events are emitted, output LOOP_COMPLETE on its own line.
+  max_iterations: 3
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  exact_iterations: 3
+  min_total_events: 2

@@ -33,9 +33,7 @@ use ralph_e2e::{
     // Tier 3: Events
     BackpressureScenario,
     // Tier 2: Orchestration Loop
-    CompletionScenario,
     // Tier 1: Connectivity
-    ConnectivityScenario,
     EventsScenario,
     // Tier 5: Hat Collections
     HatBackendOverrideScenario,
@@ -55,7 +53,6 @@ use ralph_e2e::{
     MemorySearchScenario,
     MockCliError,
     MockConfig,
-    MultiIterScenario,
     ParallelAppServerIdleStartLiveScenario,
     ParallelAppServerIdleStartScenario,
     // Tier 8: Parallel Runtime
@@ -271,15 +268,27 @@ impl ReportFormat {
 fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
     vec![
         // Tier 1: Connectivity (backend-agnostic)
-        Box::new(ConnectivityScenario::new()),
+        // connectivity 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "connectivity",
+            include_str!("../scenarios/connectivity.yaml"),
+        )),
         // Tier 2: Orchestration Loop (backend-agnostic)
         // single-iter 已声明化(候选6 试点)
         Box::new(ralph_e2e::declarative::from_yaml(
             "single-iter",
             include_str!("../scenarios/single-iter.yaml"),
         )),
-        Box::new(MultiIterScenario::new()),
-        Box::new(CompletionScenario::new()),
+        // multi-iter 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "multi-iter",
+            include_str!("../scenarios/multi-iter.yaml"),
+        )),
+        // completion 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "completion",
+            include_str!("../scenarios/completion.yaml"),
+        )),
         // Tier 3: Events (backend-agnostic)
         Box::new(EventsScenario::new()),
         Box::new(BackpressureScenario::new()),
