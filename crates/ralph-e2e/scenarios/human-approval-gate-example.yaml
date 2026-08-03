@@ -17,6 +17,9 @@ setup:
       payload: '{"approved_by":"release-manager","window":"2026-03-10 10:00 UTC"}'
       json_payload: true
       target_instance: ralph#1
+      # 会话定向: 避免 ralph#1 busy 时被 rewrite_target_for_busy_ralph 改投 ralph#2,
+      # 否则 ralph#1 收不到审批, 流程无法收敛。
+      session_strategy: app_server
 expect:
   response_received: true
   exit_code_success_or_limit: true

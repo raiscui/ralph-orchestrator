@@ -247,13 +247,16 @@ impl DeclarativeScenarioRunner {
         Self { spec, base_dir }
     }
 
-    /// 渲染 ralph.yml 模板({backend} / {model} 占位符)。
+    /// 渲染 ralph.yml 模板({backend} / {model} / {profile_args} 占位符)。
     ///
     /// 说明:
     /// - `{backend}`: 按 e2e 后端名展开(与命令式场景一致)。
     /// - `{model}`: 按 `codex_e2e_model()` 展开(env `RALPH_E2E_CODEX_MODEL` 优先, 否则默认),
     ///   避免声明式 YAML 硬编码模型导致与命令式行为不一致。
+    /// - `{profile_args}`: 按 `codex_e2e_profile()` 展开为 `- -p\n        - <profile>`
+    ///   (未配置 profile 时展开为空, 不注入 -p 参数)。
     fn render_config(&self, backend: Backend) -> String {
+        let profile_args = render_profile_args(crate::scenarios::parallel::codex_e2e_profile());
         self.spec
             .setup
             .config
@@ -262,7 +265,15 @@ impl DeclarativeScenarioRunner {
                 "{model}",
                 &crate::scenarios::parallel::codex_e2e_model(),
             )
+            .replace("{profile_args}", &profile_args)
     }
+}
+
+/// 渲染 `{profile_args}` 占位符: 有 profile 时注入两行 `- -p` / `- <profile>`。
+fn render_profile_args(profile: Option<String>) -> String {
+    profile
+        .map(|profile| format!("        - -p\n        - {profile}"))
+        .unwrap_or_default()
 }
 
 #[async_trait]
@@ -627,17 +638,57 @@ fn event_payload_contains(
     topic: &str,
     needle: &str,
 ) -> crate::models::Assertion {
-    let event = result.events.iter().find(|e| e.topic == topic);
-    let ok = event.map(|e| e.payload.contains(needle)).unwrap_or(false);
+    // 优先用 stdout 解析的完整 payload:
+    // - events.jsonl 会截断 >500 字符的 payload, 截断后的 JSON 不可解析;
+    // - 并行 stdout 会带 `[instance:out:job=N]` 前缀与 err 通道交错,
+    //   必须先归一化(:out:job 行剥前缀拼接)再提取, 否则 payload 不是纯 JSON。
+    let full_payload = crate::scenarios::parallel::extract_last_parallel_out_payload_for_topic(
+        &result.stdout,
+        topic,
+    );
+    let event_payload = full_payload
+        .as_deref()
+        .or_else(|| result.events.iter().find(|e| e.topic == topic).map(|e| e.payload.as_str()));
+    let ok = event_payload
+        .map(|payload| payload_matches_needle(payload, needle))
+        .unwrap_or(false);
     let builder = crate::scenarios::AssertionBuilder::new(format!(
         "Event '{topic}' payload contains '{needle}'"
     ))
     .expected(format!("Payload containing '{needle}'"))
-    .actual(match event {
-        Some(e) => format!("Payload: {}", truncate_payload(&e.payload)),
+    .actual(match event_payload {
+        Some(payload) => format!("Payload: {}", truncate_payload(payload)),
         None => "Event not found".to_string(),
     });
     if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 判断 payload 是否匹配期望子串。
+///
+/// 说明:
+/// - 事件 payload 可能是 JSON(如 `{"audit_status":"READY_FOR_AUDITOR", ...}`)
+///   或 line 格式(如 `audit_status: READY_FOR_AUDITOR`), 两者都要能匹配。
+/// - 期望写成 `key: value` 时, 优先做 JSON 字段语义匹配:
+///   - JSON: 解析后检查 `key` 字段值 == value(大小写不敏感)。
+///   - line: 保持子串匹配(与命令式 example 场景的 payload matcher 口径一致)。
+/// - 期望不含 `: ` 时退化为纯子串匹配。
+fn payload_matches_needle(payload: &str, needle: &str) -> bool {
+    // 先尝试纯子串匹配(JSON 与 line 都可能有)。
+    if payload.contains(needle) {
+        return true;
+    }
+
+    // 期望形如 `key: value` 时, 尝试 JSON 字段语义匹配。
+    let Some((key, expected)) = needle.split_once(": ") else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    let Some(actual) = value.get(key).and_then(|v| v.as_str()) else {
+        return false;
+    };
+    actual.eq_ignore_ascii_case(expected)
 }
 
 fn event_payload_keywords(
@@ -645,10 +696,17 @@ fn event_payload_keywords(
     topic: &str,
     keywords: &[String],
 ) -> crate::models::Assertion {
-    let event = result.events.iter().find(|e| e.topic == topic);
-    let ok = event
-        .map(|e| {
-            let payload = e.payload.to_lowercase();
+    // 与 event_payload_contains 一致: 优先用 stdout 完整 payload(避免截断)。
+    let full_payload = crate::scenarios::parallel::extract_last_parallel_out_payload_for_topic(
+        &result.stdout,
+        topic,
+    );
+    let event_payload = full_payload
+        .as_deref()
+        .or_else(|| result.events.iter().find(|e| e.topic == topic).map(|e| e.payload.as_str()));
+    let ok = event_payload
+        .map(|payload| {
+            let payload = payload.to_lowercase();
             keywords.iter().any(|k| payload.contains(&k.to_lowercase()))
         })
         .unwrap_or(false);
@@ -656,8 +714,8 @@ fn event_payload_keywords(
         "Event '{topic}' payload hits a keyword"
     ))
     .expected(format!("Payload with one of {keywords:?}"))
-    .actual(match event {
-        Some(e) => format!("Payload: {}", truncate_payload(&e.payload)),
+    .actual(match event_payload {
+        Some(payload) => format!("Payload: {}", truncate_payload(payload)),
         None => "Event not found".to_string(),
     });
     if ok { builder.passed() } else { builder.failed() }.build()
@@ -905,10 +963,14 @@ fn no_jobs_after_loop_complete(result: &ExecutionResult) -> crate::models::Asser
                 jobs_before.insert((instance_id, job_id));
             }
         }
+        // 注意: 必须精确匹配 payload 本身 == LOOP_COMPLETE,
+        // 不能用 ends_with —— ralph#2 等实例的文本里可能以 "…与 LOOP_COMPLETE" 结尾,
+        // 误判会把真正完成后的新 job 当幽灵(与命令式 no_new_jobs 口径一致)。
         if !completion_seen
-            && line.trim_end().ends_with(completion_promise)
             && line.trim_start().starts_with("[ralph#")
             && line.contains(":out:job=")
+            && let Some((_prefix, payload)) = line.split_once("] ")
+            && payload.trim() == completion_promise
         {
             completion_seen = true;
         }
@@ -1205,6 +1267,47 @@ mod tests {
     }
 
     #[test]
+    fn payload_matches_needle_handles_json_and_line_formats() {
+        // line 格式: 子串直接命中。
+        let line = "review_status: READY_FOR_REGION_WEEKLY\nregion_code: APAC_ENTERPRISE";
+        assert!(payload_matches_needle(line, "review_status: READY_FOR_REGION_WEEKLY"));
+        // JSON 格式: 字段语义匹配(key: value 拆分后查 JSON 字段)。
+        let json = r#"{"review_id":"x","review_status":"READY_FOR_REGION_WEEKLY","region_code":"APAC_ENTERPRISE"}"#;
+        assert!(payload_matches_needle(json, "review_status: READY_FOR_REGION_WEEKLY"));
+        assert!(payload_matches_needle(json, "region_code: APAC_ENTERPRISE"));
+        // JSON 但期望值不匹配。
+        assert!(!payload_matches_needle(json, "review_status: SOMETHING_ELSE"));
+        // JSON 且 key 不存在。
+        assert!(!payload_matches_needle(json, "missing_key: VALUE"));
+        // 非 JSON payload + key: value 期望 → 子串失败则整体失败。
+        assert!(!payload_matches_needle("plain text", "key: value"));
+        // 纯值子串(无冒号)在 JSON 里命中。
+        assert!(payload_matches_needle(json, "READY_FOR_REGION_WEEKLY"));
+    }
+
+    #[test]
+    fn event_payload_contains_prefers_full_stdout_payload_over_truncated_jsonl() {
+        // events.jsonl 的 payload 会被截断(>500 字符), 截断后的 JSON 不可解析;
+        // 断言应优先用 stdout 解析的完整 payload(含并行 :out:job 前缀归一化)。
+        let mut r = sample_result(1, vec!["regional.review.ready"], None);
+        r.events[0].payload = "{\"review_status\":\"REA... [truncated, 800 chars total]".to_string();
+        r.stdout = "[regional_operating_lead#1:out:job=1] <event topic=\"regional.review.ready\">\n[regional_operating_lead#1:out:job=1] {\"review_status\":\"READY_FOR_REGION_WEEKLY\",\n[regional_operating_lead#1:out:job=1] \"region_code\":\"APAC_ENTERPRISE\",\n[regional_operating_lead#1:out:job=1] \"operating_owner\":\"regional-chief-of-staff\"}\n[regional_operating_lead#1:out:job=1] </event>"
+            .to_string();
+        assert!(
+            event_payload_contains(&r, "regional.review.ready", "review_status: READY_FOR_REGION_WEEKLY")
+                .passed
+        );
+        assert!(
+            event_payload_contains(&r, "regional.review.ready", "region_code: APAC_ENTERPRISE")
+                .passed
+        );
+        // stdout 也缺失时, 退回 events.jsonl 的(可能截断)payload。
+        let mut r2 = sample_result(1, vec!["build.done"], None);
+        r2.events[0].payload = "status: ok".to_string();
+        assert!(event_payload_contains(&r2, "build.done", "status: ok").passed);
+    }
+
+    #[test]
     fn event_payload_keywords_hits_any() {
         let mut r = sample_result(1, vec!["build.done"], None);
         r.events[0].payload = "tests: pass".to_string();
@@ -1326,6 +1429,21 @@ mod tests {
     }
 
     #[test]
+    fn no_jobs_after_loop_complete_requires_exact_payload_match() {
+        // 回归: ralph#2 等实例的文本以 "…与 LOOP_COMPLETE" 结尾,
+        // 不能误判为完成信号(否则真正完成后的新 job 会被当作幽灵)。
+        let mut r = sample_result(1, vec![], None);
+        r.stdout = "[ralph#2:out:job=1] next_action: 等待 deployment.ready 后输出最终上线摘要与 LOOP_COMPLETE\n[ralph#1:out:job=5] LOOP_COMPLETE\n"
+            .to_string();
+        assert!(no_jobs_after_loop_complete(&r).passed);
+        // 而 payload 恰好为 LOOP_COMPLETE 时才算完成。
+        let mut r2 = sample_result(1, vec![], None);
+        r2.stdout = "[ralph#1:out:job=1] LOOP_COMPLETE\n[writer#1:out:job=7] ghost\n"
+            .to_string();
+        assert!(!no_jobs_after_loop_complete(&r2).passed);
+    }
+
+    #[test]
     fn event_order_matches_checks_strict_increasing_positions() {
         let r = sample_result(1, vec!["a", "b", "c"], None);
         assert!(event_order_matches(&r, &["a".into(), "b".into(), "c".into()]).passed);
@@ -1387,6 +1505,45 @@ mod tests {
             rendered.contains(&format!("model={}", crate::scenarios::parallel::codex_e2e_model())),
             "rendered config must use codex_e2e_model(): {rendered}"
         );
+    }
+
+    #[test]
+    fn render_config_expands_profile_args_when_profile_configured() {
+        // 纯函数验证: profile 存在时注入 -p 两行, 否则为空(不依赖进程级 env)。
+        let with_profile = render_profile_args(Some("minimax".to_string()));
+        assert_eq!(with_profile, "        - -p\n        - minimax");
+        assert!(render_profile_args(None).is_empty());
+        // 端到端: 占位符替换后 config 形态正确。
+        let spec = DeclarativeScenario {
+            id: "profile-test".to_string(),
+            description: String::new(),
+            tier: String::new(),
+            backends: vec!["codex".to_string()],
+            setup: DeclarativeSetup {
+                config: "args:\n        - exec\n{profile_args}\n        - -m\n        - {model}"
+                    .to_string(),
+                prompt: None,
+                prompt_file: None,
+                max_iterations: None,
+                timeout_secs: None,
+                extra_args: vec![],
+                prompt_source: None,
+                inject: vec![],
+                env: Default::default(),
+                write_prompt_to: None,
+                write_files: vec![],
+                example: None,
+                path_prefix: vec![],
+            },
+            expect: DeclarativeExpect::default(),
+        };
+        let runner = DeclarativeScenarioRunner::new(spec, PathBuf::from("."));
+        let rendered = runner
+            .spec
+            .setup
+            .config
+            .replace("{profile_args}", &render_profile_args(Some("minimax".to_string())));
+        assert!(rendered.contains("        - -p\n        - minimax"));
     }
 
     #[test]
