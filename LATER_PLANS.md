@@ -897,9 +897,11 @@
 - 候选6(Speculative): e2e 场景声明化(35k 行 harness)。
 - flaky 测试: `integration_record_session::sigint_leaves_record_session_parseable_and_writes_termination_and_pointer` 在并发跑时偶发失败(单独跑通过),SIGINT 时序竞态,值得后续加固。
 
-## [2026-08-03 22:10:00] [Session ID: omx-1785634382266-fz89ur] 候选6 收尾待办
+## [2026-08-04 01:30:00] [Session ID: omx-1785634382266-fz89ur] 候选6 收尾完成
 
 - [x] 已用 minimax profile 补验: 24/24 example 场景 live 通过(见 task_plan 2026-08-03 23:55)
-- [ ] 评估 fake shim ×2(app-server-idle-start / app-server-steer-multi-turn)声明化:
-      需 write_files 嵌入 300 行 python, 当前保留命令式; 若 YAML 维护性可接受再做
-- [ ] 候选6 全部完成时: 从 LATER_PLANS 移除本条目
+- [x] 核心 parallel 场景 minimax 补验: emit-spawn / starting ×2 / steer-live ×2 / idle-start-live / hat-instances-zh 全过
+- [x] fake shim ×2 评估结论: 300 行 python 嵌入 YAML 无收益(可读性/维护性差),
+      live 版已声明化, fake 版保留命令式作确定性回归
+- [x] {profile_args} 缩进 bug 修复(见 task_plan 2026-08-04 01:30)
+- [x] 候选6 全部完成, 本条目关闭
