@@ -368,3 +368,26 @@
 ### 限制
 - codex 账户额度不足(¥0.03, 需 ¥0.15+): release-checklist / human-approval-gate
   等剩余场景 live 验证被 403 阻塞, 非声明化问题; 额度恢复后补验
+
+## [2026-08-03 22:30:00] [Session ID: omx-1785634382266-fz89ur] [记录类型]: 候选6 剩余 parallel 场景处理完成
+
+### 最终状态
+- [x] 全部核心 parallel 场景声明化: emit-spawn / starting-event-inference ×2 /
+      hat-instances en+zh / app-server-idle-start-live / steer ×2 live
+- [x] 24 个 example 场景声明化(trigger-routing 试点 + 21 批量 + pr-review +
+      release-checklist + human-approval-gate)
+- [x] declarative 能力: {model} / write_files / path_prefix / example 引用 /
+      first_entry / event_absent(_prefixes) / no_jobs_after_loop_complete /
+      event_order / wait_event / --json emit
+- [x] 520 lib tests + 38 集成 tests 全过; clippy 0 warning
+- [x] live 验证: emit-spawn 49.6s / starting 41.6s+39.0s / trigger-routing 82s /
+      audit 56s / pr-review 62.6s 全过
+- [x] 6 个 scoped commits 已提交
+
+### 保留命令式(3 个, 有理由)
+- experimental-dev-engine: git seed/commit 工作流
+- app-server-idle-start(fake shim) / app-server-steer-multi-turn(fake shim):
+  300 行 python 嵌入 YAML 收益低, live 版已声明化
+
+### 待办(额度恢复后)
+- 剩余 21 个 example 场景 live 补验(403 预扣费额度不足, 非声明化问题)
