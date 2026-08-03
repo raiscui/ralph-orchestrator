@@ -158,9 +158,12 @@ expect:
   termination: LOOP_COMPLETE
   output_contains:
     - "[supervisor] instances"
-    - "[writer#1:out:job="
-    - "[writer#2:out:job="
-    - "[tester#1:out:job="
+  # 实例可能被路由到 writer#2 而未实际跑 job: 与命令式 attributed_outputs_visible
+  # 一致, 用"out:job / err:job / state 任一命中"口径。
+  output_contains_any:
+    - ["[writer#1:out:job=", "[writer#1:err:job=", "[writer#1:state]"]
+    - ["[writer#2:out:job=", "[writer#2:err:job=", "[writer#2:state]"]
+    - ["[tester#1:out:job=", "[tester#1:err:job=", "[tester#1:state]"]
   events:
     - topic: build.task
       min_count: 2

@@ -130,6 +130,9 @@ pub struct DeclarativeExpect {
     /// 输出必须包含的文本。
     #[serde(default)]
     pub output_contains: Vec<String>,
+    /// 输出必须命中至少一个文本(任一命中即通过, 如 [writer#1:out:job= / [writer#1:state])。
+    #[serde(default)]
+    pub output_contains_any: Vec<Vec<String>>,
     /// 第一个 workflow entry 事件 topic(starting_event 未配置时的推测断言)。
     #[serde(default)]
     pub first_entry: Option<String>,
@@ -272,7 +275,10 @@ impl DeclarativeScenarioRunner {
 /// 渲染 `{profile_args}` 占位符: 有 profile 时注入两行 `- -p` / `- <profile>`。
 fn render_profile_args(profile: Option<String>) -> String {
     profile
-        .map(|profile| format!("        - -p\n        - {profile}"))
+        // 注意: config 块经 serde_yaml 解析后, 公共缩进(4 空格)已被剥离,
+        // 占位符所在行自带 4 空格前缀(与 `- exec` 同级), 因此第一行不能再带缩进;
+        // 第二行起需要显式 4 空格对齐。
+        .map(|profile| format!("- -p\n    - {profile}"))
         .unwrap_or_default()
 }
 
@@ -493,6 +499,9 @@ impl TestScenario for DeclarativeScenarioRunner {
         }
         for needle in &expect.output_contains {
             assertions.push(output_contains(&execution, needle));
+        }
+        for needles in &expect.output_contains_any {
+            assertions.push(output_contains_any(&execution, needles));
         }
         for payload_expect in &expect.event_payload_contains {
             assertions.push(event_payload_contains(
@@ -879,6 +888,30 @@ fn output_contains(result: &ExecutionResult, needle: &str) -> crate::models::Ass
     let builder = crate::scenarios::AssertionBuilder::new(format!("Output contains {needle:?}"))
         .expected(format!("stdout contains {needle:?}"))
         .actual(if ok { "found".to_string() } else { "missing".to_string() });
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: stdout 命中任一 needle(如实例的 out:job 行或 state 行)。
+///
+/// 说明:
+/// - 并行日志中, 实例被创建但未实际跑 job 时只有 `[writer#1:state]` 行,
+///   没有 `[writer#1:out:job=]` 行; 命令式 attributed_outputs_visible 用"任一命中"口径。
+fn output_contains_any(result: &ExecutionResult, needles: &[String]) -> crate::models::Assertion {
+    let hits: Vec<&str> = needles
+        .iter()
+        .filter(|needle| result.stdout.contains(needle.as_str()))
+        .map(|needle| needle.as_str())
+        .collect();
+    let ok = !hits.is_empty();
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "Output contains any of {needles:?}"
+    ))
+    .expected(format!("stdout contains at least one of {needles:?}"))
+    .actual(if hits.is_empty() {
+        "none matched".to_string()
+    } else {
+        format!("matched {hits:?}")
+    });
     if ok { builder.passed() } else { builder.failed() }.build()
 }
 
@@ -1286,6 +1319,23 @@ mod tests {
     }
 
     #[test]
+    fn output_contains_any_matches_at_least_one_needle() {
+        let mut r = sample_result(1, vec![], None);
+        r.stdout = "[writer#1:state] created\n[writer#2:out:job=1] work\n".to_string();
+        // writer#1 只有 state 行(未实际跑 job), 任一命中应通过。
+        let needles = vec![
+            "[writer#1:out:job=".to_string(),
+            "[writer#1:err:job=".to_string(),
+            "[writer#1:state]".to_string(),
+        ];
+        assert!(output_contains_any(&r, &needles).passed);
+        // 全部缺失则失败。
+        let r2 = sample_result(1, vec![], None);
+        let missing = vec!["[ghost:out:job=".to_string()];
+        assert!(!output_contains_any(&r2, &missing).passed);
+    }
+
+    #[test]
     fn event_payload_contains_prefers_full_stdout_payload_over_truncated_jsonl() {
         // events.jsonl 的 payload 会被截断(>500 字符), 截断后的 JSON 不可解析;
         // 断言应优先用 stdout 解析的完整 payload(含并行 :out:job 前缀归一化)。
@@ -1511,7 +1561,8 @@ mod tests {
     fn render_config_expands_profile_args_when_profile_configured() {
         // 纯函数验证: profile 存在时注入 -p 两行, 否则为空(不依赖进程级 env)。
         let with_profile = render_profile_args(Some("minimax".to_string()));
-        assert_eq!(with_profile, "        - -p\n        - minimax");
+        // config 块经 serde_yaml 解析后公共缩进已剥离, 注入内容与 `- exec` 同级(4 空格)。
+        assert_eq!(with_profile, "- -p\n    - minimax");
         assert!(render_profile_args(None).is_empty());
         // 端到端: 占位符替换后 config 形态正确。
         let spec = DeclarativeScenario {
@@ -1520,7 +1571,9 @@ mod tests {
             tier: String::new(),
             backends: vec!["codex".to_string()],
             setup: DeclarativeSetup {
-                config: "args:\n        - exec\n{profile_args}\n        - -m\n        - {model}"
+                // 模拟 serde_yaml 解析后的形态: 公共缩进(4 空格)已被剥离。
+                // 占位符所在行保留 4 空格前缀(与 `- exec` 同级)。
+                config: "args:\n    - exec\n    {profile_args}\n    - -m\n    - {model}"
                     .to_string(),
                 prompt: None,
                 prompt_file: None,
@@ -1543,7 +1596,12 @@ mod tests {
             .setup
             .config
             .replace("{profile_args}", &render_profile_args(Some("minimax".to_string())));
-        assert!(rendered.contains("        - -p\n        - minimax"));
+        // 占位符行自带 4 空格前缀, 替换后第一行与 `- exec` 对齐。
+        assert!(rendered.contains("    - -p\n    - minimax"));
+        assert!(
+            rendered.contains("args:\n    - exec\n    - -p\n    - minimax\n    - -m"),
+            "rendered cli args must align: {rendered}"
+        );
     }
 
     #[test]
@@ -1628,6 +1686,66 @@ mod yaml_parse_tests {
             let spec: DeclarativeScenario = serde_yaml::from_str(yaml)
                 .unwrap_or_else(|e| panic!("invalid YAML for {id}: {e}"));
             assert!(!spec.id.is_empty(), "scenario {id} must have id");
+        }
+    }
+}
+
+#[cfg(test)]
+mod profile_render_integration_tests {
+    use super::*;
+
+    /// 端到端回归: 内嵌 config 的 5 个场景 YAML, 在注入 profile 后生成的 ralph.yml
+    /// cli 段缩进必须正确(与 `- exec` 同级 4 空格), 否则 `-p` 不生效。
+    ///
+    /// 实现: 不依赖进程级 env, 直接把 {profile_args} 占位符替换为
+    /// render_profile_args 的输出(与 render_config 行为一致), 再走 setup 落盘。
+    #[test]
+    fn inline_config_scenarios_render_valid_profile_args() {
+        let cases: &[(&str, &str)] = &[
+            ("emit-spawn", include_str!("../../scenarios/emit-spawn-instance.yaml")),
+            ("hat-instances", include_str!("../../scenarios/hat-instances.yaml")),
+            ("hat-instances-zh", include_str!("../../scenarios/hat-instances-zh.yaml")),
+            ("starting-event-inference", include_str!("../../scenarios/starting-event-inference.yaml")),
+            ("starting-event-inference-multi-candidate", include_str!("../../scenarios/starting-event-inference-multi-candidate.yaml")),
+        ];
+        for (id, yaml) in cases {
+            let mut spec: DeclarativeScenario = serde_yaml::from_str(yaml)
+                .unwrap_or_else(|e| panic!("invalid YAML for {id}: {e}"));
+            // 模拟 render_config 的占位符替换(profile 注入)。
+            spec.setup.config = spec
+                .setup
+                .config
+                .replace("{profile_args}", &render_profile_args(Some("minimax".to_string())));
+            let runner = DeclarativeScenarioRunner::new(spec, PathBuf::from("."));
+            let dir = tempfile::tempdir().unwrap();
+            runner
+                .setup(dir.path(), Backend::Codex)
+                .unwrap_or_else(|e| panic!("setup failed for {id}: {e}"));
+            let rendered = std::fs::read_to_string(dir.path().join("ralph.yml"))
+                .unwrap_or_else(|e| panic!("read ralph.yml failed for {id}: {e}"));
+            // 关键断言: `- -p` 必须与 `- exec` 同级(4 空格缩进), 且紧接着是 `- <profile>`。
+            let cli_section = rendered
+                .split("event_loop:")
+                .next()
+                .unwrap_or_default();
+            let exec_line = cli_section.lines().find(|l| l.trim() == "- exec").expect("missing - exec");
+            let exec_indent = exec_line.len() - exec_line.trim_start().len();
+            let p_line = cli_section
+                .lines()
+                .find(|l| l.trim() == "- -p")
+                .expect("missing - -p after profile injection");
+            let p_indent = p_line.len() - p_line.trim_start().len();
+            assert_eq!(
+                exec_indent, p_indent,
+                "{id}: - -p must align with - exec (both 4 spaces), got exec={exec_indent} p={p_indent}\n{cli_section}"
+            );
+            assert!(
+                cli_section.lines().any(|l| l.trim() == "- minimax"),
+                "{id}: missing - minimax after - -p"
+            );
+            // 生成的 ralph.yml 必须能被解析为合法 YAML。
+            let _: serde_yaml::Value = serde_yaml::from_str(&rendered)
+                .unwrap_or_else(|e| panic!("{id}: rendered ralph.yml invalid YAML: {e}"));
         }
     }
 }
