@@ -1753,7 +1753,8 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_app_server_process_args_forwards_profile_and_config_overrides() {
+    fn build_codex_app_server_process_args_ignores_profile_but_forwards_config_overrides() {
+        // codex app-server(<= 0.146)不支持 --profile: 必须忽略, 只透传 --config。
         let options = CodexAppServerOptions {
             profile: Some("e2e".to_string()),
             config_overrides: vec![
@@ -1770,14 +1771,13 @@ mod tests {
                 "app-server".to_string(),
                 "--listen".to_string(),
                 "stdio://".to_string(),
-                "--profile".to_string(),
-                "e2e".to_string(),
                 "--config".to_string(),
                 "model_reasoning_effort=\"low\"".to_string(),
                 "--config".to_string(),
                 "model_reasoning_summary=\"none\"".to_string(),
             ]
         );
+        assert!(!args.contains(&"--profile".to_string()), "profile must not be forwarded");
     }
 
     #[test]
