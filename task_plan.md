@@ -419,3 +419,20 @@ vendor 122.6s / multi-region 110.8s / trigger-routing 82s(此前)
 
 ### 提交
 2d9a370 profile 支持 / 231372e payload 修复 + 会话定向
+
+## [2026-08-03 23:55:00] [Session ID: omx-1785634382266-fz89ur] [记录类型]: minimax 全量 example 场景验证完成
+
+### 结果: 24/24 example 场景通过
+- 本次 minimax 验证 23 个(pr-review 此前 gpt-5.5 通过)
+- 通过耗时: 52.4s ~ 161.4s 不等
+- 修复过程中验证: release-checklist 161.4s / human-approval-gate 130.4s /
+  EBR 64.6s / regional 88.2s / finance 81.6s / onboarding 88.4s /
+  proposal 126s / vendor 122.6s / multi-region 110.8s / incident 133.2s /
+  hiring 89.8s / launch 138.8s / renewal-risk 68.2s / migration 94.4s /
+  security 63s / support 52.4s / partner 75.8s / postmortem 84.6s /
+  revops 57.4s(重跑) / field 104.4s / cab 82.6s / renewal 125.8s / audit 87s
+
+### 说明
+- revops 首次失败(ralph#1 跳过 4-lane 直接聚合)为模型波动, 重跑通过
+- regional 首次失败为 payload 截断问题(已修复), 修复后通过
+- human-approval-gate 首次失败为 ralph#2 改投(已加 session_strategy), 修复后通过

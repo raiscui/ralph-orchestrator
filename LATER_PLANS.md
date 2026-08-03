@@ -899,8 +899,7 @@
 
 ## [2026-08-03 22:10:00] [Session ID: omx-1785634382266-fz89ur] 候选6 收尾待办
 
-- [ ] codex 账户额度恢复后补验 live: release-checklist / human-approval-gate 等
-      21 个未验证的声明式 example 场景(账户 403 预扣费额度失败, 非声明化问题)
+- [x] 已用 minimax profile 补验: 24/24 example 场景 live 通过(见 task_plan 2026-08-03 23:55)
 - [ ] 评估 fake shim ×2(app-server-idle-start / app-server-steer-multi-turn)声明化:
       需 write_files 嵌入 300 行 python, 当前保留命令式; 若 YAML 维护性可接受再做
 - [ ] 候选6 全部完成时: 从 LATER_PLANS 移除本条目
