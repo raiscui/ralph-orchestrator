@@ -1,0 +1,44 @@
+# revops_quote_desk 声明化(候选6)
+id: parallel-revops-quote-desk-example
+description: Directly runs examples/parallel-revops-quote-desk and asserts quote lanes converge into quote.packet.ready (declarative) (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  example: parallel-revops-quote-desk
+  max_iterations: 20
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  output_contains:
+    - "[supervisor] instances"
+  events:
+    - topic: revops.deal.structure.review
+      min_count: 1
+    - topic: revops.pricing.guardrail.review
+      min_count: 1
+    - topic: revops.billing.setup.review
+      min_count: 1
+    - topic: revops.commercial.terms.review
+      min_count: 1
+    - topic: structure.ready
+      min_count: 1
+    - topic: pricing.ready
+      min_count: 1
+    - topic: billing.ready
+      min_count: 1
+    - topic: terms.ready
+      min_count: 1
+    - topic: revops.quote.packet.request
+      min_count: 1
+    - topic: quote.packet.ready
+      min_count: 1
+  event_payload_contains:
+    - topic: quote.packet.ready
+      contains: "quote_status: READY_FOR_SELLER_HANDOFF"
+  no_jobs_after_loop_complete: true
+  agents_snapshot:
+    min_instances: 5
+    hat_ids: [billing_setup_reviewer, commercial_terms_reviewer, deal_structure_reviewer, pricing_guardrail_reviewer, quote_desk_lead]

@@ -30,6 +30,7 @@ pub struct DeclarativeScenario {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeclarativeSetup {
     /// ralph.yml 模板(支持 `{backend}` 占位符, 按 backend 名展开)。
+    #[serde(default)]
     pub config: String,
     /// 内联 prompt。
     #[serde(default)]
@@ -56,6 +57,27 @@ pub struct DeclarativeSetup {
     /// 将指定内容写入 workspace 的 PROMPT.md(prompt_source: config 且 ralph 读 prompt_file 时使用)。
     #[serde(default)]
     pub write_prompt_to: Option<String>,
+    /// 附加文件写入(相对 workspace; 如 fake codex shim)。
+    #[serde(default)]
+    pub write_files: Vec<DeclarativeWriteFile>,
+    /// 从仓库 examples 目录引用 example 场景(自动 patch cli 段)。
+    #[serde(default)]
+    pub example: Option<String>,
+    /// 注入到 PATH 前部的 workspace 相对目录(如 .e2e/bin 放 fake codex shim)。
+    #[serde(default)]
+    pub path_prefix: Vec<String>,
+}
+
+/// 写入 workspace 的附加文件。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeclarativeWriteFile {
+    /// 相对 workspace 的路径(如 .e2e/bin/codex)。
+    pub path: String,
+    /// 文件内容。
+    pub content: String,
+    /// 是否设置可执行位(unix)。
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// expect: 期望(映射到内置断言)。
@@ -114,6 +136,12 @@ pub struct DeclarativeExpect {
     /// 事件流中不允许出现的 topic(如 distractor hat 事件)。
     #[serde(default)]
     pub event_absent: Vec<String>,
+    /// 事件流中不允许出现的 topic 前缀(如 gate.*)。
+    #[serde(default)]
+    pub event_absent_prefixes: Vec<String>,
+    /// LOOP_COMPLETE 之后 stdout 中不得出现新的 job(并行收敛不变量)。
+    #[serde(default)]
+    pub no_jobs_after_loop_complete: bool,
 }
 
 /// 事件计数断言。
@@ -266,6 +294,16 @@ impl TestScenario for DeclarativeScenarioRunner {
             ScenarioError::SetupError(format!("failed to create .agent directory: {e}"))
         })?;
 
+        // example 引用: 从仓库 examples/<name>/ 读取 ralph.yml + PROMPT.md, patch cli 后写入 workspace。
+        if let Some(example_name) = &self.spec.setup.example {
+            return crate::scenarios::parallel::setup_prompt_file_example_workspace(
+                workspace,
+                backend,
+                example_name,
+                self.spec.setup.max_iterations.unwrap_or(10),
+            );
+        }
+
         let config_content = self.render_config(backend);
         let config_path = workspace.join("ralph.yml");
         std::fs::write(&config_path, config_content).map_err(|e| {
@@ -277,6 +315,43 @@ impl TestScenario for DeclarativeScenarioRunner {
             std::fs::write(workspace.join("PROMPT.md"), content).map_err(|e| {
                 ScenarioError::SetupError(format!("failed to write PROMPT.md: {e}"))
             })?;
+        }
+
+        // 附加文件写入(如 fake codex shim)。
+        for file in &self.spec.setup.write_files {
+            let path = workspace.join(&file.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    ScenarioError::SetupError(format!(
+                        "failed to create dir for {}: {e}",
+                        file.path
+                    ))
+                })?;
+            }
+            std::fs::write(&path, &file.content).map_err(|e| {
+                ScenarioError::SetupError(format!("failed to write {}: {e}", file.path))
+            })?;
+            if file.executable {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(&path)
+                        .map_err(|e| {
+                            ScenarioError::SetupError(format!(
+                                "failed to stat {}: {e}",
+                                file.path
+                            ))
+                        })?
+                        .permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(&path, perms).map_err(|e| {
+                        ScenarioError::SetupError(format!(
+                            "failed to chmod +x {}: {e}",
+                            file.path
+                        ))
+                    })?;
+                }
+            }
         }
 
         // prompt: 内联 / 文件 / config(ralph_prompt)。
@@ -331,7 +406,21 @@ impl TestScenario for DeclarativeScenarioRunner {
             })
         });
 
-        let extra_env: Vec<(String, String)> = self.spec.setup.env.clone().into_iter().collect();
+        // PATH 前缀注入: 把 workspace 相对目录(如 .e2e/bin)放到 PATH 最前面,
+        // 让 ralph 优先找到 fake codex shim; 与命令式 fake shim 场景一致。
+        let mut extra_env: Vec<(String, String)> = self.spec.setup.env.clone().into_iter().collect();
+        if !self.spec.setup.path_prefix.is_empty() {
+            let old_path = std::env::var("PATH").unwrap_or_default();
+            let prefix = self
+                .spec
+                .setup
+                .path_prefix
+                .iter()
+                .map(|dir| executor.workspace().join(dir).display().to_string())
+                .collect::<Vec<_>>()
+                .join(":");
+            extra_env.push(("PATH".to_string(), format!("{prefix}:{old_path}")));
+        }
         let execution = executor
             .run_with_extra_env(config, &extra_env)
             .await
@@ -423,6 +512,12 @@ impl TestScenario for DeclarativeScenarioRunner {
         }
         for absent in &expect.event_absent {
             assertions.push(event_absent(&execution, absent));
+        }
+        for prefix in &expect.event_absent_prefixes {
+            assertions.push(event_absent_prefix(&execution, prefix));
+        }
+        if expect.no_jobs_after_loop_complete {
+            assertions.push(no_jobs_after_loop_complete(&execution));
         }
 
         let all_passed = assertions.iter().all(|a| a.passed);
@@ -752,6 +847,69 @@ fn event_absent(result: &ExecutionResult, topic: &str) -> crate::models::Asserti
     if present { builder.failed() } else { builder.passed() }.build()
 }
 
+/// 断言: 事件流中不存在以指定前缀开头的 topic(如 gate.*)。
+fn event_absent_prefix(result: &ExecutionResult, prefix: &str) -> crate::models::Assertion {
+    let present: Vec<String> = result
+        .events
+        .iter()
+        .filter(|e| e.topic.starts_with(prefix))
+        .map(|e| e.topic.clone())
+        .collect();
+    let builder =
+        crate::scenarios::AssertionBuilder::new(format!("Event absent prefix: {prefix:?}"))
+            .expected(format!("events.jsonl does NOT contain any topic starting with {prefix:?}"))
+            .actual(if present.is_empty() {
+                "absent".to_string()
+            } else {
+                format!("present={present:?}")
+            });
+    if present.is_empty() { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: LOOP_COMPLETE 之后 stdout 中不得出现新的并行 job。
+///
+/// 说明:
+/// - 这是并行收敛的强不变量: 协调者宣布完成后,任何新 job 都意味着"幽灵工作"。
+/// - 与命令式 example 场景的 no_new_jobs_started_after_loop_complete 口径一致。
+fn no_jobs_after_loop_complete(result: &ExecutionResult) -> crate::models::Assertion {
+    let completion_promise = "LOOP_COMPLETE";
+    let mut completion_seen = false;
+    let mut jobs_before: std::collections::HashSet<(String, u64)> =
+        std::collections::HashSet::new();
+    let mut new_jobs_after: Vec<(String, u64)> = Vec::new();
+
+    for line in result.stdout.lines() {
+        if let Some((instance_id, job_id)) =
+            crate::scenarios::parallel::job_run_counts::parse_parallel_job_line(line)
+        {
+            if completion_seen {
+                if !jobs_before.contains(&(instance_id.clone(), job_id)) {
+                    new_jobs_after.push((instance_id, job_id));
+                }
+            } else {
+                jobs_before.insert((instance_id, job_id));
+            }
+        }
+        if !completion_seen
+            && line.trim_end().ends_with(completion_promise)
+            && line.trim_start().starts_with("[ralph#")
+            && line.contains(":out:job=")
+        {
+            completion_seen = true;
+        }
+    }
+
+    let ok = completion_seen && new_jobs_after.is_empty();
+    let builder = crate::scenarios::AssertionBuilder::new(
+        "No new jobs after LOOP_COMPLETE",
+    )
+    .expected("After LOOP_COMPLETE, no new job_id should appear in stdout")
+    .actual(format!(
+        "completion_seen={completion_seen}, new_jobs_after={new_jobs_after:?}"
+    ));
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
 // ---------------------------------------------------------------------------
 // 注入时序执行器(wait/sleep/assert/emit)。
 // ---------------------------------------------------------------------------
@@ -1054,6 +1212,30 @@ mod tests {
     }
 
     #[test]
+    fn event_absent_prefix_matches_gate_style() {
+        let r = sample_result(1, vec!["gate.approval", "build.done"], None);
+        assert!(!event_absent_prefix(&r, "gate.").passed);
+        let r2 = sample_result(1, vec!["build.done"], None);
+        assert!(event_absent_prefix(&r2, "gate.").passed);
+    }
+
+    #[test]
+    fn no_jobs_after_loop_complete_detects_ghost_jobs() {
+        // 正常: LOOP_COMPLETE 后没有新 job。
+        let mut r = sample_result(1, vec![], Some("LOOP_COMPLETE"));
+        r.stdout = "[ralph#1:out:job=1] LOOP_COMPLETE\n".to_string();
+        assert!(no_jobs_after_loop_complete(&r).passed);
+        // 异常: LOOP_COMPLETE 后又出现新 job。
+        r.stdout = "[ralph#1:out:job=1] LOOP_COMPLETE\n[writer#1:out:job=7] ghost\n"
+            .to_string();
+        assert!(!no_jobs_after_loop_complete(&r).passed);
+        // 无 LOOP_COMPLETE 本身即失败。
+        let mut r2 = sample_result(1, vec![], None);
+        r2.stdout = "[writer#1:out:job=1] work\n".to_string();
+        assert!(!no_jobs_after_loop_complete(&r2).passed);
+    }
+
+    #[test]
     fn render_config_expands_backend_and_model_placeholders() {
         // {model} 占位符: 与命令式 codex_e2e_model() 一致(env 优先, 否则默认)。
         let spec = DeclarativeScenario {
@@ -1072,6 +1254,9 @@ mod tests {
                 inject: vec![],
                 env: Default::default(),
                 write_prompt_to: None,
+                write_files: vec![],
+                example: None,
+                path_prefix: vec![],
             },
             expect: DeclarativeExpect::default(),
         };
@@ -1109,6 +1294,62 @@ mod tests {
                 rendered.contains(needle),
                 "rendered ralph.yml must contain {needle:?}, got:\n{rendered}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod yaml_parse_tests {
+    use super::DeclarativeScenario;
+
+    // 回归保护: 所有编译期内嵌的声明式场景 YAML 必须可解析。
+    // 新增/修改场景时如果 YAML 语法错误, 会在 --list 或 run 时 panic, 这里提前拦截。
+    #[test]
+    fn all_scenario_yamls_parse() {
+        let cases: &[(&str, &str)] = &[
+            ("connectivity", include_str!("../../scenarios/connectivity.yaml")),
+            ("single-iter", include_str!("../../scenarios/single-iter.yaml")),
+            ("multi-iter", include_str!("../../scenarios/multi-iter.yaml")),
+            ("completion", include_str!("../../scenarios/completion.yaml")),
+            ("events", include_str!("../../scenarios/events.yaml")),
+            ("backpressure", include_str!("../../scenarios/backpressure.yaml")),
+            ("hat-instances", include_str!("../../scenarios/hat-instances.yaml")),
+            ("hat-instances-zh", include_str!("../../scenarios/hat-instances-zh.yaml")),
+            ("app-server-idle-start-live", include_str!("../../scenarios/app-server-idle-start-live.yaml")),
+            ("steer-multi-turn-live", include_str!("../../scenarios/steer-multi-turn-live.yaml")),
+            ("steer-live-reply-multi-turn", include_str!("../../scenarios/steer-live-reply-multi-turn.yaml")),
+            ("emit-spawn-instance", include_str!("../../scenarios/emit-spawn-instance.yaml")),
+            ("starting-event-inference", include_str!("../../scenarios/starting-event-inference.yaml")),
+            ("starting-event-inference-multi-candidate", include_str!("../../scenarios/starting-event-inference-multi-candidate.yaml")),
+            ("trigger-routing-example", include_str!("../../scenarios/parallel-trigger-routing-example.yaml")),
+            ("pr-review-example", include_str!("../../scenarios/pr-review-example.yaml")),
+            ("release-checklist-example", include_str!("../../scenarios/release-checklist-example.yaml")),
+            ("audit-evidence-pack-example", include_str!("../../scenarios/audit-evidence-pack-example.yaml")),
+            ("customer-advisory-board-prep-example", include_str!("../../scenarios/customer-advisory-board-prep-example.yaml")),
+            ("customer-onboarding-activation-example", include_str!("../../scenarios/customer-onboarding-activation-example.yaml")),
+            ("customer-renewal-desk-example", include_str!("../../scenarios/customer-renewal-desk-example.yaml")),
+            ("executive-business-review-prep-example", include_str!("../../scenarios/executive-business-review-prep-example.yaml")),
+            ("field-enablement-rollout-example", include_str!("../../scenarios/field-enablement-rollout-example.yaml")),
+            ("finance-close-control-room-example", include_str!("../../scenarios/finance-close-control-room-example.yaml")),
+            ("hiring-debrief-panel-example", include_str!("../../scenarios/hiring-debrief-panel-example.yaml")),
+            ("incident-response-war-room-example", include_str!("../../scenarios/incident-response-war-room-example.yaml")),
+            ("launch-readiness-command-example", include_str!("../../scenarios/launch-readiness-command-example.yaml")),
+            ("migration-rehearsal-example", include_str!("../../scenarios/migration-rehearsal-example.yaml")),
+            ("multi-region-pipeline-sync-example", include_str!("../../scenarios/multi-region-pipeline-sync-example.yaml")),
+            ("partner-launch-coordination-example", include_str!("../../scenarios/partner-launch-coordination-example.yaml")),
+            ("postmortem-action-board-example", include_str!("../../scenarios/postmortem-action-board-example.yaml")),
+            ("proposal-assembly-example", include_str!("../../scenarios/proposal-assembly-example.yaml")),
+            ("regional-operating-review-example", include_str!("../../scenarios/regional-operating-review-example.yaml")),
+            ("renewal-risk-calibration-example", include_str!("../../scenarios/renewal-risk-calibration-example.yaml")),
+            ("revops-quote-desk-example", include_str!("../../scenarios/revops-quote-desk-example.yaml")),
+            ("security-exception-review-example", include_str!("../../scenarios/security-exception-review-example.yaml")),
+            ("support-escalation-desk-example", include_str!("../../scenarios/support-escalation-desk-example.yaml")),
+            ("vendor-security-procurement-example", include_str!("../../scenarios/vendor-security-procurement-example.yaml")),
+        ];
+        for (id, yaml) in cases {
+            let spec: DeclarativeScenario = serde_yaml::from_str(yaml)
+                .unwrap_or_else(|e| panic!("invalid YAML for {id}: {e}"));
+            assert!(!spec.id.is_empty(), "scenario {id} must have id");
         }
     }
 }

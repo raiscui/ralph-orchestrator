@@ -205,7 +205,7 @@ pub(in crate::scenarios) fn patch_example_config_for_codex_e2e(
 /// - 这批真实 example 都强调“目录自包含”。
 /// - 但当前 `prompt_file` 仍相对 workspace root 解析。
 /// - 因此 E2E 既要把 example 原目录拷进 workspace,也要在 workspace 根补一份 `PROMPT.md`。
-pub(in crate::scenarios) fn setup_prompt_file_example_workspace(
+pub(crate) fn setup_prompt_file_example_workspace(
     workspace: &Path,
     backend: Backend,
     example_name: &str,
@@ -229,12 +229,10 @@ pub(in crate::scenarios) fn setup_prompt_file_example_workspace(
             config_path.display()
         ))
     })?;
-    let prompt_content = std::fs::read_to_string(&prompt_path).map_err(|error| {
-        ScenarioError::SetupError(format!(
-            "failed to read example prompt {}: {error}",
-            prompt_path.display()
-        ))
-    })?;
+    // 说明:
+    // - 部分 example 使用 config 内联 prompt(无 PROMPT.md),此时跳过 prompt 拷贝。
+    // - 命令式 trigger-routing-example 就是这种形态(prompt 在 ralph.yml 的 event_loop.prompt)。
+    let prompt_content = std::fs::read_to_string(&prompt_path).ok();
 
     let dest_dir = workspace.join(format!("examples/{example_name}"));
     std::fs::create_dir_all(&dest_dir).map_err(|error| {
@@ -249,14 +247,16 @@ pub(in crate::scenarios) fn setup_prompt_file_example_workspace(
     std::fs::write(dest_dir.join("ralph.yml"), patched).map_err(|error| {
         ScenarioError::SetupError(format!("failed to write workspace ralph.yml: {error}"))
     })?;
-    std::fs::write(dest_dir.join("PROMPT.md"), prompt_content.as_str()).map_err(|error| {
-        ScenarioError::SetupError(format!(
-            "failed to write workspace example PROMPT.md: {error}"
-        ))
-    })?;
-    std::fs::write(workspace.join("PROMPT.md"), prompt_content.as_str()).map_err(|error| {
-        ScenarioError::SetupError(format!("failed to write workspace root PROMPT.md: {error}"))
-    })?;
+    if let Some(prompt_content) = &prompt_content {
+        std::fs::write(dest_dir.join("PROMPT.md"), prompt_content.as_str()).map_err(|error| {
+            ScenarioError::SetupError(format!(
+                "failed to write workspace example PROMPT.md: {error}"
+            ))
+        })?;
+        std::fs::write(workspace.join("PROMPT.md"), prompt_content.as_str()).map_err(|error| {
+            ScenarioError::SetupError(format!("failed to write workspace root PROMPT.md: {error}"))
+        })?;
+    }
 
     Ok(ScenarioConfig {
         config_file: format!("examples/{example_name}/ralph.yml").into(),

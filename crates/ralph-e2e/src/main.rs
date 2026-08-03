@@ -54,32 +54,8 @@ use ralph_e2e::{
     ParallelAppServerIdleStartScenario,
     // Tier 8: Parallel Runtime
     ParallelAppServerSteerMultiTurnScenario,
-    ParallelAuditEvidencePackExampleScenario,
-    ParallelCustomerAdvisoryBoardPrepExampleScenario,
-    ParallelCustomerOnboardingActivationExampleScenario,
-    ParallelCustomerRenewalDeskExampleScenario,
-    ParallelExecutiveBusinessReviewPrepExampleScenario,
     ParallelExperimentalDevEngineExampleScenario,
-    ParallelFieldEnablementRolloutExampleScenario,
-    ParallelFinanceCloseControlRoomExampleScenario,
-    ParallelHiringDebriefPanelExampleScenario,
     ParallelHumanApprovalGateExampleScenario,
-    ParallelIncidentResponseWarRoomExampleScenario,
-    ParallelLaunchReadinessCommandExampleScenario,
-    ParallelMigrationRehearsalExampleScenario,
-    ParallelMultiRegionPipelineSyncExampleScenario,
-    ParallelPartnerLaunchCoordinationExampleScenario,
-    ParallelPostmortemActionBoardExampleScenario,
-    ParallelPrReviewExampleScenario,
-    ParallelProposalAssemblyExampleScenario,
-    ParallelRegionalOperatingReviewExampleScenario,
-    ParallelReleaseChecklistExampleScenario,
-    ParallelRenewalRiskCalibrationExampleScenario,
-    ParallelRevopsQuoteDeskExampleScenario,
-    ParallelSecurityExceptionReviewExampleScenario,
-    ParallelSupportEscalationDeskExampleScenario,
-    ParallelTriggerRoutingExampleScenario,
-    ParallelVendorSecurityProcurementExampleScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
     RunConfig,
@@ -359,32 +335,108 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
             "parallel-app-server-steer-live-reply-multi-turn",
             include_str!("../scenarios/steer-live-reply-multi-turn.yaml"),
         )),
-        Box::new(ParallelTriggerRoutingExampleScenario::new()),
+        // trigger-routing-example 已声明化(候选6, example 引用试点)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-trigger-routing-example",
+            include_str!("../scenarios/parallel-trigger-routing-example.yaml"),
+        )),
+        // 以下 example 场景已声明化(候选6): example 引用 + 事件链/payload/gates 断言
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-pr-review-example",
+            include_str!("../scenarios/pr-review-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-release-checklist-example",
+            include_str!("../scenarios/release-checklist-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-audit-evidence-pack-example",
+            include_str!("../scenarios/audit-evidence-pack-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-customer-advisory-board-prep-example",
+            include_str!("../scenarios/customer-advisory-board-prep-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-customer-onboarding-activation-example",
+            include_str!("../scenarios/customer-onboarding-activation-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-customer-renewal-desk-example",
+            include_str!("../scenarios/customer-renewal-desk-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-executive-business-review-prep-example",
+            include_str!("../scenarios/executive-business-review-prep-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-field-enablement-rollout-example",
+            include_str!("../scenarios/field-enablement-rollout-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-finance-close-control-room-example",
+            include_str!("../scenarios/finance-close-control-room-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-hiring-debrief-panel-example",
+            include_str!("../scenarios/hiring-debrief-panel-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-incident-response-war-room-example",
+            include_str!("../scenarios/incident-response-war-room-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-launch-readiness-command-example",
+            include_str!("../scenarios/launch-readiness-command-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-migration-rehearsal-example",
+            include_str!("../scenarios/migration-rehearsal-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-multi-region-pipeline-sync-example",
+            include_str!("../scenarios/multi-region-pipeline-sync-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-partner-launch-coordination-example",
+            include_str!("../scenarios/partner-launch-coordination-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-postmortem-action-board-example",
+            include_str!("../scenarios/postmortem-action-board-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-proposal-assembly-example",
+            include_str!("../scenarios/proposal-assembly-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-regional-operating-review-example",
+            include_str!("../scenarios/regional-operating-review-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-renewal-risk-calibration-example",
+            include_str!("../scenarios/renewal-risk-calibration-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-revops-quote-desk-example",
+            include_str!("../scenarios/revops-quote-desk-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-security-exception-review-example",
+            include_str!("../scenarios/security-exception-review-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-support-escalation-desk-example",
+            include_str!("../scenarios/support-escalation-desk-example.yaml"),
+        )),
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-vendor-security-procurement-example",
+            include_str!("../scenarios/vendor-security-procurement-example.yaml"),
+        )),
+        // experimental-dev-engine(复杂 git seed)与 human-approval-gate(inject + 顺序断言)
+        // 保留命令式: 声明化需要额外能力, 收益低。
         Box::new(ParallelExperimentalDevEngineExampleScenario::new()),
-        Box::new(ParallelPrReviewExampleScenario::new()),
-        Box::new(ParallelReleaseChecklistExampleScenario::new()),
         Box::new(ParallelHumanApprovalGateExampleScenario::new()),
-        Box::new(ParallelIncidentResponseWarRoomExampleScenario::new()),
-        Box::new(ParallelSecurityExceptionReviewExampleScenario::new()),
-        Box::new(ParallelCustomerRenewalDeskExampleScenario::new()),
-        Box::new(ParallelAuditEvidencePackExampleScenario::new()),
-        Box::new(ParallelFinanceCloseControlRoomExampleScenario::new()),
-        Box::new(ParallelHiringDebriefPanelExampleScenario::new()),
-        Box::new(ParallelCustomerOnboardingActivationExampleScenario::new()),
-        Box::new(ParallelSupportEscalationDeskExampleScenario::new()),
-        Box::new(ParallelPartnerLaunchCoordinationExampleScenario::new()),
-        Box::new(ParallelFieldEnablementRolloutExampleScenario::new()),
-        Box::new(ParallelRevopsQuoteDeskExampleScenario::new()),
-        Box::new(ParallelExecutiveBusinessReviewPrepExampleScenario::new()),
-        Box::new(ParallelCustomerAdvisoryBoardPrepExampleScenario::new()),
-        Box::new(ParallelRegionalOperatingReviewExampleScenario::new()),
-        Box::new(ParallelRenewalRiskCalibrationExampleScenario::new()),
-        Box::new(ParallelMultiRegionPipelineSyncExampleScenario::new()),
-        Box::new(ParallelLaunchReadinessCommandExampleScenario::new()),
-        Box::new(ParallelMigrationRehearsalExampleScenario::new()),
-        Box::new(ParallelPostmortemActionBoardExampleScenario::new()),
-        Box::new(ParallelProposalAssemblyExampleScenario::new()),
-        Box::new(ParallelVendorSecurityProcurementExampleScenario::new()),
     ]
 }
 

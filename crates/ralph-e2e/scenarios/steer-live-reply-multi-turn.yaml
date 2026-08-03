@@ -1,0 +1,101 @@
+# steer-live-reply-multi-turn 声明化(候选6)
+id: parallel-app-server-steer-live-reply-multi-turn
+description: Validates REAL codex app-server turn/steer produces visible reply output (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  prompt_source: config
+  max_iterations: 10
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+  env:
+    RALPH_CODEX_APP_SERVER_TRACE: "1"
+    RALPH_CODEX_APP_SERVER_TRACE_STEER_INPUT: "1"
+  config: |
+    cli:
+      backend: "codex"
+
+    event_loop:
+      prompt: |
+        # E2E: parallel-app-server-steer-live-reply-multi-turn (REAL codex app-server)
+
+        你正在运行一个 E2E 场景(真实 codex app-server)。
+        本场景用于验证两件事:
+        1) `turn/steer` 的输入能在真实 app-server 下成功 send/recv。
+        2) steer 输入会进入 thread 历史,并在 **下一次 turn** 中可被模型读取并产生回复(answer)。
+
+        关键约束(必须严格遵守):
+        - 不要调用任何工具,不要读写任何文件,不要提出问题。
+        - 不要输出 Markdown,不要输出空行。
+
+        你必须根据 `## PENDING EVENTS` 里的事件 topic 决定输出内容:
+
+        A) 如果本轮 PENDING EVENTS 里包含 `[task.start]`:
+           - 输出 30 行: STEER_WINDOW_OPEN
+           - 然后立刻停止输出。
+           - 绝对不要输出 LOOP_COMPLETE(否则测试会提前结束)。
+
+        B) 如果本轮 PENDING EVENTS 里包含 `[e2e.reply.step2]`:
+           - 你需要从 thread 历史中找到最近的两条用户输入,它们形如:
+             marker: E2E_...; question: 121+43=?
+           - 对每条输入,输出两行(每行独占一行):
+             - TASK_REQUEST[n]: <该输入的原文>
+             - TASK_FEEDBACK[n]: answer: <加法结果>
+             n 从 1 开始递增。
+           - 当你输出两次 TASK_FEEDBACK 后,输出最后一行: LOOP_COMPLETE,然后停止输出。
+
+        除上述行外,不要输出任何其他文本。
+      completion_promise: "LOOP_COMPLETE"
+      max_iterations: 4
+      max_runtime_seconds: 90
+
+    parallel:
+      enabled: true
+      autoscale:
+        max_running_jobs: 1
+        dynamic_idle_ttl_secs: 30
+      permissions:
+        worktree: allow
+        hooks: allow
+
+    hats: {}
+
+  inject:
+    # 等 ralph#1 进入第一轮
+    - type: wait
+      instance: ralph#1
+      state: running
+      timeout_secs: 60
+    # 第一条 steer(尽早落在 in-flight window)
+    - type: emit
+      topic: e2e.steer
+      payload: "marker: E2E_LIVE_REPLY_STEER_MARKER_1_42; question: 121+43=?"
+      target_instance: ralph#1
+      session_strategy: app_server
+      turn_action: steer
+    # 两条 steer 间隔, 避免模型难以分辨
+    - type: sleep
+      secs: 1
+    - type: emit
+      topic: e2e.steer
+      payload: "marker: E2E_LIVE_REPLY_STEER_MARKER_2_42; question: 10+5=?"
+      target_instance: ralph#1
+      session_strategy: app_server
+      turn_action: steer
+    # step2: 触发下一次 turn, 让模型从 thread 历史读取 steer 输入
+    - type: sleep
+      secs: 1
+    - type: emit
+      topic: e2e.reply.step2
+      payload: "step2"
+      target_instance: ralph#1
+      session_strategy: app_server
+      turn_action: start
+expect:
+  termination: LOOP_COMPLETE
+  output_contains:
+    - "E2E_LIVE_REPLY_STEER_MARKER_1_42"
+    - "E2E_LIVE_REPLY_STEER_MARKER_2_42"
+    - "answer: 164"
+    - "answer: 15"
+    - "[app-server-rpc]"

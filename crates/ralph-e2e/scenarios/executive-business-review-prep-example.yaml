@@ -1,0 +1,48 @@
+# executive_business_review_prep 声明化(候选6)
+id: parallel-executive-business-review-prep-example
+description: Directly runs examples/parallel-executive-business-review-prep and asserts EBR lanes converge into ebr.packet.ready (declarative) (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  example: parallel-executive-business-review-prep
+  max_iterations: 18
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  output_contains:
+    - "[supervisor] instances"
+  events:
+    - topic: ebr.revenue.narrative.review
+      min_count: 1
+    - topic: ebr.product.adoption.review
+      min_count: 1
+    - topic: ebr.risk.outlook.review
+      min_count: 1
+    - topic: ebr.exec.asks.review
+      min_count: 1
+    - topic: revenue.ready
+      min_count: 1
+    - topic: adoption.ready
+      min_count: 1
+    - topic: risk.ready
+      min_count: 1
+    - topic: asks.ready
+      min_count: 1
+    - topic: ebr.packet.request
+      min_count: 1
+    - topic: ebr.packet.ready
+      min_count: 1
+  event_payload_contains:
+    - topic: ebr.packet.ready
+      contains: "ebr_status: READY_FOR_EXEC_REVIEW"
+    - topic: ebr.packet.ready
+      contains: "meeting_tier: Q2_BUSINESS_REVIEW"
+    - topic: ebr.packet.ready
+      contains: "narrative_owner: gm-office"
+  no_jobs_after_loop_complete: true
+  agents_snapshot:
+    min_instances: 5
+    hat_ids: [ebr_chief_of_staff, executive_asks_owner, product_adoption_owner, revenue_narrative_owner, risk_outlook_owner]

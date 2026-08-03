@@ -1,0 +1,48 @@
+# customer_advisory_board_prep 声明化(候选6)
+id: parallel-customer-advisory-board-prep-example
+description: Directly runs examples/parallel-customer-advisory-board-prep and asserts CAB lanes converge into cab.packet.ready (declarative) (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  example: parallel-customer-advisory-board-prep
+  max_iterations: 18
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  output_contains:
+    - "[supervisor] instances"
+  events:
+    - topic: cab.customer.cohort.review
+      min_count: 1
+    - topic: cab.agenda.shaping.review
+      min_count: 1
+    - topic: cab.exec.host.prep.review
+      min_count: 1
+    - topic: cab.logistics.readiness.review
+      min_count: 1
+    - topic: cohort.ready
+      min_count: 1
+    - topic: agenda.ready
+      min_count: 1
+    - topic: host.ready
+      min_count: 1
+    - topic: logistics.ready
+      min_count: 1
+    - topic: cab.packet.request
+      min_count: 1
+    - topic: cab.packet.ready
+      min_count: 1
+  event_payload_contains:
+    - topic: cab.packet.ready
+      contains: "cab_status: READY_TO_CONFIRM"
+  event_absent_prefixes:
+    - "gate."
+  event_absent:
+    - approval.requested
+  no_jobs_after_loop_complete: true
+  agents_snapshot:
+    min_instances: 5
+    hat_ids: [agenda_shaping_owner, cab_program_lead, customer_cohort_owner, executive_host_owner, logistics_readiness_owner]

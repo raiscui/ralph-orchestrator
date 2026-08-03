@@ -1,0 +1,40 @@
+# pr-review-example 声明化(候选6)
+id: parallel-pr-review-example
+description: Directly runs examples/parallel-pr-review and asserts multi-reviewer fanout plus synthesis completion (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  example: parallel-pr-review
+  max_iterations: 18
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  output_contains:
+    - "[supervisor] instances"
+  events:
+    - topic: review.correctness
+      min_count: 1
+    - topic: review.security
+      min_count: 1
+    - topic: review.architecture
+      min_count: 1
+    - topic: correctness.done
+      min_count: 1
+    - topic: security.done
+      min_count: 1
+    - topic: architecture.done
+      min_count: 1
+    - topic: synthesis.request
+      min_count: 1
+    - topic: review.complete
+      min_count: 1
+  event_payload_contains:
+    - topic: review.complete
+      contains: REQUEST_CHANGES
+  no_jobs_after_loop_complete: true
+  agents_snapshot:
+    min_instances: 4
+    hat_ids: [correctness_reviewer, security_reviewer, architecture_reviewer, review_synthesizer]

@@ -1,0 +1,24 @@
+# parallel-trigger-routing-example 声明化(候选6)
+id: parallel-trigger-routing-example
+description: Directly runs examples/parallel-trigger-routing and asserts deterministic hat job run counts (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  example: parallel-trigger-routing
+  max_iterations: 12
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  output_contains:
+    - "[supervisor] instances"
+  hat_run_counts:
+    spec_writer: 2
+    spec_reviewer: 2
+    spec_logger: 3
+  no_jobs_after_loop_complete: true
+  agents_snapshot:
+    min_instances: 3
+    hat_ids: [spec_writer, spec_reviewer, spec_logger]

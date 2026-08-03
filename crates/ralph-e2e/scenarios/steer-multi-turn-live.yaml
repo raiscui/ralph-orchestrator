@@ -1,0 +1,68 @@
+# steer-multi-turn-live 声明化(候选6)
+id: parallel-app-server-steer-multi-turn-live
+description: Validates REAL codex app-server turn/steer works in-flight (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  prompt_source: config
+  max_iterations: 10
+  timeout_secs: 240
+  extra_args: ["--no-tui"]
+  env:
+    RALPH_CODEX_APP_SERVER_TRACE: "1"
+    RALPH_CODEX_APP_SERVER_TRACE_STEER_INPUT: "1"
+  config: |
+    cli:
+      backend: "codex"
+
+    event_loop:
+      prompt: |
+        # E2E: parallel-app-server-steer-multi-turn-live (REAL codex app-server)
+
+        你正在运行一个 E2E 场景。
+        该场景会在你运行期间对 `ralph#1` 注入两次 turn/steer。
+
+        要求(必须严格遵守):
+        - 不要调用任何工具,不要读写任何文件,不要提出问题。
+        - 即使你收到任何 steer 输入(包含 marker/question),也必须完全忽略它们,继续按固定输出执行。
+        - 从现在开始,只输出以下内容,每行独占一行,不要添加编号或解释:
+          - 连续输出 30 行: STEER_WINDOW_OPEN
+          - 最后一行输出: LOOP_COMPLETE
+      completion_promise: "LOOP_COMPLETE"
+      max_iterations: 4
+      max_runtime_seconds: 90
+
+    parallel:
+      enabled: true
+      autoscale:
+        max_running_jobs: 2
+        dynamic_idle_ttl_secs: 30
+      permissions:
+        worktree: allow
+        hooks: allow
+
+    hats: {}
+
+  inject:
+    - type: wait
+      instance: ralph#1
+      state: running
+      timeout_secs: 60
+    # 两条 steer 尽量快地注入 in-flight window
+    - type: emit
+      topic: e2e.steer
+      payload: "marker: E2E_LIVE_STEER_MARKER_1_42; question: 121+43=?"
+      target_instance: ralph#1
+      session_strategy: app_server
+      turn_action: steer
+    - type: emit
+      topic: e2e.steer
+      payload: "marker: E2E_LIVE_STEER_MARKER_2_42; question: 10+5=?"
+      target_instance: ralph#1
+      session_strategy: app_server
+      turn_action: steer
+expect:
+  termination: LOOP_COMPLETE
+  output_contains:
+    - "[app-server-rpc]"
+    - "method=turn/steer"
