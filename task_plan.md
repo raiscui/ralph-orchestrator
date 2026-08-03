@@ -391,3 +391,31 @@
 
 ### 待办(额度恢复后)
 - 剩余 21 个 example 场景 live 补验(403 预扣费额度不足, 非声明化问题)
+
+## [2026-08-03 23:30:00] [Session ID: omx-1785634382266-fz89ur] [记录类型]: minimax 账户适配完成
+
+### 用户指令
+"使用 codex -p minimax 账户" —— 切换到 minimax profile 跑 e2e live 验证
+
+### 关键发现(ralph-example 的 -p 差异)
+- ralph-example/ralph.yml 里 `-p deepseek` 只对 worker(exec 通道)生效
+- ralph#1 走 codex app-server 通道, app-server(<=0.146)不支持 --profile,
+  旧代码直接丢弃 -p → ralph#1 始终用默认账户(此前 403 额度不足的根因)
+- 证据: demo-ds-run.jsonl 中 worker 输出 model: deepseek-v4-flash,
+  ralph#1 无任何 model/provider 痕迹
+
+### 修复
+1. app_server job: profile → --config 覆写(读取 ~/.codex/<profile>.config.toml)
+2. declarative {profile_args}: RALPH_E2E_CODEX_PROFILE env 注入 -p
+3. payload 断言: stdout 完整 payload(避开 events.jsonl 500 字符截断)+
+   JSON 字段语义匹配 + :out:job 前缀归一化
+4. no_jobs 精确匹配(ralph#2 文本误判修复)
+5. human-approval-gate: session_strategy 会话定向(避免 busy 改投 ralph#2)
+
+### live 验证(minimax, 10/10 通过)
+release-checklist 161.4s / human-approval-gate 130.4s / EBR 64.6s /
+regional 88.2s / finance 81.6s / onboarding 88.4s / proposal 126s /
+vendor 122.6s / multi-region 110.8s / trigger-routing 82s(此前)
+
+### 提交
+2d9a370 profile 支持 / 231372e payload 修复 + 会话定向
