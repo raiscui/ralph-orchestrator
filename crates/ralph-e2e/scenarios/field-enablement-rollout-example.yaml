@@ -1,6 +1,6 @@
 # field_enablement_rollout 声明化(候选6)
 id: parallel-field-enablement-rollout-example
-description: Directly runs examples/parallel-field-enablement-rollout and asserts enablement lanes converge into enablement.rollout.ready (declarative) (declarative)
+description: Directly runs examples/parallel-field-enablement-rollout and asserts enablement lanes converge into enablement.rollout.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

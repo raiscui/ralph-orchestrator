@@ -1,6 +1,6 @@
 # customer_advisory_board_prep 声明化(候选6)
 id: parallel-customer-advisory-board-prep-example
-description: Directly runs examples/parallel-customer-advisory-board-prep and asserts CAB lanes converge into cab.packet.ready (declarative) (declarative)
+description: Directly runs examples/parallel-customer-advisory-board-prep and asserts CAB lanes converge into cab.packet.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

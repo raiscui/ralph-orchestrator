@@ -1,6 +1,6 @@
 # customer_renewal_desk 声明化(候选6)
 id: parallel-customer-renewal-desk-example
-description: Directly runs examples/parallel-customer-renewal-desk and asserts renewal lanes converge into renewal.plan.ready (declarative) (declarative)
+description: Directly runs examples/parallel-customer-renewal-desk and asserts renewal lanes converge into renewal.plan.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

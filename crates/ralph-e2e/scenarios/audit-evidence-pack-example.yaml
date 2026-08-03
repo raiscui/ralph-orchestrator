@@ -1,6 +1,6 @@
 # audit_evidence_pack 声明化(候选6)
 id: parallel-audit-evidence-pack-example
-description: Directly runs examples/parallel-audit-evidence-pack and asserts audit lanes converge into audit.packet.ready (declarative) (declarative)
+description: Directly runs examples/parallel-audit-evidence-pack and asserts audit lanes converge into audit.packet.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

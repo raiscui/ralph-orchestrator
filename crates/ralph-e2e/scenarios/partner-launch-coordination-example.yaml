@@ -1,6 +1,6 @@
 # partner_launch_coordination 声明化(候选6)
 id: parallel-partner-launch-coordination-example
-description: Directly runs examples/parallel-partner-launch-coordination and asserts partner lanes converge into partner.launch.ready (declarative) (declarative)
+description: Directly runs examples/parallel-partner-launch-coordination and asserts partner lanes converge into partner.launch.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

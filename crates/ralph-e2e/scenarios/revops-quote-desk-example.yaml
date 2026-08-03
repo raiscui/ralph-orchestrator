@@ -1,6 +1,6 @@
 # revops_quote_desk 声明化(候选6)
 id: parallel-revops-quote-desk-example
-description: Directly runs examples/parallel-revops-quote-desk and asserts quote lanes converge into quote.packet.ready (declarative) (declarative)
+description: Directly runs examples/parallel-revops-quote-desk and asserts quote lanes converge into quote.packet.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

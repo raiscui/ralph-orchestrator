@@ -1,6 +1,6 @@
 # finance_close_control_room 声明化(候选6)
 id: parallel-finance-close-control-room-example
-description: Directly runs examples/parallel-finance-close-control-room and asserts close lanes converge into close.packet.ready (declarative) (declarative)
+description: Directly runs examples/parallel-finance-close-control-room and asserts close lanes converge into close.packet.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

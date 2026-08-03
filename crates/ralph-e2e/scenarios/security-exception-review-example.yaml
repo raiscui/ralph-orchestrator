@@ -1,6 +1,6 @@
 # security_exception_review 声明化(候选6)
 id: parallel-security-exception-review-example
-description: Directly runs examples/parallel-security-exception-review and asserts exception lanes converge into exception.ready (declarative) (declarative)
+description: Directly runs examples/parallel-security-exception-review and asserts exception lanes converge into exception.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

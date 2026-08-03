@@ -1,6 +1,6 @@
 # hiring_debrief_panel 声明化(候选6)
 id: parallel-hiring-debrief-panel-example
-description: Directly runs examples/parallel-hiring-debrief-panel and asserts hiring lanes converge into hiring.packet.ready (declarative) (declarative)
+description: Directly runs examples/parallel-hiring-debrief-panel and asserts hiring lanes converge into hiring.packet.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

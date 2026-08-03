@@ -1,6 +1,6 @@
 # multi_region_pipeline_sync 声明化(候选6)
 id: parallel-multi-region-pipeline-sync-example
-description: Directly runs examples/parallel-multi-region-pipeline-sync and asserts region lanes converge into pipeline.sync.ready (declarative) (declarative)
+description: Directly runs examples/parallel-multi-region-pipeline-sync and asserts region lanes converge into pipeline.sync.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

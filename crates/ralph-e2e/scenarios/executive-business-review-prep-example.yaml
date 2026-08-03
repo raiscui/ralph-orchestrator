@@ -1,6 +1,6 @@
 # executive_business_review_prep 声明化(候选6)
 id: parallel-executive-business-review-prep-example
-description: Directly runs examples/parallel-executive-business-review-prep and asserts EBR lanes converge into ebr.packet.ready (declarative) (declarative)
+description: Directly runs examples/parallel-executive-business-review-prep and asserts EBR lanes converge into ebr.packet.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

@@ -1,6 +1,6 @@
 # migration_rehearsal 声明化(候选6)
 id: parallel-migration-rehearsal-example
-description: Directly runs examples/parallel-migration-rehearsal and asserts rehearsal lanes converge into migration.ready (declarative) (declarative)
+description: Directly runs examples/parallel-migration-rehearsal and asserts rehearsal lanes converge into migration.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

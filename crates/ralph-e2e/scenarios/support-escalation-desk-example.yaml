@@ -1,6 +1,6 @@
 # support_escalation_desk 声明化(候选6)
 id: parallel-support-escalation-desk-example
-description: Directly runs examples/parallel-support-escalation-desk and asserts escalation lanes converge into escalation.plan.ready (declarative) (declarative)
+description: Directly runs examples/parallel-support-escalation-desk and asserts escalation lanes converge into escalation.plan.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

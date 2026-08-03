@@ -1,6 +1,6 @@
 # vendor_security_procurement 声明化(候选6)
 id: parallel-vendor-security-procurement-example
-description: Directly runs examples/parallel-vendor-security-procurement and asserts vendor lanes converge into vendor.ready (declarative) (declarative)
+description: Directly runs examples/parallel-vendor-security-procurement and asserts vendor lanes converge into vendor.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

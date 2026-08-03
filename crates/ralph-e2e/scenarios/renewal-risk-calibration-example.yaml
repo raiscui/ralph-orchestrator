@@ -1,6 +1,6 @@
 # renewal_risk_calibration 声明化(候选6)
 id: parallel-renewal-risk-calibration-example
-description: Directly runs examples/parallel-renewal-risk-calibration and asserts calibration lanes converge into renewal.calibration.ready (declarative) (declarative)
+description: Directly runs examples/parallel-renewal-risk-calibration and asserts calibration lanes converge into renewal.calibration.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

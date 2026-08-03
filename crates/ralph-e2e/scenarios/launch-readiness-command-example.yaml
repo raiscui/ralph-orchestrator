@@ -1,6 +1,6 @@
 # launch_readiness_command 声明化(候选6)
 id: parallel-launch-readiness-command-example
-description: Directly runs examples/parallel-launch-readiness-command and asserts launch lanes converge into launch.command.ready (declarative) (declarative)
+description: Directly runs examples/parallel-launch-readiness-command and asserts launch lanes converge into launch.command.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

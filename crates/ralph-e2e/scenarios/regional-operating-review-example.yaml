@@ -1,6 +1,6 @@
 # regional_operating_review 声明化(候选6)
 id: parallel-regional-operating-review-example
-description: Directly runs examples/parallel-regional-operating-review and asserts regional lanes converge into regional.review.ready (declarative) (declarative)
+description: Directly runs examples/parallel-regional-operating-review and asserts regional lanes converge into regional.review.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

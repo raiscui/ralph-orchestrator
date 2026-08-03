@@ -1,6 +1,6 @@
 # customer_onboarding_activation 声明化(候选6)
 id: parallel-customer-onboarding-activation-example
-description: Directly runs examples/parallel-customer-onboarding-activation and asserts onboarding lanes converge into onboarding.activation.ready (declarative) (declarative)
+description: Directly runs examples/parallel-customer-onboarding-activation and asserts onboarding lanes converge into onboarding.activation.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:

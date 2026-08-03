@@ -1,6 +1,6 @@
 # postmortem_action_board 声明化(候选6)
 id: parallel-postmortem-action-board-example
-description: Directly runs examples/parallel-postmortem-action-board and asserts postmortem lanes converge into postmortem.board.ready (declarative) (declarative)
+description: Directly runs examples/parallel-postmortem-action-board and asserts postmortem lanes converge into postmortem.board.ready (declarative)
 tier: "Tier 8: Parallel Runtime"
 backends: [codex]
 setup:
