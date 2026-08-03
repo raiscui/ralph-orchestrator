@@ -55,7 +55,6 @@ use ralph_e2e::{
     // Tier 8: Parallel Runtime
     ParallelAppServerSteerMultiTurnScenario,
     ParallelExperimentalDevEngineExampleScenario,
-    ParallelHumanApprovalGateExampleScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
     RunConfig,
@@ -433,10 +432,13 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
             "parallel-vendor-security-procurement-example",
             include_str!("../scenarios/vendor-security-procurement-example.yaml"),
         )),
-        // experimental-dev-engine(复杂 git seed)与 human-approval-gate(inject + 顺序断言)
-        // 保留命令式: 声明化需要额外能力, 收益低。
+        // human-approval-gate 已声明化(候选6: wait_event 注入 + --json emit + 事件顺序断言)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-human-approval-gate-example",
+            include_str!("../scenarios/human-approval-gate-example.yaml"),
+        )),
+        // experimental-dev-engine 保留命令式: 依赖复杂 git seed/commit 工作流, 不适合声明化。
         Box::new(ParallelExperimentalDevEngineExampleScenario::new()),
-        Box::new(ParallelHumanApprovalGateExampleScenario::new()),
     ]
 }
 

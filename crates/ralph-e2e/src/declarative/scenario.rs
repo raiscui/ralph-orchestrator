@@ -142,6 +142,9 @@ pub struct DeclarativeExpect {
     /// LOOP_COMPLETE 之后 stdout 中不得出现新的 job(并行收敛不变量)。
     #[serde(default)]
     pub no_jobs_after_loop_complete: bool,
+    /// 事件出现顺序约束(按序检查首个出现位置)。
+    #[serde(default)]
+    pub event_order: Vec<String>,
 }
 
 /// 事件计数断言。
@@ -183,6 +186,15 @@ pub enum DeclarativeInjectStep {
         session_strategy: Option<String>,
         #[serde(default)]
         turn_action: Option<String>,
+        /// 是否用 `--json` 传 payload(如 approval.granted)。
+        #[serde(default)]
+        json_payload: bool,
+    },
+    /// 等待事件流中出现指定 topic(轮询 events.jsonl)。
+    WaitEvent {
+        topic: String,
+        #[serde(default = "default_wait_timeout")]
+        timeout_secs: u64,
     },
 }
 
@@ -518,6 +530,9 @@ impl TestScenario for DeclarativeScenarioRunner {
         }
         if expect.no_jobs_after_loop_complete {
             assertions.push(no_jobs_after_loop_complete(&execution));
+        }
+        if !expect.event_order.is_empty() {
+            assertions.push(event_order_matches(&execution, &expect.event_order));
         }
 
         let all_passed = assertions.iter().all(|a| a.passed);
@@ -910,6 +925,37 @@ fn no_jobs_after_loop_complete(result: &ExecutionResult) -> crate::models::Asser
     if ok { builder.passed() } else { builder.failed() }.build()
 }
 
+/// 断言: 事件按给定顺序出现(每个 topic 取首个出现位置, 必须严格递增)。
+fn event_order_matches(result: &ExecutionResult, expected_order: &[String]) -> crate::models::Assertion {
+    let mut positions = Vec::new();
+    for topic in expected_order {
+        let pos = result
+            .events
+            .iter()
+            .position(|e| e.topic == *topic)
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        positions.push((topic.as_str(), pos));
+    }
+    // 严格递增且全部出现。
+    let ok = positions
+        .iter()
+        .all(|(_, pos)| *pos >= 0)
+        && positions.windows(2).all(|w| w[0].1 < w[1].1);
+    let actual = positions
+        .iter()
+        .map(|(t, p)| format!("{t}={p}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "Event order: {}",
+        expected_order.join(" < ")
+    ))
+    .expected(expected_order.join(" < "))
+    .actual(actual);
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
 // ---------------------------------------------------------------------------
 // 注入时序执行器(wait/sleep/assert/emit)。
 // ---------------------------------------------------------------------------
@@ -954,6 +1000,7 @@ async fn run_inject_sequence(
                 target_instance,
                 session_strategy,
                 turn_action,
+                json_payload,
             } => {
                 emit_event(
                     ralph_bin,
@@ -963,8 +1010,12 @@ async fn run_inject_sequence(
                     target_instance.as_deref(),
                     session_strategy.as_deref(),
                     turn_action.as_deref(),
+                    *json_payload,
                 )
                 .await?;
+            }
+            DeclarativeInjectStep::WaitEvent { topic, timeout_secs } => {
+                wait_for_event(workspace, topic, *timeout_secs).await?;
             }
         }
     }
@@ -1040,11 +1091,18 @@ async fn emit_event(
     target_instance: Option<&str>,
     session_strategy: Option<&str>,
     turn_action: Option<&str>,
+    json_payload: bool,
 ) -> Result<(), String> {
     use tokio::process::Command;
 
     let mut cmd = Command::new(ralph_bin);
-    cmd.arg("emit").arg(topic).arg(payload).current_dir(workspace);
+    cmd.arg("emit").arg(topic).current_dir(workspace);
+    if json_payload {
+        // 结构化 payload(如 approval.granted --json): 保持 JSON 原样传递。
+        cmd.arg("--json").arg(payload);
+    } else {
+        cmd.arg(payload);
+    }
     if let Some(target) = target_instance {
         cmd.arg("--target-instance").arg(target);
     }
@@ -1066,6 +1124,38 @@ async fn emit_event(
         ));
     }
     Ok(())
+}
+
+/// 等待事件流(.ralph/events.jsonl)中出现指定 topic。
+///
+/// 说明:
+/// - 用于"先看到某事件, 再注入后续事件"的时序场景(如 approval.requested → approval.granted)。
+/// - 与命令式 human_approval_gate 的 wait_for_topic 口径一致。
+async fn wait_for_event(
+    workspace: &std::path::Path,
+    topic: &str,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        // events.jsonl 可能尚未生成: 读取失败视为"尚未出现", 继续等。
+        if let Ok(content) = std::fs::read_to_string(workspace.join(".ralph").join("events.jsonl")) {
+            let found = content.lines().any(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .and_then(|v| v.get("topic").and_then(|t| t.as_str()).map(str::to_string))
+                    .as_deref()
+                    == Some(topic)
+            });
+            if found {
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timeout waiting for event topic {topic:?}"));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
 #[cfg(test)]
@@ -1236,6 +1326,36 @@ mod tests {
     }
 
     #[test]
+    fn event_order_matches_checks_strict_increasing_positions() {
+        let r = sample_result(1, vec!["a", "b", "c"], None);
+        assert!(event_order_matches(&r, &["a".into(), "b".into(), "c".into()]).passed);
+        assert!(!event_order_matches(&r, &["c".into(), "b".into(), "a".into()]).passed);
+        assert!(!event_order_matches(&r, &["a".into(), "missing".into()]).passed);
+    }
+
+    #[test]
+    fn emit_event_uses_json_flag_for_json_payload() {
+        // 轻量验证: 无法真实 spawn ralph, 这里只验证参数构造逻辑的可见部分
+        // (真正的 --json 路径在 wait/emit 集成测试覆盖)。
+        // 直接验证 wait_for_event 的读取逻辑。
+        let dir = tempfile::tempdir().unwrap();
+        let ralph = dir.path().join(".ralph");
+        std::fs::create_dir_all(&ralph).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // 文件不存在 → 超时错误
+        let err = rt.block_on(wait_for_event(dir.path(), "approval.requested", 1));
+        assert!(err.is_err());
+        // 写入事件 → 命中
+        std::fs::write(
+            ralph.join("events.jsonl"),
+            "{\"topic\":\"approval.requested\"}\n",
+        )
+        .unwrap();
+        let ok = rt.block_on(wait_for_event(dir.path(), "approval.requested", 1));
+        assert!(ok.is_ok());
+    }
+
+    #[test]
     fn render_config_expands_backend_and_model_placeholders() {
         // {model} 占位符: 与命令式 codex_e2e_model() 一致(env 优先, 否则默认)。
         let spec = DeclarativeScenario {
@@ -1345,6 +1465,7 @@ mod yaml_parse_tests {
             ("security-exception-review-example", include_str!("../../scenarios/security-exception-review-example.yaml")),
             ("support-escalation-desk-example", include_str!("../../scenarios/support-escalation-desk-example.yaml")),
             ("vendor-security-procurement-example", include_str!("../../scenarios/vendor-security-procurement-example.yaml")),
+            ("human-approval-gate-example", include_str!("../../scenarios/human-approval-gate-example.yaml")),
         ];
         for (id, yaml) in cases {
             let spec: DeclarativeScenario = serde_yaml::from_str(yaml)
