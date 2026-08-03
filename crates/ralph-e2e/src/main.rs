@@ -53,14 +53,11 @@ use ralph_e2e::{
     MockConfig,
     ParallelAppServerIdleStartScenario,
     // Tier 8: Parallel Runtime
-    ParallelAppServerSteerLiveReplyMultiTurnScenario,
-    ParallelAppServerSteerMultiTurnLiveScenario,
     ParallelAppServerSteerMultiTurnScenario,
     ParallelAuditEvidencePackExampleScenario,
     ParallelCustomerAdvisoryBoardPrepExampleScenario,
     ParallelCustomerOnboardingActivationExampleScenario,
     ParallelCustomerRenewalDeskExampleScenario,
-    ParallelEmitSpawnInstanceScenario,
     ParallelExecutiveBusinessReviewPrepExampleScenario,
     ParallelExperimentalDevEngineExampleScenario,
     ParallelFieldEnablementRolloutExampleScenario,
@@ -80,7 +77,6 @@ use ralph_e2e::{
     ParallelRenewalRiskCalibrationExampleScenario,
     ParallelRevopsQuoteDeskExampleScenario,
     ParallelSecurityExceptionReviewExampleScenario,
-    ParallelStartingEventInferenceScenario,
     ParallelSupportEscalationDeskExampleScenario,
     ParallelTriggerRoutingExampleScenario,
     ParallelVendorSecurityProcurementExampleScenario,
@@ -331,9 +327,21 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
             "parallel-hat-instances-zh",
             include_str!("../scenarios/hat-instances-zh.yaml"),
         )),
-        Box::new(ParallelStartingEventInferenceScenario::new()),
-        Box::new(ParallelStartingEventInferenceScenario::new_multi_candidate()),
-        Box::new(ParallelEmitSpawnInstanceScenario::new()),
+        // starting-event-inference 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-starting-event-inference",
+            include_str!("../scenarios/starting-event-inference.yaml"),
+        )),
+        // starting-event-inference-multi-candidate 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-starting-event-inference-multi-candidate",
+            include_str!("../scenarios/starting-event-inference-multi-candidate.yaml"),
+        )),
+        // emit-spawn-instance 已声明化(候选6); {model} 占位符与命令式等价
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-emit-spawn-instance",
+            include_str!("../scenarios/emit-spawn-instance.yaml"),
+        )),
         Box::new(ParallelAppServerIdleStartScenario::new()),
         // app-server-idle-start-live 已声明化(候选6 inject 试点)
         Box::new(ralph_e2e::declarative::from_yaml(
@@ -341,8 +349,16 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
             include_str!("../scenarios/app-server-idle-start-live.yaml"),
         )),
         Box::new(ParallelAppServerSteerMultiTurnScenario::new()),
-        Box::new(ParallelAppServerSteerMultiTurnLiveScenario::new()),
-        Box::new(ParallelAppServerSteerLiveReplyMultiTurnScenario::new()),
+        // steer-multi-turn-live 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-app-server-steer-multi-turn-live",
+            include_str!("../scenarios/steer-multi-turn-live.yaml"),
+        )),
+        // steer-live-reply-multi-turn 已声明化(候选6)
+        Box::new(ralph_e2e::declarative::from_yaml(
+            "parallel-app-server-steer-live-reply-multi-turn",
+            include_str!("../scenarios/steer-live-reply-multi-turn.yaml"),
+        )),
         Box::new(ParallelTriggerRoutingExampleScenario::new()),
         Box::new(ParallelExperimentalDevEngineExampleScenario::new()),
         Box::new(ParallelPrReviewExampleScenario::new()),

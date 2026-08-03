@@ -16,7 +16,7 @@ setup:
       args:
         - exec
         - -m
-        - deepseek-v4-flash
+        - {model}
         - --full-auto
         # 降低推理强度/总结输出（避免 E2E 噪音与延迟）。
         - -c

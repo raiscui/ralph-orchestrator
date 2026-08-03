@@ -1,0 +1,116 @@
+# emit-spawn-instance 声明化(候选6)
+id: parallel-emit-spawn-instance
+description: Validates ralph#1 spawns a dynamic worker via ralph emit --spawn-instance and receives spawn.done ACK (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  prompt_source: config
+  max_iterations: 20
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+  # ralph 从 PROMPT.md 读取入口 prompt(config 模式); 约束语义在 ralph_prompt
+  write_prompt_to: |
+    # E2E Prompt
+
+    请严格遵守 `event_loop.ralph_prompt` 的协议.
+    不要自作主张修改流程.
+  config: |
+    # Parallel emit spawn_instance E2E config for {backend}
+    cli:
+      backend: custom
+      command: codex
+      args:
+        - exec
+        - -m
+        - {model}
+        - --full-auto
+        - --sandbox
+        - danger-full-access
+        - -c
+        - 'model_reasoning_effort="low"'
+        - -c
+        - 'model_reasoning_summary="none"'
+        - -c
+        - 'rmcp_client=false'
+        - -c
+        - 'features.hooks=false'
+
+
+    event_loop:
+      completion_promise: "LOOP_COMPLETE"
+      # workflow entry/exit（官方并行语义锚点）
+      starting_event: "spawn.task"
+      complete_publishes: "spawn.done"
+      max_iterations: 12
+      max_runtime_seconds: 120
+      # Ralph-only prompt: 强约束 `ralph#1` 行为,避免 prompt 污染其它 hats
+      ralph_prompt: |
+        # E2E: parallel-emit-spawn-instance
+
+        Marker: E2E_SPAWN_MARKER_42
+
+        ## If you receive task.start (fresh)
+        - You MUST emit the workflow entry event `spawn.task` using the CLI `ralph emit`.
+        - You MUST NOT output any `<event ...>` blocks in this job (especially do NOT output `<event topic="spawn.task">`).
+        - First print EXACTLY ONE line that starts with `[E2E_CMD]`:
+          [E2E_CMD] ralph emit spawn.task "marker: E2E_SPAWN_MARKER_42; question: 121+43=?" --target worker --spawn-instance
+        - Then execute the exact command above (tool/shell).
+        - Then stop. Do NOT output LOOP_COMPLETE.
+
+        ## If you receive spawn.done
+        - Output two lines and stop:
+          ACK marker: E2E_SPAWN_MARKER_42 answer: 164
+          LOOP_COMPLETE
+
+    parallel:
+      enabled: true
+      autoscale:
+        max_running_jobs: 4
+        dynamic_idle_ttl_secs: 30
+
+      # E2E 场景中不启用 ask gate，避免“等待 human”导致卡住
+      permissions:
+        worktree: allow
+        hooks: allow
+
+    hats:
+      worker:
+        name: "Worker"
+        description: "Replies spawn.done to ralph#1"
+        instances: 1
+        triggers:
+          - spawn.task
+        publishes:
+          - spawn.done
+        instructions: |
+          You are Worker.
+
+          IMPORTANT (E2E harness):
+          - Do NOT run tests, do NOT run shell commands/tools, do NOT edit files.
+          - Do NOT output LOOP_COMPLETE.
+
+          When you receive spawn.task:
+          - Emit EXACTLY ONE spawn.done event to ralph#1 using this exact format (no code fences):
+
+          <event topic="spawn.done" target_instance="ralph#1">
+          marker: E2E_SPAWN_MARKER_42
+          question: 121+43=?
+          answer: 164
+          </event>
+
+          Then stop.
+
+expect:
+  termination: LOOP_COMPLETE
+  output_contains:
+    - "[E2E_CMD] ralph emit spawn.task"
+    - "E2E_SPAWN_MARKER_42"
+    - "121+43=?"
+  events:
+    - topic: spawn.done
+      min_count: 1
+  agents_snapshot:
+    has_dynamic_instance: true
+  instance_last_input:
+    - instance: ralph#1
+      topic: spawn.done

@@ -45,7 +45,7 @@ const DEFAULT_RALPH_E2E_CODEX_MODEL: &str = "gpt-5.5";
 /// 说明：
 /// - live E2E 依赖外部 provider,硬编码模型会把"模型不可用"误报成 runtime 语义失败。
 /// - 默认值跟当前仓库开发机 Codex 配置保持一致；需要切换 provider/model 时只改环境变量。
-pub(in crate::scenarios) fn codex_e2e_model() -> String {
+pub(crate) fn codex_e2e_model() -> String {
     codex_e2e_model_from_lookup(|name| std::env::var(name).ok())
 }
 

@@ -53,6 +53,9 @@ pub struct DeclarativeSetup {
     /// 额外环境变量(透传给 ralph 进程)。
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// 将指定内容写入 workspace 的 PROMPT.md(prompt_source: config 且 ralph 读 prompt_file 时使用)。
+    #[serde(default)]
+    pub write_prompt_to: Option<String>,
 }
 
 /// expect: 期望(映射到内置断言)。
@@ -96,12 +99,21 @@ pub struct DeclarativeExpect {
     /// agents.json 快照断言(parallel)。
     #[serde(default)]
     pub agents_snapshot: Option<DeclarativeAgentsSnapshot>,
+    /// 实例 last_input.topic 断言(parallel, 读 agents.json)。
+    #[serde(default)]
+    pub instance_last_input: Vec<DeclarativeLastInput>,
     /// 必须存在的产物文件(相对 workspace)。
     #[serde(default)]
     pub artifacts: Vec<String>,
     /// 输出必须包含的文本。
     #[serde(default)]
     pub output_contains: Vec<String>,
+    /// 第一个 workflow entry 事件 topic(starting_event 未配置时的推测断言)。
+    #[serde(default)]
+    pub first_entry: Option<String>,
+    /// 事件流中不允许出现的 topic(如 distractor hat 事件)。
+    #[serde(default)]
+    pub event_absent: Vec<String>,
 }
 
 /// 事件计数断言。
@@ -141,6 +153,8 @@ pub enum DeclarativeInjectStep {
         target_instance: Option<String>,
         #[serde(default)]
         session_strategy: Option<String>,
+        #[serde(default)]
+        turn_action: Option<String>,
     },
 }
 
@@ -169,6 +183,16 @@ pub struct DeclarativeAgentsSnapshot {
     pub min_instances: usize,
     #[serde(default)]
     pub hat_ids: Vec<String>,
+    /// 是否要求存在动态实例(is_dynamic=true, 含 completed)。
+    #[serde(default)]
+    pub has_dynamic_instance: bool,
+}
+
+/// 实例 last_input 断言。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeclarativeLastInput {
+    pub instance: String,
+    pub topic: String,
 }
 
 /// 声明式场景 runner: 实现 TestScenario, 让现有 harness 直接支持。
@@ -183,12 +207,21 @@ impl DeclarativeScenarioRunner {
         Self { spec, base_dir }
     }
 
-    /// 渲染 ralph.yml 模板({backend} 占位符)。
+    /// 渲染 ralph.yml 模板({backend} / {model} 占位符)。
+    ///
+    /// 说明:
+    /// - `{backend}`: 按 e2e 后端名展开(与命令式场景一致)。
+    /// - `{model}`: 按 `codex_e2e_model()` 展开(env `RALPH_E2E_CODEX_MODEL` 优先, 否则默认),
+    ///   避免声明式 YAML 硬编码模型导致与命令式行为不一致。
     fn render_config(&self, backend: Backend) -> String {
         self.spec
             .setup
             .config
             .replace("{backend}", backend.as_config_str())
+            .replace(
+                "{model}",
+                &crate::scenarios::parallel::codex_e2e_model(),
+            )
     }
 }
 
@@ -238,6 +271,13 @@ impl TestScenario for DeclarativeScenarioRunner {
         std::fs::write(&config_path, config_content).map_err(|e| {
             ScenarioError::SetupError(format!("failed to write ralph.yml: {e}"))
         })?;
+
+        // 部分场景依赖 ralph 从 PROMPT.md 读取入口 prompt(prompt_source: config)。
+        if let Some(content) = &self.spec.setup.write_prompt_to {
+            std::fs::write(workspace.join("PROMPT.md"), content).map_err(|e| {
+                ScenarioError::SetupError(format!("failed to write PROMPT.md: {e}"))
+            })?;
+        }
 
         // prompt: 内联 / 文件 / config(ralph_prompt)。
         let prompt = match self.spec.setup.prompt_source.as_deref() {
@@ -368,8 +408,21 @@ impl TestScenario for DeclarativeScenarioRunner {
                 snapshot_expect,
             ));
         }
+        for last_input_expect in &expect.instance_last_input {
+            assertions.push(instance_last_input_matches(
+                executor.workspace(),
+                &last_input_expect.instance,
+                &last_input_expect.topic,
+            ));
+        }
         for artifact in &expect.artifacts {
             assertions.push(artifact_exists(executor.workspace(), artifact));
+        }
+        if let Some(topic) = &expect.first_entry {
+            assertions.push(first_entry_matches(&execution, topic));
+        }
+        for absent in &expect.event_absent {
+            assertions.push(event_absent(&execution, absent));
         }
 
         let all_passed = assertions.iter().all(|a| a.passed);
@@ -566,9 +619,25 @@ fn agents_snapshot_matches(
                     })
                     .cloned()
                     .collect();
-                let ok = count >= expect.min_instances && missing.is_empty();
+                let has_dynamic = expect.has_dynamic_instance && {
+                    let dynamic = instances.iter().any(|i| {
+                        i.get("is_dynamic").and_then(|v| v.as_bool()) == Some(true)
+                    });
+                    // 动态实例可能完成后退场(completed_dynamic_instances)
+                    let completed_dynamic = value
+                        .get("completed_dynamic_instances")
+                        .and_then(|v| v.as_array())
+                        .map(|list| !list.is_empty())
+                        .unwrap_or(false);
+                    dynamic || completed_dynamic
+                };
+                let ok = count >= expect.min_instances
+                    && missing.is_empty()
+                    && (!expect.has_dynamic_instance || has_dynamic);
                 let actual = if missing.is_empty() {
-                    format!("instance_count={count}")
+                    format!(
+                        "instance_count={count}, has_dynamic={has_dynamic}"
+                    )
                 } else {
                     format!("instance_count={count}, missing={missing:?}")
                 };
@@ -584,6 +653,46 @@ fn agents_snapshot_matches(
             expect.min_instances, expect.hat_ids
         ))
         .actual(actual);
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+fn instance_last_input_matches(
+    workspace: &std::path::Path,
+    instance: &str,
+    expected_topic: &str,
+) -> crate::models::Assertion {
+    let path = workspace.join(".ralph").join("agents.json");
+    let (ok, actual) = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => {
+                let topic = value
+                    .get("instances")
+                    .and_then(|v| v.as_array())
+                    .and_then(|list| {
+                        list.iter().find(|i| {
+                            i.get("instance_id").and_then(|v| v.as_str())
+                                == Some(instance)
+                        })
+                    })
+                    .and_then(|i| i.get("last_input"))
+                    .and_then(|li| li.get("topic"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                match topic {
+                    Some(t) if t == expected_topic => (true, format!("topic={t}")),
+                    Some(t) => (false, format!("topic={t} (expected {expected_topic})")),
+                    None => (false, "no last_input".to_string()),
+                }
+            }
+            Err(e) => (false, format!("invalid JSON: {e}")),
+        },
+        Err(e) => (false, format!("missing: {e}")),
+    };
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "{instance} last_input.topic == {expected_topic}"
+    ))
+    .expected(expected_topic)
+    .actual(actual);
     if ok { builder.passed() } else { builder.failed() }.build()
 }
 
@@ -603,6 +712,44 @@ fn output_contains(result: &ExecutionResult, needle: &str) -> crate::models::Ass
         .expected(format!("stdout contains {needle:?}"))
         .actual(if ok { "found".to_string() } else { "missing".to_string() });
     if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: ralph#1 在 task.start/task.resume 之后发布的第一个事件 topic。
+///
+/// 说明:
+/// - 用于 `event_loop.starting_event` 未配置时,验证 coordinator 从拓扑推测入口事件。
+/// - 与命令式 starting_event_inference 的 workflow_entry_inferred 口径一致。
+fn first_entry_matches(result: &ExecutionResult, expected_topic: &str) -> crate::models::Assertion {
+    let mut first: Option<&str> = None;
+    for e in &result.events {
+        if e.source_instance.as_deref() != Some("ralph#1") {
+            continue;
+        }
+        if matches!(e.topic.as_str(), "task.start" | "task.resume") {
+            continue;
+        }
+        first = Some(e.topic.as_str());
+        break;
+    }
+    let ok = first == Some(expected_topic);
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "First ralph#1 workflow entry event is {expected_topic:?}"
+    ))
+    .expected(expected_topic)
+    .actual(match first {
+        Some(topic) => format!("first_entry={topic}"),
+        None => "first_entry=<none>".to_string(),
+    });
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: 事件流中不存在指定 topic(distractor hat 不应被触发)。
+fn event_absent(result: &ExecutionResult, topic: &str) -> crate::models::Assertion {
+    let present = result.events.iter().any(|e| e.topic == topic);
+    let builder = crate::scenarios::AssertionBuilder::new(format!("Event absent: {topic:?}"))
+        .expected(format!("events.jsonl does NOT contain {topic:?}"))
+        .actual(if present { "present".to_string() } else { "absent".to_string() });
+    if present { builder.failed() } else { builder.passed() }.build()
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +795,7 @@ async fn run_inject_sequence(
                 payload,
                 target_instance,
                 session_strategy,
+                turn_action,
             } => {
                 emit_event(
                     ralph_bin,
@@ -656,6 +804,7 @@ async fn run_inject_sequence(
                     payload,
                     target_instance.as_deref(),
                     session_strategy.as_deref(),
+                    turn_action.as_deref(),
                 )
                 .await?;
             }
@@ -732,6 +881,7 @@ async fn emit_event(
     payload: &str,
     target_instance: Option<&str>,
     session_strategy: Option<&str>,
+    turn_action: Option<&str>,
 ) -> Result<(), String> {
     use tokio::process::Command;
 
@@ -742,6 +892,9 @@ async fn emit_event(
     }
     if let Some(strategy) = session_strategy {
         cmd.arg("--session-strategy").arg(strategy);
+    }
+    if let Some(action) = turn_action {
+        cmd.arg("--turn-action").arg(action);
     }
     let output = cmd
         .output()
@@ -871,5 +1024,91 @@ mod tests {
         let r = sample_result(1, vec![], Some("LOOP_COMPLETE"));
         assert!(termination_matches(&r, "LOOP_COMPLETE").passed);
         assert!(!termination_matches(&r, "MAX_ITERATIONS").passed);
+    }
+
+    #[test]
+    fn first_entry_matches_skips_task_start_and_resume() {
+        // 构造事件: task.start(task.start) → build.done → spec.start
+        let mut r = sample_result(2, vec!["task.start", "build.done", "spec.start"], None);
+        r.events[0].source_instance = Some("ralph#1".to_string());
+        r.events[1].source_instance = Some("ralph#1".to_string());
+        r.events[2].source_instance = Some("worker#1".to_string());
+        // 第一个 ralph#1 非 task.start/resume 事件是 build.done
+        assert!(first_entry_matches(&r, "build.done").passed);
+        assert!(!first_entry_matches(&r, "spec.start").passed);
+        // 忽略其它实例的事件
+        let mut r2 = sample_result(1, vec!["spec.start"], None);
+        r2.events[0].source_instance = Some("worker#1".to_string());
+        assert!(!first_entry_matches(&r2, "spec.start").passed);
+        // 无 ralph#1 事件
+        let r3 = sample_result(1, vec![], None);
+        assert!(!first_entry_matches(&r3, "spec.start").passed);
+    }
+
+    #[test]
+    fn event_absent_detects_presence() {
+        let r = sample_result(1, vec!["docs.start", "build.done"], None);
+        assert!(event_absent(&r, "docs.done").passed);
+        assert!(!event_absent(&r, "docs.start").passed);
+        assert!(!event_absent(&r, "build.done").passed);
+    }
+
+    #[test]
+    fn render_config_expands_backend_and_model_placeholders() {
+        // {model} 占位符: 与命令式 codex_e2e_model() 一致(env 优先, 否则默认)。
+        let spec = DeclarativeScenario {
+            id: "placeholder-test".to_string(),
+            description: String::new(),
+            tier: String::new(),
+            backends: vec!["codex".to_string()],
+            setup: DeclarativeSetup {
+                config: "backend={backend}\nmodel={model}".to_string(),
+                prompt: None,
+                prompt_file: None,
+                max_iterations: None,
+                timeout_secs: None,
+                extra_args: vec![],
+                prompt_source: None,
+                inject: vec![],
+                env: Default::default(),
+                write_prompt_to: None,
+            },
+            expect: DeclarativeExpect::default(),
+        };
+        let runner = DeclarativeScenarioRunner::new(spec, PathBuf::from("."));
+        let rendered = runner.render_config(Backend::Codex);
+        assert!(rendered.contains("backend=codex"));
+        assert!(
+            rendered.contains(&format!("model={}", crate::scenarios::parallel::codex_e2e_model())),
+            "rendered config must use codex_e2e_model(): {rendered}"
+        );
+    }
+
+    #[test]
+    fn emit_spawn_yaml_renders_full_config() {
+        // 回归保护: emit-spawn YAML 的 config 块必须完整渲染,
+        // 不能因为 ralph_prompt 块缩进错误而截断(event_loop 之后的内容丢失)。
+        let yaml = include_str!("../../scenarios/emit-spawn-instance.yaml");
+        let runner = super::super::from_yaml("parallel-emit-spawn-instance", yaml);
+        let dir = tempfile::tempdir().unwrap();
+        let _config = runner
+            .setup(dir.path(), Backend::Codex)
+            .expect("setup should succeed");
+        let rendered = std::fs::read_to_string(dir.path().join("ralph.yml"))
+            .expect("ralph.yml should be written");
+        for needle in [
+            "ralph_prompt: |",
+            "E2E_SPAWN_MARKER_42",
+            "[E2E_CMD] ralph emit spawn.task",
+            "parallel:",
+            "hats:",
+            "worker:",
+            "spawn.done",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "rendered ralph.yml must contain {needle:?}, got:\n{rendered}"
+            );
+        }
     }
 }

@@ -1,0 +1,118 @@
+# starting-event-inference 声明化(候选6): 单候选入口推测
+id: parallel-starting-event-inference
+description: Validates ralph#1 infers workflow entry event when starting_event is not set (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  max_iterations: 20
+  timeout_secs: 300
+  extra_args: ["--no-tui"]
+  prompt: |
+    You are running an E2E test for Ralph's parallel runtime.
+
+    Objective:
+    - `event_loop.starting_event` is intentionally NOT set.
+    - You MUST infer the correct workflow entry event from the hat topology and start the workflow.
+    - This workflow is: Planner runs first, then Builder runs.
+    - When you observe the completion candidate event `build.done`, output `LOOP_COMPLETE` on its own line and stop.
+
+    Constraints:
+    - Do NOT implement code.
+    - Do NOT run tools or commands.
+    - Do NOT edit files.
+  config: |
+    # Parallel starting_event inference E2E config for {backend}
+    cli:
+      backend: custom
+      command: codex
+      args:
+        - exec
+        - -m
+        - {model}
+        - --full-auto
+        - -c
+        - 'model_reasoning_effort="low"'
+        - -c
+        - 'model_reasoning_summary="none"'
+        - -c
+        - 'rmcp_client=false'
+        - -c
+        - 'features.hooks=false'
+
+
+    event_loop:
+      completion_promise: "LOOP_COMPLETE"
+      complete_publishes: "build.done"
+      max_iterations: 12
+      max_runtime_seconds: 120
+
+    parallel:
+      enabled: true
+      autoscale:
+        max_running_jobs: 2
+        dynamic_idle_ttl_secs: 30
+
+      permissions:
+        worktree: allow
+        hooks: allow
+
+    hats:
+      planner:
+        name: "Planner"
+        description: "Converts spec.start into build.task"
+        triggers:
+          - spec.start
+        publishes:
+          - build.task
+        instructions: |
+          You are Planner.
+
+          When you receive `spec.start`:
+          - Do NOT implement code.
+          - Emit EXACTLY ONE `build.task` event using this exact format:
+
+          <event topic="build.task">
+          from: planner
+          </event>
+
+          Then stop.
+
+      builder:
+        name: "Builder"
+        description: "Converts build.task into build.done"
+        triggers:
+          - build.task
+        publishes:
+          - build.done
+        instructions: |
+          You are Builder.
+
+          When you receive `build.task`:
+          - Do NOT implement code.
+          - Emit EXACTLY ONE `build.done` event using this exact format:
+
+          <event topic="build.done">
+          status: ok
+          </event>
+
+          Then stop.
+
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  termination: LOOP_COMPLETE
+  output_contains:
+    - "[supervisor] instances"
+  first_entry: spec.start
+  event_absent: []
+  events:
+    - topic: spec.start
+      min_count: 1
+    - topic: build.task
+      min_count: 1
+    - topic: build.done
+      min_count: 1
+  agents_snapshot:
+    min_instances: 2
+    hat_ids: [planner, builder]
