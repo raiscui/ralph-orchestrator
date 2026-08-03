@@ -210,3 +210,56 @@
 
 - [x] openspec/specs/parallel-trigger-routing/spec.md 增加 2 个场景: session-directed 不改投 + 会话上下文保持
 - [x] openspec validate --all --strict: 28 passed 0 failed
+
+## [2026-08-02 18:55:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: ralph-example 配置修复
+
+- [x] 检查: 字段全部有效; 内容过时(缺 commit 顶层字段契约, 与仓库 example 差 65 行); prompt_file 悬空(硬失败)
+- [x] 修复: 同步仓库最新 ralph.yml + 创建 PROMPT.md/README.md; 路径引用修正
+- [x] 验证: hats 命令 3 hat 正常加载; doctor 0 errors(7 warnings 均与配置过期无关)
+
+## [2026-08-02 19:00:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: ralph-example PROMPT.md 重写为具体 example
+
+- [x] 原 PROMPT.md 是并行自检模板(模板化措辞), 重写为具体演示 example
+- [x] demo-greeter: 两条策略实验(bash 直写 vs 参数化函数)→ 审计 → 集成 → 收敛闭环
+- [x] 验证命令全部可真跑(断言/退出码), 与 ralph.yml 协议对齐(commit 顶层字段、final_verification 一一对应)
+
+## [2026-08-02 19:10:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: ralph-example demo 实跑验证
+
+- [x] git init + 初始 commit; ralph run 完整闭环(341s, CompletionPromise)
+- [x] 事件链与期望一致: task×2 → result×2 → reviewed×2(approved) → integration×1 → applied+complete → LOOP_COMPLETE
+- [x] 产物: tools/greeter.sh(100755), 输出断言 PASS, 无参数 exit=1, 主工作区 commit 24ee2d2
+
+## [2026-08-02 19:25:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: PROMPT.md 自然语言版重写 + 实跑验证
+
+- [x] 自然语言任务("多种排序算法并行实现")替代结构化实验条目模板
+- [x] 实跑: Auto-Plan 自动规划 3 条实验(冒泡/快排/内置 sorted), topology.spawn_group 并行组, 8 runner 并发
+- [x] 事件链: task×3 → result×3 → reviewed×3(approved) → integration×1 → applied+complete → LOOP_COMPLETE(474s)
+- [x] 产物: tools/sort.py(采纳内置 sorted), 断言 PASS, 未采纳实现清理干净
+
+## [2026-08-02 23:15:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: 改进1+2 落地与验证
+
+- [x] 改进1: PROMPT.md 加性能基准(10,000 随机整数计时)+ COMPARISON.md 对比结论要求 + 限定恰好 3 条实验
+- [x] 改进2: scripts/demo-check.sh 回归检查(termination/事件链/产物/COMPARISON, 退出码)
+- [x] demo-bench 验证: 脚本正确发现 6 条实验未收敛(MaxRuntime, 5 FAIL)
+- [x] demo-v2 验证: 卡住根因 = codex 账户额度不足(¥0.03, 403 预扣失败), 非 demo 问题
+- [ ] 额度恢复后重跑 demo-v2 验证完整闭环(3 实验 + 性能基准 + COMPARISON + demo-check 全 PASS)
+
+## [2026-08-03 00:30:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: deepseek 适配完成
+
+- [x] 最小实验: deepseek 对简短指令+格式示例完美遵循(事件块精确输出)
+- [x] ralph-example ralph_prompt 极简版(示例驱动, 去掉窗口/backpressure 复杂语义)
+- [x] 实测: task×3 → result×3 → reviewed×3 → integration → applied+complete → LOOP_COMPLETE(599s, CompletionPromise)
+- [x] COMPARISON.md 性能对比生成(冒泡 2791.9ms vs 快排 40.8ms vs 内置 28.4ms)
+- [x] demo-check.sh 修复(-x → -f), 10/10 全 PASS
+
+## [2026-08-03 00:40:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: 候选5 + 经验沉淀
+
+- [ ] 候选5: EventLoop 窄 interface(事实核查 → grilling → 实施)
+- [ ] deepseek/架构经验沉淀到 EXPERIENCE.md
+
+## [2026-08-03 01:30:00] [Session ID: omx-1785579233065-awidzo] [记录类型]: 候选5 完成
+
+- [x] EventLoop::run 窄入口 + PromptExecutor port + RunHooks; cli 1247→565 行
+- [x] adapters PtyPromptExecutor(PTY+CliExecutor 双路径/角色参数/展示工厂)
+- [x] 测试: core 645+ / adapters 126 / cli 171+ 全过; 串行真实 run(deepseek) 27.9s CompletionPromise
+- [x] 提交 3ff4b47 + 01ece15, 已推送
