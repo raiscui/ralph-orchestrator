@@ -721,6 +721,11 @@ struct CleanArgs {
     /// Clean diagnostic logs instead of .agent directory
     #[arg(long)]
     diagnostics: bool,
+
+    /// Clean event run history (`.ralph/events*.jsonl` + `current-events` marker)
+    /// instead of the agent directory.
+    #[arg(long, conflicts_with = "diagnostics")]
+    events: bool,
 }
 
 /// Arguments for the emit subcommand.
@@ -2159,6 +2164,12 @@ fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -
     if args.diagnostics {
         let workspace_root = std::env::current_dir().context("Failed to get current directory")?;
         return ralph_cli::clean_diagnostics(&workspace_root, use_colors, args.dry_run);
+    }
+
+    // If --events flag is set, clean event run history only
+    if args.events {
+        let workspace_root = std::env::current_dir().context("Failed to get current directory")?;
+        return ralph_cli::clean_events(&workspace_root, use_colors, args.dry_run);
     }
 
     // Otherwise, clean .agent directory (existing behavior)

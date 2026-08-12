@@ -280,7 +280,8 @@ ralph emit "review.done" --json '{"status": "approved", "issues": 0}'
 
 ### ralph clean
 
-Clean up `.agent/` directory.
+By default, deletes the whole `.agent/` directory — scratchpad, `memories.md`, and
+`tasks.jsonl` included. Use `--diagnostics` or `--events` to target run artifacts instead.
 
 ```bash
 ralph clean [OPTIONS]
@@ -290,8 +291,11 @@ ralph clean [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--diagnostics` | Clean diagnostics directory |
-| `--all` | Clean everything |
+| `--diagnostics` | Clean `.ralph/diagnostics` instead of the agent directory |
+| `--events` | Clean event run history: `.ralph/events.jsonl`, `.ralph/events-*.jsonl`, and the `.ralph/current-events` marker |
+| `--dry-run` | Preview deletions |
+
+`--diagnostics` and `--events` are mutually exclusive; run the command twice to clear both.
 
 **Examples:**
 
