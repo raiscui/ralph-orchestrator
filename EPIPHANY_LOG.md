@@ -699,3 +699,80 @@
 ### 后续讨论入口
 - 继续 4.x manual continue 时,`continued_by_human` 应走同一套 scheduler path,并最终落到 `retrying -> recovered/exhausted`。
 - 继续 5.x observability 时,agents snapshot 应能把 pending 和 terminal recoverable 状态区分展示。
+
+## [2026-08-12 21:20:00] [Session ID: omx-1786419140441-df5ql8] 主题: cherry-pick 「risk group」标签必须 dry-run 实证,zero/small/medium risk 全是脆性假设
+
+### 发现来源
+
+Group 2 6 项全部 dry-run 失败,proposal 标为「small-risk」但全部冲突。
+
+### 核心问题
+
+proposal 给 cherry-pick 打的「zero/small/medium risk」分级是基于 commit message 与
+scope 推测,不是 dry-run 实证。本地 main 的架构调整(EventLoop 收窄 / 大量
+adapter 重写 / mcp.rs 删除)让这些 scope 假设全部失效。
+
+### 为什么重要
+
+直接后果:
+- 6 项 Group 2「small-risk」全部冲突 -> 14 行 Group 1 + 2 14 行(假设可执行)
+  -> 实际只有 2 项可落地(1.1 manual port + 1.6 partial)
+- 影响 proposal 数据可信度:所有「risk group」标签都需要重新审查
+
+规律:
+- 「small-risk」类(test 改动、文档)冲突率 = 100%
+- 「medium-risk」类(没测)预计类似高冲突率
+- Group 3 的 5 项(中风险)也得先 dry-run 才能 verify
+- Group 4 rewrite 任务从 6 个变 12+ 个
+
+### 未来风险
+
+- Group 3 同样会失稳,不验证就推进会浪费时间
+- proposal 的「groups 1-3 cherry-pick, 4 rewrite, 5 patch」框架基本失效
+- 唯一可信的 cherry-pick 门:`git cherry-pick --no-commit <sha>`,必跑
+- 整个 change 名存实亡,可能 archive 时就只能附经验记录
+
+### 当前结论
+- 已验证规律:Group 2 「small-risk」实际全部冲突
+- 已落实:Group 2.1-2.6 全部移 Group 4 follow-ups
+- 必须推进:Group 3 也先 dry-run 才能继续
+
+### 后续讨论入口
+- 此规律已加到 self-learning.git-cherry-pick-preflight 候选
+- 任何 cherry-pick 计划必须 explicit dry-run gate
+- 「risk group」标签 should be deprecated 变成 dry-run 实证
+
+## [2026-08-12 22:05:00] [Session ID: omx-1786419140441-df5ql8] 主题: audit 「22 lines」叙述低估了 whole-crate 删除,scope 必须先验证再引用
+
+### 发现来源
+
+P4 audit 揭示 proposal.md 写「22 lines reverse diff on `ralph-api/src/main.rs`」实际是「整个
+ralph-api/ crate 删除」(17 src 文件 + 多个子目录 + data + tests)。
+
+### 核心问题
+
+proposal 在写 Group 5 P4 时只看到 surface (`main.rs` 22 行),没看整体(crate 1e88b7e3 的
+完整 src 文件清单)。Auditor 不知道 rewrite target 是不是真的存在。
+
+### 为什么重要
+
+- 直接后果:Group 4 §1 / §4 rewrite tasks 的目标文件根本不存在 → rewrite 是无意义的
+- 误判风险:rewrite 一通后发现工作全 white 白费;但「audit scope 不足」不是致命的,
+  致命的是「audit 写完没人 read」所以 rewrite 任务保留很 negative
+- 类似 P1、P2 是否也低估了 scope? 值得重新 verify
+
+### 未来风险
+- 任何 audit 描述用「22 lines」「minimal」之类都要警惕:
+  - 「22 lines」可能背后是「whole module」
+  - 「minimal」可能背后是「whole feature」
+- audit 必须先 git ls-tree + git grep 验证 file inventory,
+  而非只看 stat 数
+
+### 当前结论
+- 已落地:Proposal Appendix C 反映 audit 实际 scope
+- 已落地:Group 4 §4 / §4.15 标 dropped
+- 后续:类似 P4 的描述「22 lines」「+87/-197」要避免,改用 file inventory + capability grep
+
+### 后续讨论入口
+- 新建 declarative-e2e-mock-parity change 作为 F1 follow-up
+- 任何 follow-up Change 不混在 sync-origin-main-features 里,单独 openspec/change

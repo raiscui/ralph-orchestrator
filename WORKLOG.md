@@ -493,3 +493,87 @@
 
 - .gitignore 增加 .codegraph/ .cursor/ parallel_rec.jsonl test
 - git push my main: f41c2bd..6afcdea(17 commits)推送完成, 本地与远端同步
+
+## [2026-08-12 21:18:00] [Session ID: omx-1786419140441-df5ql8] 任务名称: Group 2 dry-run(6 项,全部冲突)
+
+### 任务内容
+- 对 Group 2 的 6 项 cherry-pick 各跑 `git cherry-pick --no-commit`,记录冲突实证
+- 按冲突情况分发到 Group 4 (rewrite)
+- 覆盖: 0207c8b / c9f2182 / cf0ec8d / 7b673cc / 0b61a78 / 4ba3d3a
+
+### 完成过程
+- 6 项 dry-run,每项 5-7 秒(检测 conflicts)
+- 6 项全部失败,且 `git cherry-pick --abort` 6 次 silent 失败 — 全部用 `git reset --hard HEAD` 兜底
+- proposal.md Appendix B 记录每个 commit 的冲突文件分类
+- tasks.md §7 + Group 4 follow-ups 更新
+
+### 净结果
+- 0 个 commit 落地(Group 2 全部 dry-run 失败)
+- 6 项移到 Group 4 (rewrite)
+- 1 项(7b673cc)无 partial value,跳过
+
+### 总结感悟
+- 与 Group 1 同模式:proposal 「small-risk」标签在本地 main 上完全不成立
+- 6 次 `cherry-pick --abort` 失败 -> 总结「abort 不可靠,reset --hard HEAD 兜底」通用规律
+- 某些 rename detect 是 git 自动识别的(2.4 .ralph/tasks -> tasks/),可以让我们知道
+  「概念性 rename」+「新文件 add」是 git 自己能跟上的,但跨 surface 的代码改动不能
+
+### 状态
+- HEAD 仍在 8b27556(无 commit 落地)
+- proposal.md Appendix B 已更新
+- tasks.md §7 dry-run log + Group 4 §5-§8 follow-ups 已更新
+
+## [2026-08-12 21:40:00] [Session ID: omx-1786419140441-df5ql8] 任务名称: Group 5 P3 + P4 audit(独立,无 cherry-pick 风险)
+
+### 任务内容
+- P3:审计 `ralph-e2e/src/runner.rs` 的 e88b7e3..HEAD 反向 diff
+- P4:审计 `ralph-api/src/main.rs` 的 e88b7e3..HEAD 反向 diff
+- audit 报告落盘到 openspec change 目录
+
+### 完成过程
+- 收集 3 个 baseline(merge-base 1d90c1e / origin e88b7e3 / HEAD 8b27556)的 diff stat
+- P3:diff 全貌(e88b7e3..HEAD +197/-87 = local -87 / +197 重写)
+- P3 -87 行分析:mock 块 + 老 configure_mock_mode + 老 mock 集成
+- P3 +197 行分析:mock 硬失败 + 改进版 configure + 新 persist_e2e_artifacts
+- P3 mock.rs 总览:M module 已拆到独立文件,RunConfig.mock_config 保留
+- P3 declarative/scenario.rs grep mock → **找不到引用**,F1
+- P4:整个 ralph-api/ 在本地 main 缺失(17 src 文件 + 子目录)
+- P4 grep ralph_api::* → **0 引用**
+
+### 完成结果
+- 0 个 commit(纯 audit + 报告)
+- 1 个 audit 报告文件:207 行
+- 2 个 finding:
+  - **F1** declarative e2e 不引用 mock(影响 declarative mock mode 支持,但当前不是 critical path)
+  - **F2** 整个 ralph-api crate 在本地 main 删除 — Group 4 §1/§4 应该 drop
+
+### 总结感悟
+- **proposal audit scope 应更宽** — "22 lines" 听起来小,实际是 whole-crate。具体的 22 行只是入口表面。
+- **真正的 functionality audit 用 grep + git ls-tree 验证**,只看 stat 数会漏掉结构性改变
+- **multi-target grep 是 audit 标准动作**:`git grep ralph_api::* crates/` 验证 capability loss
+- **declarative vs imperative 路径同步有 gap** — 跟 F1 类似,但 declarative e2e 没主动同步 mock
+
+## [2026-08-12 22:00:00] [Session ID: omx-1786419140441-df5ql8] 任务名称: 提案落地(1+2+3 组合)
+
+### 任务内容
+- 落 proposal Appendix C(P3+P4 audit 摘要)
+- 修 tasks.md 4.4 dropped + 4.15 dropped
+- 新建 declarative-e2e-mock-parity change(F1 follow-up)
+
+### 完成过程
+- python3 单行 replace 4.4 → [x] dropped(crates/ralph-api/ 已删,rewrite 不再有意义)
+- cat <<'EOF' >> tasks.md 加 4.15
+- cat <<'EOF' >> proposal.md 加 Appendix C
+- mkdir declarative-e2e-mock-parity + 写 proposal.md 和 tasks.md
+
+### 完成结果
+- proposal.md: 433 → 522 行(+89 Appendix C)
+- tasks.md: 4.4 dropped + 4.15 dropped
+- 新建 openspec/changes/declarative-e2e-mock-parity/{proposal.md, tasks.md}
+- 0 code commit(纯文档 + 工作文件)
+
+### 总结感悟
+- Appendix C 把 P3+P4 audit 升到 proposal 主线 — 未来看到 sync-origin-main-features 的
+  人会理解 p3p4 不是「22 行反向」而是「整 crate 重构」+ 「module reorg」
+- 新 change file 用独立目录,F1 独立追踪,不会污染主线 sync-origin-main-features
+- 4.4 / 4.15 dropped 这种小细节记录很关键 — Group 4 review 时不会被迷惑
