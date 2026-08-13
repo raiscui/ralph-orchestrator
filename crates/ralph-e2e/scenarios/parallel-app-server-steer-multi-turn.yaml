@@ -1,0 +1,221 @@
+# parallel-app-server-steer-multi-turn 声明化(候选 2.4.2: ParallelAppServerSteerMultiTurnScenario → parallel-app-server-steer-multi-turn.yaml)
+#
+# 与命令式 ParallelAppServerSteerMultiTurnScenario 等价性分析:
+# - 同 id, description, tier, supported_backends(默认 all, 实际仅 Codex)
+# - 同 setup: ralph.yml + 写入 fake codex shim (Python, .e2e/bin/codex,
+#   支持 turn/steer JSON-RPC) + prompt_source=Config + extra_args=[--no-tui] +
+#   path_prefix 注入 fake_bin_dir + inject sequence (2 次 Emit steer)
+# - expect 11 条断言中 9 条映射 + 2 条 dropped:
+#   response_received           → response_received: true
+#   exit_code_success_or_limit  → exit_code_success_or_limit: true
+#   no_timeout                  → no_timeout: true
+#   duration_within(120)        → failed_within_secs: 120
+#     (命令式 <= 120s, schema 严格 < 120s; off-by-one 边界可接受)
+#   fake_app_server_used        → output_contains [FAKE_CODEX_APP_SERVER_READY]
+#   steer_events_recorded       → events + event_payload_contains:
+#     (events 含 >= 2 个 e2e.steer   events:
+#      records with payload marker    [{topic: e2e.steer, min_count: 2}]
+#      + question; schema 用 AND     event_payload_contains:
+#      拆 5 个字段)                   [{topic: e2e.steer, contains: E2E_STEER_MARKER_1_42},
+#                                       {topic: e2e.steer, contains: 121+43=?},
+#                                       {topic: e2e.steer, contains: E2E_STEER_MARKER_2_42},
+#                                       {topic: e2e.steer, contains: 10+5=?}]
+#   steer_markers_observed      → output_contains [E2E_STEER_MARKER_1_42] +
+#                                 [E2E_STEER_MARKER_2_42]
+#     (命令式 stdout 含 2 markers,   output_contains_any: 
+#      AND 折 AND — 2 个 markers     全部 2 个 markers 一个 list 里 OR;
+#      在同一 assert 里, 用 2 个     schema 用 2 个 output_contains entry AND)
+#      output_contains entry)
+#   steer_answers_observed      → output_contains [answer: 164] +
+#                                 [answer: 15]
+#     (同 steer_markers_observed 模式)
+#   loop_complete_detected      → termination: "LOOP_COMPLETE"
+#   human_log_written           → DROPPED
+#     (.e2e/human-log.md file content 多 substring 检查, schema 无 file_content)
+#   Steer injector succeeded    → DROPPED
+#     (declarative runner 已有 inject 失败时 map_err 强制 setup 错误, implicit)
+id: parallel-app-server-steer-multi-turn
+description: Validates Codex App Server turn/steer works in-flight with multiple steers (parallel runtime) (declarative)
+tier: "Tier 8: Parallel Runtime"
+setup:
+  # 写 fake codex shim 到 .e2e/bin/codex (Python, executable, 支持 turn/steer)
+  write_files:
+    - path: .e2e/bin/codex
+      executable: true
+      content: |
+        #!/usr/bin/env python3
+        import json
+        import re
+        import sys
+        import time
+
+        FAKE_READY = "__FAKE_READY__"
+
+        def eprint(msg):
+            print(msg, file=sys.stderr, flush=True)
+
+        def send(obj):
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+
+        def run_exec(argv):
+            eprint("FAKE_CODEX_EXEC_READY")
+            sys.stdout.write("FAKE_CODEX_EXEC_OUTPUT\n")
+            sys.stdout.flush()
+            return 0
+
+        def run_app_server(argv):
+            eprint(FAKE_READY)
+            thread_id = "thread-1"
+            turn_id = "turn-1"
+            steer_count = 0
+            turn_started_sent = False
+            for raw in sys.stdin:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except Exception:
+                    continue
+                method = msg.get("method")
+                msg_id = msg.get("id")
+                if msg_id is None and method:
+                    eprint(f"[fake-codex] recv notify method={method}")
+                    continue
+                if msg_id is None or method is None:
+                    continue
+                eprint(f"[fake-codex] recv request method={method} id={msg_id}")
+                if method == "initialize":
+                    send({"id": msg_id, "result": {}})
+                    continue
+                if method == "thread/start":
+                    send({"id": msg_id, "result": {}})
+                    send({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
+                    continue
+                if method == "turn/start":
+                    send({"id": msg_id, "result": {}})
+                    time.sleep(0.2)
+                    send({"method": "turn/started", "params": {"turn": {"id": turn_id}}})
+                    send({"method": "codex/event/task_started", "params": {"msg": {"turn_id": turn_id}}})
+                    turn_started_sent = True
+                    continue
+                if method == "turn/steer":
+                    send({"id": msg_id, "result": {}})
+                    params = msg.get("params", {})
+                    input_items = params.get("input", [])
+                    parts = []
+                    for item in input_items:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            parts.append(item.get("text", ""))
+                    steer_text = "".join(parts).strip()
+                    steer_count += 1
+                    send({"method": "item/agentMessage/delta", "params": {"delta": f"TASK_REQUEST[{steer_count}]: {steer_text}\n"}})
+                    m = re.search(r"(\d+)\s*\+\s*(\d+)\s*=\?", steer_text)
+                    answer = (int(m.group(1)) + int(m.group(2))) if m else None
+                    if answer is None:
+                        send({"method": "item/agentMessage/delta", "params": {"delta": "TASK_EXECUTE: no-addition-expression\n"}})
+                        send({"method": "item/agentMessage/delta", "params": {"delta": f"TASK_FEEDBACK[{steer_count}]: answer: <unknown>\n"}})
+                    else:
+                        send({"method": "item/agentMessage/delta", "params": {"delta": "TASK_EXECUTE: addition\n"}})
+                        send({"method": "item/agentMessage/delta", "params": {"delta": f"TASK_FEEDBACK[{steer_count}]: answer: {answer}\n"}})
+                    if steer_count >= 2:
+                        send({"method": "item/agentMessage/delta", "params": {"delta": "LOOP_COMPLETE\n"}})
+                        send({"method": "turn/completed", "params": {"turn": {"id": turn_id}}})
+                    continue
+                if method == "turn/interrupt":
+                    send({"id": msg_id, "result": {}})
+                    if turn_started_sent:
+                        send({"method": "turn/completed", "params": {"turn": {"id": turn_id}}})
+                    continue
+                send({"id": msg_id, "result": {}})
+            return 0
+
+        def main(argv):
+            if len(argv) >= 2 and argv[1] == "app-server":
+                return run_app_server(argv[1:])
+            return run_exec(argv[1:])
+
+        if __name__ == "__main__":
+            sys.exit(main(sys.argv))
+  config: |
+    cli:
+      backend: "codex"
+
+    event_loop:
+      prompt: |
+        # E2E: parallel-app-server-steer-multi-turn
+
+        你正在运行一个 E2E 场景。
+        该场景会在运行中对 `ralph#1` 注入两次 turn/steer。
+        当你观察到输出包含两次 marker 后,输出 `LOOP_COMPLETE` 并停止。
+      completion_promise: "LOOP_COMPLETE"
+      max_iterations: 6
+      max_runtime_seconds: 60
+
+    parallel:
+      enabled: true
+      autoscale:
+        max_running_jobs: 2
+        dynamic_idle_ttl_secs: 30
+      permissions:
+        worktree: allow
+        hooks: allow
+
+    hats: {}
+  prompt_source: config
+  max_iterations: 10
+  timeout_secs: 180
+  extra_args:
+    - --no-tui
+  # PATH 前部注入 fake_bin_dir, 让 codex app-server spawn 找到 fake shim
+  path_prefix:
+    - .e2e/bin
+  # Inject sequence: 2 次 Emit steer, 不同 marker + question
+  inject:
+    - type: emit
+      topic: human.message
+      payload: "E2E_STEER_MARKER_1_42: 121+43=?"
+      target_instance: ralph#1
+      session_strategy: app_server
+      turn_action: steer
+    - type: emit
+      topic: human.message
+      payload: "E2E_STEER_MARKER_2_42: 10+5=?"
+      target_instance: ralph#1
+      session_strategy: app_server
+      turn_action: steer
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # duration_within(120s) (命令式 <=, schema 严格 <, off-by-one 边界)
+  failed_within_secs: 120
+  # output_contains: 多 needle 合并到 1 个字段 (schema Vec<String>,
+  # 每个 needle 独立断言, runner AND 全部通过)
+  # 组 1 - fake_app_server_used: stdout 含 fake ready marker
+  # 组 2+3 - steer_markers_observed (AND 2 markers): STEER_MARKER_1 + STEER_MARKER_2
+  # 组 4+5 - steer_answers_observed (AND 2 answers): answer 164 + answer 15
+  output_contains:
+    - "FAKE_CODEX_APP_SERVER_READY"
+    - "E2E_STEER_MARKER_1_42"
+    - "E2E_STEER_MARKER_2_42"
+    - "answer: 164"
+    - "answer: 15"
+  # steer_events_recorded: events >= 2 + 4 个 payload substring 验证
+  events:
+    - topic: e2e.steer
+      min_count: 2
+  event_payload_contains:
+    - topic: e2e.steer
+      contains: "E2E_STEER_MARKER_1_42"
+    - topic: e2e.steer
+      contains: "121+43=?"
+    - topic: e2e.steer
+      contains: "E2E_STEER_MARKER_2_42"
+    - topic: e2e.steer
+      contains: "10+5=?"
+  # loop_complete_detected: termination 严格相等
+  termination: "LOOP_COMPLETE"
+  # human_log_written dropped — file content 多 substring 检查
+  # Steer injector succeeded dropped — declarative runner implicit enforcement

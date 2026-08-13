@@ -460,9 +460,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "parallel-app-server-steer-multi-turn",
-            Box::new(ParallelAppServerSteerMultiTurnScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "parallel-app-server-steer-multi-turn",
+                include_str!("../scenarios/parallel-app-server-steer-multi-turn.yaml"),
+            )),
         ),
         // steer-multi-turn-live 已声明化(候选6)
         (
