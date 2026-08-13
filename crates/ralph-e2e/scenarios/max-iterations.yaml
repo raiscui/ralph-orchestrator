@@ -1,0 +1,49 @@
+# max-iterations 声明化(候选 2.1.2: MaxIterationsScenario → max-iterations.yaml)
+#
+# 与命令式 MaxIterationsScenario 等价:
+# - 同 id `max-iterations`(scenario.id() 输出不变)
+# - 同 description / tier
+# - 同 setup: ralph.yml + inline prompt(逐轮 step 推进但永远不达 promise) + max_iterations=2
+# - 同 supported_backends: Claude / Kiro / OpenCode
+# - expect 4 条断言全部映射到 declarative schema 已有字段(1:1, 无折断言)
+#
+# 命令式 4 条断言 → declarative 4 条断言:
+#   response_received      → expect.response_received: true
+#   iterations == 2        → expect.exact_iterations: 2
+#   termination_reason     → expect.termination: "MAX_ITERATIONS"
+#     (命令式做 lowercase contains 匹配, executor.detect_termination_reason
+#      实际返回 "MAX_ITERATIONS", declarative termination_matches 做严格相等,
+#      字面值等价。)
+#   no_timeout             → expect.no_timeout: true
+id: max-iterations
+description: Verifies termination at max iterations limit (declarative)
+tier: "Tier 7: Error Handling"
+backends: [claude, kiro, opencode]
+setup:
+  config: |
+    # Max iterations test config
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 2
+      completion_promise: "NEVER_GOING_TO_MATCH_THIS"
+  prompt: |
+    You are testing max iterations behavior.
+
+    Your task is complex and will take many steps:
+    1. In iteration 1: Say "Starting step 1" and emit <event topic="step.1">done</event>
+    2. In iteration 2: Say "Starting step 2" and emit <event topic="step.2">done</event>
+    3. In iteration 3: Say "Starting step 3" and emit <event topic="step.3">done</event>
+    4. In iteration 4: Say "Starting step 4" and emit <event topic="step.4">done</event>
+    5. Only after step 4: Output NEVER_GOING_TO_MATCH_THIS
+
+    Complete exactly one step per iteration. Stop after each step.
+  max_iterations: 2
+  # timeout_secs 不写 → declarative runner 落到 backend.default_timeout()
+  # (Claude 600s / Kiro 300s / OpenCode 300s), 与命令式 setup() 一致。
+expect:
+  response_received: true
+  exact_iterations: 2
+  termination: "MAX_ITERATIONS"
+  no_timeout: true

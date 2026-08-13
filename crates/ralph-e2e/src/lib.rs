@@ -328,9 +328,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "max-iterations",
-            Box::new(MaxIterationsScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "max-iterations",
+                include_str!("../scenarios/max-iterations.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,
