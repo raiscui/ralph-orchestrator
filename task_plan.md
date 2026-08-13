@@ -483,3 +483,57 @@ capabilities.rs (ToolUse) + 当前 schema 字段
 3. **§2.4 剩余** parallel-app-server-idle-start + parallel-app-server-steer-multi-turn
 4. **先 push**: 把 31 commits 推到 my/main
 5. **暂停**: 等用户决策
+
+## [2026-08-13 16:05:00] [Session ID: omx-1786600320381-z290x9] Wave 2 §2.3.2 + §2.4.2 启动:MemorySearch + Streaming
+
+### 目标(用户指令 "1+2")
+1. **§2.3.2** MemorySearchScenario → memory-search.yaml
+2. **§2.4.2** StreamingScenario → streaming.yaml(audit 标 "schema extension needed",
+   实际命令式先读后判断)
+
+### 状态
+**目前在阶段1(读命令式 + 评估 schema 缺口)** — 下一步: 读 memory.rs (MemorySearch) +
+capabilities.rs (Streaming) + 当前 schema 字段
+
+## [2026-08-13 16:18:00] [Session ID: omx-1786600320381-z290x9] Wave 2 §2.3.2 + §2.4.2 双迁移完成 + 2 duplicate field bug fix
+
+### 完成动作
+- 新文件 `crates/ralph-e2e/scenarios/memory-search.yaml`(98 行,id = `memory-search`)
+- 新文件 `crates/ralph-e2e/scenarios/streaming.yaml`(72 行,id = `streaming`)
+- lib.rs registry 2 处 `Imperative` → `Declarative`
+- fix-up commit `6e73a08` 修 2.3.2 的 memory-search.yaml duplicate `output_contains_any` 字段
+
+### 净结果
+- 3 commits this batch:
+  - `3977d0e` feat(e2e): migrate MemorySearchScenario → memory-search.yaml (Wave 2 task 2.3.2)
+  - `6e73a08` fix(e2e): merge duplicate output_contains_any fields in memory-search.yaml
+  - `a621342` feat(e2e): migrate StreamingScenario → streaming.yaml (Wave 2 task 2.4.2)
+- drift log delta:83.33 % → 86.67 %(52 declarative / 8 imperative / 1 keep)
+  - §2.3.2 + §2.4.2 加 2:Declarative 50→52, Imperative 10→8
+  - 净 +2 scenarios, 共 +3.33% 覆盖率
+- 534 lib tests 全过
+- gate test 仍 FAIL(预期:到 90% 还需 3/8 migrations; 8 remaining 是 §2.3 memory 6 个 + §2.4 parallel-app-server 2 个)
+
+### 决定
+- [决定]: 用 Python re 检测 ALL indent levels 的 duplicate YAML key, 而非 awk '^a-z_:'
+  [理由]: awk '^[a-z_]+:' 只匹配 0-indent 顶层 key, 漏掉 expect: 内 2-indent
+  duplicate (本次 memory-search + streaming 都中招); Python re.findall
+  '^(\s*)([a-z_]+):' 配合 Counter 检测全 indent levels
+- [决定]: fix-up 而非 amend
+  [理由]: 与 2.2.2 d9f7c79 同 pattern; amend 会改 commit hash + 重写 history
+- [决定]: 2.4.2 streaming audit 反预期, 不需要 schema 扩展
+  [理由]: audit-p5-p1.md:76 建议 "schema adds per-token pacing", 但命令式只查
+  stdout 关键词 (hello/streaming/LOOP_COMPLETE + len > 50); streaming_output_received
+  和 content_extracted 都有部分 OR 子检查被 dropped (len > 50 / stdout 非空),
+  因为它们是 response_received 的重复或 schema-cost > value
+- [决定]: 2.3.2 memory-search 不需要 schema 扩展(连续 2 个 memory scenarios 都无 schema 缺口)
+  [理由]: found_matching_memories 是 OR across 3 sub-condition OR, 用单
+  output_contains_any group 14 case 变体合并; 与 2.3.1 memory-add 的
+  artifacts + dropped content check 模式一致, §2.3 memory 类不需要 file_content
+  字段
+
+### 下一步可选方向
+1. **任务 2.3.3** MemoryInjectionScenario → memory-injection.yaml(§2.3 第三刀, 6 个 memory 剩余)
+2. **§2.4 parallel-app-server** 2 个 scenarios(non-live harness, 可能需 schema 扩展)
+3. **§2.3 + §2.4 全清后**: 推 38 commits 到 my/main, Wave 2 收官, 触发 continuous-learning
+4. **暂停**: 等用户决策

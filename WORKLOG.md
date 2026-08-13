@@ -125,3 +125,48 @@
 - **`# ponytail:` 这次不需要**: 2 dropped 都有具体 imperative 场景驱动,
   不是 speculative; "audit 反预期" 是基于实际命令式实现的判断, 不是
   主动简化。
+
+## [2026-08-13 16:18:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 2 §2.3.2 + §2.4.2 双迁移 (MemorySearch + Streaming)
+
+### 任务内容
+- 用户指令 "1+2" — 同时跑 §2.3.2 (MemorySearch) 和 §2.4.2 (Streaming)
+- audit-p5-p1.md 标 §2.4 为 "Hard, schema extension needed", 2.4.2 建议 per-token pacing
+- §2.3 memory 类 8 个 scenarios, MemorySearch 是第二刀
+
+### 完成过程
+**Phase 1 — 2.3.2 MemorySearchScenario (commit 3977d0e + fix 6e73a08)**
+- 5 命令式断言 → 5 schema 字段 1:1 映射(无 dropped, 无 schema 扩展)
+- search_command_executed: 8 case 变体覆盖 4 关键词
+- found_matching_memories: 14 case 变体覆盖 7 关键词 (3 sub-condition OR 合并)
+- BUG: 写出 2 个 output_contains_any: 块 (duplicate field); fix-up commit 6e73a08 合并
+- 预填充 memories.md 用 setup.write_files 落地(与 2.4.1 tool-use 同模式)
+
+**Phase 2 — 2.4.2 StreamingScenario (commit a621342 + 写时发现 duplicate)**
+- 5 命令式断言 → 4 schema 字段(2 部分 dropped)
+- streaming_output_received OR 拆为: output_contains_any [{, "type"] (dropped
+  stdout 非空 — 与 response_received 重复)
+- content_extracted OR 折 AND: output_contains_any [hello/streaming] +
+  output_contains [LOOP_COMPLETE] (dropped len > 50 — low-value defensive,
+  schema 无 stdout_length 字段)
+- 写 YAML 时即发现 duplicate output_contains_any, 写完即合并为 1 个字段
+
+### 总结感悟
+- **duplicate YAML key 误判回归**: 这是本 batch 第二次中招(2.2.2 hat-instructions
+  + 本轮 memory-search + streaming)。根本原因: 写 2 个 OR group 的命令式断言映射
+  时, 我倾向于写 2 个独立的 output_contains_any: 块, 每块 1 个 OR group;
+  但 schema 是 Vec<Vec<String>>, 多 group 必须放在 1 个字段下。
+- **awk '^a-z_:' 验证器不够强**: 之前的 5 个 hat YAML 我用 awk '^a-z_:'
+  校验顶层字段唯一性, 没考虑 indent; 这导致 expect: 内 2-indent 的
+  output_contains_any 重复被漏检。本轮改用 Python re.findall +
+  Counter, 全 indent levels 检测。
+- **audit 反预期连续 2 次**: §2.4.1 ToolUse + §2.4.2 Streaming 都 audit 标
+  "schema extension needed", 实际命令式都是 stdout 关键词检查 (lenient),
+  schema 现成字段够。§2.4 audit 整体比 §2.3 乐观 — §2.4 实际可能 0 个
+  schema 扩展 (parallel-app-server-idle-start / steer-multi-turn 例外,
+  标 "non-live harness")。
+- **memory 类 0 schema 扩展**: §2.3.1 + §2.3.2 都直接落地, 连续 2 个无
+  schema 缺口。剩余 §2.3.3-§2.3.8 6 个 memory scenarios 也可能 0 schema
+  扩展, 若如此 §2.3 全部 8 个迁移无需等待 schema 工作。值得继续读 §2.3.3
+  验证假设。
+- **`# ponytail:` 不需要**: 2 个 dropped 都是基于 schema-cost vs value 评估,
+  不是 speculative 简化。
