@@ -654,3 +654,109 @@
   `e2e-declarative-migration-plan` 把这 dry-run audit script 写成 CI gate
 - **explicit keep (experimental-dev-engine) 不该计入分母** — 注释清楚说明「保留命令式」
 - **22 顽固者 8 是 chaos test,5 是 hats** — 前者迁移价值 ≥ 时间成本,后者迁移成本低
+
+## [2026-08-13 13:05:00] [Session ID: omx-1786600320381-z290x9] 任务名称: 跟进 e2e-declarative-migration-plan change 落盘
+
+### 任务内容
+- 把上次 staged 但未 commit 的 `e2e-declarative-migration-plan` change 落地
+- 解决 `openspec validate --strict` 红字(缺 specs/ delta)
+- commit 落盘
+
+### 完成过程
+- 读 task_plan.md 旧状态:「proposal + tasks 已 staged,等用户决策 commit」
+- 读 WORKLOG 上下文:上次完成 Group 5 P1 audit (NO-GO on 5.1),建议开 `e2e-declarative-migration-plan` change
+- 检查 git status:3 files staged (proposal + tasks + 新 specs delta)
+- 跑 `openspec validate --strict`:fail — change has no deltas
+- 看 `tui-mdfried-viewer` 怎么写 delta:`specs/<spec>/spec.md` + `## ADDED Requirements` + `### Requirement:`(首句 MUST)+ `#### Scenario:`
+- 写 `openspec/changes/e2e-declarative-migration-plan/specs/e2e-declarative-coverage-gate/spec.md`:
+  - Requirement 1: E2E test suite MUST fail loudly when declarative coverage drops below 90 %
+    - 3 Scenario:above threshold / coverage drops / explicit-keep excluded
+  - Requirement 2: Scenario registry MUST expose each entry's kind (declarative vs imperative)
+    - 2 Scenario:CLI list path / gate test imports
+- 跑 `openspec validate e2e-declarative-migration-plan --strict`:pass
+- 跑 `openspec validate --all --strict`:29 passed, 0 failed
+- `git add` 新 delta 文件
+- `git commit`:`b24131a chore(openspec): open e2e-declarative-migration-plan change with declarative coverage gate delta`
+- 写 commit message,讲清 NO-GO 后续、CI gate contract、MUST-level contracts
+
+### 净结果
+- 1 commit:`b24131a`(3 files, 389 insertions)
+  - proposal.md(214 行)
+  - specs/e2e-declarative-coverage-gate/spec.md(62 行,新增)
+  - tasks.md(113 行)
+- 0 代码改动
+- working tree clean(`.scratch/` 保留未动)
+
+### 总结感悟
+- **staged 但未 commit 是 fragile 状态** — 任何 `git reset --hard` 或编辑器 crash 会丢 327 行工作
+  把 staged change 及时 commit 是「git 跟进」的最自然动作,不是过度激进
+- **OpenSpec strict validator 是真实 backpressure** — 「缺 delta」这种红字不修会被 `openspec archive`
+  流程挡掉,提前在 active 阶段修是最便宜的修复点
+- **delta 是 contract,不是 plan detail** — 我刻意只写 2 个 Requirement pin CI gate contract,
+  没把 22 行 migration 计划写进 spec(spec 应该是「必须满足的条件」,不是「要做的步骤清单」)
+- **MUST/SHALL 在 Requirement 首句** — memory 里的 validator gotcha 在本次任务得到验证,
+  我的 2 个 Requirement 标题都以 MUST 开头,validate pass,无 retry
+- **`.scratch/` 是用户 scratch worktree**(内含 25 个 issues),按 AGENTS.md 规则不动
+  — "git 发现不是你生成的改动,不要动" 原则保护用户工作
+- **未 push 不代表不该 commit** — 9 commits ahead of my/main 是有意积累,
+  按 AGENTS.md 节奏让用户决定 push 时机(尤其涉及跨多 audit 的 staged 提交时)
+
+## [2026-08-13 13:45:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 1 — CI gate test + ScenarioKind lib surface
+
+### 任务内容
+- 落 Wave 1 三个 task:
+  - 1.1 把 `get_all_scenarios()` 从 main.rs 搬到 ralph_e2e lib surface
+  - 1.2 加 `ScenarioKind` enum + 给每条 entry 打 kind 标签
+  - 1.3 写 `tests/declarative_coverage_gate.rs` 集成 test,assert ratio >= 0.90
+
+### 完成过程
+- 读 `crates/ralph-e2e/src/lib.rs`:确认 `pub use` 已经暴露所有 imperative 类型
+- 读 `crates/ralph-e2e/src/main.rs:235-472`:确认 `get_all_scenarios()` 函数本体(61 条 entry)
+- 读 `crates/ralph-e2e/src/declarative/mod.rs`:确认 `from_yaml` API
+- 读 `crates/ralph-e2e/src/scenarios/mod.rs:163-220`:确认 `TestScenario` trait 签名
+- 读 `main.rs:535-545` 和 `main.rs:620-635`:确认两处 caller 怎么用 Vec<Box<dyn TestScenario>>
+- 设计 API:单一函数返回 `(ScenarioKind, &'static str, Box<dyn TestScenario>)` 三元组
+- Python 脚本 `build_all_scenarios.py`:从原 main.rs 函数体生成带 kind 标签的新函数体
+  - declarative block → `(Declarative, "id", Box::new(crate::declarative::from_yaml(...)))`
+  - imperative block → `(Imperative, "slug", Box::new(Type::new()))`
+  - explicit-keep block → `(ImperativeExplicitKeep, ...)`
+- 把 `ralph_e2e::declarative::` 全部替换为 `crate::declarative::`(在 lib.rs 内部用 crate:: 是惯例)
+- 补 tuple 元素间的逗号(Rust vec![] 元素间必须有逗号)
+- 修 `include_str!()` 闭合括号错位(Python 脚本缩进 bug)
+- 写 ScenarioKind enum + 文档注释(用中文 ASCII 风格注释)
+- 写 `tests/declarative_coverage_gate.rs`:
+  - 2 个 #[test]
+  - drift log 用 eprintln! 失败时可见
+  - explicit-keep invariant 用 vec![] 相等比较 pin 死
+- 删 `main.rs::get_all_scenarios()` 函数本体 + 2 处 caller 改用 `ralph_e2e::all_scenarios()`
+- 清理 main.rs 里 22 个 dead `TestScenario` type imports
+- `cargo test -p ralph-e2e --lib`:526 pass / 0 fail(无回归)
+- `cargo test -p ralph-e2e --test declarative_coverage_gate`:1 fail (预期) + 1 ok
+- `cargo run -p ralph-e2e -- --list`:scenario list 同序,行为不变
+- `openspec validate --all --strict`:29/29 全绿
+- commit `50e11cd feat(e2e): add declarative coverage CI gate with ScenarioKind registry`
+
+### 净结果
+- 1 commit `50e11cd`
+  - crates/ralph-e2e/src/lib.rs +485 行(ScenarioKind enum + all_scenarios 函数)
+  - crates/ralph-e2e/src/main.rs -244 行(净,删 get_all_scenarios + 死 imports)
+  - crates/ralph-e2e/tests/declarative_coverage_gate.rs +118 行(新增)
+- 0 行为变更(CLI 行为完全一致)
+
+### 总结感悟
+- **单一真相源 > 平行数据结构**:把 `ScenarioKind` 和 scenario id 跟 box 一起放在一个 tuple 里,
+  避免「两个 Vec 必须保持同序」这种 fragile 同步成本。gate test 直接迭代就能拿全三类信息。
+- **3-variant enum 比 1 bool + 1 id 黑名单清晰**:`ImperativeExplicitKeep` 是显式语义,
+  future-proof;若改用 `Vec<&str>`,未来加新 keep 要改两处(rust + 黑名单)。
+- **故意 fail 的 gate test 是 back-pressure,不是 bug**:覆盖率 65% < 90% 是「按设计的红」,
+  commit message 必须明说,否则 reviewer 会以为是测试坏了。drift log 把每条 id 都打出来,
+  让 Wave 2 的 commit message 可以直接 copy-paste。
+- **`cargo fmt -p <crate>` 会格式化整个 crate,不止 caller 文件**:首次跑把我无关的
+  `declarative/scenario.rs` (721 行) 也改了。教训:fmt 前先确认范围,或事后 revert。
+  本次用 `git checkout --` 精准回退了无关改动。
+- **Python 脚本生成 Rust 代码比手写 200 行 enum 更稳**:61 条 entry 机械重复,人写一定会漏一个;
+  脚本 + 显式 `IMPERATIVE_SLUG` 映射表 + 显式 `EXPLICIT_KEEP` 集合,三类错误都直接抛。
+- **`# ponytail:` 不需要**:这次没偷懒 — declarative coverage 是真契约,不能模糊;
+  `THRESHOLD = 0.90` 是硬数字,不接受环境变量 override。
+- **`Box<dyn TestScenario>` 的 dyn trait 转发不需要 Arc/Mutex**:`Send + Sync` 已经够用,
+  runner.rs 现有代码直接拿走就行。
