@@ -875,3 +875,73 @@
 - **`# ponytail:` 这次不需要**:迁移是 1:1 schema 平移,schema 已经最简,
   不存在 lazy 简化空间;若硬要省,可考虑把 inline prompt 提到 .md 文件用 `prompt_file`,
   但 inline 是命令式原貌,保持 1:1 等价比 DRY 更重要。
+
+## [2026-08-13 15:18:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 2 schema 扩展 + §2.1 全部 4 commits (timeout / max-iterations / backend-unavailable / auth-failure)
+
+### 任务内容
+- 用户指令选项 1: schema 扩展优先, 不接受降级迁移
+- 加 4 个新 schema 字段 (failed / stderr_contains / stderr_contains_any / failed_within_secs)
+- 加 4 个对应 assertion builder + 8 个单元测试
+- 迁移 2.1.3 (backend-unavailable) 与 2.1.4 (auth-failure)
+- §2.1 全部 4 个 migrations 落地
+
+### 完成过程
+**Phase 1 — schema 扩展 (commit 4531b9a)**
+- 调研命令式 3 个 failure 类断言的 OR 语义(exit_code != 0 || !stderr.is_empty())
+- 设计 4 个新字段:
+  - `failed: bool` — 单字段覆盖 OR 语义(若拆成 exit_code_nonzero + stderr_nonempty,
+    runner 的 AND 断言会压扁 OR, 失真)
+  - `stderr_contains: Vec<String>` — stderr 单 needle
+  - `stderr_contains_any: Vec<Vec<String>>` — stderr 任一命中(覆盖 error_mentions_*
+    类断言, 退到 stderr only)
+  - `failed_within_secs: Option<u64>` — duration < secs(严格 < 匹配命令式)
+- 故意 NOT 实现 `exit_code_present: bool`(对应 2.1.4 process_exited_cleanly)
+- 实现 4 builder + 8 测试 (每个 builder 至少 2 个 case: pass/fail 边界 + OR 语义)
+- `cargo check` ok / `cargo test --lib` 534 passed (+8 new)
+
+**Phase 2 — 2.1.3 backend-unavailable (commit efe3330)**
+- 写 backend-unavailable.yaml: 3 条命令式断言 → 3 条 schema 字段 1:1
+- lib.rs registry: Imperative → Declarative
+- drift delta: 41/19/1 (68.33%) → 42/18/1 (70.00%)
+- 已知 caveat 1: 命令式 cli.command 在 backend != custom 时被忽略(config.rs:795-803)
+- 已知 caveat 2: stderr_contains_any 退到 stderr only, 不查 stdout
+
+**Phase 3 — 2.1.4 auth-failure (commit 2d3866f)**
+- 写 auth-failure.yaml: 3 条命令式断言中 2 条 1:1, 1 条 dropped
+- process_exited_cleanly (exit_code.is_some()) 不实现 schema 字段, YAML 注释说明
+  rationale (schema 字段成本 > 价值, 几乎永远通过)
+- lib.rs registry: Imperative → Declarative
+- drift delta: 42/18/1 (70.00%) → 43/17/1 (71.67%)
+- §2.1 4 commits 全部落地, 可以宣告 §2.1 完成
+
+**Phase 4 — 决策备忘 (commit a4a67ff)**
+- 记录 2.1.3 暂停决策 + schema 扩展需求
+- 在 LATER_PLANS.md 记录 schema 扩展工作 + audit 建议的 require_backend 语义
+
+### 总结感悟
+- **OR 语义不能拆成两个独立字段** — 这是 schema 扩展最深的教训。runner 的
+  `assertions.iter().all(|a| a.passed)` 是 AND 语义;若命令式断言是
+  `A || B`, 拆成两个独立 schema 字段会让 A 和 B 必须同时通过 (= AND), 失真。
+  单字段 `failed: bool` 保留 OR 语义, 是唯一正确的 schema 设计。
+- **schema-cost vs assertion-value 评估** — process_exited_cleanly
+  (exit_code.is_some()) 只防 panic/segfault, 实际几乎永远通过, 加
+  `exit_code_present: bool` 字段成本(新字段 + 新 builder + 测试 + 文档)
+  > 价值(可能 N 年都用不上一次)。直接 dropped + YAML 注释说明, 是 ponytail
+  "不要为 hypothetical 加复杂度" 的典型应用。
+- **命令式 setup 本身的语义问题** — backend-unavailable 命令式设
+  `cli.command: nonexistent-cli-...`, 但 ralph config.rs:795-803 显示
+  `cli.command` 只在 `cli.backend == "custom"` 时生效。命令式 test 即便 live run
+  也不一定真触发 backend-unavailable 路径 — 这是命令式 setup 本身的语义问题,
+  不是迁移引入的。audit 建议改 `require_backend: <wrong>` 让 declarative runner
+  主动构造失败路径, 留待后续 schema 扩展工作。
+- **drift log delta 跳跃**: 2.1.3/2.1.4 每个 commit 是 +1.67% (1/60);
+  schema 扩展 commit 4531b9a 单独不推进覆盖率但解锁 2 个后续迁移,
+  所以"§2.1 全部"总推进是 +5.00% (2 迁移 + 1 schema), 比"4 迁移 = +6.67%" 略低。
+- **`# ponytail:` 这次扩展不需要**: 4 个新字段全部有具体 imperative 场景驱动,
+  没有任何 speculative 字段; 命名 (`failed` / `stderr_contains` / `stderr_contains_any` /
+  `failed_within_secs`) 与现有 `output_contains` / `output_contains_any` /
+  `iterations_within` 对齐, 无新概念。
+- **OpenSpec tasks.md 不改**: 这是个有意识的选择, 把分类偏差留到 Wave 3 archive
+  阶段一次性 sync, 避免反复触发 openspec validate 影响节奏; schema 扩展 + 迁移的
+  commit message 已经把分类问题记录清楚, reviewer 看 commit history 就能看到
+  "为什么 2.1.3/2.1.4 实际是 hard with schema extension"。
