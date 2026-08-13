@@ -241,9 +241,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
         ),
         // Tier 4: Capabilities (backend-agnostic)
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "tool-use",
-            Box::new(ToolUseScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "tool-use",
+                include_str!("../scenarios/tool-use.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,

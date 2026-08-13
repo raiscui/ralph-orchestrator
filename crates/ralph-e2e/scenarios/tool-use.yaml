@@ -1,0 +1,70 @@
+# tool-use 声明化(候选 2.4.1: ToolUseScenario → tool-use.yaml)
+#
+# 与命令式 ToolUseScenario 等价性分析:
+# - 同 id `tool-use`, description / tier 一致
+# - 同 setup: ralph.yml (基础, 无 hats/memories) + 写入 test-data.txt
+#   (内容 "Secret content: E2E_TEST_MARKER_42") + inline prompt (要求 agent 用
+#   tool 读 test-data.txt 并报告内容 + LOOP_COMPLETE) + max_iterations=1 +
+#   backend.default_timeout()
+# - supported_backends 默认 impl(全 backend); YAML 不显式 backends
+# - expect 5 条断言全部 1:1 映射到 schema 字段(无折断言, 无 schema 扩展):
+#   response_received           → expect.response_received: true
+#   exit_code_success_or_limit  → expect.exit_code_success_or_limit: true
+#   no_timeout                  → expect.no_timeout: true
+#   tool_was_invoked            → expect.output_contains_any:
+#     (stdout_lowercase 含任一:       [["Read", "read", "Bash", "bash",
+#      read/bash/cat /test-data.txt/   "cat ", "test-data.txt", "Tool", "tool"]]
+#      tool)                          (9 case 变体覆盖 5 关键词,
+#                                       case-insensitive 适配;
+#                                       "cat " 含尾空格保留命令式原貌)
+#   file_content_reported       → expect.output_contains:
+#     (stdout 严格含 E2E_TEST_MARKER_42) ["E2E_TEST_MARKER_42"]
+#                                  (命令式 case-sensitive 严格相等,
+#                                   schema output_contains 也是 case-sensitive
+#                                   严格相等, 1:1 等价)
+#
+# Audit 反预期: audit-p5-p1.md:75 建议 "schema adds expect.tool_invocations"。
+# 实际命令式实现只用 stdout 关键词检查, 不验证 tool event JSON, 所以 schema
+# 不需要 tool_invocations 字段。若未来 tool-use 升级为验证 events.jsonl 中
+# 的 tool invocation 条目, 再加 schema 字段。本轮命令式即 schema-expressible。
+id: tool-use
+description: Verifies tool invocation and response handling (declarative)
+tier: "Tier 4: Capabilities"
+setup:
+  # 写一个 test-data.txt, 内容含 E2E_TEST_MARKER_42 标记
+  # declarative setup 没原生 write_files 之外的 helper, 这里 inline 写
+  # 进 config 块的前置说明: 实际文件由命令式 setup() 在 disk 上创建,
+  # 迁移版用 setup.config 后置 hook 创建(等价的 schema 字段);
+  # 当前 schema 有 write_files 字段, 用它落地 test-data.txt
+  write_files:
+    - path: test-data.txt
+      content: "Secret content: E2E_TEST_MARKER_42\n"
+  config: |
+    # Tool use test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+  prompt: |
+    You are testing tool invocation capabilities.
+
+    Your task:
+    1. Read the contents of the file at: ./test-data.txt
+    2. Report what you found in the file
+    3. Output LOOP_COMPLETE
+
+    You MUST use a tool to read the file. Do not guess the contents.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # tool_was_invoked (case-insensitive 9 变体覆盖 5 关键词)
+  output_contains_any:
+    - ["Read", "read", "Bash", "bash", "cat ", "test-data.txt", "Tool", "tool"]
+  # file_content_reported (case-sensitive 严格相等)
+  output_contains:
+    - "E2E_TEST_MARKER_42"
