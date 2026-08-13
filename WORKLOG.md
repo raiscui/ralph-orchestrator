@@ -302,3 +302,75 @@
     + 提炼 21 migrations 经验 + 分流到长期知识载体
   - OpenSpec archive: tasks.md sync + openspec archive 命令
   - Wave 3.2-3.4 (#[deprecated] + docs + follow-up issue)
+
+## [2026-08-13 17:25:00] [Session ID: omx-1786600320381-z290x9] 任务名称: $continuous-learning 完整复盘 — root 上下文整理
+
+### 任务内容
+- 用户显式调用 `$continuous-learning` skill + "整理所有根目录文件上下文"
+- 按 continuous-learning 3.0 流程: 读 6 文件 → Gate → Refresh → skill/glossary/AGENTS sync → 验证 → 归档 → 交付
+
+### 完成过程
+**Phase 1 — 6 文件活跃度分析**
+- task_plan.md (661 lines): current session (18 提及), Wave 2 declarative migration 阶段状态
+- WORKLOG.md (304 lines): current session (5 提及), Wave 2 + CL closure
+- EPIPHANY_LOG.md (893 lines): 1 current mention (WORKLOG 归档触发), 其余历史
+- LATER_PLANS.md (960 lines): 2 current mentions (Wave 2 CL + schema extension)
+- ERRORFIX.md (246 lines): 0 current mentions, 全部 2026-05-28 历史
+- notes.md (790 lines): 0 current mentions, 全部 2026-05-28 历史
+- 全部 < 1000 行, 无自动归档触发; 当前 session 仍 active, 不归档任何段
+
+**Phase 2 — Compound Gate / Capture**
+- 距上次 CL (commit a7daa79) 仅 `7acd1a5` 一个 LATER_PLANS 标记, 无新代码改动
+- 0 new Compound Capture 候选
+- 0 stale / 0 superseded / 0 drift
+
+**Phase 3 — Scoped Refresh (a7daa79 captures 验证)**
+- 2 self-learning skills (yaml-schema-or-vs-and-semantics, yaml-duplicate-field-bug):
+  frontmatter 格式合规 (name/description/author/version/date), 仍 active
+- 4 EXPERIENCE.md entries (exp-20260813-*): HTML comment 元数据完整 (scope/source_topics/
+  source_hats/status/confidence/created_at/updated_at/supersedes), 仍 active
+- 1 docs/solutions/declarative-scenario-migration.md:
+  - **本轮发现**: 缺 YAML frontmatter + 路径应在 problem_type 子目录
+  - **本轮修复**: 移到 `docs/solutions/documentation-gaps/` (problem_type=documentation_gap
+    → Category Mapping 表: documentation-gaps/ 目录), 加 11 个必填 frontmatter 字段
+  - **验证**: validate-solution-frontmatter.py OK + validate-solution-claims.py OK
+    (4 paths / 0 SHAs / 0 links / 0 flags)
+
+**Phase 4 — AGENTS.md 索引同步**
+- 路径更新: `docs/solutions/declarative-scenario-migration.md` →
+  `docs/solutions/documentation-gaps/declarative-scenario-migration.md`
+- 其他 2 个索引条目 (2 self-learning skills) 路径未变, 仍 valid
+
+**Phase 5 — Verification**
+- `cargo test -p ralph-e2e --lib`: 536 passed / 0 failed / 24 ignored (无回归)
+- `cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture`:
+  Coverage 100.00% / Pass / Fail: PASS
+- solution validate-frontmatter: OK
+- solution validate-claims: OK (0 flags)
+
+**Phase 6 — Archive**
+- 0 archive (无文件达 1000 行, 无当前 Session 内容需归档, 历史内容已存在 archive/ 子目录)
+- WORKLOG__2026-08-13_pre_section_2_2_4_migrations.md 已在 commit a7daa79 移到
+  archive/branch_contexts/wave2_e2e_declarative_migration/, 保留
+
+### 总结感悟
+- **$continuous-learning 与上次 commit a7daa79 的关系**: a7daa79 是 Wave 2 收官后的
+  "sweep" CL (轻量, 只 capture Wave 2 内容); 本轮是用户显式触发的 "完整" CL (按
+  skill 完整 7 步跑); 两次互补, 不重复。本次新增内容仅是上一轮 captures 的
+  path 重构 + frontmatter 标准化 (skill 流程要求的格式)。
+- **docs/solutions 必须符合 solution-schema**: 上次 a7daa79 写 declarative-scenario-
+  migration.md 时只写了 markdown body, 没有 frontmatter, 也没按 problem_type
+  分类放子目录。validate-solution-frontmatter.py 立刻报错, 这是 skill 流程的
+  "七项门禁 + 重叠检查 + 验证脚本" 的最后一道防护 — 即使人工写了 solution,
+  校验脚本强制要求 schema 合规。补 frontmatter + 移到子目录后双通过。
+- **6 文件 Session ID 区分是 continuous-learning 的关键纪律**: notes.md (790 行)
+  + ERRORFIX.md (246 行) 0 提及当前 Session ID = 历史参考, 不是本轮事实账本。
+  若按"活跃度只看文件名"会误以为是当前活跃文件而误归档。当前 session 活跃段
+  在 task_plan/WORKLOG/EPIPHANY/LATER_PLANS (共 26 提及)。
+- **当前 CL 触发 vs 上次 a7daa79 的区别**: 本次是"无新 candidates" 状态, 但仍
+  跑完整流程 — 因为用户显式触发, 且 skill 流程要求 validate 已有 captures
+  (发现 frontmatter / path 缺陷, 立即 Refresh)。这正是 continuous-learning 的
+  价值: 不只是 add, 也定期 verify。
+- **0 归档 仍合理**: 无文件超 1000 行, 当前 session 内容全部 <100 行新 entries,
+  active 段仍需追加 (Wave 3 准备 + 命令式 cli.command 修复), 不该归档当前活跃
+  文件 — 那是 Wave 3 收官后的下一步工作。

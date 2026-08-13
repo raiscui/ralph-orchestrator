@@ -891,3 +891,44 @@ registry 是 hand-maintained,也无法 grep/monitor 变化。proposal 把 5.1 �
 ### 后续讨论入口
 - 看 LATER_PLANS.md "Wave 2 收官 continuous-learning" 条目
 - 归档文件 WORKLOG__2026-08-13_pre_section_2_2_4_migrations.md (999 行) 可回读
+
+## [2026-08-13 17:25:00] [Session ID: omx-1786600320381-z290x9] 主题: $continuous-learning skill 的 solution-schema 强制校验
+
+### 发现来源
+- 本轮 ($continuous-learning 完整复盘) 运行 validate-solution-frontmatter.py 发现
+  a7daa79 写的 declarative-scenario-migration.md 缺 YAML frontmatter + 路径不在
+  problem_type 子目录, 9 个必填字段缺失。
+
+### 核心问题
+- a7daa79 commit 是 Wave 2 收官后的 sweep CL, 当时直接按 markdown 习惯写了 solution
+  body, 跳过 frontmatter + Category Mapping 目录结构。validate-solution-frontmatter.py
+  立刻报错。
+- skill 流程的 "validate 长期产物" 步骤不是装饰, 是真正的 schema 合规检查 —
+  即使作者自认为合规, 校验脚本可能发现 author 视角外的缺陷。
+
+### 为什么重要
+- skill 流程的 7 步 (读 → Gate → Capture → Refresh → sync → **验证** → 归档) 是闭环:
+  Capture / Refresh 写内容, **验证** 强制格式合规, 不合规即 fail 必须修。
+- 跳一步会留下"半成品 solution", 后续 reviewer / agent 看不懂该 solution 属于哪个
+  problem_type / 哪个 component / 何时该读。
+- 这是 continuous-learning 的"七项门禁 + 重叠检查 + 验证脚本" 三层防护的最后一道
+  必须通过, 否则视为未完成 Capture。
+
+### 决定
+- [决定]: 本轮 Refresh 时把 declarative-scenario-migration.md 重构:
+  加 frontmatter (title/date/last_updated/module/component/problem_type=documentation_gap/
+  severity=medium/status=active/tags/verified_by) + 移到 documentation-gaps/ 子目录
+- [决定]: AGENTS.md 索引路径同步 (含子目录路径)
+- [决定]: 后续 writes docs/solutions/ 必须先读 solution-schema.md + solution-template.md
+  (避免再被校验脚本拒绝)
+
+### 当前结论
+- validate-solution-frontmatter.py / validate-solution-claims.py 双通过
+- AGENTS.md 索引更新
+- 0 archive (无文件达 1000 行)
+
+### 后续讨论入口
+- 看 `/Users/cuiluming/.codex/skills/continuous-learning-skill/resources/solution-schema.md`
+  的 frontmatter / tracks / Category Mapping 三部分
+- 看 `/Users/cuiluming/.codex/skills/continuous-learning-skill/resources/solution-template.md`
+  的 Bug Track + Knowledge Track 模板

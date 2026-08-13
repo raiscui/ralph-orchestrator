@@ -1,3 +1,29 @@
+---
+title: E2E Declarative Scenario Migration Guide
+date: 2026-08-13
+last_updated: 2026-08-13
+module: crates/ralph-e2e/src/scenarios/
+component: declarative migration
+problem_type: documentation_gap
+severity: medium
+status: active
+tags:
+  - declarative-yaml
+  - schema-design
+  - rust-e2e
+  - migration-guide
+  - wave2-q3-2026
+verified_by:
+  - "cargo test -p ralph-e2e --lib (534+ passed; this round 536 passed)"
+  - "cargo test -p ralph-e2e --test declarative_coverage_gate (Coverage 100.00% PASS)"
+  - "cargo run -p ralph-e2e --quiet -- --list (60 declarative scenarios)"
+related_solutions:
+  - ../EXPERIENCE.md (4 exp-20260813 entries)
+related_skills:
+  - self-learning.yaml-schema-or-vs-and-semantics
+  - self-learning.yaml-duplicate-field-bug
+---
+
 # E2E Declarative Scenario Migration Guide
 
 ## 背景

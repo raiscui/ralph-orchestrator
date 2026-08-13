@@ -958,3 +958,18 @@
 - 验证: cargo test -p ralph-e2e --lib 536 passed; gate test Coverage 100.00% PASS
 - 未做: 命令式 cli.command 静默忽略 (2.1.3 命令式本身的语义问题) 仍待后续修复,
   见下一条目
+
+## [2026-08-13 17:25:00] [Session ID: omx-1786600320381-z290x9] ~~$continuous-learning 完整复盘 (root 上下文整理)~~ ✅ DONE (本轮 chore commit)
+
+- 完成时间: 2026-08-13 17:25
+- 完成内容:
+  - 6 文件活跃度分析 (task_plan/WORKLOG/EPIPHANY/LATER_PLANS = current; ERRORFIX/notes = 历史)
+  - 0 新 Compound Capture (距上次 CL 仅 LATER_PLANS 标记更新)
+  - Scoped Refresh: docs/solutions/declarative-scenario-migration.md 重构
+    (移到 documentation-gaps/ 子目录 + 加 11 必填 frontmatter 字段)
+  - AGENTS.md 索引路径同步
+  - 验证: validate-solution-frontmatter.py OK + validate-solution-claims.py OK
+    (0 flags) + cargo test 536 passed + gate 100% PASS
+  - 0 归档 (无文件达 1000 行, 当前 session 仍 active)
+- 未做: 命令式 cli.command 静默忽略 (2.1.3 命令式本身的语义问题) 仍待后续修复
+- 详情: 见 task_plan.md / WORKLOG.md 最新 entries

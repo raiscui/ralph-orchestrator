@@ -659,3 +659,76 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - **Push**: 47 commits 推 my/main
 - **OpenSpec archive**: 修改 tasks.md 反映实际完成情况 (audit 反预期 + schema
   扩展 commits) + 运行 openspec archive
+
+## [2026-08-13 17:25:00] [Session ID: omx-1786600320381-z290x9] $continuous-learning 完整复盘 — root 上下文整理
+
+### 触发
+- 用户显式调用 `$continuous-learning` + "整理所有根目录文件上下文"
+
+### Gate 结果
+- **新 Compound Capture 候选**: 无。距上次 CL (commit a7daa79) 仅 `7acd1a5` 一个 LATER_PLANS 标记更新, 无新代码改动 / 无新发现。
+- **Scoped Refresh**: 无 drift。a7daa79 的 captures (2 skills + 4 EXP + 1 docs/solutions) 全部仍 valid。
+- **6 文件活跃度检查**:
+  - task_plan.md (661 lines): current session (18 提及) — active, 不归档
+  - WORKLOG.md (304 lines): current session (5 提及) — active, 不归档
+  - EPIPHANY_LOG.md (893 lines): 1 current mention + 大量历史 (codex app-server profile, codesign DR, deepseek 模型 drift 等) — current 段 active, 历史段保留
+  - LATER_PLANS.md (960 lines): 2 current mentions — active, 不归档
+  - ERRORFIX.md (246 lines): 0 current mentions, 全部历史 (record_session fixture 字段误放 等 2026-05-28 段) — 历史参考, 不归档
+  - notes.md (790 lines): 0 current mentions, 全部历史 (recoverable retry 接续点 等 2026-05-28 段) — 历史参考, 不归档
+  - 全部 < 1000 行, 无自动归档触发
+
+### 决策
+- [决定]: docs/solutions/declarative-scenario-migration.md 重构路径 + 加 frontmatter
+  [理由]: validate-solution-frontmatter.py 报错 — 文件必须以 '---' 分隔行开头且必填
+  title/date/last_updated/module/component/problem_type/severity/status/tags/verified_by;
+  validate-solution-claims.py 检查 0 flag (4 paths / 0 SHAs / 0 links); 同时按
+  Category Mapping 表把 problem_type=documentation_gap → 目录名 documentation-gaps
+  移入子目录 `docs/solutions/documentation-gaps/`。AGENTS.md 索引路径同步更新。
+- [决定]: 不归档 6 文件任何一段
+  [理由]: 当前 session 仍 active (task_plan.md 最新条目就是 Wave 2 closure);
+  历史 session (omx-1779954714247-oab9zc, 2026-05-28) 写的 notes.md / ERRORFIX.md
+  内容已被对应 archive/ 分支 (notes_2026-05-28_1559_pre_recoverable_retry_5x.md 等)
+  保留, 当前不需要重新归档。
+- [决定]: WORKLOG 归档 (commit a7daa79) 仍保留在 archive/branch_contexts/wave2_e2e_declarative_migration/
+  [理由]: continuous-learning 完成后允许 archive, 不再需要移到别处。
+
+### 验证 (cargo + solution 校验脚本)
+- `cargo test -p ralph-e2e --lib`: 536 passed / 0 failed / 24 ignored (无回归)
+- `cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture`:
+  Coverage 100.00% / Pass / Fail: PASS
+- `python3 continuous-learning-skill/scripts/validate-solution-frontmatter.py
+   docs/solutions/documentation-gaps/declarative-scenario-migration.md`:
+  OK (frontmatter 字段齐全)
+- `python3 continuous-learning-skill/scripts/validate-solution-claims.py ...`:
+  OK (4 paths / 0 SHAs / 0 links / 0 flags)
+
+### 净结果
+- 1 个 chore commit (本轮):
+  - docs/solutions/ → docs/solutions/documentation-gaps/ 重命名
+  - declarative-scenario-migration.md 加 frontmatter (title/date/last_updated/module/
+    component/problem_type/severity/status/tags/verified_by/related_solutions/related_skills)
+  - AGENTS.md 索引路径同步
+- 长期产物状态 (CL a7daa79 + 本轮 refresh):
+  - 2 self-learning skills (yaml-schema-or-vs-and-semantics, yaml-duplicate-field-bug)
+  - 4 EXPERIENCE.md entries (exp-20260813-yaml-schema-or-vs-and-semantics,
+    yaml-duplicate-field-detection, schema-cost-vs-assertion-value,
+    audit-classification-reality-check)
+  - 1 docs/solutions/documentation-gaps/declarative-scenario-migration.md
+    (frontmatter OK + claims OK)
+  - AGENTS.md Project Knowledge Index (3 个 Wave 2 相关条目)
+- 0 归档 (6 文件全部 < 1000 行 + current session 仍 active)
+
+### 下一步可选方向
+1. **Push 50 commits** 到 my/main (49 commits ahead of my/main, 未 push)
+2. **Wave 3 closure** (per OpenSpec tasks.md §3.1-3.4):
+   - 3.1 Confirm gate test green ✅ DONE (Coverage 100% PASS)
+   - 3.2 剩余 imperative TestScenario impls 加 `#[deprecated]`
+   - 3.3 docs/e2e/declarative-migration.md pointer
+   - 3.4 follow-up issue (1 release cycle 后物理删除)
+3. **OpenSpec archive**:
+   - 修改 tasks.md 反映实际 (audit 反预期 4 次 + 2 schema 扩展 commits)
+   - 跑 `openspec archive` (29/29 validate --strict 绿 → archive 流程)
+4. **命令式 cli.command 静默忽略** (2.1.3 backend-unavailable 语义问题):
+   - 留在 LATER_PLANS, 需要 `require_backend: <wrong>` schema 扩展
+   - 同时需修命令式 setup() 让 cli.command 在 backend != custom 时生效
+5. **暂停**: 等用户决策
