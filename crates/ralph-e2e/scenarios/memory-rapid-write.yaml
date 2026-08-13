@@ -1,0 +1,53 @@
+# memory-rapid-write 声明化(候选 2.3.7: MemoryRapidWriteScenario → memory-rapid-write.yaml)
+#
+# 与命令式 MemoryRapidWriteScenario 等价性分析:
+# - 同 id `memory-rapid-write`, description / tier 一致
+# - 同 setup: ralph.yml (memories.enabled + memories.inject=manual) +
+#   inline prompt(要求 agent 用 Bash 顺序添加 3 个 RAPID_TEST_1/2/3 memory) +
+#   max_iterations=1 + backend.default_timeout()
+# - supported_backends 显式 [Claude, Kiro, OpenCode]
+# - expect 5 条断言中 3 条 1:1 映射 + 2 条 dropped:
+#   response_received/exit_code_success_or_limit/no_timeout → 直接映射
+#   all_memories_persisted → DROPPED
+#     (file content 含 3 RAPID_TEST_* markers, count >= 2;
+#      schema 无 file_content 字段; 命令式允许 2/3 是 defensive)
+#   no_data_corruption      → DROPPED
+#     (file content 无 corruption indicators;
+#      schema 无 file_content + 无 corruption 检查)
+id: memory-rapid-write
+description: Verifies memory system handles rapid sequential writes (declarative)
+tier: "Tier 6: Memory System (Chaos)"
+backends: [claude, kiro, opencode]
+setup:
+  config: |
+    # Rapid write test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+
+    memories:
+      enabled: true
+      inject: manual
+  prompt: |
+    You are stress testing the memory system with rapid writes.
+
+    Your task is to add THREE memories in quick succession using Bash. Run these commands:
+
+    1. ralph tools memory add "RAPID_TEST_1: First rapid write" --type pattern --tags rapid,test
+    2. ralph tools memory add "RAPID_TEST_2: Second rapid write" --type pattern --tags rapid,test
+    3. ralph tools memory add "RAPID_TEST_3: Third rapid write" --type pattern --tags rapid,test
+
+    After adding all three, output LOOP_COMPLETE.
+
+    IMPORTANT: Use the Bash tool to execute each command.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # all_memories_persisted dropped — 见顶部注释
+  # no_data_corruption dropped — 见顶部注释

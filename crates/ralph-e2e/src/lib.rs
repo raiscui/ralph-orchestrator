@@ -348,9 +348,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "memory-rapid-write",
-            Box::new(MemoryRapidWriteScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "memory-rapid-write",
+                include_str!("../scenarios/memory-rapid-write.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,
