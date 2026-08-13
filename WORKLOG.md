@@ -760,3 +760,61 @@
   `THRESHOLD = 0.90` 是硬数字,不接受环境变量 override。
 - **`Box<dyn TestScenario>` 的 dyn trait 转发不需要 Arc/Mutex**:`Send + Sync` 已经够用,
   runner.rs 现有代码直接拿走就行。
+
+## [2026-08-13 14:10:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 2 任务 2.1.1 — 迁移 TimeoutScenario → timeout.yaml
+
+### 任务内容
+- 把 Tier 7 第一个 imperative(`TimeoutScenario`)迁移为 declarative YAML
+- 验证 gate test drift log 从 65.00 % → 66.67 %
+- 单 commit,小 diff,无 schema 扩展
+
+### 完成过程
+- 读 `crates/ralph-e2e/src/scenarios/errors.rs:30-210`:`TimeoutScenario` 完整实现
+  - 3 条断言:did_timeout / terminated_gracefully / duration_near_timeout
+  - 全部归结到 `result.timed_out == true`
+- 读 `crates/ralph-e2e/src/executor.rs:447-449`:确认 `timed_out == true` 时
+  `termination_reason = Some("TIMEOUT")`(精确字符串)
+- 读 `crates/ralph-e2e/src/declarative/scenario.rs:91,475-477`:确认 `expect.termination`
+  通过 `termination_matches` 做精确字符串比较
+- 写 `timeout.yaml`(42 行):
+  - `id: timeout-handling`(匹配命令式 id,保持 CLI 输出不变)
+  - 完整 setup(ralph.yml + 10,000 字 prompt + max_iterations=100 + timeout_secs=5)
+  - `expect.termination: "TIMEOUT"`(单条 declarative 断言覆盖命令式 3 条)
+- 改 `lib.rs::all_scenarios()`:
+  - 把 `Box::new(TimeoutScenario::new())` 换成 `Box::new(crate::declarative::from_yaml(...))`
+  - `ScenarioKind::Imperative` → `ScenarioKind::Declarative`
+  - registry id `"timeout"` → `"timeout-handling"`(匹配 YAML id)
+- `cargo check -p ralph-e2e`:ok
+- `cargo test -p ralph-e2e --lib`:526 passed / 0 failed(无回归)
+- `cargo run -p ralph-e2e -- --list`:显示 `timeout-handling  Verifies graceful timeout termination (declarative)`
+- `cargo test -p ralph-e2e --test declarative_coverage_gate`:
+  - Declarative 40 / Imperative 20 / ExplicitKeep 1
+  - Coverage 66.67 %(比上一轮 +1.67 %)
+  - gate 故意外仍 FAIL(threshold 90.00 %)
+- commit `c0e1687`
+
+### 净结果
+- 1 commit `c0e1687`
+  - crates/ralph-e2e/scenarios/timeout.yaml +42 行(新增)
+  - crates/ralph-e2e/src/lib.rs +6 / -3
+- `TimeoutScenario` struct + 全部测试保留(向后兼容,W ave 3 才删)
+- drift log 跨 1 commit 改善 +1.67 %(65.00 → 66.67)
+
+### 总结感悟
+- **「折断言」是 imperative → declarative 迁移的核心权衡**:命令式有 3 条 assertion,
+  declarative schema 只有 1 个相关字段(`termination`)。把 3 条折成 1 条的前提是
+  它们的语义真的等价 — 这里 `result.timed_out` 既是命令式的核心断言又是 executor
+  设置 termination_reason 的唯一触发条件,所以折是安全的。
+- **YAML `id:` 必须匹配 `scenario.id()`,否则 CLI 行为会变**:registry id 是给
+  gate test diagnostic 用的,YAML id 是给 `scenario.id()` 用的,两者不一定相同,
+  但保持一致能减少 future contributor 的认知负担。
+- **保留旧 struct 是 Wave 3 的工作,不是 Wave 2**:`TimeoutScenario` 还在,
+  它的 526 个 lib tests 还覆盖它,W ave 3 才用 `#[deprecated]` 标它,然后一个
+  release cycle 后才物理删除。这次迁移只动 registry 那一行,保持 diff 最小。
+- **drift log delta 是迁移 commit 的「质量度量」**:65.00 % → 66.67 % 是 1/60 ≈ 1.67 %,
+  commit message 必须把这个数字写出来,reviewer 一眼能验证「确实迁移了一个 imperative」。
+  后续 21 个 commits 可以照这个模板写,保持 drift delta 的可追溯性。
+- **`cargo run -- --list` 是最低成本的 smoke test**:它会真正执行 YAML 反序列化
+  (via `from_yaml` 的 `unwrap_or_else panic`),如果 schema 不匹配会立刻 panic 退出。
+  这是不依赖任何 backend 的纯编译期 + 启动期验证。
+- **`# ponytail:` 这次不需要**:迁移是 1:1 替换,没有 lazy 简化空间。

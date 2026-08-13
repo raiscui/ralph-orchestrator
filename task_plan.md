@@ -111,3 +111,37 @@ Pass / Fail:            FAIL
 3. **Wave 2 第一个 commit**(任务 2.3.1):迁移 `MemoryAddScenario` → `memory-add.yaml`(memory 类 8 个里的第一个,难度中等)
 4. **暂留 Wave 2**:先 push 现有 10 commits 到 my/main
 5. **暂停**:等用户决策下一步
+
+## [2026-08-13 14:10:00] [Session ID: omx-1786600320381-z290x9] Wave 2 任务 2.1.1 已 commit
+
+### 完成动作
+- 新文件 `crates/ralph-e2e/scenarios/timeout.yaml`(42 行,id = `timeout-handling`)
+- lib.rs registry 把 `TimeoutScenario` 那条改成 `Declarative` + from_yaml(...)
+- CLI list 显示:`timeout-handling  Verifies graceful timeout termination (declarative)`
+- `TimeoutScenario` struct 留在 errors.rs(测试 + pub use 仍保留,Wave 3 才删)
+
+### 净结果
+- 1 commit `c0e1687 feat(e2e): migrate TimeoutScenario → timeout.yaml (Wave 2 task 2.1.1)`
+  - timeout.yaml +42 行
+  - lib.rs +6 行 / -3 行
+- drift log delta:65.00 % → 66.67 %(40 declarative / 20 imperative / 1 keep)
+- 526 lib tests 仍全过
+- gate test 仍 FAIL(预期,要 19 / 21 migrations 才到 90 %)
+
+### 决定
+- [决定]: YAML id 用 `timeout-handling` 而不是 `timeout`,匹配命令式 `TimeoutScenario::id()`
+  [理由]: 保持 `scenario.id()` 调用方行为不变,CLI 输出保持一致
+- [决定]: 命令式 3 条断言(did_timeout / graceful / duration_near)折成 1 条 declarative
+  `termination: TIMEOUT`
+  [理由]: 3 条都归结到 `result.timed_out`,executor 把 `termination_reason` 设成 `"TIMEOUT"`
+  当且仅当 timed_out;duration_near 由 hard kill 行为保证,无需 schema 字段
+- [决定]: 不删除 `TimeoutScenario` struct + pub use
+  [理由]: Wave 3 task 3.4 显式推迟 struct 物理删除到一个 release cycle 后,
+  本轮只换 registry 调用,不破坏外部 API
+
+### 下一步可选方向
+1. **任务 2.1.2**:迁移 `MaxIterationsScenario` → `max-iterations.yaml`
+2. **任务 2.1.3**:迁移 `BackendUnavailableScenario` → `backend-unavailable.yaml`
+3. **任务 2.1.4**:迁移 `AuthFailureScenario` → `auth-failure.yaml`(完成 §2.1 全部 easy 类)
+4. **先 push**:把 12 commits 推到 my/main
+5. **暂停**:等用户决策
