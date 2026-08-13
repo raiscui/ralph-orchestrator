@@ -776,3 +776,80 @@ proposal 在写 Group 5 P4 时只看到 surface (`main.rs` 22 行),没看整体(
 ### 后续讨论入口
 - 新建 declarative-e2e-mock-parity change 作为 F1 follow-up
 - 任何 follow-up Change 不混在 sync-origin-main-features 里,单独 openspec/change
+
+## [2026-08-13 10:35:00] [Session ID: omx-1786419140441-df5ql8] 主题: 测试中 "hat_id 是 coordinator 而非 active sub-hat" — port 设计契约需在 tests 里 pin 下来
+
+### 发现来源
+
+写 P2 contract test 时第一次犯断言错误 `hat_id == "planner"`,实际
+`EventLoop::run` 把 "ralph" (coordinator) 传给 `execute_prompt`。
+错误本身是个发现 — 在 prompt 里 "planner" 是 active sub-hat,但 `hat_id`
+parameter 是 coordinator id。
+
+### 核心问题
+
+`PromptExecutor::execute_prompt(..., &hat_id, ...)` 的 `hat_id` 参数语义:
+- **coordinator hat id**(default "ralph" in multi-hat mode) — 不是 active sub-hat
+- active sub-hat id 是通过 prompt text 内嵌传递的(display_hat)
+
+这个 port 设计是 `3ff4b47 refactor(core): EventLoop 收窄为 run() 窄入口`
+引入的语义,但当时没有 in-repo test pin 这个契约,留给下游适配层(PtyPromptExecutor)
+靠「we know what we are」隐式正确。
+
+### 为什么重要
+
+后果:
+- 未来一个 refactor 想把 `execute_prompt` 改成"传 sub-hat id" 会 silent 改变
+  PtyPromptExecutor 的行为(backend 选择、role_args 应用都基于 active hat)
+- 不会 fail compile,不会 fail test,直到某个用户观测到 backend 错选
+
+教训:
+- **port 设计决策应该在测试里钉死**,而不是「信任后续 contributor」
+- **同一份 contract test 既能验证 happy path,也能 pin the right thing**
+- **「test failures are features」— 第一次 fail 暴露了我对 port 语义的理解错,
+  这正是 test 存在的意义**
+
+### 当前结论
+- 已落地:`crates/ralph-core/tests/prompt_executor_contract.rs` 3 tests pin
+  - iteration 顺序
+  - hat_id 语义(coordinator 而非 sub-hat)
+  - canceled → Interrupted
+  - timed_out → Stopped
+- 645 existing lib tests 仍 0 fail
+
+### 后续讨论入口
+- 任何新 port trait 引入时必须同时包含至少 1 个 round-trip contract test
+- 类似 PtyPromptExecutor 这种 port impl 可考虑继承 prompt_executor_contract 的 helper 设计
+
+## [2026-08-13 11:35:00] [Session ID: omx-1786419140441-df5ql8] 主题: 干 verification 「deprecate when X%」必须 explicit X% + CI 可机械 verify,不能 narrative
+
+### 发现来源
+
+5.1 audit 揭示 5.1 决策依赖「≥ 90% declarative coverage」 — 但 90% 没具体定义怎么测,
+registry 是 hand-maintained,也无法 grep/monitor 变化。proposal 把 5.1 写的「直到 X%」自然
+假设是 narrative-driven。
+
+### 核心问题
+
+阈值式 deprecation(如「90% 才删 escape hatch」)有 3 个坑:
+1. numerator + denominator 由谁维护? — 容易忘记 denominator 变化
+2. 测不测? — 写不出测试的 threshold 等于没写
+3. migration-by-migration 怎么 re-check? — 每次 commit 都手数?
+
+### 为什么重要
+
+后果:
+- 90% 这个数字听上去合理,但没 IC verify = 实际工作不能以此为依据
+- 没有 CI gate 的话,5.1 永远可以 subjective 地标 [x]
+- 也会 lazy commit:says「接近 90%」就标 [x],其实真实数字掉在 80%
+
+### 当前结论
+- 已落地:audit 写成 static 数据(39 / 61 = 63.93%)
+- 已落地:NO-GO 决策,5.1 保持 [ ]
+- 后续建议:开 new change `e2e-declarative-migration-plan`,首工写 CI gate script
+  (在 `get_all_scenarios` 函数内枚举,assert `yaml_count / total >= 0.9` 即可)
+
+### 后续讨论入口
+- 任何「deprecate after X%」类型的 task 都该要求 owner 写 CI gate test
+- 「X%」类数值要 ground in testable source-of-truth 不是 grep
+- registry-style counting code 是 natural CI gate:硬代码的 shift 即 regression

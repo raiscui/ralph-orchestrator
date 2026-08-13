@@ -577,3 +577,80 @@
   人会理解 p3p4 不是「22 行反向」而是「整 crate 重构」+ 「module reorg」
 - 新 change file 用独立目录,F1 独立追踪,不会污染主线 sync-origin-main-features
 - 4.4 / 4.15 dropped 这种小细节记录很关键 — Group 4 review 时不会被迷惑
+
+## [2026-08-13 10:30:00] [Session ID: omx-1786419140441-df5ql8] 任务名称: Group 5 P2 PromptExecutor port contract test
+
+### 任务内容
+- 给 `ralph-core::PromptExecutor` 加 round-trip contract test
+- 写 audit 报告,update tasks.md 5.2 标 [x]
+
+### 完成过程
+- 读 3ff4b47 引入的 port (PromptExecutor / PromptOutput / RunHooks)
+- 读 `EventLoop::run` 完整签名 + 调用顺序
+- 决定位置:`crates/ralph-core/tests/prompt_executor_contract.rs`(integration test,不动 src)
+- 写 RecordingExecutor stub + 3 个 #[tokio::test]
+- 第一次跑 test fail:断言 hat_id="planner" 错了 → 实际 EventLoop 传 "ralph" (coordinator hat),
+  而 display_hat(显示用)才是 "planner"。修测试 + 加 prompt.contains("Planner") 验证
+- 第二次 3/3 pass(0.52s)
+- 跑 ralph-core lib tests:645 全绿(无回归)
+
+### 净结果
+- 新文件:`crates/ralph-core/tests/prompt_executor_contract.rs`(250 行,3 tests)
+- 新 audit:`openspec/changes/archive/2026-08-12-.../audit-p5-p2.md`(115 行)
+- tasks.md 5.2 标 [x]
+- 1 个 commit `209f3aa test(core): pin PromptExecutor port contract with 3 round-trip tests`
+
+### 总结感悟
+- **`hat_id` 是 coordinator id("ralph"),不是 active sub-hat**。prompt 文本里才是 active hat
+  名。这是 port 设计的关键契约,但容易误判。测试明确 pin 这一点防止 silent change。
+- **Arc<Mutex<...>> 共享计数 to 'static FnMut closures** 解决 lifetime 痛点。
+- **integration test 优于新增 mod** — 不污染 src,顺路覆盖完整 path
+- **`#[tokio::test]` 已经够用**(workspace tokio "full" feature),不需要额外 runtime 配置
+- **`serde_yaml::from_str::<RalphConfig>` 的 minimal yaml 必须包含核心必填 fields**(completion_promise
+  等),否则 deserialize fail
+
+### Group 5 进度(4/6 完成)
+- 5.1 (P1) deprecate escape hatch — pending declarative coverage 审计
+- 5.2 (P2) ✅ done
+- 5.3 (P3) ✅ done (audit-p3-p4.md)
+- 5.4 (P4) ✅ done (audit-p3-p4.md, scope 修正)
+- 5.5 (P5) ✅ done (audit-p5.md, 无 work needed)
+- 5.6 (P6) release tag — pending Group 1-3 definition
+
+## [2026-08-13 11:30:00] [Session ID: omx-1786419140441-df5ql8] 任务名称: Group 5 P1 (5.1 escape hatch deprecate) audit → NO-GO
+
+### 任务内容
+- Audit current `get_all_scenarios()` registry to determine declarative coverage
+- 决定 5.1 (escape hatch deprecate) 是否可 NOW 落地
+
+### 完成过程
+- 读 `crates/ralph-e2e/src/main.rs` 第 235-470 行的 `get_all_scenarios()` function
+- 精确数 `Box::new(declarative::from_yaml(...))` 39 个
+- 精确数 `Box::new(TypeNameScenario::new())` 22 个
+- 写下 22 imperative 按迁移难度分类:
+  - 4 errors (easy)
+  - 13 memory (medium-hard,filesystem-level chaos tests)
+  - 5 hats (medium)
+  - 2 tools (hard)
+  - 2 parallel non-live (hard,fixture engineering)
+  - 1 explicit keep (experimental-dev-engine)
+- 算 coverage:
+  - 总 61
+  - declarative 39
+  - 39/61 = 63.93% (低于 90% 阈值)
+- 决策:**NO-GO**,5.1 暂不动
+
+### 净结果
+- 1 audit 文件:`openspec/changes/archive/2026-08-12-.../audit-p5-p1.md`(198 行)
+- 1 commit `c753328 chore(openspec): record P1 declarative coverage audit (NO-GO on deprecation)`
+- tasks.md 5.1 改用 NO-GO note 但保留 [ ]
+- 0 代码改动(纯 audit)
+
+### 总结感悟
+- **registry 是 single source of truth** — `get_all_scenarios()` 函数硬编码场景, grep 计数可信
+- **「90% 阈值」是脆性假设** — 当初 proposal 设计时不知道有 22 个 imperative,直接 fork「已达 90%」
+  反而是个会伤害真正迁移工作的 self-deception
+- **5.1 不能 ground truth 在「达到了」 — 必须 ground 在「CI 看的脚本」** — 我建议开新 change
+  `e2e-declarative-migration-plan` 把这 dry-run audit script 写成 CI gate
+- **explicit keep (experimental-dev-engine) 不该计入分母** — 注释清楚说明「保留命令式」
+- **22 顽固者 8 是 chaos test,5 是 hats** — 前者迁移价值 ≥ 时间成本,后者迁移成本低
