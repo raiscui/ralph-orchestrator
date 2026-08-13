@@ -273,9 +273,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "hat-event-routing",
-            Box::new(HatEventRoutingScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "hat-event-routing",
+                include_str!("../scenarios/hat-event-routing.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,
