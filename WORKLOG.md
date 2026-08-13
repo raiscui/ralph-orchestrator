@@ -78,3 +78,50 @@
 - **WORKLOG 提前归档的代价**: 把 "每个迁移一个 chore commit" 模式打破, 改为
   "§2.2 batch 一个 chore commit"; 代价是 chore 变长(本节 ~80 行), 但避免连续触发
   1000 行规则 + 提前执行 continuous-learning 的不完整流程。trade-off 评估 OK。
+
+## [2026-08-13 16:00:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 2 §2.3.1 + §2.4.1 双迁移 (MemoryAdd + ToolUse)
+
+### 任务内容
+- 用户指令 "1+2" — 同时跑 §2.3.1 (MemoryAdd) 和 §2.4.1 (ToolUse)
+- audit-p5-p1.md 标 §2.4 为 "Hard, schema extension needed", 2.4.1 建议加
+  expect.tool_invocations
+- §2.3 标 "medium-hard", 8 个 memory scenarios, MemoryAdd 是第一刀
+
+### 完成过程
+**Phase 1 — 2.3.1 MemoryAddScenario (commit 0f070a2)**
+- 6 命令式断言 → 5 schema 字段 + 1 dropped
+- dropped: memory_content_valid (检查 memories.md 内容非空; schema 无
+  file_content 字段; artifacts 已覆盖 file 存在, content check 只防
+  "存在但空" 边缘 case, schema-cost > value)
+- setup 用 ralph.yml + memories.enabled + memories.inject=manual + inline
+  prompt (Bash tool 跑 ralph tools memory add) + max_iterations=1 +
+  backend.default_timeout()
+- supported_backends 显式 [Claude, Kiro, OpenCode]
+- drift delta: 48/12 → 49/11
+
+**Phase 2 — 2.4.1 ToolUseScenario (commit 057d8ae)**
+- 5 命令式断言 → 5 schema 字段全部 1:1 映射(无 schema 扩展)
+- audit 反预期: audit 说需要 expect.tool_invocations, 但命令式只用 stdout
+  关键词检查, schema 现成字段就够; 若未来升级为验证 events.jsonl, 再加
+- 用 schema 的 `write_files` 字段创建 test-data.txt(命令式用 std::fs::write,
+  declarative 等价)
+- "cat " 尾空格保留, 匹配 "cat /path" shell command 特征
+- drift delta: 49/11 → 50/10
+
+### 总结感悟
+- **audit 反预期 = 好消息**: 2.4.1 audit 标 "Hard, schema extension needed",
+  实际命令式实现不需要 tool_invocations 字段。教训: 审计文档基于对未来
+  strict-mode 的判断, 但命令式现状是 lenient (stdout 关键词); 迁declarative
+  时若命令式是 lenient, audit 的 schema 扩展建议可能是 "future strict-mode",
+  可以先不实施。这与 2.1.3 形成对比 — 2.1.3 的命令式需要 schema 扩展才能
+  1:1 (stderr_contains / duration_within), 2.4.1 不需要。
+- **write_files 字段是隐式 asset**: 之前 5 个 hat scenarios + 2.1.x 错误
+  scenarios 都没有用 write_files (它们的 setup 不需要写额外文件), tool-use
+  是首个使用场景。这个字段原本是为 fake codex shim 类场景设计的 (scenario
+  注释提到), 但 tool-use 显示它也是通用 helper。
+- **memory 类可能不需要 schema 扩展**: 2.3.1 是第一个, 只 dropped content
+  check 一个; 若 2.3.2-2.3.8 都不需要 file_content 字段, 则 §2.3 全部 8
+  个 migrations 可以不依赖 schema 扩展完成。值得继续读 2.3.2 验证。
+- **`# ponytail:` 这次不需要**: 2 dropped 都有具体 imperative 场景驱动,
+  不是 speculative; "audit 反预期" 是基于实际命令式实现的判断, 不是
+  主动简化。
