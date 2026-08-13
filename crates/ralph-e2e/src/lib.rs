@@ -252,9 +252,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
         ),
         // Tier 5: Hat Collections (backend-agnostic)
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "hat-single",
-            Box::new(HatSingleScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "hat-single",
+                include_str!("../scenarios/hat-single.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,

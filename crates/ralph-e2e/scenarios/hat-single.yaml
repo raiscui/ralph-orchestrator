@@ -1,0 +1,88 @@
+# hat-single 声明化(候选 2.2.1: HatSingleScenario → hat-single.yaml)
+#
+# 与命令式 HatSingleScenario 等价性分析:
+# - 同 id `hat-single`, description / tier 一致
+# - 同 setup: ralph.yml 含 hats.builder(name/description/triggers=[build.task]/
+#   publishes=[build.done]/instructions 含 "Builder role activated") + inline prompt
+#   (emit build.task + LOOP_COMPLETE) + max_iterations=2 + backend.default_timeout()
+# - supported_backends 走 TestScenario::supported_backends 默认 impl(返回全部 backend),
+#   不显式声明 backends(与命令式一致);declarative runner 在 backends 为空时返回
+#   全 backend(含 Codex),所以行为对齐
+# - expect 5 条断言全部 1:1 映射到 schema 字段(无折断言):
+#   response_received           → expect.response_received: true
+#   exit_code_success_or_limit  → expect.exit_code_success_or_limit: true
+#   no_timeout                  → expect.no_timeout: true
+#   hat_persona_visible         → expect.output_contains_any:
+#     (stdout_lowercase 含任一关键   [["Builder", "builder", "Implement",
+#      词: builder/implement/build)   "implement", "Build", "build"]]
+#     (case-insensitive 适配: 命令式用 .to_lowercase() 后 contains, schema 是
+#      case-sensitive; 6 个 case 变体覆盖 3 关键词, 等价于 "任一大小写变体出现")
+#   build_event_emitted         → expect.events:
+#     (events 中任一 topic starts_with   [{topic: build.task, min_count: 1},
+#      "build.")                          {topic: build.done, min_count: 1}]
+#     (适配: event_count_at_least 只支持精确 topic 匹配, 不支持 starts_with;
+#      scenario 已知只 emit build.task 与 build.done 两个 topic, 用 2 条精确匹配
+#      等价于 starts_with("build."); 若未来 hat 增加第三个 build.* event, 需追加)
+id: hat-single
+description: Verifies single custom hat executes with correct persona (declarative)
+tier: "Tier 5: Hat Collections"
+setup:
+  config: |
+    # Single hat test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 2
+      completion_promise: "LOOP_COMPLETE"
+
+    hats:
+      builder:
+        name: "Builder"
+        description: "A focused builder hat that implements tasks"
+        triggers:
+          - build.task
+        publishes:
+          - build.done
+        instructions: |
+          You are Builder, a focused implementation specialist.
+
+          When you receive a build.task event:
+          1. Acknowledge your Builder role explicitly
+          2. Complete the requested task
+          3. Emit a build.done event with your results using this exact XML format:
+
+          <event topic="build.done">
+          tests: pass
+          lint: pass
+          typecheck: pass
+          </event>
+
+          Always mention "Builder role activated" in your response.
+  prompt: |
+    You are testing Ralph's hat system.
+
+    Start by emitting a build.task event to trigger the Builder hat:
+    <event topic="build.task">
+    Task: Create a simple greeting function
+    </event>
+
+    After the builder completes, output LOOP_COMPLETE.
+  max_iterations: 2
+  # timeout_secs 不写 → runner 落到 backend.default_timeout()(命令式 setup 一致)
+expect:
+  # 断言 1: response_received
+  response_received: true
+  # 断言 2: exit_code_success_or_limit
+  exit_code_success_or_limit: true
+  # 断言 3: no_timeout
+  no_timeout: true
+  # 断言 4: hat_persona_visible (case-insensitive, 6 变体覆盖 3 关键词)
+  output_contains_any:
+    - ["Builder", "builder", "Implement", "implement", "Build", "build"]
+  # 断言 5: build_event_emitted (用 2 条精确 topic 匹配等价 starts_with("build."))
+  events:
+    - topic: build.task
+      min_count: 1
+    - topic: build.done
+      min_count: 1
