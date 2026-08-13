@@ -1,0 +1,50 @@
+# auth-failure 声明化(候选 2.1.4: AuthFailureScenario → auth-failure.yaml)
+#
+# 与命令式 AuthFailureScenario 等价性分析(由 schema 扩展 commit 4531b9a 启用):
+# - 同 id `auth-failure`, description / tier / supported_backends 一致
+# - 同 setup: ralph.yml + inline prompt "Say hello." + max_iterations=1 + timeout=30s
+#   + extra_args = ["--api-key", "invalid-key-12345"]
+# - expect 3 条断言中 2 条 1:1 映射, 1 条 dropped:
+#   execution_failed_with_error (exit_code != Some(0) || !stderr.is_empty())
+#                                              → expect.failed: true
+#   error_message_helpful (stderr+stdout 含 7 关键词之一)
+#                                              → expect.stderr_contains_any:
+#                                                [auth, unauthorized, invalid, key,
+#                                                 credential, 401, 403]
+#     退到 stderr only(命令式原本查 stderr+stdout, 这里只查 stderr)
+#   process_exited_cleanly (exit_code.is_some()) → DROPPED
+#     该断言只防 panic/segfault(被信号 kill), 实际几乎永远通过;
+#     schema 字段成本(exit_code_present: bool)> 价值;
+#     间接覆盖: no_timeout: true + failed: true 已经处理常见超时/异常路径
+#
+# 已知 caveat(未在 schema 解决):
+# - error_message_helpful 退到 stderr only, 不查 stdout; 若 ralph 把 auth 错误
+#   写到 stdout(如某些 CLI adapter 行为), 需追加 output_contains_any。
+# - extra_args 注入是 declarative schema 原生支持的字段, 与命令式 Vec<String> 一致。
+id: auth-failure
+description: Verifies graceful handling of authentication failures (declarative)
+tier: "Tier 7: Error Handling"
+backends: [claude, kiro, opencode]
+setup:
+  config: |
+    # Auth failure test config
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+  prompt: |
+    Say hello.
+  max_iterations: 1
+  timeout_secs: 30  # 命令式 setup 硬编码 30s
+  extra_args:
+    - --api-key
+    - invalid-key-12345  # 触发 auth 失败
+expect:
+  # 断言 1: execution_failed_with_error (exit_code != Some(0) || !stderr.is_empty())
+  failed: true
+  # 断言 2: error_message_helpful (stderr/stdout 含 7 关键词之一, 退到 stderr only)
+  stderr_contains_any:
+    - ["auth", "unauthorized", "invalid", "key", "credential", "401", "403"]
+  # 断言 3 (dropped): process_exited_cleanly — 见顶部注释

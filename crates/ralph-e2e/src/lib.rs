@@ -336,9 +336,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "auth-failure",
-            Box::new(AuthFailureScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "auth-failure",
+                include_str!("../scenarios/auth-failure.yaml"),
+            )),
         ),
         (
             ScenarioKind::Declarative,
