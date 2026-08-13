@@ -265,9 +265,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             Box::new(HatMultiWorkflowScenario::new()),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "hat-instructions",
-            Box::new(HatInstructionsScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "hat-instructions",
+                include_str!("../scenarios/hat-instructions.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,

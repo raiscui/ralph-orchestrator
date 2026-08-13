@@ -1,0 +1,90 @@
+# hat-instructions 声明化(候选 2.2.2: HatInstructionsScenario → hat-instructions.yaml)
+#
+# 与命令式 HatInstructionsScenario 等价性分析:
+# - 同 id `hat-instructions`, description / tier 一致
+# - 同 setup: ralph.yml 含 hats.reviewer(triggers=[review.request],
+#   publishes=[review.done], instructions 含 "REVIEW CHECKLIST:" + 强制 verdict)
+#   + inline prompt(emit review.request + LOOP_COMPLETE) + max_iterations=2 +
+#   backend.default_timeout()
+# - supported_backends 默认 impl(全 backend); YAML 不显式 backends
+# - expect 5 条断言映射:
+#   response_received           → expect.response_received: true
+#   exit_code_success_or_limit  → expect.exit_code_success_or_limit: true
+#   no_timeout                  → expect.no_timeout: true
+#   checklist_format_used       → expect.output_contains_any:
+#     (stdout_lowercase 含 4 关键词   [[Checklist, checklist, Security, security,
+#      任一: checklist/security/        Performance, performance, Readability,
+#      performance/readability)         readability]]
+#     (8 个 case 变体覆盖 4 关键词, case-insensitive 适配)
+#   verdict_provided            → expect.output_contains_any:
+#     (stdout_lowercase 含 verdict      [["Approved", "approved", "NEEDS_CHANGES",
+#      OR events starts_with             "needs_changes"]]
+#      "review.")                    + expect.events:
+#                                       [{topic: review.done, min_count: 1}]
+#     (OR 折 AND: 命令式是 OR(stdout verdict || events review.*), runner 的
+#      AND 会让两者都必须通过; 实际 hat instructions 强制要求两者都有,
+#      AND 更严格更正确, 不会失真; dropped has_review_event 的 starts_with
+#      适配为精确 review.done match — scenario 已知只 emit review.done)
+id: hat-instructions
+description: Verifies hat instructions are followed by the agent (declarative)
+tier: "Tier 5: Hat Collections"
+setup:
+  config: |
+    # Hat instructions test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 2
+      completion_promise: "LOOP_COMPLETE"
+
+    hats:
+      reviewer:
+        name: "Code Reviewer"
+        description: "Reviews code with a specific checklist"
+        triggers:
+          - review.request
+        publishes:
+          - review.done
+        instructions: |
+          You are Code Reviewer. You MUST follow this exact process:
+
+          1. Start your response with "REVIEW CHECKLIST:"
+          2. Check for: Security, Performance, Readability
+          3. End with a verdict: APPROVED or NEEDS_CHANGES
+          4. Emit review.done with your verdict using this exact XML format:
+
+          <event topic="review.done">
+          verdict: APPROVED
+          </event>
+
+          This checklist format is MANDATORY.
+  prompt: |
+    You are testing Ralph's hat instruction system.
+
+    Emit a review.request event to trigger the Code Reviewer hat:
+    <event topic="review.request">
+    Code to review:
+    ```python
+    def add(a, b):
+        return a + b
+    ```
+    </event>
+
+    The reviewer should follow its checklist instructions.
+    After the review is complete, output LOOP_COMPLETE.
+  max_iterations: 2
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # checklist_format_used: 8 case 变体覆盖 4 关键词
+  output_contains_any:
+    - ["Checklist", "checklist", "Security", "security", "Performance", "performance", "Readability", "readability"]
+  # verdict_provided (OR 折 AND): verdict 文本 + review.done event 都必须出现
+  output_contains_any:
+    - ["Approved", "approved", "NEEDS_CHANGES", "needs_changes"]
+  events:
+    - topic: review.done
+      min_count: 1
