@@ -1,0 +1,248 @@
+# parallel-app-server-idle-start 声明化(候选 2.4.1: ParallelAppServerIdleStartScenario → parallel-app-server-idle-start.yaml)
+#
+# 与命令式 ParallelAppServerIdleStartScenario 等价性分析:
+# - 同 id, description, tier, supported_backends=[Codex]
+# - 同 setup: ralph.yml + 写入 fake codex shim (Python, .e2e/bin/codex) +
+#   prompt_source=Config + extra_args=[--no-tui, --idle-start] + path_prefix
+#   注入 fake_bin_dir + inject sequence (Wait idle + Sleep 4s + Assert idle +
+#   Emit warmup human.message + Wait running_then_idle + Sleep 6s + Emit finish)
+# - schema 已支持: write_files + executable / extra_args / prompt_source /
+#   path_prefix / inject (Wait + Sleep + Assert + Emit / WaitEvent)
+# - expect 12 条断言中 10 条映射 + 2 条 dropped:
+#   response_received           → response_received: true
+#   exit_code_success_or_limit  → exit_code_success_or_limit: true
+#   no_timeout                  → no_timeout: true
+#   duration_within(120)        → failed_within_secs: 120
+#     (命令式用 <= 120s, schema 严格 < 120s; off-by-one 边界可接受)
+#   fake_app_server_used        → output_contains [FAKE_CODEX_APP_SERVER_IDLE_READY]
+#   marker_observed             → output_contains_any [E2E_IDLE_START_MARKER_42]
+#   warmup_ack_observed         → output_contains [IDLE_START_WARMUP_ACK] +
+#                                 output_contains [WAITING_FOR_SECOND_MESSAGE]
+#     (命令式 AND 2 个 substring, schema 用 2 个 AND 字段)
+#   answers_observed            → output_contains [answer: 164] +
+#                                 output_contains [answer: 15]
+#     (命令式 AND 2 个 substring, schema 同上)
+#   survived_two_runtime_windows → duration_at_least_secs: 10
+#     (pre_wait=4s + post_warmup_wait=6s = 10s, schema 严格 >= 10s)
+#   loop_complete_detected      → termination: "LOOP_COMPLETE"
+#   human_log_written           → DROPPED
+#     (.e2e/human-log.md file content 检查 10 个 substring, schema 无 file_content)
+#   Injector succeeded          → DROPPED
+#     (declarative runner 已有 inject 失败时 map_err 强制 setup 错误, implicit)
+id: parallel-app-server-idle-start
+description: Validates parallel --idle-start survives pre/post-first-message max_runtime windows and completes on second human.message via app-server (fake codex shim) (declarative)
+tier: "Tier 8: Parallel Runtime"
+backends: [codex]
+setup:
+  # 写 fake codex shim 到 .e2e/bin/codex (Python script, executable)
+  write_files:
+    - path: .e2e/bin/codex
+      executable: true
+      content: |
+        #!/usr/bin/env python3
+        import json
+        import re
+        import sys
+        import time
+
+        FAKE_READY = "__FAKE_READY__"
+
+        def eprint(msg):
+            print(msg, file=sys.stderr, flush=True)
+
+        def send(obj):
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+
+        def extract_all_text(value):
+            parts = []
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    if k == "text" and isinstance(v, str):
+                        parts.append(v)
+                    else:
+                        parts.append(extract_all_text(v))
+            elif isinstance(value, list):
+                for item in value:
+                    parts.append(extract_all_text(item))
+            return "".join(parts)
+
+        def run_app_server(argv):
+            eprint(FAKE_READY)
+            thread_id = "thread-1"
+            turn_counter = 0
+            for raw in sys.stdin:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except Exception as e:
+                    eprint(f"[fake-codex] invalid json: {e}")
+                    continue
+                method = msg.get("method")
+                msg_id = msg.get("id")
+                if msg_id is None and method:
+                    eprint(f"[fake-codex] recv notify method={method}")
+                    continue
+                if msg_id is None or method is None:
+                    continue
+                eprint(f"[fake-codex] recv request method={method} id={msg_id}")
+                if method == "initialize":
+                    send({"id": msg_id, "result": {}})
+                    continue
+                if method == "thread/start":
+                    send({"id": msg_id, "result": {}})
+                    send({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
+                    continue
+                if method == "turn/start":
+                    turn_counter += 1
+                    turn_id = f"turn-{turn_counter}"
+                    send({"id": msg_id, "result": {}})
+                    time.sleep(0.2)
+                    send({"method": "turn/started", "params": {"turn": {"id": turn_id}}})
+                    send({"method": "codex/event/task_started", "params": {"msg": {"turn_id": turn_id}}})
+                    params = msg.get("params", {})
+                    input_items = params.get("input", [])
+                    all_text = extract_all_text(input_items)
+                    raw_text = json.dumps(msg, ensure_ascii=False)
+                    combined = raw_text + "\n" + all_text
+                    m = re.search(r"marker:\s*([A-Za-z0-9_-]+)", combined)
+                    marker = m.group(1) if m else "<missing>"
+                    phase_match = re.search(r"phase:\s*([A-Za-z0-9_-]+)", combined)
+                    phase = phase_match.group(1) if phase_match else "finish"
+                    send({"method": "item/agentMessage/delta", "params": {"delta": f"MARKER: {marker}\n"}})
+                    eprint(f"[fake-codex] parsed marker={marker} phase={phase}")
+                    if phase == "warmup":
+                        send({"method": "item/agentMessage/delta", "params": {"delta": "IDLE_START_WARMUP_ACK\n"}})
+                        send({"method": "item/agentMessage/delta", "params": {"delta": "WAITING_FOR_SECOND_MESSAGE\n"}})
+                        eprint("[fake-codex] send warmup ack without LOOP_COMPLETE")
+                        time.sleep(0.8)
+                        send({"method": "turn/completed", "params": {"turn": {"id": turn_id}}})
+                        send({"method": "codex/event/task_complete", "params": {"msg": {"turn_id": turn_id}}})
+                        continue
+                    exprs = []
+                    seen_expr = set()
+                    for m in re.finditer(r"(\d+)\s*\+\s*(\d+)\s*=\s*\?", combined):
+                        a = int(m.group(1))
+                        b = int(m.group(2))
+                        expr = f"{a}+{b}=?"
+                        if expr in seen_expr:
+                            continue
+                        seen_expr.add(expr)
+                        exprs.append((expr, a + b))
+                        if len(exprs) >= 2:
+                            break
+                    if not exprs:
+                        send({"method": "item/agentMessage/delta", "params": {"delta": "TASK_FEEDBACK: answer: <unknown>\n"}})
+                    else:
+                        for i, (expr, ans) in enumerate(exprs, start=1):
+                            send({"method": "item/agentMessage/delta", "params": {"delta": f"TASK_REQUEST[{i}]: question: {expr}\n"}})
+                            send({"method": "item/agentMessage/delta", "params": {"delta": f"TASK_EXECUTE[{i}]: addition\n"}})
+                            send({"method": "item/agentMessage/delta", "params": {"delta": f"TASK_FEEDBACK[{i}]: answer: {ans}\n"}})
+                    send({"method": "item/agentMessage/delta", "params": {"delta": "LOOP_COMPLETE\n"}})
+                    send({"method": "turn/completed", "params": {"turn": {"id": turn_id}}})
+                    send({"method": "codex/event/task_complete", "params": {"msg": {"turn_id": turn_id}}})
+                    continue
+                send({"id": msg_id, "result": {}})
+            return 0
+
+        def main(argv):
+            if len(argv) >= 2 and argv[1] == "app-server":
+                return run_app_server(argv[1:])
+            return 0
+  config: |
+    cli:
+      backend: "codex"
+
+    event_loop:
+      ralph_prompt: |
+        # E2E: parallel-app-server-idle-start (fake codex shim)
+
+        你会在稍后收到两条 human.message,其中可能包含:
+        - marker: E2E_IDLE_START_MARKER_42
+        - phase: warmup
+        - phase: finish
+        - question: 121+43=?
+        - question: 10+5=?
+
+        重要:
+        - 你不需要做任何事,直到收到那些 human.message。
+      completion_promise: "LOOP_COMPLETE"
+      max_iterations: 6
+      max_runtime_seconds: 3
+
+    parallel:
+      enabled: true
+      autoscale:
+        max_running_jobs: 2
+        dynamic_idle_ttl_secs: 30
+      permissions:
+        worktree: allow
+        hooks: allow
+
+    hats: {}
+  prompt_source: config
+  max_iterations: 10
+  timeout_secs: 180
+  extra_args:
+    - --no-tui
+    - --idle-start
+  # PATH 前部注入 fake_bin_dir, 让 codex app-server spawn 找到 fake shim
+  path_prefix:
+    - .e2e/bin
+  # Inject sequence: 等待 ralph#1 进入 idle → sleep 4s (超过 max_runtime) →
+  # assert still idle (idle_start 期间不计时) → emit warmup human.message →
+  # wait running then idle → sleep 6s (再次超过 max_runtime) → emit finish
+  inject:
+    - type: wait
+      instance: ralph#1
+      state: idle
+      timeout_secs: 30
+    - type: sleep
+      secs: 4
+    - type: assert
+      instance: ralph#1
+      state: idle
+    - type: emit
+      topic: human.message
+      payload: "marker: E2E_IDLE_START_MARKER_42; phase: warmup"
+      target_instance: ralph#1
+      session_strategy: app_server
+    - type: wait
+      instance: ralph#1
+      state: running_then_idle
+      timeout_secs: 30
+    - type: sleep
+      secs: 6
+    - type: emit
+      topic: human.message
+      payload: "marker: E2E_IDLE_START_MARKER_42; phase: finish; question: 121+43=?; question: 10+5=?"
+      target_instance: ralph#1
+      session_strategy: app_server
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # duration_within(120s) (命令式 <=, schema 严格 <, off-by-one 边界)
+  failed_within_secs: 120
+  # output_contains: 多 needle 合并到 1 个字段 (schema Vec<String>,
+  # 每个 needle 独立断言, runner AND 全部通过)
+  # 组 1 - fake_app_server_used: stdout 严格含 fake ready marker
+  # 组 2+3 - warmup_ack_observed (AND 2 substring): IDLE_START_WARMUP_ACK + WAITING
+  # 组 4+5 - answers_observed (AND 2 substring): answer 164 + answer 15
+  output_contains:
+    - "FAKE_CODEX_APP_SERVER_IDLE_READY"
+    - "IDLE_START_WARMUP_ACK"
+    - "WAITING_FOR_SECOND_MESSAGE"
+    - "answer: 164"
+    - "answer: 15"
+  # marker_observed: 单 needle 也需要包在 nested list 里
+  output_contains_any:
+    - ["E2E_IDLE_START_MARKER_42"]
+  # survived_two_runtime_windows: pre_wait=4s + post_warmup_wait=6s = 10s
+  duration_at_least_secs: 10
+  # loop_complete_detected: termination reason 严格相等
+  termination: "LOOP_COMPLETE"
+  # human_log_written dropped — file content 多 substring 检查
+  # Injector succeeded dropped — declarative runner implicit enforcement

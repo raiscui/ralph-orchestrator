@@ -443,9 +443,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "parallel-app-server-idle-start",
-            Box::new(ParallelAppServerIdleStartScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "parallel-app-server-idle-start",
+                include_str!("../scenarios/parallel-app-server-idle-start.yaml"),
+            )),
         ),
         // app-server-idle-start-live 已声明化(候选6 inject 试点)
         (
