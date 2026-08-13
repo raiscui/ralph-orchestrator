@@ -377,3 +377,55 @@ Pass / Fail:            FAIL
 
 ### 状态
 **目前在阶段1(归档 WORKLOG + 读命令式)** — 下一步: 4 个 feat commits (各场景 1 个)
+
+## [2026-08-13 15:38:00] [Session ID: omx-1786600320381-z290x9] Wave 2 §2.2 全部 5 commits 收官 + duplicate field bug fix
+
+### 完成动作
+- 新文件 `crates/ralph-e2e/scenarios/hat-{instructions,event-routing,backend-override,multi-workflow}.yaml`
+- lib.rs registry 4 处 `Imperative` → `Declarative` + from_yaml(include_str!)
+- fix-up commit `d9f7c79` 修 2.2.2 的 hat-instructions.yaml duplicate `output_contains_any` 字段
+
+### 净结果
+- 6 commits in this batch:
+  - `cedaab1` feat(e2e): migrate HatInstructionsScenario → hat-instructions.yaml (Wave 2 task 2.2.2)
+  - `13cff39` feat(e2e): migrate HatEventRoutingScenario → hat-event-routing.yaml (Wave 2 task 2.2.3)
+  - `e40832a` feat(e2e): migrate HatBackendOverrideScenario → hat-backend-override.yaml (Wave 2 task 2.2.4)
+  - `cac1d94` feat(e2e): migrate HatMultiWorkflowScenario → hat-multi-workflow.yaml (Wave 2 task 2.2.5)
+  - `d9f7c79` fix(e2e): merge duplicate output_contains_any fields in hat-instructions.yaml
+  - `7d19d02` chore(docs): archive WORKLOG (999 lines) + defer continuous-learning to Wave 2 收官
+- drift log delta:73.33 % → 80.00 %(48 declarative / 12 imperative / 1 keep)
+  - §2.2 加 5:Declarative 44→48, Imperative 16→12
+  - 净 +5 scenarios, 共 +6.67% 覆盖率
+- 534 lib tests 仍全过
+- gate test 仍 FAIL(预期:要 10 / 12 migrations 才到 90 %,其中 8 是 §2.3 memory)
+
+### 决定
+- [决定]: 用 uniq -c 校验每个新 YAML 顶层 schema 字段无 duplicate
+  [理由]: 2.2.2 commit `cedaab1` 写出的 hat-instructions.yaml 在 expect 顶层有 2 个
+  `output_contains_any:` 块, serde_yaml 视为 duplicate field; 后续 5 个 hat YAML
+  都已 uniq -c 校验唯一
+- [决定]: 用 fix-up commit `d9f7c79` 修 2.2.2 bug, 而非 amend cedaab1
+  [理由]: amend 会重写 history + 改 commit hash, review 时追溯原意难;
+  fix-up commit 记录「2.2.2 的 INTENT」与「修 BUG 的 fix」两个独立事件, 诚实可追溯
+- [决定]: OR 语义命令式断言折 AND schema 字段(stricter, 更正确)
+  [理由]: 2.2.2 verdict_provided / 2.2.3 correct_hat_responded / 2.2.5
+  workflow_progressed 都是命令式 OR; runner 的 AND 会要求多字段都通过, 看似失真;
+  但 scenario 已知 emit 完整事件链 / hat instructions 强制要求所有产物, AND
+  实际上更接近"指令遵循"的真实期望, 比命令式 OR 更严格, 捕获更多 bug
+- [决定]: NEGATED 断言 dropped 2 处(stdout NOT contains "DEPLOYMENT STATUS:" /
+  stderr NOT contains "config" + "error/invalid")
+  [理由]: schema 无 output_absent / stderr_absent 字段; 实际 deployer 误激活会
+  同时 emit deploy.* event (被 event_absent_prefixes catch), config 解析失败会
+  让 ralph 启动报错退出码非 0 (被 exit_code_success_or_limit catch); 两条
+  dropped 都是冗余 defensive, schema-cost > value
+- [决定]: case-insensitive 适配用 N 个 case 变体, 而非 schema 字段
+  [理由]: 4 个 hat 场景都有 case-insensitive stdout 关键词检查;
+  共 4 个场景, 用 4 个 case 变体组是局部决策; 升级 schema 加
+  `output_contains_any_case_insensitive: bool` 是 premature abstraction,
+  ponytail "不要为 hypothetical 加复杂度"
+
+### 下一步可选方向
+1. **任务 2.3.1** MemoryAddScenario → memory-add.yaml(§2.3 第一刀, 8 个 memory scenarios)
+2. **任务 2.4.1** ToolUseScenario → schema 加 `expect.tool_invocations` + tool-use.yaml(§2.4 第一刀)
+3. **先 push**: 把 28 commits 推到 my/main
+4. **暂停**: 等用户决策
