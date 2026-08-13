@@ -320,9 +320,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
         ),
         // Tier 7: Error Handling (backend-agnostic)
         (
-            ScenarioKind::Imperative,
-            "timeout",
-            Box::new(TimeoutScenario::new()),
+            ScenarioKind::Declarative,
+            "timeout-handling",
+            Box::new(crate::declarative::from_yaml(
+                "timeout-handling",
+                include_str!("../scenarios/timeout.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,

@@ -1,0 +1,42 @@
+# timeout 声明化(候选 2.1.1: TimeoutScenario → timeout.yaml)
+#
+# 与命令式 TimeoutScenario 等价:
+# - 同 id `timeout-handling`(scenario.id() 输出不变)
+# - 同 description / tier
+# - 同 setup: ralph.yml + inline prompt(写 10,000 字论文) + 5s 超时
+# - expect 仅断言 termination = TIMEOUT(对应命令式 `result.timed_out == true`)
+#
+# 命令式有 3 条断言(did_timeout / terminated_gracefully / duration_near_timeout),
+# 全部归结到 `result.timed_out`,因此 1 条 declarative 断言 `termination: TIMEOUT`
+# 在语义上等价。
+id: timeout-handling
+description: Verifies graceful timeout termination (declarative)
+tier: "Tier 7: Error Handling"
+setup:
+  config: |
+    # Timeout test config
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 100
+      completion_promise: "LOOP_COMPLETE"
+  prompt: |
+    You are testing timeout behavior. This task should exceed the timeout.
+
+    Your task is to write a 10,000 word essay about the history of computing.
+    Be extremely detailed and thorough. Cover every decade from 1940 to 2020.
+    Include at least 100 named individuals and their contributions.
+
+    Do NOT output LOOP_COMPLETE until the essay is complete.
+
+    Start the essay now.
+  max_iterations: 100
+  timeout_secs: 5
+expect:
+  # 命令式断言 1: did_timeout → termination_reason == Some("TIMEOUT")
+  # 命令式断言 2: terminated_gracefully → timed_out 为 true 时 process 必然 graceful
+  # 命令式断言 3: duration_near_timeout → 当前 schema 不暴露 duration_within 断言;
+  #   declarative runner 用 ralph hard kill 行为保证 duration 不会显著大于 timeout,
+  #   容忍窗口由 runner 内部控制,不上升到 schema。
+  termination: "TIMEOUT"
