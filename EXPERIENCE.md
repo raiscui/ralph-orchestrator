@@ -471,3 +471,78 @@
   - `-p deepseek` 是 codex profile(deepseek.config.toml), 不是模型名参数。
 - 验证锚点:
   - ralph-example 极简 ralph_prompt + demo-check.sh 10/10; COMPARISON.md 性能对比生成。
+
+### exp-20260813-yaml-schema-or-vs-and-semantics
+> 命令式 OR 断言 (`A || B`) 不能拆成 2 个独立 schema 字段, runner 的 `assertions.iter().all` 会把 OR 压扁成 AND(更严格); 单字段保留 OR 或 OR 折 AND 都要在 YAML 注释里显式说明。
+<!-- scope: project | source_topics: declarative_migration,schema_design,wave2_e2e | source_hats: codex | status: active | confidence: high | created_at: 2026-08-13T17:00:00+08:00 | updated_at: 2026-08-13T17:00:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 设计 schema 字段迁移命令式 OR 断言(`A || B` / `has_X || has_Y`)。
+  - 打算把 OR 的两臂拆成 2 个独立 schema 字段(每个产生 1 条 assertion)。
+- 已验证规律:
+  - Wave 2 累计 ~15 条 dropped 断言里, 6 条因 OR 折 AND 而保留(`failed: true` 单字段保留 OR, 适用于 `execution_failed` 类; `output_contains_any + events` 双字段 OR 折 AND, 适用于 hat instructions 强制要求两者)。
+  - 2.1.3 BackendUnavailableScenario 的 `execution_failed` (`exit_code != Some(0) || !stderr.is_empty()`) 拆 `exit_code_nonzero` + `stderr_nonempty` 会让 runner 要求两者都通过 (AND), 失真; 单字段 `failed: bool` 保留 OR。
+  - 2.2.5 HatMultiWorkflowScenario 的 `workflow_progressed` (events `starts_with("build.")`) 是 defensive 路径, OR 折 AND (`events: [plan.request, build.task, build.done]` 3 个全部要求) 更接近 hat workflow 真实期望, 是合理的 stricter check。
+- 关键边界:
+  - "保留 OR" 用单字段, "OR 折 AND" 用多个 AND 字段; 两者都要在 YAML 注释说明 rationale。
+  - "OR 折 AND" 比命令式更严格, 适合 "指令强制要求全部产物" 的场景; 不适合 "defensive OR"的场景。
+- 验证锚点:
+  - schema 扩展 commits 4531b9a (failed / stderr_contains_any) + ba1c352 (duration_at_least_secs)。
+  - 21 个 migrations 累计 536 passed / 0 failed, Coverage 100.00% PASS。
+  - skill: `.codex/skills/self-learning.yaml-schema-or-vs-and-semantics/SKILL.md`。
+
+### exp-20260813-yaml-duplicate-field-detection
+> YAML schema `Vec<Vec<T>>` 字段 (如 `output_contains_any`) 不能在顶层写多个同名 key, serde_yaml 会报 `duplicate field`; 写完每个 YAML 必须跑 `cargo run -p ralph-e2e -- --list` 验证, 不要依赖 `cargo check` + `cargo test --lib`(单测不 catch 该错误)。
+<!-- scope: project | source_topics: declarative_migration,yaml_serde,wave2_e2e | source_hats: codex | status: active | confidence: high | created_at: 2026-08-13T17:00:00+08:00 | updated_at: 2026-08-13T17:00:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 写 YAML 顶层 `output_contains_any` / `output_contains` / `events` 等 Vec<Vec<T>> 字段, 映射多个命令式 OR-group。
+  - `cargo check` + `cargo test --lib` 都过, 但 `cargo run -- --list` 报 `duplicate field`。
+- 已验证规律:
+  - Wave 2 4 次中招: 2.2.2 hat-instructions (commit cedaab1 + fix d9f7c79) / 2.3.2 memory-search (commit 3977d0e + fix 6e73a08) / 2.4.1 parallel-app-server-idle-start (commit 5dfbcec) / 2.4.2 parallel-app-server-steer-multi-turn (commit 56ff3c5)。
+  - 错误信息固定格式: `invalid declarative scenario <id>: expect: duplicate field \`<field>\` at line N column M`。
+  - 简单 awk `^[a-z_]+:` 只检测 0-indent 顶层 key, 漏掉 expect: 内 2-indent 的字段重复; Python `re.findall(r'^(\s*)([a-z_]+):') + Counter` 才能检测全 indent levels。
+- 关键边界:
+  - Python re 检测会捕获 `config: |` literal block 内的伪 key (如 `max_iterations:` 在 YAML 字符串值内); 需人工 review 或用 ruamel.yaml 严格解析。
+  - serde_yaml 不支持重复字段, 必须在 YAML 源层面修复 (合并到 1 个字段 + nested list), 不是 serde 层 workaround。
+- 验证锚点:
+  - fix-up commits d9f7c79 / 6e73a08, 后续 2.4.1/2.4.2 写 YAML 时即合并。
+  - skill: `.codex/skills/self-learning.yaml-duplicate-field-bug/SKILL.md`。
+
+### exp-20260813-schema-cost-vs-assertion-value
+> schema 扩展决策 rubric: 加新字段的成本 (新增 builder + 测试 + 文档) vs 该字段能覆盖的 dropped 断言数量 + 测试核心价值。Wave 2 累计 ~15 条 dropped 断言, 全部基于 schema-cost > value 判断。
+<!-- scope: project | source_topics: declarative_migration,schema_design,ponytail,wave2_e2e | source_hats: codex | status: active | confidence: high | created_at: 2026-08-13T17:00:00+08:00 | updated_at: 2026-08-13T17:00:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 决定是否加新 schema 字段以覆盖 dropped 命令式断言。
+  - 评估 schema 扩展 vs 局部适配 vs dropped 的取舍。
+- 已验证规律:
+  - Wave 2 累计 dropped 模式: (a) file content 检查 (schema 无 file_content, dropped 但 `artifacts` 已覆盖 file existence); (b) NEGATED stdout/stderr NOT contains (schema 无 absent 字段, dropped 但正向字段已 catch 主要失败); (c) 冗余 defensive check (`response_received + exit_code_success_or_limit + artifacts` 已覆盖主路径)。
+  - 加 schema 字段的真实场景: 2.1.3-2.1.4 加 4 个字段 (failed / stderr_contains / stderr_contains_any / failed_within_secs) 覆盖 2.1.3 + 2.1.4 共 6 条 dropped; 2.4.1 加 1 个字段 (duration_at_least_secs) 覆盖 2.4.1 idle_start 关键断言 + 2.4.2 复用。
+  - 加 schema 字段的"足够便宜"门槛: 1 个新字段 + 1 个 builder + ≥1 个 unit test, 镜像已有字段 (如 duration_at_least_secs 镜像 failed_within_secs) 是 trivial。
+- 关键边界:
+  - "覆盖 N 条 dropped" 不是加字段的充分理由; 还要看 dropped 是否捕获 "测试核心 claim" (如 2.4.1 idle_start 的 survived_two_runtime_windows 是核心, 必须 schema 扩展)。
+  - "schema-cost = 0 复用" 是 dropped 的合理信号: 单个 dropped 累加没有第二用户, 加字段是 speculative abstraction。
+- 验证锚点:
+  - 2 schema extension commits (4531b9a / ba1c352), 累计 dropped ~15 条, Coverage 100% PASS。
+  - ponytail "stricter check 优于 lenient check" 在 hat/memory 类场景成立 (指令强制要求产物)。
+
+### exp-20260813-audit-classification-reality-check
+> OpenSpec audit 分类 (`tasks.md §2.x 标 Easy/Medium/Hard`) 与命令式实际实现可能有偏差 (Wave 2 累计 4 次反预期); 迁移前必须读命令式代码确认 schema 缺口, 不要盲信 audit。
+<!-- scope: project | source_topics: declarative_migration,openspec_tasks_md,audit_drift,wave2_e2e | source_hats: codex | status: active | confidence: high | created_at: 2026-08-13T17:00:00+08:00 | updated_at: 2026-08-13T17:00:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 准备迁移 OpenSpec tasks.md §2.x 标 Easy/Medium/Hard 的命令式 scenario。
+  - 看到 audit 标 "Hard, schema extension needed" 但实际迁移只遇到 stdout 关键词检查。
+- 已验证规律:
+  - 反预期 1: §2.1.3 BackendUnavailableScenario 标 Easy (tasks.md §2.1), 实际需要 schema 扩展 (stderr_contains + failed + duration_within) — 已 commit 4531b9a 解决。
+  - 反预期 2: §2.1.4 AuthFailureScenario 同上, 需 schema 扩展 — 已 commit 4531b9a 解决。
+  - 反预期 3: §2.4.1 ToolUseScenario 标 "Hard, schema extension needed" (tasks.md §2.4 + audit-p5-p1.md:75), 实际命令式只用 stdout 关键词 + file content 标记, schema 现成字段够, 无需扩展。
+  - 反预期 4: §2.4.2 StreamingScenario 同上, audit 建议 per-token pacing, 实际命令式只需 stdout 关键词检查。
+  - audit 分类与实际命令式实现的偏差累计 4 次, 是 schema 扩展工作的驱动力。
+- 关键边界:
+  - audit 标 "Easy" 不代表无 schema 工作 — 必须读命令式 setup + run + 3-5 个 assertions 确认。
+  - audit 标 "Hard, schema extension needed" 不代表真的需要 — audit 可能基于 "future strict-mode" 判断, 而命令式现状是 lenient。
+- 验证锚点:
+  - 21 个 migrations 累计 100% Coverage PASS, 0 个迁移因 audit 分类错误导致失败。
+  - Wave 3 archive 时一次性 sync tasks.md 反映实际 (audit 反预期 4 次 + schema 扩展 commits)。
