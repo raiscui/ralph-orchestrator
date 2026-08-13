@@ -78,23 +78,28 @@ mod parallel_trigger_routing_example;
 mod parallel_vendor_security_procurement_example;
 mod tasks;
 
+#[allow(deprecated)]
 pub use capabilities::{StreamingScenario, ToolUseScenario};
 pub use connectivity::ConnectivityScenario;
+#[allow(deprecated)]
 pub use errors::{
     AuthFailureScenario, BackendUnavailableScenario, MaxIterationsScenario, TimeoutScenario,
 };
 pub use events::{BackpressureScenario, EventsScenario};
+#[allow(deprecated)]
 pub use hats::{
     HatBackendOverrideScenario, HatEventRoutingScenario, HatInstructionsScenario,
     HatMultiWorkflowScenario, HatSingleScenario,
 };
 pub use incremental::{ChainedLoopScenario, IncrementalFeatureScenario};
+#[allow(deprecated)]
 pub use memory::{
     MemoryAddScenario, MemoryCorruptedFileScenario, MemoryInjectionScenario,
     MemoryLargeContentScenario, MemoryMissingFileScenario, MemoryPersistenceScenario,
     MemoryRapidWriteScenario, MemorySearchScenario,
 };
 pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
+#[allow(deprecated)]
 pub use parallel::{
     ParallelAppServerIdleStartLiveScenario, ParallelAppServerIdleStartScenario,
     ParallelAppServerSteerLiveReplyMultiTurnScenario, ParallelAppServerSteerMultiTurnLiveScenario,

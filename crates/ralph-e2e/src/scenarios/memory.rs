@@ -50,6 +50,7 @@ impl AssertionExt for crate::models::Assertion {
 /// let scenario = MemoryAddScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 6: Memory System");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/memory-add.yaml")]
 pub struct MemoryAddScenario {
     id: String,
     description: String,
@@ -270,6 +271,7 @@ impl MemoryAddScenario {
 /// let scenario = MemorySearchScenario::new();
 /// assert_eq!(scenario.id(), "memory-search");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/memory-search.yaml")]
 pub struct MemorySearchScenario {
     id: String,
     description: String,
@@ -491,6 +493,7 @@ impl MemorySearchScenario {
 /// let scenario = MemoryInjectionScenario::new();
 /// assert_eq!(scenario.id(), "memory-injection");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/memory-injection.yaml")]
 pub struct MemoryInjectionScenario {
     id: String,
     description: String,
@@ -714,6 +717,7 @@ impl MemoryInjectionScenario {
 /// let scenario = MemoryPersistenceScenario::new();
 /// assert_eq!(scenario.id(), "memory-persistence");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/memory-persistence.yaml")]
 pub struct MemoryPersistenceScenario {
     id: String,
     description: String,
@@ -937,6 +941,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 /// let scenario = MemoryCorruptedFileScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 6: Memory System (Chaos)");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/memory-corrupted-file.yaml")]
 pub struct MemoryCorruptedFileScenario {
     id: String,
     description: String,
@@ -1157,6 +1162,7 @@ impl MemoryCorruptedFileScenario {
 /// let scenario = MemoryMissingFileScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 6: Memory System (Chaos)");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/memory-missing-file.yaml")]
 pub struct MemoryMissingFileScenario {
     id: String,
     description: String,
@@ -1355,6 +1361,7 @@ impl MemoryMissingFileScenario {
 /// let scenario = MemoryRapidWriteScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 6: Memory System (Chaos)");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/memory-rapid-write.yaml")]
 pub struct MemoryRapidWriteScenario {
     id: String,
     description: String,
@@ -1544,6 +1551,7 @@ impl MemoryRapidWriteScenario {
 /// let scenario = MemoryLargeContentScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 6: Memory System (Chaos)");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/memory-large-content.yaml")]
 pub struct MemoryLargeContentScenario {
     id: String,
     description: String,
@@ -1712,6 +1720,7 @@ impl MemoryLargeContentScenario {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::env;

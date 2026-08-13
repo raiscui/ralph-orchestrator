@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 ///   - 两次注入命令 + emit stdout/stderr 摘录
 ///   - runner 的 stdout 摘录(含 warmup ack / answers / LOOP_COMPLETE)
 ///   - idle 期间的 agents.json 证据(ralph#1=Idle)
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/parallel-app-server-idle-start.yaml")]
 pub struct ParallelAppServerIdleStartScenario {
     id: String,
     description: String,

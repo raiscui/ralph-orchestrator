@@ -34,6 +34,7 @@ use std::time::Duration;
 /// let scenario = TimeoutScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 7: Error Handling");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/timeout-handling.yaml")]
 pub struct TimeoutScenario {
     id: String,
     description: String,
@@ -226,6 +227,7 @@ impl TimeoutScenario {
 /// let scenario = MaxIterationsScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 7: Error Handling");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/max-iterations.yaml")]
 pub struct MaxIterationsScenario {
     id: String,
     description: String,
@@ -405,6 +407,7 @@ impl MaxIterationsScenario {
 /// let scenario = AuthFailureScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 7: Error Handling");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/auth-failure.yaml")]
 pub struct AuthFailureScenario {
     id: String,
     description: String,
@@ -598,6 +601,7 @@ impl AuthFailureScenario {
 /// let scenario = BackendUnavailableScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 7: Error Handling");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/backend-unavailable.yaml")]
 pub struct BackendUnavailableScenario {
     id: String,
     description: String,
@@ -800,6 +804,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::env;

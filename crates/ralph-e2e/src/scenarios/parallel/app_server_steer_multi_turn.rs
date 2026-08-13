@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 ///   因此:
 ///   - steer 若未走 in-flight 控制通道,测试会稳定卡住并以 MaxRuntime 失败
 ///   - steer 若走通,会输出两次 marker 并输出 `LOOP_COMPLETE` 退出
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/parallel-app-server-steer-multi-turn.yaml")]
 pub struct ParallelAppServerSteerMultiTurnScenario {
     id: String,
     description: String,

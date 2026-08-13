@@ -52,6 +52,7 @@ impl AssertionExt for crate::models::Assertion {
 /// let scenario = HatSingleScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 5: Hat Collections");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/hat-single.yaml")]
 pub struct HatSingleScenario {
     id: String,
     description: String,
@@ -259,6 +260,7 @@ impl HatSingleScenario {
 /// let scenario = HatMultiWorkflowScenario::new();
 /// assert_eq!(scenario.id(), "hat-multi-workflow");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/hat-multi-workflow.yaml")]
 pub struct HatMultiWorkflowScenario {
     id: String,
     description: String,
@@ -479,6 +481,7 @@ impl HatMultiWorkflowScenario {
 /// let scenario = HatInstructionsScenario::new();
 /// assert_eq!(scenario.id(), "hat-instructions");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/hat-instructions.yaml")]
 pub struct HatInstructionsScenario {
     id: String,
     description: String,
@@ -700,6 +703,7 @@ impl HatInstructionsScenario {
 /// let scenario = HatEventRoutingScenario::new();
 /// assert_eq!(scenario.id(), "hat-event-routing");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/hat-event-routing.yaml")]
 pub struct HatEventRoutingScenario {
     id: String,
     description: String,
@@ -912,6 +916,7 @@ impl HatEventRoutingScenario {
 /// let scenario = HatBackendOverrideScenario::new();
 /// assert_eq!(scenario.id(), "hat-backend-override");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/hat-backend-override.yaml")]
 pub struct HatBackendOverrideScenario {
     id: String,
     description: String,
@@ -1114,6 +1119,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::executor::EventRecord;

@@ -30,6 +30,7 @@ use std::path::Path;
 /// let scenario = ToolUseScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 4: Capabilities");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/tool-use.yaml")]
 pub struct ToolUseScenario {
     id: String,
     description: String,
@@ -221,6 +222,7 @@ impl ToolUseScenario {
 /// let scenario = StreamingScenario::new();
 /// assert_eq!(scenario.tier(), "Tier 4: Capabilities");
 /// ```
+#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/streaming.yaml")]
 pub struct StreamingScenario {
     id: String,
     description: String,
@@ -407,6 +409,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::env;
