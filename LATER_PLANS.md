@@ -51,7 +51,7 @@
 - 命令式本身的语义问题随着本条 2.3.0 物理删除自然解决 (BackendUnavailableScenario
   命令式 impl 被删, 不再有静默忽略路径).
 
-## [2026-08-13 22:05:00] [Session ID: omx-1786600320381-z290x9] e2e-live-convergence 诊断 — 解 exp-20260813-e2e-live-convergence-issue
+## [2026-08-13 22:05:00] [Session ID: omx-1786600320381-z290x9] ~~e2e-live-convergence 诊断 — 解 exp-20260813-e2e-live-convergence-issue~~ ✅ DONE (root cause: OpenAI Codex balance $0.009910 < $0.103358, see EXP entry + .e2e-tests/parallel-app-server-idle-start-live/)
 
 ### 来源
 - EXP-20260813-e2e-live-convergence-issue (EXPERIENCE.md): 3 个 live 场景失败模式

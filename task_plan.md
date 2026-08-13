@@ -860,3 +860,48 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - LATER_PLANS 历史保留 (不清理"已完成回写"段, 它们是历史证据)
 - `.scratch/` 是用户自己的, 不能误 add
 - 1 ahead of my/main (`af3fbf8`) + 本轮 chore commit = 2 ahead, push 待用户确认
+
+## [2026-08-13 22:45:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 行动计划] Task 3 e2e-live-convergence 诊断 (kiro 卸载后改用 codex)
+
+### 上下文变化
+- 前置 commit `0ee6434` 删了 kiro/claude/opencode/amp/gemini fixture + preset + startup resource
+- ralph 代码层仍支持 6 backend (cli_backend.rs / config.rs / HatBackend 未动)
+- 但 live harness 实际能跑的只剩 codex (其它 CLI binary 缺)
+- 用户授权 "需要" → 开做 Task 3 诊断
+
+### 现状
+- EXP-20260813-e2e-live-convergence-issue (EXPERIENCE.md) 记录 3 个 live 场景失败模式
+- LATER_PLANS.md 第 2 条已写明 "待执行" 4 步 (human-log / agents.json / max_iterations / 对比 declarative)
+- 环境阻塞已部分解除 (kiro 卸了 = 一致状态; codex live harness 现在可以单独跑)
+
+### 工作清单
+- [ ] 环境最小检查 (codex CLI / API key / 3 个 live 场景文件名)
+- [ ] 抓 EXP entry 提到的人类可读现场 (human-log.md / agents.json / events.jsonl 模板)
+- [ ] 跑最小 live harness (1 个 live 场景 1 次) — 验证环境就绪
+- [ ] 定位根因 → 候选 3 个 (app-server 协调者输出丢失 / live parallel token 截断 / max_runtime 提前收掉)
+- [ ] 修复或记录 known limitation
+- [ ] EXP entry 升级到 docs/solutions/ formal capture (如果根因找到 + 可修)
+- [ ] commit + push
+
+### 不变量
+- 保留现有 declarative scenario 不动 (gate 还 100% PASS)
+- 不动 .scratch/
+- 跑 live harness 用真实 Codex CLI (不是 fake shim)
+
+### Task 3 完成总结 (2026-08-13 23:30)
+- [x] 环境最小检查 (codex CLI 0.147.0 + ~/.codex/auth.json 认证 OK)
+- [x] 跑最小 live harness (`--filter parallel-app-server-idle-start-live --keep-workspace`)
+- [x] 抓现场 (events.jsonl + agents.json + stdout.txt 411 行)
+- [x] 根因定位: **OpenAI Codex 账户余额 $0.009910 < 第二轮预扣费 $0.103358**,
+  codex 返回 `insufficient_user_quota` 错误, 不是 ralph bug
+- [x] EXP entry 升级: status active → resolved_external, confidence medium → high,
+  append Resolved 段含 root cause + 次要发现 (Output contains... 假阳性)
+- [ ] 升级到 docs/solutions/ formal capture (LATER_PLANS 跟踪)
+- [ ] 修 content assertion 假阳性 bug (LATER_PLANS 跟踪)
+- [ ] 充钱 / 换 key 后重跑 3 个 live 场景验证 (LATER_PLANS 跟踪)
+
+### 下一步可选方向
+1. **Push commit** (本轮 EXP entry 升级 + task_plan 标记完成)
+2. **立即升级到 docs/solutions/** (formal capture)
+3. **充钱后重跑 live harness 验证修复** (充钱需用户操作)
+4. **暂停**: 等用户决策

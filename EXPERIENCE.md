@@ -549,7 +549,7 @@
 
 ### exp-20260813-e2e-live-convergence-issue
 > e2e live 场景 (parallel-emit-spawn-instance / parallel-app-server-idle-start-live / parallel-app-server-steer-multi-turn(+live)) 失败时统一模式: termination_reason=None (协调者未输出 LOOP_COMPLETE), 但事件流完整(spawn.task → spawn.done)。新旧代码一致, 是 LIVE 路径的已知问题。
-<!-- scope: project | source_topics: e2e_live_convergence,parallel_live,termination_reason | source_hats: codex | status: active | confidence: medium | created_at: 2026-08-13T17:35:00+08:00 | updated_at: 2026-08-13T17:35:00+08:00 | supersedes:  -->
+<!-- scope: project | source_topics: e2e_live_convergence,parallel_live,termination_reason | source_hats: codex | status: resolved_external | confidence: high | created_at: 2026-08-13T17:35:00+08:00 | updated_at: 2026-08-13T23:30:00+08:00 | supersedes:  -->
 
 - 触发条件:
   - 跑 e2e live 场景, 观察到失败(原 `notes__e2e_conv.md` 2026-08-02):
@@ -578,3 +578,47 @@
 - 未来动作:
   - 重新诊断时读 `archive/branch_contexts/e2e_conv/notes__e2e_conv.md` + 本 entry。
   - 解决后再开 docs/solutions/ formal capture (problem_type: runtime_error / live_convergence)。
+
+### exp-20260813-e2e-live-convergence-issue (Resolved 2026-08-13)
+
+#### 根因 (Resolved)
+- **外部资源限制**：~/.codex/auth.json 对应 OpenAI Codex 账户余额 $0.009910，
+  第二轮 finish turn 需要预扣费 $0.103358 → OpenAI 返回
+  `insufficient_user_quota` 错误通知
+- 不是 ralph 协调者协议 bug，是 OpenAI API 余额不足
+- 复现路径: `cargo run -p ralph-e2e -- codex --filter parallel-app-server-idle-start-live --keep-workspace`
+  → 跑 240s timeout → stderr 实际收 codex `insufficient_user_quota` 错误通知
+  → ralph#1 state: done → supervisor final states: done → 无 completion_promise → TIMEOUT
+
+#### 关键现场 (本轮跑出)
+- agents.json: ralph#1 last_input = "marker: ...; phase: finish; question: 121+43=?; question: 10+5=?"
+- events.jsonl 序列: created → idle → running → idle → coordinator.no_event_first_turn (warmup) → idle → running → idle → done
+- stdout.txt line 含 `[app-server-rpc]` + `[codex-app-server] ERROR: notification received`
+  + `code: insufficient_user_quota` (15:23:12.949256Z)
+- 现场保留在 `.e2e-tests/parallel-app-server-idle-start-live/` (gitignored)
+
+#### 次要发现: Output contains... 断言假阳性
+- 6 个内容断言 ("Output contains 'answer: 164'" / "answer: 15" / 等) 全部 PASS
+- 但 codex 第二轮没输出答案 (被 insufficient_user_quota 拒了)
+- 假阳性根因: content assertion 把 ralph 写给 codex 的 **prompt input** 也算进 "output contains"
+  (stdout.txt 中 ralph 把 prompt 模板 echo 到 stderr tag `[ralph#1:err:job=N]`, 与 stdout 合并搜索)
+- 实际上 prompt 模板里 line 177/180 已包含 `answer: 164`/`answer: 15` 字样作为示例
+  → 即使 codex 没输出, "Output contains" 也会 PASS
+- **修复方向** (LATER_PLANS): content assertion 应该区分 `[ralph#1:err:job=N]` (prompt input) 
+  vs `[ralph#1:out:job=N]` (actual codex response), 或者 regex 严格匹配
+
+#### 解阻塞路径
+1. **充钱**: 给 OpenAI Codex 账户充值 > $0.50 (1 次 live turn ~$0.10)
+2. **用其它 key**: 改 ~/.codex/auth.json 指向余额充足账户
+3. **跳过 live harness**: 仅 declarative 验证 (declarative 全 PASS, gate 100%); live 仅在 release 前跑
+
+#### EXP entry 升级状态
+- status: active → **resolved_external** (根因找到, 是外部资源限制, 不是 ralph bug)
+- confidence: medium → **high** (有 root cause + 完整证据链 + 现场 workspace 保留)
+- supersedes: 不 supersede 任何 entry (新发现, 与原 entry 共存作为升级)
+
+#### 后续动作 (本次不做)
+- 升级到 `docs/solutions/external-resources/codex-quota-insufficient.md` formal capture
+  (problem_type: external_resources, tags: codex, openai_billing)
+- 修 content assertion 假阳性 bug (区分 prompt input vs codex response)
+- 重新跑 3 个 live 场景验证 (充钱后)
