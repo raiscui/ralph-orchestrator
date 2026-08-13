@@ -341,9 +341,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             Box::new(AuthFailureScenario::new()),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "backend-unavailable",
-            Box::new(BackendUnavailableScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "backend-unavailable",
+                include_str!("../scenarios/backend-unavailable.yaml"),
+            )),
         ),
         // Tier 8: Parallel Runtime (experimental)
         // parallel-hat-instances(en) 已声明化(候选6)

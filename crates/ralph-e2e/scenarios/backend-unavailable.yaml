@@ -1,0 +1,50 @@
+# backend-unavailable 声明化(候选 2.1.3: BackendUnavailableScenario → backend-unavailable.yaml)
+#
+# 与命令式 BackendUnavailableScenario 等价性分析(由 schema 扩展 commit 4531b9a 启用):
+# - 同 id `backend-unavailable`, description / tier / supported_backends 一致
+# - 同 setup: ralph.yml (cli.command = nonexistent-cli-...) + max_iterations=1 + timeout=30s
+#   + prompt="Say hello." — 与命令式 setup() 一字不差
+# - expect 3 条断言全部 1:1 映射到 schema 字段(无折断言):
+#   execution_failed (exit_code != Some(0))            → expect.failed: true
+#     (OR 语义: exit_code != Some(0) || !stderr.is_empty(); 命令式两个
+#      `execution_failed` 类断言都是这个 OR,新字段 1:1 覆盖)
+#   error_mentions_backend (stderr+stdout 含任一关键词) → expect.stderr_contains_any
+#     (退到 stderr only; 命令式原本同时查 stderr+stdout,但 ralph 的
+#      backend-spawn 错误按 POSIX 约定写到 stderr;若 live 跑发现 stdout-only
+#      错误,需追加 output_contains_any 或扩展 schema 为 stderr_or_stdout_contains_any)
+#   failed_fast (duration < 20s)                       → expect.failed_within_secs: 20
+#
+# 已知 caveat(未在 schema 解决):
+# - 命令式 setup 设 `cli.command: nonexistent-cli-...`, 但 ralph 的
+#   config.rs:795-803 显示 `cli.command` 只在 `cli.backend == "custom"` 时生效;
+#   当 backend: claude|kiro|opencode 时, ralph 用 self.adapters.<backend>
+#   跑真 CLI, command 字段被静默忽略。这意味着命令式 test 即便 live run 也
+#   不一定真触发 backend-unavailable 路径 — 这是命令式 setup 本身的语义问题,
+#   不是迁移引入的。Audit 建议用 `require_backend: <wrong>` 让 declarative runner
+#   主动构造失败路径(尚未实现)。
+id: backend-unavailable
+description: Verifies graceful handling of missing CLI backends (declarative)
+tier: "Tier 7: Error Handling"
+backends: [claude, kiro, opencode]
+setup:
+  config: |
+    # Backend unavailable test config
+    cli:
+      backend: {backend}
+      command: nonexistent-cli-that-does-not-exist-12345
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+  prompt: |
+    Say hello.
+  max_iterations: 1
+  timeout_secs: 30  # 命令式 setup 硬编码 30s, 不是 backend.default_timeout
+expect:
+  # 断言 1: execution_failed (exit_code != Some(0) || !stderr.is_empty())
+  failed: true
+  # 断言 2: error_mentions_backend (stderr/stdout 含任一关键词, 退到 stderr only)
+  stderr_contains_any:
+    - ["not found", "command not found", "no such file", "cannot find", "nonexistent", "backend", "cli"]
+  # 断言 3: failed_fast (duration < 20s, 严格 < 匹配命令式)
+  failed_within_secs: 20
