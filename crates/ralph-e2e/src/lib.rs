@@ -281,9 +281,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "hat-backend-override",
-            Box::new(HatBackendOverrideScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "hat-backend-override",
+                include_str!("../scenarios/hat-backend-override.yaml"),
+            )),
         ),
         // Tier 6: Memory System (backend-agnostic)
         (

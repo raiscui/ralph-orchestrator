@@ -1,0 +1,80 @@
+# hat-backend-override 声明化(候选 2.2.4: HatBackendOverrideScenario → hat-backend-override.yaml)
+#
+# 与命令式 HatBackendOverrideScenario 等价性分析:
+# - 同 id `hat-backend-override`, description / tier 一致
+# - 同 setup: ralph.yml 含 hats.specialist(triggers=[special.task],
+#   publishes=[special.done], 显式 backend: {backend} override) + inline prompt
+#   (emit special.task + LOOP_COMPLETE) + max_iterations=2 + backend.default_timeout()
+# - supported_backends 默认 impl(全 backend); YAML 不显式 backends
+# - expect 5 条断言映射:
+#   response_received           → expect.response_received: true
+#   exit_code_success_or_limit  → expect.exit_code_success_or_limit: true
+#   no_timeout                  → expect.no_timeout: true
+#   config_parsed_successfully  → DROPPED
+#     (NEGATED: stderr NOT contains "config" + "error/invalid"
+#      意图是 "config 解析成功"; schema 无 output/stderr_absent 字段, 没法
+#      表达 "NOT contains X"; 若 config 真解析失败, exit_code_success_or_limit
+#      会 catch(ralph 启动报错退出码非 0); dropped 这条冗余 defensive 检查)
+#   hat_executed                → expect.output_contains_any + expect.events:
+#     (stdout_lowercase "specialist"/  output_contains_any: [["Specialist", "specialist",
+#      "special" || events                    "Special", "special"]]
+#      starts_with "special.")         events:
+#                                       [{topic: special.task, min_count: 1},
+#                                        {topic: special.done, min_count: 1}]
+#     (OR 折 AND, 与 2.2.1/2.2.3 同模式)
+id: hat-backend-override
+description: Verifies per-hat backend override configuration (declarative)
+tier: "Tier 5: Hat Collections"
+setup:
+  config: |
+    # Backend override test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 2
+      completion_promise: "LOOP_COMPLETE"
+
+    hats:
+      specialist:
+        name: "Specialist"
+        description: "A specialist hat with backend override"
+        triggers:
+          - special.task
+        publishes:
+          - special.done
+        backend: {backend}  # Explicit backend override
+        instructions: |
+          You are Specialist with a dedicated backend configuration.
+          Acknowledge your specialist role and complete the task.
+          Always mention "Specialist backend active" in your response.
+          When done, emit using this exact XML format:
+
+          <event topic="special.done">
+          result: complete
+          </event>
+  prompt: |
+    You are testing Ralph's backend override configuration.
+
+    Emit a special.task event to trigger the Specialist hat:
+    <event topic="special.task">
+    Task: Demonstrate backend override functionality
+    </event>
+
+    The Specialist hat has a dedicated backend configuration.
+    After completion, output LOOP_COMPLETE.
+  max_iterations: 2
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # config_parsed_successfully dropped — 见顶部注释
+  # hat_executed (OR 折 AND)
+  output_contains_any:
+    - ["Specialist", "specialist", "Special", "special"]
+  events:
+    - topic: special.task
+      min_count: 1
+    - topic: special.done
+      min_count: 1
