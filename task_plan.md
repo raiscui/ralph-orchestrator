@@ -303,3 +303,57 @@ Pass / Fail:            FAIL
 3. **任务 2.4.1** ToolUseScenario → schema 加 `expect.tool_invocations` + tool-use.yaml(§2.4 第一刀)
 4. **先 push**: 把 19 commits 推到 my/main
 5. **暂停**: 等用户决策下一步
+
+## [2026-08-13 15:22:00] [Session ID: omx-1786600320381-z290x9] Wave 2 任务 2.2.1 启动:HatSingleScenario → hat-single.yaml
+
+### 目标
+- 读 scenarios/hat_single.rs（或 scenarios.rs）HatSingleScenario 完整定义
+- 检查 schema 是否有 hat 相关字段(预计已有 hat_run_counts)
+- 写 hat-single.yaml,1:1 映射到 declarative schema
+- 改 lib.rs registry
+- 跑 4 gate: cargo check / cargo test --lib / --list / declarative_coverage_gate
+- 预期 drift delta: 43/17/1 (71.67%) → 44/16/1 (73.33%)
+
+### 状态
+**目前在阶段1(读命令式)** — 下一步:定位 HatSingleScenario 定义位置
+
+## [2026-08-13 15:25:00] [Session ID: omx-1786600320381-z290x9] Wave 2 任务 2.2.1 已 commit
+
+### 完成动作
+- 新文件 `crates/ralph-e2e/scenarios/hat-single.yaml`(93 行,id = `hat-single`)
+- lib.rs registry 把 `HatSingleScenario` 那条改成 `Declarative` + from_yaml(...)
+- CLI list 显示:`hat-single  Verifies single custom hat executes with correct persona (declarative)`
+- `HatSingleScenario` struct 留在 hats.rs(测试 + pub use 仍保留,Wave 3 才删)
+
+### 净结果
+- 1 commit `7e4e970 feat(e2e): migrate HatSingleScenario → hat-single.yaml (Wave 2 task 2.2.1)`
+  - hat-single.yaml +93 行
+  - lib.rs +5 行 / -2 行
+- drift log delta:71.67 % → 73.33 %(44 declarative / 16 imperative / 1 keep)
+- 534 lib tests 仍全过
+- gate test 仍 FAIL(预期:要 14 / 17 migrations 才到 90 %)
+
+### 决定
+- [决定]: case-insensitive 适配用「6 个 case 变体」覆盖 3 关键词,而非扩展 schema
+  [理由]: 命令式 `hat_persona_visible` 是 `lowercased_stdout.contains(any of 3 lowercased keywords)`,
+  schema 的 `output_contains` 是 case-sensitive;两种适配方案(a)扩 schema 加
+  `output_contains_any_case_insensitive: bool` / (b)YAML 列 6 个 case 变体;
+  (b)是单场景局部决策, 0 schema 改动, 0 新增 builder,0 新增测试;若未来多个场景都要
+  case-insensitive,再(a)。
+- [决定]: `starts_with("build.")` 适配用「2 条精确 topic 匹配」,而非扩展 schema
+  [理由]: scenario 已知只 emit `build.task` + `build.done` 两个 topic;用 2 条
+  `events: [{topic: build.task, min_count: 1}, {topic: build.done, min_count: 1}]`
+  完全等价于 `starts_with("build.")`;schema 扩展 `event_prefix_min_count` 是为更
+  通用场景准备的,不应当作单场景适配手段。
+- [决定]: YAML 不显式声明 `backends:`
+  [理由]: 命令式 `HatSingleScenario` 走 `TestScenario::supported_backends()` 默认 impl
+  返回全 backend;declarative runner 在 `backends` 为空时同样返回全 backend(含 Codex);
+  行为对齐,不写 `backends:` 与命令式语义一致。
+
+### 下一步可选方向
+1. **任务 2.2.2** HatInstructionsScenario → hat-instructions.yaml(§2.2 第二刀)
+2. **任务 2.2.3** HatEventRoutingScenario → hat-event-routing.yaml
+3. **任务 2.2.4** HatBackendOverrideScenario → hat-backend-override.yaml
+4. **任务 2.2.5** HatMultiWorkflowScenario → hat-multi-workflow.yaml(§2.2 收官)
+5. **先 push**: 把 21 commits 推到 my/main
+6. **暂停**: 等用户决策

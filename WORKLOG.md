@@ -945,3 +945,55 @@
   阶段一次性 sync, 避免反复触发 openspec validate 影响节奏; schema 扩展 + 迁移的
   commit message 已经把分类问题记录清楚, reviewer 看 commit history 就能看到
   "为什么 2.1.3/2.1.4 实际是 hard with schema extension"。
+
+## [2026-08-13 15:25:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 2 任务 2.2.1 HatSingleScenario → hat-single.yaml
+
+### 任务内容
+- 迁移命令式 `HatSingleScenario`(hats.rs:55-250)到 declarative YAML
+- 5 条命令式断言 → 5 条 schema 字段 1:1 映射(无 schema 扩展,无折断言)
+- 改 `crates/ralph-e2e/src/lib.rs` registry entry
+- 不删除原 struct / 测试 / pub use
+
+### 完成过程
+- **读命令式完整实现**(hats.rs:55-250)
+  - setup:r alph.yml 含 hats.builder 配置 + inline prompt + max_iterations=2 +
+    backend.default_timeout()(注意 timeout 不写 YAML 让 runner 默认)
+  - 5 条断言:`response_received` / `exit_code_success_or_limit` / `no_timeout` /
+    `hat_persona_visible` (case-insensitive) / `build_event_emitted` (starts_with)
+- **schema 检查**(scenario.rs + 现有 YAML):
+  - `response_received` / `exit_code_success_or_limit` / `no_timeout`: 直字段
+  - `hat_persona_visible`: schema 的 `output_contains` 是 case-sensitive,
+    命令式用 `.to_lowercase()`,需适配
+  - `build_event_emitted`: schema 的 `event_count_at_least` 只支持精确 topic 匹配,
+    命令式用 `starts_with("build.")`,需适配
+- **2 个适配决策(均选「局部适配」而非「schema 扩展」)**:
+  - case-insensitive → YAML 列 6 个 case 变体覆盖 3 关键词
+  - starts_with → scenario 已知只 emit 2 个 topic, 用 2 条精确匹配等价
+- **写 hat-single.yaml**(93 行)
+  - 不显式 `backends:`(与命令式 supported_backends 默认 impl 一致,declarative runner
+    空 backends = 全 backend)
+- **改 lib.rs registry**:`Imperative` → `Declarative`,`from_yaml(include_str!)` 模式
+- **跑 4 个 gate 验证**:
+  - `cargo check -p ralph-e2e` — ok
+  - `cargo test -p ralph-e2e --lib` — 534 passed / 0 failed
+  - `cargo run -p ralph-e2e -- --list | grep hat-single` — 显示 `(declarative)` 后缀
+  - `cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture` —
+    drift log delta:`43/17/1 (71.67%) → 44/16/1 (73.33%)`,`hat-single` 出现在
+    Declarative 列表,Imperative 从 17 减到 16
+
+### 总结感悟
+- **「局部适配」 vs 「schema 扩展」选择**:`hat_persona_visible` 的 case-insensitive
+  和 `build_event_emitted` 的 starts_with 都是 schema 不能直接表达的语义;
+  两条路径都能解决。ponytail 偏向「局部适配」:每个 adapter 是 0 schema 改动 +
+  0 新增 builder + 0 新增测试的最小成本;只有当多个场景都需要同一适配时才升 schema。
+  当前每个 adapter 都是「单场景一次性」成本,不应当作 schema 驱动。
+- **YAML 不写 `backends:` 的语义**:`TestScenario::supported_backends()` 默认 impl
+  返回全 backend;命令式 hat scenarios(可能因为「all backends should test hats」)
+  都没 override 默认 impl。declarative runner 在 `backends` 为空时同样返回全 backend
+  (scenario.rs:300), 行为对齐。YAML 写 `backends:` 反而是「显式但不正确」的偏差。
+- **命令式 timeout 模式识别**:HatSingleScenario `timeout: backend.default_timeout()`
+  与 `TimeoutScenario` 的 `timeout: Duration::from_secs(5)` 不同;迁移时要分清「
+  硬编码超时」(timeout scenario 类)和「用 backend 默认超时」(正常 scenario)。
+  前者 YAML 必须显式 `timeout_secs:`,后者不写让 runner 默认。
+- **`# ponytail:` 这次扩展不需要**:所有适配都是 YAML 局部决策, 没有 schema 改动;
+  决策逻辑在 YAML 注释里说清楚, 后续 reader 直接看到 rationale。
