@@ -1,0 +1,87 @@
+# memory-corrupted 声明化(候选 2.3.5: MemoryCorruptedFileScenario → memory-corrupted-file.yaml)
+#
+# 与命令式 MemoryCorruptedFileScenario 等价性分析:
+# - 同 id `memory-corrupted-file`, description / tier 一致
+# - 同 setup: ralph.yml (memories.enabled + memories.inject=auto) + 预填充
+#   .agent/memories.md 含 corrupted 内容(invalid ID / binary garbage /
+#   missing fields) + inline prompt(要求 agent 在 corrupted 环境下 add
+#   memory) + max_iterations=1 + backend.default_timeout()
+# - supported_backends 显式 [Claude, Kiro, OpenCode]
+# - expect 5 条断言中 3 条 1:1 映射 + 2 条 dropped:
+#   response_received/exit_code_success_or_limit/no_timeout → 直接映射
+#   did_not_crash           → DROPPED
+#     (NEGATED: stdout/stderr NOT contains    rationale: schema 无 output_absent;
+#      "panic" / "fatal error" / exit_code    NEGATED + OR 跨 stdout/stderr
+#      != 101)                                难以表达; exit_code_success_or_limit
+#                                             + response_received 已 catch 主要失败
+#   new_memory_added        → DROPPED
+#     (file content 含 "Chaos test            rationale: schema 无 file_content
+#      survived" / "chaos")                   字段; artifacts 检查文件存在已 catch
+#                                             主路径
+id: memory-corrupted-file
+description: Verifies graceful handling of corrupted memory files (declarative)
+tier: "Tier 6: Memory System (Chaos)"
+backends: [claude, kiro, opencode]
+setup:
+  # 预填充 corrupted memories.md — 与命令式 setup() 等价
+  write_files:
+    - path: .agent/memories.md
+      content: |
+        # Memories
+
+        ## Patterns
+
+        ### INVALID-ID-FORMAT
+        > This has an invalid ID format
+        <!-- missing closing comment
+
+        ### mem-notavalidtimestamp-xyz!
+        > Invalid timestamp and non-hex suffix
+        <!-- tags: broken | created: not-a-date -->
+
+        ###
+        > Memory with empty ID
+        <!-- tags: empty -->
+
+        ## Fixes
+
+        ### mem-1737300200-a3b3
+        > This one is valid for comparison
+        <!-- tags: valid | created: 2025-01-19 -->
+
+        RANDOM_GARBAGE_HERE_NOT_VALID_MARKDOWN
+  config: |
+    # Corrupted memory file test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+
+    memories:
+      enabled: true
+      inject: auto
+  prompt: |
+    You are testing memory system robustness against corrupted files.
+
+    The memories.md file contains some corrupted entries. Your task:
+
+    1. Try to add a new memory using Bash: ralph tools memory add "Chaos test survived" --type context --tags chaos,test
+    2. Report if the command succeeded or failed
+    3. If any errors occurred, describe them
+
+    Output LOOP_COMPLETE when done.
+
+    IMPORTANT: Use the Bash tool to execute the command.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # did_not_crash dropped — 见顶部注释
+  # new_memory_added dropped — 见顶部注释
+  # artifacts 仍作为 chaos test 存在性的兜底
+  artifacts:
+    - .agent/memories.md

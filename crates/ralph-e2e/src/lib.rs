@@ -332,9 +332,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
         ),
         // Tier 6: Memory System (Chaos Tests)
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "memory-corrupted",
-            Box::new(MemoryCorruptedFileScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "memory-corrupted",
+                include_str!("../scenarios/memory-corrupted-file.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,
