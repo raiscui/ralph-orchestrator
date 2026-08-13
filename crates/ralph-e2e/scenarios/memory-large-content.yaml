@@ -1,0 +1,50 @@
+# memory-large-content 声明化(候选 2.3.8: MemoryLargeContentScenario → memory-large-content.yaml)
+#
+# 与命令式 MemoryLargeContentScenario 等价性分析:
+# - 同 id `memory-large-content`, description / tier 一致
+# - 同 setup: ralph.yml (memories.enabled + memories.inject=manual) +
+#   inline prompt(要求 agent 用 Bash add 大段多行 memory + END_MARKER_12345) +
+#   max_iterations=1 + backend.default_timeout()
+# - supported_backends 显式 [Claude, Kiro, OpenCode]
+# - expect 5 条断言中 3 条 1:1 映射 + 2 条 dropped:
+#   response_received/exit_code_success_or_limit/no_timeout → 直接映射
+#   large_content_stored → DROPPED
+#     (file content 含 "LARGE_CONTENT_TEST"/"microservices"/"architecture";
+#      schema 无 file_content 字段)
+#   content_not_truncated → DROPPED
+#     (file content 含 "END_MARKER_12345"; schema 无 file_content 字段)
+id: memory-large-content
+description: Verifies memory system handles large content storage (declarative)
+tier: "Tier 6: Memory System (Chaos)"
+backends: [claude, kiro, opencode]
+setup:
+  config: |
+    # Large content test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+
+    memories:
+      enabled: true
+      inject: manual
+  prompt: |
+    You are testing memory system large content handling.
+
+    Your task is to add a memory with detailed, multi-line content using Bash:
+
+    ralph tools memory add "LARGE_CONTENT_TEST: This is a comprehensive memory entry that contains multiple sentences describing a complex architectural decision. The decision involves choosing between microservices and monolithic architecture for the authentication service. After careful consideration of scalability, maintainability, and team expertise, we decided to implement a modular monolith with clear bounded contexts that can be extracted into microservices later if needed. Key factors: team size (5 engineers), expected load (10K requests/min), and deployment infrastructure (Kubernetes). END_MARKER_12345" --type decision --tags architecture,large,test
+
+    After adding, output LOOP_COMPLETE.
+
+    IMPORTANT: Use the Bash tool to execute the command.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # large_content_stored dropped — 见顶部注释
+  # content_not_truncated dropped — 见顶部注释

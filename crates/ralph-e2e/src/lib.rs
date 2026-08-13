@@ -356,9 +356,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "memory-large-content",
-            Box::new(MemoryLargeContentScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "memory-large-content",
+                include_str!("../scenarios/memory-large-content.yaml"),
+            )),
         ),
         // Tier 7: Error Handling (backend-agnostic)
         (
