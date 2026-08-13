@@ -357,3 +357,23 @@ Pass / Fail:            FAIL
 4. **任务 2.2.5** HatMultiWorkflowScenario → hat-multi-workflow.yaml(§2.2 收官)
 5. **先 push**: 把 21 commits 推到 my/main
 6. **暂停**: 等用户决策
+
+## [2026-08-13 15:28:00] [Session ID: omx-1786600320381-z290x9] Wave 2 §2.2 批量任务启动:2.2.2-2.2.5 四个 hat scenarios
+
+### 目标(用户指令 "进行1234" 一次性跑完)
+- 2.2.2 HatInstructionsScenario → hat-instructions.yaml
+- 2.2.3 HatEventRoutingScenario → hat-event-routing.yaml
+- 2.2.4 HatBackendOverrideScenario → hat-backend-override.yaml
+- 2.2.5 HatMultiWorkflowScenario → hat-multi-workflow.yaml
+
+### 适配策略总结(4 个场景共用)
+| 命令式特征 | schema 适配 |
+|---|---|
+| case-insensitive stdout contains (4-7 keywords) | `output_contains_any` 列 N 个 case 变体(每关键词 2 case) |
+| events topic `starts_with("X.")` | 已知 emit 的 2 个 topic 用 `events:` 精确匹配列表 |
+| OR 语义(A 或 B) | 折成 2 条 AND 断言(更严格, 仍 catch 失败路径) |
+| stdout/stderr `not_contains` 否定 | `event_absent_prefixes` 适用;`output_absent` 缺字段 → drop |
+| 默认 supported_backends (全 backend) | YAML 不写 `backends:` |
+
+### 状态
+**目前在阶段1(归档 WORKLOG + 读命令式)** — 下一步: 4 个 feat commits (各场景 1 个)

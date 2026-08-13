@@ -942,3 +942,29 @@
 ### 临时决策
 - 本轮跳过 2.1.3(不迁移、不动 lib.rs),直接进 §2.1.4 AuthFailureScenario 迁移。
 - OpenSpec tasks.md 暂不改(避免触动已绿 29/29 validate),等 schema 扩展 spec 起时一并改。
+
+## [2026-08-13 15:28:00] [Session ID: omx-1786600320381-z290x9] Wave 2 收官后:执行 continuous-learning 流程
+
+### 来源
+- 见 EPIPHANY_LOG.md "WORKLOG 1000 行临界触发归档" 条目
+- AGENTS.md: "当因为"超过1000行"而续档时,必须执行 continuous-learning"
+
+### 待执行
+- Wave 2 全部 migrations 完成(§2.2 + §2.3 + §2.4)后,执行完整 continuous-learning:
+  1. 列出并回读 WORKLOG__2026-08-13_pre_section_2_2_4_migrations.md (999 行) +
+     当前 WORKLOG.md (§2.2 内容)
+  2. 提炼 Wave 2 学到的可复用经验:
+     - schema 扩展设计 (OR vs AND 语义、case-insensitive、starts_with 适配)
+     - 局部适配 vs schema 扩展 ponytail 偏向
+     - 命令式 setup 语义问题(cli.command 静默忽略)
+     - 折断言允许条件 (语义等价 schema 可表达)
+  3. 分流到长期知识载体:
+     - docs/solutions/ — schema 扩展设计模式
+     - self-learning.* skill — OR 语义字段不能拆 (新 skill 候选)
+     - EXPERIENCE.md — 暂存,Compound Gate 未成熟的经验
+     - 必要时更新 AGENTS.md 索引
+  4. 验证长期产物 (跑相关测试)
+  5. 已消费上下文归档到 archive/
+
+### 触发条件
+- §2.4 全部完成 + gate test 90% 覆盖率达成(或主动暂停 Wave 2)

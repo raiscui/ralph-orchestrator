@@ -853,3 +853,41 @@ registry 是 hand-maintained,也无法 grep/monitor 变化。proposal 把 5.1 �
 - 任何「deprecate after X%」类型的 task 都该要求 owner 写 CI gate test
 - 「X%」类数值要 ground in testable source-of-truth 不是 grep
 - registry-style counting code 是 natural CI gate:硬代码的 shift 即 regression
+
+## [2026-08-13 15:28:00] [Session ID: omx-1786600320381-z290x9] 主题: WORKLOG 1000 行临界触发归档,continuous-learning 推迟到 Wave 2 收官
+
+### 发现来源
+- 完成 2.2.1 之后 wc -l WORKLOG.md = 999, 即将进入 §2.2.2-2.2.5 (4 个 hat scenarios),
+  每轮 ~50 行 chore 追加会触发 WORKLOG > 1000 行规则。
+
+### 核心问题
+- AGENTS.md: "WORKLOG.md 超过 1000 行就将现文件加日期重命名后再创建一个新的"
+- AGENTS.md: "当因为"超过1000行"而续档（重命名旧六文件 + 新开一档）时,必须执行一次 continuous-learning 的持续学习流程"
+- continuous-learning 流程涉及: 回读旧文件、提炼经验、分流到 docs/solutions/ /
+  self-learning.* skills / CONTEXT.md / AGENTS.md / EXPERIENCE.md、验证
+  长期产物,然后归档。是 substantial 工作,不是 commit-and-go。
+- 用户指令"进行1234"要求 4 个迁移一次性跑完;如果在中间触发 continuous-learning
+  会打断 1234 pipeline,且需要在 4 个迁移的 feat commits 之间嵌入大量学习代码。
+
+### 决定
+- [决定]: WORKLOG 提前归档(在 2.2.2 之前 rename, 而非 1000 行阈值自动触发)
+  [理由]: 保持 feat commits 的纯度(每个 commit 只动 YAML + lib.rs),把 chore append
+  全部累积到 §2.2 完成时的 single chore commit。
+- [决定]: continuous-learning 推迟到 Wave 2 收官(§2.2 + §2.3 + §2.4 全部完成)
+  [理由]: Wave 2 整体学习价值高于 §2.2 单独学习;§2.3 memory 与 §2.4 hard schema extension
+  会产生不同模式的提炼经验,合并做一次 continuous-learning 比 §2.2 + §2.3 + §2.4
+  三次轻量学习更有价值。LATER_PLANS.md 已追加条目跟踪。
+- [决定]: 归档文件保留为 WORKLOG__2026-08-13_pre_section_2_2_4_migrations.md(在仓库根,
+  非 archive/ 子目录)
+  [理由]: AGENTS.md: "未完成 continuous-learning 的 Capture 与验证流程时,任何上下文
+  Markdown 都不能移入 archive/"。rename 到根目录保持可读性但不违反规则。
+
+### 当前结论
+- WORKLOG 归档于根目录,文件名带日期便于排序
+- 新 WORKLOG.md 包含 header + 历史归档索引
+- EPIPHANY_LOG 标记 continuous-learning 推迟到 Wave 2 收官
+- LATER_PLANS.md 追加条目:Wave 2 收官时执行 continuous-learning
+
+### 后续讨论入口
+- 看 LATER_PLANS.md "Wave 2 收官 continuous-learning" 条目
+- 归档文件 WORKLOG__2026-08-13_pre_section_2_2_4_migrations.md (999 行) 可回读
