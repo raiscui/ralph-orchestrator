@@ -249,9 +249,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "streaming",
-            Box::new(StreamingScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "streaming",
+                include_str!("../scenarios/streaming.yaml"),
+            )),
         ),
         // Tier 5: Hat Collections (backend-agnostic)
         (

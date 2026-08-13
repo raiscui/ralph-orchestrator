@@ -1,0 +1,67 @@
+# streaming 声明化(候选 2.4.2: StreamingScenario → streaming.yaml)
+#
+# 与命令式 StreamingScenario 等价性分析:
+# - 同 id `streaming`, description / tier 一致
+# - 同 setup: ralph.yml (cli.backend + cli.args ["--output-format", "stream-json"])
+#   + inline prompt("Say 'Hello from streaming test!' + LOOP_COMPLETE") +
+#   max_iterations=1 + backend.default_timeout()
+# - supported_backends 默认 impl(全 backend); YAML 不显式 backends
+# - expect 5 条断言映射(2 部分 dropped, audit 反预期):
+#   response_received           → expect.response_received: true
+#   exit_code_success_or_limit  → expect.exit_code_success_or_limit: true
+#   no_timeout                  → expect.no_timeout: true
+#   streaming_output_received   → expect.output_contains_any:
+#     (OR: stdout 含 "{" OR "\"type\""  [["{" , "\"type\""]]
+#      OR stdout 非空)                  (2 needles case-sensitive; dropped
+#                                       "stdout 非空" 部分 — 与 response_received
+#                                       重复, schema-cost > value)
+#   content_extracted           → expect.output_contains_any + expect.output_contains:
+#     (OR: lowcase 含 hello/streaming   output_contains_any:
+#      OR stdout 含 LOOP_COMPLETE        [["hello", "streaming"]]
+#      OR stdout.len() > 50)            output_contains: ["LOOP_COMPLETE"]
+#                                       (OR 折 AND: 命令式是 OR, schema 用
+#                                       2 个字段 AND; prompt 强制要求 hello
+#                                       + LOOP_COMPLETE 都出现, AND 正确;
+#                                       dropped "len > 50" — low-value 兜底,
+#                                       schema 无 stdout_length 字段,
+#                                       schema-cost > value)
+#
+# Audit 反预期: audit-p5-p1.md:76 建议 "schema adds per-token pacing"。
+# 实际命令式只用 stdout 关键词检查, 不验证 NDJSON pacing (per-token 时序);
+# schema 不需要新增 pacing 字段。若未来 streaming 升级为验证 per-token 时序
+# 或 event 间隔, 再加 schema 字段; 本轮命令式即 schema-expressible。
+id: streaming
+description: Verifies NDJSON streaming output parsing (declarative)
+tier: "Tier 4: Capabilities"
+setup:
+  config: |
+    # Streaming test config for {backend}
+    cli:
+      backend: {}
+      args:
+        - "--output-format"
+        - "stream-json"
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+  prompt: |
+    You are testing streaming output.
+
+    Say "Hello from streaming test!" and then output LOOP_COMPLETE.
+
+    Keep your response short.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # output_contains_any: 多组(每组任一命中即通过)
+  # 组 1 - streaming_output_received (partial: dropped "stdout 非空" 重复检查)
+  # 组 2 - content_extracted (OR 折 AND: dropped "len > 50" 兜底)
+  output_contains_any:
+    - ["{", "\"type\""]
+    - ["hello", "streaming"]
+  output_contains:
+    - "LOOP_COMPLETE"
