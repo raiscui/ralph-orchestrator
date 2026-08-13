@@ -26,45 +26,17 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use ralph_e2e::{
     AuthChecker,
-    // Tier 7: Error Handling
-    AuthFailureScenario,
     Backend as LibBackend,
-    BackendUnavailableScenario,
-    // Tier 3: Events
-    // Tier 2: Orchestration Loop
-    // Tier 1: Connectivity
-    // Tier 5: Hat Collections
-    HatBackendOverrideScenario,
-    HatEventRoutingScenario,
-    HatInstructionsScenario,
-    HatMultiWorkflowScenario,
-    HatSingleScenario,
-    MaxIterationsScenario,
-    // Tier 6: Memory System
-    MemoryAddScenario,
-    MemoryCorruptedFileScenario,
-    MemoryInjectionScenario,
-    MemoryLargeContentScenario,
-    MemoryMissingFileScenario,
-    MemoryPersistenceScenario,
-    MemoryRapidWriteScenario,
-    MemorySearchScenario,
     MockCliError,
     MockConfig,
-    ParallelAppServerIdleStartScenario,
-    // Tier 8: Parallel Runtime
-    ParallelAppServerSteerMultiTurnScenario,
-    ParallelExperimentalDevEngineExampleScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
     RunConfig,
-    // Tier 4: Capabilities
-    StreamingScenario,
+    // Scenario registry now lives in ralph_e2e::all_scenarios() (lib surface),
+    // 不再需要在 binary 侧直接 use 具体场景类型。
     TerminalReporter,
     TestRunner,
     TestScenario,
-    TimeoutScenario,
-    ToolUseScenario,
     Verbosity,
     WorkspaceManager,
     create_incremental_progress_callback,
@@ -231,217 +203,6 @@ impl ReportFormat {
     }
 }
 
-/// Returns all registered test scenarios.
-fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
-    vec![
-        // Tier 1: Connectivity (backend-agnostic)
-        // connectivity 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "connectivity",
-            include_str!("../scenarios/connectivity.yaml"),
-        )),
-        // Tier 2: Orchestration Loop (backend-agnostic)
-        // single-iter 已声明化(候选6 试点)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "single-iter",
-            include_str!("../scenarios/single-iter.yaml"),
-        )),
-        // multi-iter 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "multi-iter",
-            include_str!("../scenarios/multi-iter.yaml"),
-        )),
-        // completion 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "completion",
-            include_str!("../scenarios/completion.yaml"),
-        )),
-        // Tier 3: Events (backend-agnostic)
-        // events 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "events",
-            include_str!("../scenarios/events.yaml"),
-        )),
-        // backpressure 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "backpressure",
-            include_str!("../scenarios/backpressure.yaml"),
-        )),
-        // Tier 4: Capabilities (backend-agnostic)
-        Box::new(ToolUseScenario::new()),
-        Box::new(StreamingScenario::new()),
-        // Tier 5: Hat Collections (backend-agnostic)
-        Box::new(HatSingleScenario::new()),
-        Box::new(HatMultiWorkflowScenario::new()),
-        Box::new(HatInstructionsScenario::new()),
-        Box::new(HatEventRoutingScenario::new()),
-        Box::new(HatBackendOverrideScenario::new()),
-        // Tier 6: Memory System (backend-agnostic)
-        Box::new(MemoryAddScenario::new()),
-        Box::new(MemorySearchScenario::new()),
-        Box::new(MemoryInjectionScenario::new()),
-        Box::new(MemoryPersistenceScenario::new()),
-        // Tier 6: Memory System (Chaos Tests)
-        Box::new(MemoryCorruptedFileScenario::new()),
-        Box::new(MemoryMissingFileScenario::new()),
-        Box::new(MemoryRapidWriteScenario::new()),
-        Box::new(MemoryLargeContentScenario::new()),
-        // Tier 7: Error Handling (backend-agnostic)
-        Box::new(TimeoutScenario::new()),
-        Box::new(MaxIterationsScenario::new()),
-        Box::new(AuthFailureScenario::new()),
-        Box::new(BackendUnavailableScenario::new()),
-        // Tier 8: Parallel Runtime (experimental)
-        // parallel-hat-instances(en) 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-hat-instances",
-            include_str!("../scenarios/hat-instances.yaml"),
-        )),
-        // parallel-hat-instances-zh 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-hat-instances-zh",
-            include_str!("../scenarios/hat-instances-zh.yaml"),
-        )),
-        // starting-event-inference 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-starting-event-inference",
-            include_str!("../scenarios/starting-event-inference.yaml"),
-        )),
-        // starting-event-inference-multi-candidate 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-starting-event-inference-multi-candidate",
-            include_str!("../scenarios/starting-event-inference-multi-candidate.yaml"),
-        )),
-        // emit-spawn-instance 已声明化(候选6); {model} 占位符与命令式等价
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-emit-spawn-instance",
-            include_str!("../scenarios/emit-spawn-instance.yaml"),
-        )),
-        Box::new(ParallelAppServerIdleStartScenario::new()),
-        // app-server-idle-start-live 已声明化(候选6 inject 试点)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-app-server-idle-start-live",
-            include_str!("../scenarios/app-server-idle-start-live.yaml"),
-        )),
-        Box::new(ParallelAppServerSteerMultiTurnScenario::new()),
-        // steer-multi-turn-live 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-app-server-steer-multi-turn-live",
-            include_str!("../scenarios/steer-multi-turn-live.yaml"),
-        )),
-        // steer-live-reply-multi-turn 已声明化(候选6)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-app-server-steer-live-reply-multi-turn",
-            include_str!("../scenarios/steer-live-reply-multi-turn.yaml"),
-        )),
-        // trigger-routing-example 已声明化(候选6, example 引用试点)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-trigger-routing-example",
-            include_str!("../scenarios/parallel-trigger-routing-example.yaml"),
-        )),
-        // 以下 example 场景已声明化(候选6): example 引用 + 事件链/payload/gates 断言
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-pr-review-example",
-            include_str!("../scenarios/pr-review-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-release-checklist-example",
-            include_str!("../scenarios/release-checklist-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-audit-evidence-pack-example",
-            include_str!("../scenarios/audit-evidence-pack-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-customer-advisory-board-prep-example",
-            include_str!("../scenarios/customer-advisory-board-prep-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-customer-onboarding-activation-example",
-            include_str!("../scenarios/customer-onboarding-activation-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-customer-renewal-desk-example",
-            include_str!("../scenarios/customer-renewal-desk-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-executive-business-review-prep-example",
-            include_str!("../scenarios/executive-business-review-prep-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-field-enablement-rollout-example",
-            include_str!("../scenarios/field-enablement-rollout-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-finance-close-control-room-example",
-            include_str!("../scenarios/finance-close-control-room-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-hiring-debrief-panel-example",
-            include_str!("../scenarios/hiring-debrief-panel-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-incident-response-war-room-example",
-            include_str!("../scenarios/incident-response-war-room-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-launch-readiness-command-example",
-            include_str!("../scenarios/launch-readiness-command-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-migration-rehearsal-example",
-            include_str!("../scenarios/migration-rehearsal-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-multi-region-pipeline-sync-example",
-            include_str!("../scenarios/multi-region-pipeline-sync-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-partner-launch-coordination-example",
-            include_str!("../scenarios/partner-launch-coordination-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-postmortem-action-board-example",
-            include_str!("../scenarios/postmortem-action-board-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-proposal-assembly-example",
-            include_str!("../scenarios/proposal-assembly-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-regional-operating-review-example",
-            include_str!("../scenarios/regional-operating-review-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-renewal-risk-calibration-example",
-            include_str!("../scenarios/renewal-risk-calibration-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-revops-quote-desk-example",
-            include_str!("../scenarios/revops-quote-desk-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-security-exception-review-example",
-            include_str!("../scenarios/security-exception-review-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-support-escalation-desk-example",
-            include_str!("../scenarios/support-escalation-desk-example.yaml"),
-        )),
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-vendor-security-procurement-example",
-            include_str!("../scenarios/vendor-security-procurement-example.yaml"),
-        )),
-        // human-approval-gate 已声明化(候选6: wait_event 注入 + --json emit + 事件顺序断言)
-        Box::new(ralph_e2e::declarative::from_yaml(
-            "parallel-human-approval-gate-example",
-            include_str!("../scenarios/human-approval-gate-example.yaml"),
-        )),
-        // experimental-dev-engine 保留命令式: 依赖复杂 git seed/commit 工作流, 不适合声明化。
-        Box::new(ParallelExperimentalDevEngineExampleScenario::new()),
-    ]
-}
-
 fn main() {
     let cli = Cli::parse();
 
@@ -536,7 +297,10 @@ async fn list_scenarios(opts: &TestOpts, verbosity: Verbosity) {
     }
 
     // List scenarios
-    let scenarios = get_all_scenarios();
+    let scenarios: Vec<Box<dyn TestScenario>> = ralph_e2e::all_scenarios()
+        .into_iter()
+        .map(|(_kind, _id, scenario)| scenario)
+        .collect();
     println!("{}\n", "Available scenarios:".bold());
 
     // Group by tier
@@ -620,7 +384,10 @@ async fn run_tests(opts: &TestOpts, verbosity: Verbosity) {
     let workspace_mgr = WorkspaceManager::new(workspace_path.clone());
 
     // Get scenarios
-    let scenarios = get_all_scenarios();
+    let scenarios: Vec<Box<dyn TestScenario>> = ralph_e2e::all_scenarios()
+        .into_iter()
+        .map(|(_kind, _id, scenario)| scenario)
+        .collect();
 
     // Build run configuration
     let mut config = RunConfig::new().keep_workspaces(opts.keep_workspace);
