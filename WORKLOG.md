@@ -510,3 +510,55 @@
 - **3.2 deprecation 跨 5 文件的批量编辑**: 21 个 struct + 5 个 mod tests + 5 个 pub use
   = 31 处修改, 一次性 Python 脚本批量完成; 验证 cargo check 仍通过 (deprecation
   warnings 预期), cargo test 仍 536 passed, gate 仍 100% PASS。
+
+## [2026-08-13 22:05:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Task 1+2+3 batch 收尾 + OpenSpec 工作树清理 (handoff 续接)
+
+### 任务内容
+- 续接前一轮 LM handoff summary, 确认 Session ID 一致 (`omx-1786600320381-z290x9`),
+  实际状态与 handoff 对齐:
+  - HEAD `af3fbf8` (Task 2 commit), 1 ahead of `my/main` (`e956bf9`), 未 push
+  - 3 个 D (`openspec/changes/e2e-declarative-migration-plan/{proposal,specs/.../spec,tasks}.md`)
+    + 1 untracked `.scratch/sync-origin-main-features-q3-2026/` (用户 scratch, 不动)
+    + 1 untracked `openspec/changes/archive/2026-08-13-...` (要 add)
+    + 1 untracked `openspec/specs/e2e-declarative-coverage-gate/spec.md` (要 add)
+  - 6 文件状态: task_plan 832 / WORKLOG 512 / LATER_PLANS **1058** (超阈值) / notes 790 /
+    EPIPHANY 934 / ERRORFIX 246 / EXPERIENCE 580 (行)
+- 完成 LATER_PLANS 续档 (1058 行 → 重命名 `LATER_PLANS__2026-08-13.md` + 新建 82 行空文件)
+- 完成 6 文件收尾段 append (本条 WORKLOG + task_plan.md "收尾计划" 段 + 新 LATER_PLANS.md 2 条 active)
+- 完成 OpenSpec 工作树清理的 chore commit 准备 (精确 git add, 不动 `.scratch/`)
+
+### 完成过程
+1. **核对实际状态 vs handoff**: 读 `git status` / `git log` / 6 文件 wc + 头尾片段, 全部对得上.
+2. **登记行动计划** (task_plan.md append): "Task 1+2+3 batch 6 文件收尾 + OpenSpec 工作树清理" 段.
+3. **LATER_PLANS 续档** (按 AGENTS.md "超过 1000 行 → 重命名 + 新建" 规则):
+   - `mv LATER_PLANS.md LATER_PLANS__2026-08-13.md` (保留全部 50+ 段作历史账本,
+     含 "已完成回写" 段作为历史证据, 不清理)
+   - 新建空 `LATER_PLANS.md` (82 行), 写 2 条 active:
+     1. Wave 3.4 follow-up: 2.3.0 物理删除 21 个 deprecated struct (含 cli.command 修复合并)
+     2. e2e-live-convergence 诊断 (环境阻塞已记录, EXP entry 已在 EXPERIENCE.md)
+4. **OpenSpec archive dir 完整性验证**: `ls -la` 确认 `proposal.md` / `tasks.md` /
+   `specs/.../` / 应用后 `openspec/specs/e2e-declarative-coverage-gate/spec.md` 都存在.
+5. **基线验证**: `RUSTFLAGS="-Awarnings" cargo check -p ralph-e2e --quiet` → exit 0.
+6. **本条 WORKLOG 收尾记录**.
+7. **chore commit**: 精确 `git add` OpenSpec archive + specs dir, **绝对不动** `.scratch/`.
+8. **不主动 push**, 询问用户是否 push `af3fbf8` + 本轮 chore commit 到 `my/main`.
+
+### 总结感悟
+- **handoff summary 质量高**: 前一轮 LM 给出的 handoff 几乎完全准确, 包括 commit hash /
+  EXP entry 列表 / 6 文件行数 / 待 push 状态 / cli.command 根因诊断. 这种 "完整事实账本
+  + 关键决策口径" 的 handoff 模式值得继续用.
+- **".scratch/" 是用户 scratch, 不是产物**: handoff 没提到但实际存在 (`sync-origin-main-features-q3-2026`,
+  用户 2026-08-12 自己建的). 续接 handoff 必须用 `git status --short` 实测确认, 不能
+  假定 handoff 完整.
+- **LATER_PLANS 续档策略选择**: 旧文件 50+ 段含 6 个月前 (2026-02) 早期延期事项 + 3 处
+  "已完成回写". 选 "保留旧文件作历史 + 新建只放 active" 比 "搬运已完成的到 archive" 更
+  简单 (1058 行内容不丢, 历史可追溯). 与 sync_origin_main_2026-08-13 manifest 的
+  "搬运到 archive/branch_contexts" 策略不同 — 那是因为 4 个 notes__* 是异 Session 产物,
+  而 LATER_PLANS 是当前 Session 的 append-only 账本, 不能混淆.
+- **OpenSpec archive 工作树清理**: archive 操作自动产生 3 个 D (change 文件被删) +
+  2 个 untracked (archive dir + 应用后 specs dir). 精确 `git add` 比 `git add -A` 安全 —
+  后者会误 add `.scratch/` 等用户私货.
+- **Task 3 阻塞已充分外化**: `exp-20260813-e2e-live-convergence-issue` 在 EXPERIENCE.md
+  完整记录 (触发条件 / 已验证规律 / 证据缺口 / 未来动作), 不需要重复造轮子到 LATER_PLANS.
+  LATER_PLANS 只放 "trigger + 任务分解", 详细证据在 EXPERIENCE / notes archive.
+- **未做**: push (remote action, 按 OMX 规则 ask 用户).

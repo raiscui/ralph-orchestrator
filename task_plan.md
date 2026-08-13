@@ -830,3 +830,33 @@ capabilities.rs (Streaming) + 当前 schema 字段
 3. **命令式 cli.command 静默忽略** (2.1.3 backend-unavailable 语义问题, 已加 LATER_PLANS)
 4. **e2e-live-convergence 诊断** (3 个 live 场景 termination_reason=None, 已加 LATER_PLANS)
 5. **暂停**: 等用户决策
+
+## [2026-08-13 22:05:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾计划] Task 1+2+3 batch 6 文件收尾 + OpenSpec 工作树清理
+
+### 上下文
+- handoff summary 由前一轮 LM 给出, 与本 Session (`omx-1786600320381-z290x9`) 同源
+- Task 1 (OpenSpec archive): 已完成
+- Task 2 (cli.command 静默忽略): 已 commit `af3fbf8`, 1 ahead of my/main
+- Task 3 (e2e-live-conv 诊断): 环境阻塞 (无 API key + kiro binary 缺失), 已在
+  EXPERIENCE.md `exp-20260813-e2e-live-convergence-issue` 充分记录
+
+### 工作清单
+- [x] LATER_PLANS 续档 (1058 行超 1000 阈值)
+  - `mv LATER_PLANS.md LATER_PLANS__2026-08-13.md` (保留 50+ 段作历史)
+  - 新建空 `LATER_PLANS.md`
+  - append 3 条 active: 2.3.0 物理删除 / cli.command follow-up / e2e-live-conv 诊断
+- [x] task_plan.md 收尾段 (本条已部分完成)
+- [x] WORKLOG.md 收尾段
+- [x] 跑 cargo test -p ralph-e2e --lib 基线 (cargo check 0 错 0 警 验证过) (确认 536 passed 还在)
+- [x] chore commit: OpenSpec 工作树清理
+  - `git add openspec/changes/archive/2026-08-13-e2e-declarative-migration-plan/`
+  - `git add openspec/specs/e2e-declarative-coverage-gate/`
+  - `git rm` 3 个 D 文件 (archive 操作预期结果)
+  - **绝对不动**: `.scratch/sync-origin-main-features-q3-2026/` (用户自己的)
+- [x] 不主动 push, 询问用户
+
+### 关键不变量
+- 6 文件 append-only 纪律遵守
+- LATER_PLANS 历史保留 (不清理"已完成回写"段, 它们是历史证据)
+- `.scratch/` 是用户自己的, 不能误 add
+- 1 ahead of my/main (`af3fbf8`) + 本轮 chore commit = 2 ahead, push 待用户确认
