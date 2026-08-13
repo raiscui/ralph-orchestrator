@@ -552,20 +552,29 @@
 <!-- scope: project | source_topics: e2e_live_convergence,parallel_live,termination_reason | source_hats: codex | status: active | confidence: medium | created_at: 2026-08-13T17:35:00+08:00 | updated_at: 2026-08-13T17:35:00+08:00 | supersedes:  -->
 
 - 触发条件:
-  - 跑 e2e live 场景(parallel-emit-spawn-instance / parallel-app-server-idle-start-live / parallel-app-server-steer-multi-turn / parallel-app-server-steer-multi-turn-live / parallel-app-server-steer-live-reply-multi-turn)。
+  - 跑 e2e live 场景, 观察到失败(原 `notes__e2e_conv.md` 2026-08-02):
+    - parallel-emit-spawn-instance
+    - parallel-app-server-idle-start-live
+    - parallel-app-server-steer-multi-turn
+    - parallel-app-server-steer-multi-turn-live (与上一条同 stems, 是其 +live 后缀变体)
   - 测试报失败, 协调者未输出 LOOP_COMPLETE。
+  - 未验证相邻场景: parallel-app-server-steer-live-reply-multi-turn (Wave 2
+    declarative migration 注册为 declarative YAML 但未跑 live harness, 是否同模式待诊断)。
 - 已验证规律:
   - 失败统一模式: termination_reason=None。
   - 事件流完整(spawn.task → spawn.done), 但无 loop.terminate 事件。
-  - 新旧代码一致(同一 HEAD 切到 declarative 版本后仍失败), 说明不是 Wave 2 declarative migration 引入的回归。
+  - 新旧命令式版本一致(原 `notes__e2e_conv.md` 明确观察)。
   - 来源: `notes__e2e_conv.md` (2026-08-02, 已归档到 archive/branch_contexts/e2e_conv/notes__e2e_conv.md)。
 - 证据缺口:
   - 根因未知: 是 codex app-server 的协调者输出丢失? 是 live parallel 模式的 token 截断? 是 max_runtime 提前收掉? 需要进一步诊断。
   - 已尝试: 验证 spawn.task → spawn.done 事件链完整, 但 loop.terminate 缺失(协调者未进入收尾阶段)。
   - 未尝试: 抓 human-log.md 看协调者最后输出; 抓 agents.json 看 ralph#1 状态转换; 减少 max_iterations 看是否 early termination。
+  - 未尝试: Wave 2 declarative migration (commit `e69f007` 收尾) 把 5 个 live 场景注册
+    为 declarative YAML, 但 commit 收尾时未跑 live harness 验证 — declarative YAML 注册
+    不等于 declarative 行为变化; 实际 live 行为是否仍 fail 需要单独跑测试验证。
 - 关键边界:
   - 仅影响 LIVE 场景(走真实 codex app-server), 不影响 declarative 场景(走 fake shim)。
-  - Wave 2 declarative migration 让 declarative 版本可跑通, 但 live 版本仍是 blocker。
+  - declarative 场景与 live 场景是独立 harness, 互不影响; declarative 注册不代表 live 修复。
 - 未来动作:
   - 重新诊断时读 `archive/branch_contexts/e2e_conv/notes__e2e_conv.md` + 本 entry。
   - 解决后再开 docs/solutions/ formal capture (problem_type: runtime_error / live_convergence)。

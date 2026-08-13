@@ -51,8 +51,11 @@
 
 - **EXP-20260813-e2e-live-convergence-issue** (`EXPERIENCE.md`):
   e2e live 场景失败模式: termination_reason=None, 事件流完整但无 loop.terminate。
-  来源: `notes__e2e_conv.md` + Wave 2 declarative migration 期间观察验证。
+  来源: `notes__e2e_conv.md` (2026-08-02, 仅原命令式版本观察, 4 个场景)。
   状态: active, confidence: medium (根因未知, 证据缺口明确)。
+  注意: Wave 2 declarative migration 把 5 个 live 场景注册为 declarative YAML,
+  但收尾时未跑 live harness 验证 — declarative YAML 注册不等于 declarative
+  行为变化, 也未证明 live 行为是否变化。该 claim 已在 review-agent 反馈后修正。
   未来捕获条件: 根因定位 + 修复方案后升级到 docs/solutions/ formal capture
   (problem_type: runtime_error 或 live_convergence)。
 
