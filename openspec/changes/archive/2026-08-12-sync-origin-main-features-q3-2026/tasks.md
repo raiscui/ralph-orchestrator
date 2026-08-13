@@ -58,7 +58,7 @@
 ## 5. Group 5 — Local main patches (run in parallel with cherry-picks)
 
 - [ ] 5.1 (P1) Mark declarative e2e escape hatch `#[deprecated]`, once declarative coverage reaches ≥ 90%
-- [ ] 5.2 (P2) Add `PromptExecutor` port round-trip contract test
+- [x] 5.2 (P2) Add `PromptExecutor` port round-trip contract test — **landed as `crates/ralph-core/tests/prompt_executor_contract.rs`** (250 lines, 3 tests, 0.52s wall). Tests pin four invariants: (a) `on_iteration_started` + `execute_prompt` + `RunHooks` sandwich per iteration; (b) coordinating hat id is `"ralph"` not the sub-hat; (c) `canceled: true` → `Interrupted`; (d) `timed_out: true` → `Stopped`. 645 lib tests in `ralph-core` still green. See `audit-p5-p2.md` (2026-08-13) for the static + dynamic evidence.
 - [ ] 5.3 (P3) Audit reverse diff on `ralph-e2e/src/runner.rs` (delete −197 + insert +87), produce coverage matrix
 - [ ] 5.4 (P4) Audit reverse 22-line diff on `ralph-api/src/main.rs`, confirm no capability was lost
 - [x] 5.5 (P5) Reconcile `.ralph/specs/` ↔ `specs/`; pick `specs/` as canonical — **audit complete (audit-p5.md, 2026-08-13)**: local main already deleted `.ralph/specs/` and `.ralph/tasks/`, with `specs/` (160 files) and `tasks/` as the git-tracked canonical paths. No live code references the old runtime paths. Nothing to do.
