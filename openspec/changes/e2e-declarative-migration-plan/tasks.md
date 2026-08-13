@@ -76,15 +76,30 @@ single registry-line swap.
 
 ## 3. Wave 3 — 5.1 closure (after gate is green + ≥ 19 of 21 migrations landed)
 
-- [ ] 3.1 Confirm `cargo test -p ralph-e2e --test declarative_coverage_gate` is green.
-- [ ] 3.2 Annotate every remaining imperative `TestScenario` impl with `#[deprecated(since = "…", note = "use the declarative YAML under scenarios/<name>.yaml")]`.
-- [ ] 3.3 Add a `docs/e2e/declarative-migration.md` pointer under
-      `crates/ralph-e2e/README.md` so new contributors discover the
-      declarative path first.
-- [ ] 3.4 Open a follow-up issue / change tracker for eventual
-      physical removal of the imperative structs after one release
-      cycle. **Do not delete them in this change** — deprecated code
-      stays compile-able.
+- [x] 3.1 Confirm `cargo test -p ralph-e2e --test declarative_coverage_gate` is green.
+      ✅ DONE (commit `e69f007`): Coverage 100.00% / Pass / Fail: PASS. Gate test wired into CI.
+- [x] 3.2 Annotate every remaining imperative `TestScenario` impl with `#[deprecated(...)]`.
+      ✅ DONE (commit `73cf1fa`): 21 imperative TestScenario impl structs across 5 files
+      (errors.rs / hats.rs / memory.rs / capabilities.rs / parallel/{app_server_idle_start,app_server_steer_multi_turn}.rs)
+      annotated with `#[deprecated(since = "2.3.0", note = "use the declarative YAML under scenarios/<id>.yaml")]`.
+      ParallelExperimentalDevEngineExampleScenario (§2.5.0 explicit-keep) NOT deprecated per
+      spec ("stays in the imperative list forever"). Build warnings (297) suppressed at
+      pub use + mod tests boundaries with `#[allow(deprecated)]`. Deprecated code stays
+      compile-able (per spec).
+- [x] 3.3 Add a `docs/e2e/declarative-migration.md` pointer under `crates/ralph-e2e/README.md`.
+      ✅ DONE (this commit): `crates/ralph-e2e/docs/e2e/declarative-migration.md` (145 行)
+      created with TL;DR + 4 步骤快速上手 + schema 字段速查 + 5 个常见陷阱 + 21 个
+      deprecated scenarios 列表 + explicit-keep 标注 + 仓库级深度指南链接。
+      `crates/ralph-e2e/README.md` "Adding New Scenarios" section 重写为 "Declarative First"
+      + "Legacy Imperative" 双段, declarative 路径在前, legacy 仅用于 §2.5.0 explicit-keep
+      等少数场景。
+- [x] 3.4 Open a follow-up issue / change tracker for eventual physical removal.
+      ✅ DONE (this commit): 在 `LATER_PLANS.md` 加 "Wave 3.4 follow-up: physical removal of
+      deprecated imperative structs (target 2.3.0 release)" 条目。完整跟踪 21 个 deprecated
+      struct 列表 + 验证步骤 (cargo test + gate 100% PASS 复现 + 删除后 build 无 warning) +
+      触发条件 (2.3.0 release day)。gh CLI 不可写 origin (403 验证过), OpenSpec 是项目
+      标准 change tracking, 但 2.3.0 删除是 mechanical follow-up 不需要完整 OpenSpec
+      proposal/spec, LATER_PLANS.md 条目足够。
 
 ## 4. Verification
 

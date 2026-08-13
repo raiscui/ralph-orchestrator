@@ -200,8 +200,38 @@ cargo clippy -p ralph-e2e
 cargo doc -p ralph-e2e --open
 ```
 
-### Adding New Scenarios
+### Adding New Scenarios — Declarative First
 
+**新场景请写 YAML, 不要再写 Rust `TestScenario` impl.** Wave 2 (Q3 2026) 把 21 个
+imperative scenarios 全部迁移为 declarative YAML (Coverage 65%→100%). 详细指南:
+
+👉 **[`docs/e2e/declarative-migration.md`](docs/e2e/declarative-migration.md)** — schema 字段速查 + 4 个常见陷阱 + 验证 checklist。
+
+快速步骤:
+
+1. `crates/ralph-e2e/scenarios/<your-scenario>.yaml` (用仓库 60+ 已有 YAML 之一作模板)
+2. 在 `crates/ralph-e2e/src/lib.rs::all_scenarios()` 的 `ScenarioKind::Declarative` 块中加 entry:
+   ```rust
+   (
+       ScenarioKind::Declarative,
+       "<id>",
+       Box::new(crate::declarative::from_yaml(
+           "<id>",
+           include_str!("../scenarios/<your-scenario>.yaml"),
+       )),
+   ),
+   ```
+3. 跑 4 个验证: `cargo check` + `cargo test --lib` + `cargo run -p ralph-e2e -- --list` (YAML 反序列化, 必跑) + `cargo test --test declarative_coverage_gate`。
+
+历史命令式 impl 保留 (已加 `#[deprecated(since = "2.3.0", ...)]`), **1 release cycle 后物理删除**。
+
+### Adding New Scenarios (Legacy Imperative)
+
+历史保留的 imperative 路径, 仅用于:
+- 显式声明 `§2.5.0 explicit-keep` 的场景 (例如 `ParallelExperimentalDevEngineExampleScenario`)
+- 复杂时序 / 自定义检查, declarative schema 当前无法表达的极少数场景 (需先开 schema 扩展 RFC)
+
+如确需新增 imperative, 步骤:
 1. Create a new file in `src/scenarios/` (e.g., `my_scenario.rs`)
 2. Implement the `TestScenario` trait:
 

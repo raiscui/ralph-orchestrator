@@ -1018,3 +1018,41 @@
   - git rev-list --count HEAD..my/main: 0
   - my/main HEAD = 82fbf95 = local HEAD
 - 状态: Wave 2 + 3 次 CL passes + review fix 全部同步到 raiscui fork
+
+## [2026-08-13 18:00:00] [Session ID: omx-1786600320381-z290x9] Wave 3.4 follow-up: physical removal of deprecated imperative structs (target 2.3.0 release)
+
+### 来源
+- OpenSpec tasks.md §3.4 (commit `73cf1fa` + 下一 commit 完成):
+  "Open a follow-up issue / change tracker for eventual physical removal
+  of the imperative structs after one release cycle."
+
+### 触发条件
+- 2.3.0 release day (一个 release cycle after 2.2.x)
+- 当前 2.2.2 release 周期内, 21 个 imperative struct 标 `#[deprecated(since = "2.3.0", ...)]`
+
+### 待执行 (Wave 3.4 follow-up)
+- 删除 21 个 imperative TestScenario impl structs:
+  - crates/ralph-e2e/src/scenarios/errors.rs: TimeoutScenario / MaxIterationsScenario /
+    BackendUnavailableScenario / AuthFailureScenario
+  - crates/ralph-e2e/src/scenarios/hats.rs: HatSingleScenario / HatMultiWorkflowScenario /
+    HatInstructionsScenario / HatEventRoutingScenario / HatBackendOverrideScenario
+  - crates/ralph-e2e/src/scenarios/memory.rs: MemoryAddScenario / MemorySearchScenario /
+    MemoryInjectionScenario / MemoryPersistenceScenario / MemoryCorruptedFileScenario /
+    MemoryMissingFileScenario / MemoryRapidWriteScenario / MemoryLargeContentScenario
+  - crates/ralph-e2e/src/scenarios/capabilities.rs: ToolUseScenario / StreamingScenario
+  - crates/ralph-e2e/src/scenarios/parallel/app_server_idle_start.rs: ParallelAppServerIdleStartScenario
+  - crates/ralph-e2e/src/scenarios/parallel/app_server_steer_multi_turn.rs: ParallelAppServerSteerMultiTurnScenario
+- 删除对应 `#[allow(deprecated)]` 修饰 (errors / capabilities / hats / memory / parallel mod.rs pub use)
+- 删除对应 `mod tests` 块
+- ParallelExperimentalDevEngineExampleScenario (§2.5.0 explicit-keep) 保留
+
+### 验证步骤
+- cargo check -p ralph-e2e: 0 error 0 warning (不再有 297 deprecation warnings)
+- cargo test -p ralph-e2e --lib: 全过 (从 536 减到 ~470, 减 21 个 impl 的 unit tests)
+- cargo test -p ralph-e2e --test declarative_coverage_gate: Coverage 100.00% / PASS
+  (registry 不变, 21 declarative scenarios 仍全部跑通)
+- cargo run -p ralph-e2e -- --list: 60 declarative + 1 explicit-keep = 61 scenarios 全部可见
+
+### 决策点
+- 是否同时删除 `crates/ralph-e2e/docs/e2e/declarative-migration.md` 中 "历史命令式 impl" 表格? — 保留 (作为历史记录, 但加 "已物理删除 (2.3.0 release)" 标注)
+- 是否升级 Cargo.toml version 到 2.3.0? — 是 (本 work 是 minor breaking change for crate internal API)
