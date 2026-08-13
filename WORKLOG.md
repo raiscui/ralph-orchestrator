@@ -818,3 +818,60 @@
   (via `from_yaml` 的 `unwrap_or_else panic`),如果 schema 不匹配会立刻 panic 退出。
   这是不依赖任何 backend 的纯编译期 + 启动期验证。
 - **`# ponytail:` 这次不需要**:迁移是 1:1 替换,没有 lazy 简化空间。
+
+## [2026-08-13 14:55:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 2 任务 2.1.2 MaxIterationsScenario → max-iterations.yaml
+
+### 任务内容
+- 迁移命令式 `MaxIterationsScenario`(errors.rs:228-380)到 declarative YAML
+- 改 `crates/ralph-e2e/src/lib.rs` registry entry
+- 不删除原 struct / 测试 / pub use(Wave 3 才删)
+
+### 完成过程
+- **读命令式完整实现**(errors.rs:228-380 + executor.rs:615-660)
+  - 4 条断言:`response_received` / `iterations == 2` / `termination_reason` 含 max/iteration/limit / `no_timeout`
+  - setup:`max_iterations: 2` + `completion_promise: "NEVER_GOING_TO_MATCH_THIS"` + 4-step prompt
+  - supported_backends:`[Claude, Kiro, OpenCode]`
+- **读 declarative schema**(scenario.rs 全文)
+  - `DeclarativeExpect` 字段:`response_received` / `no_timeout` / `exact_iterations` / `termination` 等
+  - `termination_matches` 严格相等 `actual == expected`
+  - `timeout_secs: None` → 落回 `backend.default_timeout()`
+  - `backends` 字段支持,缺省 = 全 backend
+- **1:1 映射,无折断言**:命令式 4 条断言刚好对应 4 个 schema 字段,与 2.1.1 的「3 折 1」不同
+- **写 max-iterations.yaml**(54 行)
+  - id / description / tier / backends 镜像命令式
+  - setup 用 `{backend}` 占位符
+  - expect 4 个字段全显式声明
+- **改 lib.rs registry**:`Imperative` → `Declarative`,`from_yaml(include_str!)` 模式
+- **跑 4 个 gate 验证**:
+  - `cargo check -p ralph-e2e` — ok
+  - `cargo test -p ralph-e2e --lib` — 526 passed / 0 failed(24 ignored, 同基线)
+  - `cargo run -p ralph-e2e -- --list | grep max-iterations` — 显示 `(declarative)` 后缀
+  - `cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture` —
+    drift log delta:`40/20/1 (66.67%) → 41/19/1 (68.33%)`,
+    `max-iterations` 出现在 Declarative 列表,Imperative 从 20 减到 19
+    (gate 仍 FAIL,预期:要 18 / 21 migrations 到 90%)
+
+### 总结感悟
+- **2.1.1 vs 2.1.2 的「折断言」对比值得记一笔**:2.1.1 命令式 3 条 → declarative 1 条
+  (因为 schema 没有 `duration_within` 之类字段,折是 schema 限制驱动的);2.1.2 命令式
+  4 条 → declarative 4 条(因为 schema 字段 1:1 齐备,无需折)。两种 pattern 都是合法的;
+  「折」不是目标本身,「语义等价 + schema 能表达」才是。
+- **`termination_reason` 在两条路径上行为不同但恰好等价**:命令式做
+  `r.to_lowercase().contains("max" | "iteration" | "limit")`,declarative 做
+  `actual == "MAX_ITERATIONS"`。executor 的 `detect_termination_reason` 在 max iterations
+  路径固定返回字面量 `"MAX_ITERATIONS"`,两个谓词在该值上命中相同字符串集合。
+  若未来 executor 改文案(比如 `"MAX_ITERS_REACHED"`),declarative 会先于命令式 fail,
+  这是 stricter-check 提供的 drift detection 副价值。
+- **declarative `backends` 字段不是装饰**:省略 = 全 backend(含 Codex);命令式
+  `MaxIterationsScenario::supported_backends` 是 `[Claude, Kiro, OpenCode]`
+  (不含 Codex — Codex CLI 不支持 max_iterations 跑满),必须在 YAML 显式声明。
+  这点 2.1.1 的 timeout.yaml 没声明(timeout 命令式可能用了别的列表),3 个 §2.1 后续
+  迁移都要逐个对照命令式 `supported_backends()`。
+- **drift log delta 1/60 ≈ 1.67 %**:和 2.1.1 一致,说明 schema + 现有 imperative 池子的
+  粒度均匀;若某个迁移是 3/60 ≈ 5 %(即一条折多条),drift delta 会跳变,需在 commit
+  message 写明原因。
+- **不要 `cargo fmt -p ralph-e2e`**:教训延续自 c0e1687,跨 crate 的 fmt 会 reformat
+  无关文件,污染 diff;本轮只 `cargo check`,0 warning,无需 format。
+- **`# ponytail:` 这次不需要**:迁移是 1:1 schema 平移,schema 已经最简,
+  不存在 lazy 简化空间;若硬要省,可考虑把 inline prompt 提到 .md 文件用 `prompt_file`,
+  但 inline 是命令式原貌,保持 1:1 等价比 DRY 更重要。

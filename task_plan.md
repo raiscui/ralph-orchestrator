@@ -145,3 +145,48 @@ Pass / Fail:            FAIL
 3. **任务 2.1.4**:迁移 `AuthFailureScenario` → `auth-failure.yaml`(完成 §2.1 全部 easy 类)
 4. **先 push**:把 12 commits 推到 my/main
 5. **暂停**:等用户决策
+
+## [2026-08-13 14:55:00] [Session ID: omx-1786600320381-z290x9] Wave 2 任务 2.1.2 已 commit
+
+### 完成动作
+- 新文件 `crates/ralph-e2e/scenarios/max-iterations.yaml`(54 行,id = `max-iterations`)
+- lib.rs registry 把 `MaxIterationsScenario` 那条改成 `Declarative` + from_yaml(...)
+- CLI list 显示:`max-iterations  Verifies termination at max iterations limit (declarative)`
+- `MaxIterationsScenario` struct 留在 errors.rs(测试 + pub use 仍保留,Wave 3 才删)
+
+### 净结果
+- 1 commit `d267c97 feat(e2e): migrate MaxIterationsScenario → max-iterations.yaml (Wave 2 task 2.1.2)`
+  - max-iterations.yaml +54 行
+  - lib.rs +5 行 / -2 行
+- drift log delta:66.67 % → 68.33 %(41 declarative / 19 imperative / 1 keep)
+- 526 lib tests 仍全过
+- gate test 仍 FAIL(预期,要 18 / 21 migrations 才到 90 %)
+
+### 决定
+- [决定]: YAML id 用 `max-iterations` 而不是 `max-iter`,匹配命令式 `MaxIterationsScenario::id()`
+  [理由]: 同 2.1.1 — 保持 `scenario.id()` 调用方行为不变
+- [决定]: 命令式 4 条断言全部 1:1 映射到 declarative schema 字段,无折断言
+  [理由]: schema 有 `response_received` / `exact_iterations` / `termination` / `no_timeout`
+  正好一一对应,不需要合并;与 2.1.1 的「3 折 1」不同,这次是纯平移
+- [决定]: YAML 显式声明 `backends: [claude, kiro, opencode]`
+  [理由]: 命令式 `supported_backends()` 也是 `[Claude, Kiro, OpenCode]`(不含 Codex);
+  declarative runner 默认全 backend,显式声明能保持 gate test 列表与命令式一致
+- [决定]: YAML 省略 `timeout_secs:`,让 runner 落回 `backend.default_timeout()`
+  [理由]: 命令式 setup 用 `backend.default_timeout()`,declarative runner
+  `None.unwrap_or_else(backend.default_timeout)` 是同样行为,显式写数字会
+  把 backend-specific 知识搬到 YAML 里,反而破坏 1:1 等价
+- [决定]: 命令式 `termination_reason_is_max` 做 lowercase contains 匹配
+  (`max` / `iteration` / `limit`),declarative `termination_matches` 做严格相等;
+  YAML 写 `"MAX_ITERATIONS"`(实际 executor 返回值)而不是 `"max"`
+  [理由]: executor.detect_termination_reason 在 max iterations 路径固定返回
+  `"MAX_ITERATIONS"`,严格相等在该路径下与 contains 在该值集合下语义等价;
+  若未来 executor 改成返回 `"MAX_ITERS"` 之类,declarative 会立刻 fail 提示
+  schema 与 executor 不一致 — 这是 stricter-check 作为 drift detector 的副效益
+
+### 下一步可选方向
+1. **任务 2.1.3**:迁移 `BackendUnavailableScenario` → `backend-unavailable.yaml`(§2.1 倒数第 2 个)
+2. **任务 2.1.4**:迁移 `AuthFailureScenario` → `auth-failure.yaml`(完成 §2.1 全部 easy 类)
+3. **§2.2 hats**:5 个 hat-collection scenarios(难度中等,需要看 scenario 是否有 inject / snapshot 之类)
+4. **§2.3 memory**:8 个 memory scenarios(难度中等,需要 schema 扩展或保留命令式)
+5. **先 push**:把 14 commits 推到 my/main
+6. **暂停**:等用户决策
