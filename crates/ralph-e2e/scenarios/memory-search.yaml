@@ -1,0 +1,93 @@
+# memory-search 声明化(候选 2.3.2: MemorySearchScenario → memory-search.yaml)
+#
+# 与命令式 MemorySearchScenario 等价性分析:
+# - 同 id `memory-search`, description / tier 一致
+# - 同 setup: ralph.yml + 预填充 .agent/memories.md (3 条测试记忆: JWT auth /
+#   database pool / docker ECONNREFUSED) + inline prompt(要求 agent 跑
+#   `ralph tools memory search "database"` 并报告) + max_iterations=1 +
+#   backend.default_timeout()
+# - supported_backends 显式 [Claude, Kiro, OpenCode]
+# - 预填充 memories.md 用 setup.write_files 字段落地(命令式用 std::fs::write,
+#   declarative 等价)
+# - expect 5 条断言 1:1 映射到 schema 字段(无折断言, 无 dropped):
+#   response_received           → expect.response_received: true
+#   exit_code_success_or_limit  → expect.exit_code_success_or_limit: true
+#   no_timeout                  → expect.no_timeout: true
+#   search_command_executed     → expect.output_contains_any:
+#     (stdout_lowercase 含任一:       [["Search", "search", "Ralph tools memory",
+#      search/ralph tools memory/      "ralph tools memory", "Database",
+#      database/mem-)                   "database", "Mem-", "mem-"]]
+#     (8 case 变体覆盖 4 关键词)
+#   found_matching_memories     → expect.output_contains_any:
+#     (OR 折 AND: stdout_lowercase      [["Connection", "connection", "Pool", "pool",
+#      任一: connection/pool/           "mem-1737300100-a2b2", "Docker", "docker",
+#      mem-1737300100-a2b2 OR          "ECONNREFUSED", "econnrefused",
+#      docker/econnrefused/             "mem-1737300200-a3b3", "Database",
+#      mem-1737300200-a3b3 OR           "database"]]
+#      database)                        (14 case 变体覆盖 7 关键词 — 3 个
+#                                       sub-condition OR 合并为单 OR group)
+id: memory-search
+description: Verifies memories can be searched via ralph tools memory search (declarative)
+tier: "Tier 6: Memory System"
+backends: [claude, kiro, opencode]
+setup:
+  # 预填充 memories.md, 与命令式 setup() 等价
+  # Note: Memory ID suffixes 必须是有效 hex (0-9, a-f) 才能匹配 parser regex
+  write_files:
+    - path: .agent/memories.md
+      content: |
+        # Memories
+
+        ## Patterns
+
+        ### mem-1737300000-a1b1
+        > Authentication uses JWT tokens with 24h expiry
+        <!-- tags: auth, security | created: 2025-01-19 -->
+
+        ### mem-1737300100-a2b2
+        > Database connections pool with max 10 connections
+        <!-- tags: database, performance | created: 2025-01-19 -->
+
+        ## Fixes
+
+        ### mem-1737300200-a3b3
+        > ECONNREFUSED on port 5432 means start docker compose
+        <!-- tags: docker, database | created: 2025-01-19 -->
+  config: |
+    # Memory search test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+
+    memories:
+      enabled: true
+      inject: manual
+  prompt: |
+    You are testing Ralph's memory search functionality.
+
+    Pre-existing memories are in .agent/memories.md with these entries:
+    - A pattern about JWT authentication
+    - A pattern about database connection pooling
+    - A fix about docker ECONNREFUSED
+
+    Your task:
+    1. Run `ralph tools memory search "database"` to find database-related memories
+    2. You should find 2 matching memories (connection pool and docker fix)
+    3. Report what you found
+
+    Output LOOP_COMPLETE when done.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # search_command_executed: 8 case 变体覆盖 4 关键词
+  output_contains_any:
+    - ["Search", "search", "Ralph tools memory", "ralph tools memory", "Database", "database", "Mem-", "mem-"]
+  # found_matching_memories (OR 折 OR-合并为单 group): 14 case 变体覆盖 7 关键词
+  output_contains_any:
+    - ["Connection", "connection", "Pool", "pool", "mem-1737300100-a2b2", "Docker", "docker", "ECONNREFUSED", "econnrefused", "mem-1737300200-a3b3", "Database", "database"]

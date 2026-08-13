@@ -304,9 +304,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "memory-search",
-            Box::new(MemorySearchScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "memory-search",
+                include_str!("../scenarios/memory-search.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,
