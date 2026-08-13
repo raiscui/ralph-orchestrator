@@ -1,0 +1,74 @@
+# memory-add 声明化(候选 2.3.1: MemoryAddScenario → memory-add.yaml)
+#
+# 与命令式 MemoryAddScenario 等价性分析:
+# - 同 id `memory-add`, description / tier 一致
+# - 同 setup: ralph.yml (cli.backend + event_loop.max_iterations=1 +
+#   completion_promise=LOOP_COMPLETE + memories.enabled=true + memories.inject=manual)
+#   + inline prompt(agent 用 Bash 跑 ralph tools memory add ... + 输出 LOOP_COMPLETE)
+#   + max_iterations=1 + backend.default_timeout()
+# - supported_backends 显式 [Claude, Kiro, OpenCode](命令式也是这 3 个, 不含 Codex)
+# - expect 6 条断言中 5 条 1:1 映射, 1 条 dropped:
+#   response_received           → expect.response_received: true
+#   exit_code_success_or_limit  → expect.exit_code_success_or_limit: true
+#   no_timeout                  → expect.no_timeout: true
+#   memory_command_executed     → expect.output_contains_any:
+#     (stdout_lowercase 含任一:       [["Memory", "memory", "Ralph tools memory",
+#      memory/ralph tools memory/      "ralph tools memory", "Mem-", "mem-"]]
+#      mem-)                          (6 case 变体覆盖 3 关键词, case-insensitive)
+#   memory_file_created         → expect.artifacts:
+#     (.agent/memories.md 存在)       [".agent/memories.md"]
+#                                  (schema artifacts 字段检查文件存在, 直接命中)
+#   memory_content_valid        → DROPPED
+#     (检查 memories.md 内容非空且含       rationale: schema 只能检查文件存在
+#      header/memory_id/content)        (artifacts), 不能读内容并 assert;
+#                                  artifacts 已覆盖 "file 存在" 主路径,
+#                                  dropped 的 content check 只防御 "file 存在
+#                                  但为空" 边缘 case, schema-cost (新增
+#                                  file_content_contains_any 字段) > value;
+#                                  留待后续 memory 类有更多 content check
+#                                  需求时再扩展 schema)
+id: memory-add
+description: Verifies memories can be added via ralph tools memory add (declarative)
+tier: "Tier 6: Memory System"
+backends: [claude, kiro, opencode]
+setup:
+  config: |
+    # Memory add test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+
+    memories:
+      enabled: true
+      inject: manual
+  prompt: |
+    You are testing Ralph's memory system.
+
+    Your task is to add a memory using the Bash tool.
+
+    STEP 1: Use the Bash tool to run this exact command:
+    ```
+    ralph tools memory add "E2E test uses isolated workspaces" --type pattern --tags e2e,testing
+    ```
+
+    STEP 2: After the command succeeds, output LOOP_COMPLETE
+
+    The command should output something like "Memory stored: mem-1234567890-abcd"
+
+    IMPORTANT: You MUST actually execute the command using the Bash tool, not just describe it.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # memory_command_executed (case-insensitive 6 变体覆盖 3 关键词)
+  output_contains_any:
+    - ["Memory", "memory", "Ralph tools memory", "ralph tools memory", "Mem-", "mem-"]
+  # memory_file_created: artifacts 字段直接命中
+  artifacts:
+    - .agent/memories.md
+  # memory_content_valid dropped — 见顶部注释

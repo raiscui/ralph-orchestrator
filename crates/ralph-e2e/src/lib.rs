@@ -293,9 +293,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
         ),
         // Tier 6: Memory System (backend-agnostic)
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "memory-add",
-            Box::new(MemoryAddScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "memory-add",
+                include_str!("../scenarios/memory-add.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,
