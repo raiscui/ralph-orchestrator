@@ -650,6 +650,17 @@ impl TestScenario for BackendUnavailableScenario {
             ScenarioError::SetupError(format!("failed to create .agent directory: {}", e))
         })?;
 
+        // 注 (2.1.3 known issue, 修复在 declarative YAML):
+        // 本 imperative setup 设 `cli.command: nonexistent-cli-...` 来"模拟
+        // backend 不可用", 但 ralph config.rs:795-803 显示 `cli.command` 只在
+        // `cli.backend == "custom"` 时生效; 当 backend != custom 时, command
+        // 字段被静默忽略, 本测试实际上跑真实 backend CLI (claum/kiro/opencode)
+        // 而不是 missing-backend path。
+        // 正确修复在 declarative YAML (write_files + path_prefix 注入 fake
+        // shim, 让 ralph 真的找不到 CLI binary)。
+        // 本 struct 已 #[deprecated(since = "2.3.0", ...)] (Wave 3 task 3.2),
+        // 留 2.3.0 release 物理删除, 此处保留原始 ralph.yml 不动。
+
         // Create ralph.yml with a nonexistent backend command
         let config_content = format!(
             r#"# Backend unavailable test config
