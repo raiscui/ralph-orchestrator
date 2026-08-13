@@ -315,9 +315,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "memory-injection",
-            Box::new(MemoryInjectionScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "memory-injection",
+                include_str!("../scenarios/memory-injection.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,

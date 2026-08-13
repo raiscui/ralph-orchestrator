@@ -1,0 +1,95 @@
+# memory-injection 声明化(候选 2.3.3: MemoryInjectionScenario → memory-injection.yaml)
+#
+# 与命令式 MemoryInjectionScenario 等价性分析:
+# - 同 id `memory-injection`, description / tier 一致
+# - 同 setup: ralph.yml (memories.enabled + memories.inject=auto + memories.budget=0)
+#   + 预填充 .agent/memories.md (含 secret codeword PURPLE_ELEPHANT_42 + Ralph
+#   orchestrator context) + inline prompt(要求 agent 回忆 secret codeword) +
+#   max_iterations=1 + backend.default_timeout()
+# - supported_backends 显式 [Claude, Kiro, OpenCode]
+# - 预填充 memories.md 用 setup.write_files 落地(与 2.3.1/2.3.2 同模式)
+# - expect 5 条断言映射(2 dropped):
+#   response_received           → expect.response_received: true
+#   exit_code_success_or_limit  → expect.exit_code_success_or_limit: true
+#   no_timeout                  → expect.no_timeout: true
+#   memories_were_injected      → DROPPED
+#     (NEGATED: stdout NOT contains          rationale: schema 无 output_absent
+#      "no memories were injected" 等)        字段; exit_code_success_or_limit
+#                                            + response_received 已 catch 主要
+#                                            失败路径; dropped 是冗余 defensive
+#   agent_found_codeword        → expect.output_contains_any + expect.artifacts:
+#     (stdout_uppercase 含                   output_contains_any:
+#      PURPLE_ELEPHANT_42 (any case)          [["PURPLE_ELEPHANT_42",
+#      OR AND 3 parts PURPLE/ELEPHANT/42)       "purple_elephant_42",
+#                                              "Purple_Elephant_42"]]
+#                                            artifacts: [".agent/memories.md"]
+#     (3 case variants 覆盖常见大小写; dropped
+#      "AND 3 parts" 部分 — 3 部分都出现但不全等
+#      PURPLE_ELEPHANT_42 是 hypothetical edge case;
+#      prompt 强制要求 "state the codeword" 完整
+#      字符串, OR single hit 已足够; artifacts
+#      检查文件存在, 提供额外验证)
+id: memory-injection
+description: Verifies memories are auto-injected into agent prompts (declarative)
+tier: "Tier 6: Memory System"
+backends: [claude, kiro, opencode]
+setup:
+  # 预填充 memories.md 含 secret codeword + Ralph context
+  write_files:
+    - path: .agent/memories.md
+      content: |
+        # Memories
+
+        ## Patterns
+
+        ### mem-1737400000-a1b1
+        > The secret codeword is PURPLE_ELEPHANT_42
+        <!-- tags: testing, secret | created: 2025-01-20 -->
+
+        ## Context
+
+        ### mem-1737400100-a2b2
+        > This project uses the Ralph orchestrator for agentic workflows
+        <!-- tags: architecture | created: 2025-01-20 -->
+  config: |
+    # Memory injection test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+
+    memories:
+      enabled: true
+      inject: auto
+      budget: 0
+  prompt: |
+    You are testing Ralph's memory injection system.
+
+    Memories should have been auto-injected into your context.
+    One of those memories contains a secret codeword.
+
+    Your task:
+    1. Look at any injected memories in your context
+    2. Find the secret codeword (hint: it involves an animal and a number)
+    3. State the codeword in your response
+
+    If you found it, say: "The codeword is: [codeword]"
+    If you didn't receive any memories, say: "No memories were injected"
+
+    Then output LOOP_COMPLETE.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # agent_found_codeword (case-insensitive 3 变体覆盖常见大小写)
+  output_contains_any:
+    - ["PURPLE_ELEPHANT_42", "purple_elephant_42", "Purple_Elephant_42"]
+  # 额外验证: memories.md 文件存在 (write_files 已预填充, 但 schema 不能
+  # 区分"setup pre-fill" 与 "agent run-time add", 加 artifacts 兜底)
+  artifacts:
+    - .agent/memories.md
+  # memories_were_injected dropped — 见顶部注释
