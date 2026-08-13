@@ -732,3 +732,56 @@ capabilities.rs (Streaming) + 当前 schema 字段
    - 留在 LATER_PLANS, 需要 `require_backend: <wrong>` schema 扩展
    - 同时需修命令式 setup() 让 cli.command 在 backend != custom 时生效
 5. **暂停**: 等用户决策
+
+## [2026-08-13 17:40:00] [Session ID: omx-1786600320381-z290x9] $continuous-learning 整理清理根目录分支上下文文件
+
+### 触发
+- 用户显式调用 `$continuous-learning` + "整理清理所有根目录 分支上下文文件"
+
+### 审计发现
+- **根目录分支上下文文件**: 4 个 `notes__*.md`, 都从 sync-origin-main-features-q3-2026
+  cherry-pick 调查工作 (Session omx-1786419140441-df5ql8, 2026-08-11/12) 累积, 已 commit `c623abb`
+- 当前 Session 6 文件对 4 个 notes__* 引用次数: 全 0 (无活跃使用)
+- sync-origin-main 整体工作已 commit + 已归档 (`openspec/changes/archive/2026-08-12-...`)
+- 结论: 0 引用 + 异 Session + 不同主题 = 未轮转旧支线, 按 continuous-learning 规则归档
+
+### 决定
+- [决定]: 4 个 `notes__*.md` 按 suffix 各自分目录 (沿用 archive convention)
+  [理由]: archive/branch_contexts/ 已有 14 个 topic subdirs (memory_axes/
+  continuous_learning/ 等), 每个 subdir 用 `__topic` 命名; 4 个 notes__* 有 4 个不同
+  suffix (branch_diff_review / clean_events_review / e2e_conv / group1_dryrun), 各
+  自独立 subdir 保持隔离。命名: `archive/branch_contexts/<suffix>/notes__<suffix>.md`
+- [决定]: notes__e2e_conv.md 内容 capture 到 EXPERIENCE.md 作为已知 issue
+  [理由]: 描述了 LIVE 路径的 3 个 e2e 场景失败模式(termination_reason=None, 事件流
+  完整但无 loop.terminate), 是真实存在的诊断结论, 但根因未知 — 按 "inbox" 路线
+  写入 EXPERIENCE.md, 明确 evidence gap (根因/未尝试), 留待 Wave 3 期间诊断后升级
+  docs/solutions/ formal capture
+- [决定]: 另 3 个 notes__* 不 capture (skip)
+  [理由]: branch_diff_review 是 sync-origin-main 一次性过程产物 (1818 文件分支差异分析),
+  clean_events_review 是具体 commit 移植决策, group1_dryrun 是 cherry-pick 执行记录 —
+  都不是 "已验证、非琐碎、可复用" 的单一经验, 是 sync-origin-main 工作流的过程产物
+- [决定]: 创建 1 个 manifest 文档化整个 batch
+  [理由]: archive/manifests/ 已有 15 个 manifest 记录历次 archive 操作; 按
+  archive_layout.md 规范, 新批次需 manifest 记录 6 文件摘要 + 活跃度判定 + 归档映射
+  + Capture/Refresh 结果 + 验证 + 保留候选 + 未完成风险
+
+### 净结果
+- 1 commit (本轮):
+  - archive/branch_contexts/ 新建 4 个 subdir (branch_diff_review / clean_events_review /
+    e2e_conv / group1_dryrun), 各 1 个 notes__*.md 文件
+  - archive/manifests/ARCHIVE_MANIFEST__sync_origin_main_2026-08-13.md 新建 (103 行)
+  - EXPERIENCE.md 加 exp-20260813-e2e-live-convergence-issue (inbox 路线, 证据缺口明确)
+
+### 验证
+- `cargo test -p ralph-e2e --lib`: 536 passed / 0 failed / 24 ignored (无回归)
+- `cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture`: Coverage
+  100.00% / Pass / Fail: PASS
+- `git ls-files notes__*.md`: 0 个 (全部已 archive)
+- `git status --short`: 仅新增 archive 目录文件 + EXPERIENCE.md 改动, 无未跟踪分支文件
+
+### 下一步可选方向
+1. **Push 51 commits** 到 my/main (50 + 本轮 chore)
+2. **Wave 3 closure** (OpenSpec tasks.md §3.2-3.4)
+3. **e2e-live-convergence 诊断**: 解 exp-20260813-e2e-live-convergence-issue
+   (3 个 live 场景 termination_reason=None 模式), 留 Wave 3 期间
+4. **暂停**: 等用户决策

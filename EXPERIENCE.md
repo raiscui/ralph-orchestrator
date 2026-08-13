@@ -546,3 +546,26 @@
 - 验证锚点:
   - 21 个 migrations 累计 100% Coverage PASS, 0 个迁移因 audit 分类错误导致失败。
   - Wave 3 archive 时一次性 sync tasks.md 反映实际 (audit 反预期 4 次 + schema 扩展 commits)。
+
+### exp-20260813-e2e-live-convergence-issue
+> e2e live 场景 (parallel-emit-spawn-instance / parallel-app-server-idle-start-live / parallel-app-server-steer-multi-turn(+live)) 失败时统一模式: termination_reason=None (协调者未输出 LOOP_COMPLETE), 但事件流完整(spawn.task → spawn.done)。新旧代码一致, 是 LIVE 路径的已知问题。
+<!-- scope: project | source_topics: e2e_live_convergence,parallel_live,termination_reason | source_hats: codex | status: active | confidence: medium | created_at: 2026-08-13T17:35:00+08:00 | updated_at: 2026-08-13T17:35:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 跑 e2e live 场景(parallel-emit-spawn-instance / parallel-app-server-idle-start-live / parallel-app-server-steer-multi-turn / parallel-app-server-steer-multi-turn-live / parallel-app-server-steer-live-reply-multi-turn)。
+  - 测试报失败, 协调者未输出 LOOP_COMPLETE。
+- 已验证规律:
+  - 失败统一模式: termination_reason=None。
+  - 事件流完整(spawn.task → spawn.done), 但无 loop.terminate 事件。
+  - 新旧代码一致(同一 HEAD 切到 declarative 版本后仍失败), 说明不是 Wave 2 declarative migration 引入的回归。
+  - 来源: `notes__e2e_conv.md` (2026-08-02, 已归档到 archive/branch_contexts/e2e_conv/notes__e2e_conv.md)。
+- 证据缺口:
+  - 根因未知: 是 codex app-server 的协调者输出丢失? 是 live parallel 模式的 token 截断? 是 max_runtime 提前收掉? 需要进一步诊断。
+  - 已尝试: 验证 spawn.task → spawn.done 事件链完整, 但 loop.terminate 缺失(协调者未进入收尾阶段)。
+  - 未尝试: 抓 human-log.md 看协调者最后输出; 抓 agents.json 看 ralph#1 状态转换; 减少 max_iterations 看是否 early termination。
+- 关键边界:
+  - 仅影响 LIVE 场景(走真实 codex app-server), 不影响 declarative 场景(走 fake shim)。
+  - Wave 2 declarative migration 让 declarative 版本可跑通, 但 live 版本仍是 blocker。
+- 未来动作:
+  - 重新诊断时读 `archive/branch_contexts/e2e_conv/notes__e2e_conv.md` + 本 entry。
+  - 解决后再开 docs/solutions/ formal capture (problem_type: runtime_error / live_convergence)。

@@ -973,3 +973,36 @@
   - 0 归档 (无文件达 1000 行, 当前 session 仍 active)
 - 未做: 命令式 cli.command 静默忽略 (2.1.3 命令式本身的语义问题) 仍待后续修复
 - 详情: 见 task_plan.md / WORKLOG.md 最新 entries
+
+## [2026-08-13 17:40:00] [Session ID: omx-1786600320381-z290x9] ~~整理清理根目录分支上下文文件~~ ✅ DONE (本轮 chore commit)
+
+- 完成时间: 2026-08-13 17:40
+- 完成内容:
+  - 4 个 notes__*.md (branch_diff_review / clean_events_review / e2e_conv / group1_dryrun)
+    移到 archive/branch_contexts/<suffix>/, 0 引用 + 异 Session + 不同主题归档
+  - archive/manifests/ARCHIVE_MANIFEST__sync_origin_main_2026-08-13.md (103 行)
+  - EXPERIENCE.md 加 exp-20260813-e2e-live-convergence-issue (inbox 路线)
+- 验证: cargo test 536 passed; gate 100% PASS
+- 详情: 见 task_plan.md / WORKLOG.md 最新 entries
+
+## [2026-08-13 17:40:00] [Session ID: omx-1786600320381-z290x9] e2e-live-convergence 诊断 — 解 exp-20260813-e2e-live-convergence-issue
+
+### 来源
+- EXP-20260813-e2e-live-convergence-issue (EXPERIENCE.md): 3 个 live 场景失败模式
+  (termination_reason=None, 事件流完整但无 loop.terminate); 根因未知, 留 Wave 3 期间
+  诊断
+
+### 待执行
+- 抓 `human-log.md` 看协调者最后输出 (是什么阻止 LOOP_COMPLETE)
+- 抓 `agents.json` 看 ralph#1 状态转换 (是否进入 Running 后未回到 Idle)
+- 减少 max_iterations 看是否 early termination (排除 max_runtime 提前收掉)
+- 对比 declarative 版本 vs live 版本行为差异 (declarative 跑通, live 仍 fail)
+- 定位后:
+  1. 修命令式或 ralph app-server runtime
+  2. 把 exp-20260813-e2e-live-convergence-issue 升级到 docs/solutions/ formal capture
+     (problem_type: runtime_error 或新增 live_convergence 类型)
+  3. 加 Wave 3 验证 checklist
+
+### 触发条件
+- Wave 3 closure (#[deprecated] + OpenSpec archive) 期间执行
+- 或用户显式调用 "$continuous-learning 解 e2e-live-convergence-issue" 时执行

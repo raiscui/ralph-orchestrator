@@ -374,3 +374,71 @@
 - **0 归档 仍合理**: 无文件超 1000 行, 当前 session 内容全部 <100 行新 entries,
   active 段仍需追加 (Wave 3 准备 + 命令式 cli.command 修复), 不该归档当前活跃
   文件 — 那是 Wave 3 收官后的下一步工作。
+
+## [2026-08-13 17:40:00] [Session ID: omx-1786600320381-z290x9] 任务名称: $continuous-learning 整理清理根目录分支上下文文件
+
+### 任务内容
+- 用户显式调用 `$continuous-learning` + "整理清理所有根目录 分支上下文文件"
+- 按 continuous-learning 3.0 流程完整跑 7 步: 读 → Gate → Capture → Refresh → sync → 验证 → 归档
+
+### 完成过程
+**Phase 1 — 6 文件 + archive 审计**
+- 6 文件全部 < 1000 行 (无自动归档触发), 全部 current session 仍 active
+- 4 个 `notes__*.md` 支线文件 (191+126+6+80 = 403 行) 来自 sync-origin-main 调查工作
+  (Session omx-1786419140441-df5ql8, 2026-08-11/12), 0 引用 + 异 Session + 不同主题
+
+**Phase 2 — Compound Gate / Capture**
+- 4 个 notes__* 是 sync-origin-main 工作过程产物 (分支差异分析 + commit 移植决策 +
+  cherry-pick dry-run + e2e live 调查) — 不是 reusable 知识, Gate 结果: skip
+- 但 notes__e2e_conv.md 的 6 行内容描述了 LIVE 路径的真实失败模式, 按 inbox 路线
+  capture 到 EXPERIENCE.md 作为已知 issue (证据缺口: 根因未知)
+
+**Phase 3 — Scoped Refresh**
+- 现有 captures 仍 valid (a7daa79 + fe71186 + 本轮):
+  - 2 self-learning skills, 4 exp-20260813-* + 新 1 exp-20260813-e2e-live-convergence-issue
+  - docs/solutions/documentation-gaps/declarative-scenario-migration.md frontmatter OK
+- 无 drift, 无需 Refresh 已有 captures
+
+**Phase 4 — skill / glossary / AGENTS sync**
+- 无新 skill 需建 (本轮无新的可执行流程模式)
+- 无新 glossary 术语需写
+- AGENTS.md Project Knowledge Index 无需更新 (上轮已 sync 4 个 Wave 2 相关条目)
+
+**Phase 5 — 验证**
+- `cargo test -p ralph-e2e --lib`: 536 passed / 0 failed / 24 ignored
+- `cargo test -p ralph-e2e --test declarative_coverage_gate`: Coverage 100.00% PASS
+- `git ls-files notes__*.md`: 0 个 (全部已 archive)
+- `git status --short`: 仅新增 archive 目录 + EXPERIENCE.md 改动
+
+**Phase 6 — 归档 (本轮核心动作)**
+- 创建 4 个 archive/branch_contexts/ subdir (按 suffix):
+  - branch_diff_review/ → notes__branch_diff_review.md (191 行)
+  - clean_events_review/ → notes__clean_events_review.md (126 行)
+  - e2e_conv/ → notes__e2e_conv.md (6 行)
+  - group1_dryrun/ → notes__group1_dryrun.md (80 行)
+- 创建 1 个 manifest: archive/manifests/ARCHIVE_MANIFEST__sync_origin_main_2026-08-13.md
+  (103 行, 完整 6 文件摘要 + 活跃度判定 + 归档映射 + Compound Capture / Refresh + 验证
+  + 保留候选 + 未完成风险)
+
+### 总结感悟
+- **"分支上下文文件" vs "默认 6 文件"**: 用户的"整理清理所有根目录 分支上下文文件"
+  明确指向 `__` suffix 的支线文件, 而非默认 task_plan/WORKLOG/EPIPHANY_LOG/
+  LATER_PLANS/ERRORFIX/notes 六文件(后者是 active 事实账本, 不归档)。本次精准
+  处理了 4 个 notes__*, 0 引用 + 异 Session + 不同主题 = 强信号归档。
+- **notes__e2e_conv.md 的双面价值**: 表面是 6 行小调查, 实质是 LIVE 路径 blocker
+  的已知 issue; archive 归档了原始调查, 但 capture 到 EXPERIENCE.md 把 issue 状态
+  提级为 "active 已知, 待诊断"。这正是 compound-capture "价值但证据不足" 的 inbox
+  路线示范。
+- **archive/branch_contexts/ 的 naming convention**: 每个 topic subdir 用 `__suffix`
+  命名 (memory_axes/continuous_learning/serial_tui_issues/), 文件保留原 `__suffix`
+  后缀。本轮 4 个 notes__* 有 4 个不同 suffix, 严格遵循 convention 创建 4 个 subdir
+  而不是 1 个 batch subdir — 隔离性更好, 未来回读每个 subdir 自带主题语境。
+- **manifest 模板稳定性**: 历次 manifest 都按 6 文件摘要 + 活跃度判定 + 归档映射
+  + Compound Capture / Refresh 结果 + 验证 + 保留候选 + 未完成风险 7 节组织
+  (103 行 vs 历次 manifest 类似长度), 形成一致模式便于 reviewer/历史回溯。
+- **0 复述正文原则**: manifest 引用 4 个 notes__* 的 Session ID + 文件数 + 主题分类,
+  但不复制正文内容 — solution 也不复制正文, 仅引用路径 + frontmatter summary。
+  减少知识库冗余, 单源真相 (notes__*.md 单文件承载完整内容)。
+- **`# ponytail:` 累计**: 无 lazy 简化空间; 4 个 subdir 是严格 convention 强制,
+  manifest 7 节是 skill 强制模板。ponytail 不是 "为简化而简化", 而是 "不重复造轮子"
+  — 这里没有 wheel, 只有 convention。
