@@ -340,9 +340,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "memory-missing",
-            Box::new(MemoryMissingFileScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "memory-missing",
+                include_str!("../scenarios/memory-missing-file.yaml"),
+            )),
         ),
         (
             ScenarioKind::Imperative,

@@ -1,0 +1,59 @@
+# memory-missing 声明化(候选 2.3.6: MemoryMissingFileScenario → memory-missing-file.yaml)
+#
+# 与命令式 MemoryMissingFileScenario 等价性分析:
+# - 同 id `memory-missing-file`, description / tier 一致
+# - 同 setup: 不预填充 memories.md (这是测试点!) + ralph.yml (memories.enabled +
+#   memories.inject=auto) + inline prompt(要求 agent 用 Bash add memory) +
+#   max_iterations=1 + backend.default_timeout()
+# - supported_backends 显式 [Claude, Kiro, OpenCode]
+# - expect 6 条断言中 4 条 1:1 映射 + 2 条 dropped:
+#   response_received/exit_code_success_or_limit/no_timeout → 直接映射
+#   did_not_crash_on_missing → DROPPED
+#     (NEGATED stdout/stderr NOT contains "panic"/"No such file" +
+#      exit_code != 101; 跨通道 + exit_code OR;
+#      schema 无 output_absent + stderr_absent 字段;
+#      exit_code_success_or_limit 已 catch 主要失败)
+#   file_created_on_first_add → artifacts [.agent/memories.md]
+#   first_memory_stored       → DROPPED
+#     (file content 含 "First memory ever" / "mem-"; schema 无 file_content)
+id: memory-missing-file
+description: Verifies graceful handling when memories.md doesn't exist (declarative)
+tier: "Tier 6: Memory System (Chaos)"
+backends: [claude, kiro, opencode]
+setup:
+  # 注意: 故意不预填充 memories.md — 这是测试场景的关键
+  # write_files: [] (空列表, 显式表达"不写任何文件")
+  config: |
+    # Missing memory file test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 1
+      completion_promise: "LOOP_COMPLETE"
+
+    memories:
+      enabled: true
+      inject: auto
+  prompt: |
+    You are testing memory system behavior when no memories file exists.
+
+    Your task:
+    1. Add a memory using Bash: ralph tools memory add "First memory ever" --type pattern --tags first,test
+    2. Verify the command succeeded
+    3. Report what happened
+
+    Output LOOP_COMPLETE when done.
+
+    IMPORTANT: Use the Bash tool to execute the command.
+  max_iterations: 1
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # file_created_on_first_add: artifacts 检查文件存在
+  artifacts:
+    - .agent/memories.md
+  # did_not_crash_on_missing dropped — 见顶部注释
+  # first_memory_stored dropped — 见顶部注释
