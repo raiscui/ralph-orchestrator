@@ -853,7 +853,7 @@ capabilities.rs (Streaming) + 当前 schema 字段
   - `git add openspec/specs/e2e-declarative-coverage-gate/`
   - `git rm` 3 个 D 文件 (archive 操作预期结果)
   - **绝对不动**: `.scratch/sync-origin-main-features-q3-2026/` (用户自己的)
-- [x] 不主动 push, 询问用户
+- [x] push 完成 (af3fbf8 + 5864dfe → my main, raiscui fork)
 
 ### 关键不变量
 - 6 文件 append-only 纪律遵守

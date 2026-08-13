@@ -562,3 +562,26 @@
   完整记录 (触发条件 / 已验证规律 / 证据缺口 / 未来动作), 不需要重复造轮子到 LATER_PLANS.
   LATER_PLANS 只放 "trigger + 任务分解", 详细证据在 EXPERIENCE / notes archive.
 - **未做**: push (remote action, 按 OMX 规则 ask 用户).
+
+## [2026-08-13 22:18:00] [Session ID: omx-1786600320381-z290x9] 任务名称: push `af3fbf8` + `5864dfe` → my main
+
+### 任务内容
+- 用户确认 "push" → 推 2 commits 到 raiscui fork `my` remote
+- 验证: git remote get-url my → https://github.com/raiscui/ralph-orchestrator.git
+- 验证: ahead 2 commits (5864dfe + af3fbf8)
+- 验证: 当前 branch = main
+- push 结果: `e956bf9..5864dfe  main -> main` (4.13s)
+
+### 完成过程
+- 一次 `git push my main` 完成, 无冲突 / 无 force / 无 rejected
+- raiscui fork 权限 OK (origin 仍 403, 但 my 一直可写, 符合 handoff summary 描述)
+- 无 push 后 hook 报错
+
+### 总结感悟
+- **push 后 state 完全 clean**: 0 ahead of my/main, working tree 只有 `.scratch/` untracked
+- **handoff 推荐的 fork-only 工作流得到验证**: raiscui fork (`my`) 是唯一可写 remote,
+  本地 `main` → fork → 后续 PR / 自审, 与 Wave 2/3 一致
+- **不再有 outstanding action**: 本 Session (`omx-1786600320381-z290x9`) 整个 Wave 2/3
+  工作 (e2e declarative migration + Wave 3 closure + Task 1+2+3 收尾) 全部落地 + push 完成
+- **唯一 outstanding**: Task 3 (e2e-live-conv 诊断, 环境阻塞) + 2.3.0 release day 物理删除
+  — 已在 LATER_PLANS.md 跟踪, 等未来 trigger 重新拾起
