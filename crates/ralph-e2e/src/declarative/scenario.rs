@@ -153,6 +153,13 @@ pub struct DeclarativeExpect {
     /// 覆盖 `BackendUnavailableScenario::failed_fast`(duration < 20s)。
     #[serde(default)]
     pub failed_within_secs: Option<u64>,
+    /// 时间下限: `result.duration >= Duration::from_secs(N)`(secs)。
+    /// 覆盖 `ParallelAppServerIdleStartScenario::survived_two_runtime_windows`
+    /// (duration >= pre_wait + post_warmup_wait, 验证 idle-start 期间会话
+    /// 没被 max_runtime 收掉); 与 `failed_within_secs`(严格 <, 上限)配对
+    /// 使用, 一上一下覆盖双方向 duration 断言。
+    #[serde(default)]
+    pub duration_at_least_secs: Option<u64>,
     /// 第一个 workflow entry 事件 topic(starting_event 未配置时的推测断言)。
     #[serde(default)]
     pub first_entry: Option<String>,
@@ -536,6 +543,9 @@ impl TestScenario for DeclarativeScenarioRunner {
         }
         if let Some(secs) = expect.failed_within_secs {
             assertions.push(failed_within(&execution, secs));
+        }
+        if let Some(secs) = expect.duration_at_least_secs {
+            assertions.push(duration_at_least(&execution, secs));
         }
         for payload_expect in &expect.event_payload_contains {
             assertions.push(event_payload_contains(
@@ -1016,6 +1026,21 @@ fn failed_within(result: &ExecutionResult, secs: u64) -> crate::models::Assertio
     let ok = result.duration < budget;
     let builder = crate::scenarios::AssertionBuilder::new(format!("Failed within {secs}s"))
         .expected(format!("duration < {secs}s"))
+        .actual(format!("duration={:?}", result.duration));
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: `result.duration >= Duration::from_secs(secs)`。
+///
+/// 用法: 覆盖 `ParallelAppServerIdleStartScenario::survived_two_runtime_windows`
+/// (duration >= pre_wait + post_warmup_wait, 验证 idle-start 期间会话
+/// 没被 max_runtime 收掉)。命名遵循 `failed_within_secs` 的 "at_least" 镜像
+/// 形式; 选择 "大于等于" (>=) 匹配命令式 `duration >= minimum`。
+fn duration_at_least(result: &ExecutionResult, secs: u64) -> crate::models::Assertion {
+    let minimum = std::time::Duration::from_secs(secs);
+    let ok = result.duration >= minimum;
+    let builder = crate::scenarios::AssertionBuilder::new(format!("Duration >= {secs}s"))
+        .expected(format!("duration >= {secs}s"))
         .actual(format!("duration={:?}", result.duration));
     if ok { builder.passed() } else { builder.failed() }.build()
 }
@@ -1517,6 +1542,24 @@ mod tests {
         assert!(!failed_within(&r, 20).passed);
         r.duration = std::time::Duration::from_secs(25);
         assert!(!failed_within(&r, 20).passed);
+    }
+
+    #[test]
+    fn duration_at_least_passes_at_or_over_minimum() {
+        // 命令式 `duration >= Duration::from_secs(N)` 用 >=;
+        // 我们保留相同语义, 所以 N 秒边界也通过。
+        let mut r = sample_result(1, vec![], None);
+        r.duration = std::time::Duration::from_secs(10);
+        assert!(duration_at_least(&r, 10).passed);
+        r.duration = std::time::Duration::from_secs(15);
+        assert!(duration_at_least(&r, 10).passed);
+    }
+
+    #[test]
+    fn duration_at_least_fails_under_minimum() {
+        let mut r = sample_result(1, vec![], None);
+        r.duration = std::time::Duration::from_secs(5);
+        assert!(!duration_at_least(&r, 10).passed);
     }
 
     #[test]
