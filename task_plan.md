@@ -785,3 +785,48 @@ capabilities.rs (Streaming) + 当前 schema 字段
 3. **e2e-live-convergence 诊断**: 解 exp-20260813-e2e-live-convergence-issue
    (3 个 live 场景 termination_reason=None 模式), 留 Wave 3 期间
 4. **暂停**: 等用户决策
+
+## [2026-08-13 18:00:00] [Session ID: omx-1786600320381-z290x9] Wave 3 closure 全部完成 (3.1-3.4)
+
+### 完成动作
+- 3.1: confirm gate green (之前 e69f007 已做, 此处仅确认)
+- 3.2: 21 个 imperative TestScenario impl struct 加 #[deprecated(since = "2.3.0", ...)]
+  (commit 73cf1fa), 显式保留 ParallelExperimentalDevEngineExampleScenario (§2.5.0)
+- 3.3: crates/ralph-e2e/docs/e2e/declarative-migration.md 新建 (145 行) + README.md
+  "Adding New Scenarios" section 重写为 Declarative First + Legacy Imperative 双段
+- 3.4: LATER_PLANS.md 加 follow-up 条目 (21 struct 物理删除 + 5 个 #[allow(deprecated)]
+  + 5 个 mod tests 块), 触发条件 = 2.3.0 release day
+
+### 净结果
+- 2 个新 commits ahead of my/main:
+  - 73cf1fa feat(e2e): deprecate 21 imperative TestScenario impl structs
+  - 02582b6 docs(e2e): Wave 3 closure tasks 3.3 + 3.4
+- openspec/changes/e2e-declarative-migration-plan/tasks.md: 5 个 [x] 标记 (3.1-3.4 + §2.5.0)
+
+### 决定
+- [决定]: 3.4 不用 gh issue create, 改用 LATER_PLANS.md 条目
+  [理由]: gh CLI 不可写 origin (403 验证过); raiscui fork 无 issue tracker; OpenSpec
+  是项目标准 change tracking, 但 2.3.0 物理删除是 mechanical follow-up 不需要
+  完整 OpenSpec proposal/spec, LATER_PLANS.md 条目足够
+- [决定]: 297 deprecation warnings 在 pub use + mod tests 边界用 #[allow(deprecated)]
+  抑制
+  [理由]: spec 要求 "deprecated code stays compile-able" (✓), 不要求 0 warning;
+  抑制是 build 噪音清理, 不影响 runtime 行为; 未来 2.3.0 物理删除时 #[allow(deprecated)]
+  自然删除
+- [决定]: README.md "Adding New Scenarios" 拆双段 (Declarative First + Legacy Imperative)
+  [理由]: spec 要求 "new contributors discover the declarative path first",
+  Declarative First 段是主推, Legacy Imperative 段说明何时还可用 (1 release cycle
+  内 + §2.5.0 explicit-keep); 双段比单段重写更清晰
+
+### 验证
+- cargo check -p ralph-e2e: ok (297 deprecation warnings, 抑制在边界)
+- cargo test -p ralph-e2e --lib: 536 passed / 0 failed / 24 ignored
+- cargo test -p ralph-e2e --test declarative_coverage_gate: Coverage 100.00% / PASS
+- tasks.md §3.1-3.4: 全部 [x] DONE
+
+### 下一步可选方向
+1. **Push 2 commits 到 my/main** (本轮下一步)
+2. **OpenSpec archive**: tasks.md 全 done 后跑 `openspec archive e2e-declarative-migration-plan`
+3. **命令式 cli.command 静默忽略** (2.1.3 backend-unavailable 语义问题, 已加 LATER_PLANS)
+4. **e2e-live-convergence 诊断** (3 个 live 场景 termination_reason=None, 已加 LATER_PLANS)
+5. **暂停**: 等用户决策

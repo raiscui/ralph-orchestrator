@@ -442,3 +442,71 @@
 - **`# ponytail:` 累计**: 无 lazy 简化空间; 4 个 subdir 是严格 convention 强制,
   manifest 7 节是 skill 强制模板。ponytail 不是 "为简化而简化", 而是 "不重复造轮子"
   — 这里没有 wheel, 只有 convention。
+
+## [2026-08-13 18:00:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 3 closure (OpenSpec tasks.md §3.1-3.4)
+
+### 任务内容
+- 用户指令 "1" = Wave 3 closure (per 上轮 next menu 选项 1)
+- Per OpenSpec tasks.md §3:
+  - 3.1 确认 gate test green (e69f007 已做, 仅确认)
+  - 3.2 21 个 imperative TestScenario impl struct 加 #[deprecated(...)]
+  - 3.3 新建 crates/ralph-e2e/docs/e2e/declarative-migration.md + README.md pointer
+  - 3.4 Open follow-up issue / change tracker for eventual physical removal
+
+### 完成过程
+**Phase 1 — 3.1 确认**
+- 已 commit e69f007: Coverage 100.00% / Pass / Fail: PASS, gate test wired into CI
+- 本轮无新工作, 标记 [x] DONE + 引用 commit
+
+**Phase 2 — 3.2 deprecation (commit 73cf1fa)**
+- 21 个 imperative TestScenario impl struct 加 #[deprecated(since = "2.3.0",
+  note = "use the declarative YAML under scenarios/<id>.yaml")]
+- 5 个文件 (errors / hats / memory / capabilities / parallel/app_server_*) 各加
+  mod tests 块的 #[allow(deprecated)] 抑制 (4 个文件有 mod tests, 2 个 parallel
+  文件没有)
+- mod.rs 4 个 pub use 块 (errors / capabilities / hats / memory / parallel) 各加
+  #[allow(deprecated)] 抑制 (5 个块都加)
+- 21 × 6 warnings = 126 warnings from non-test, 总 297 warnings
+- ParallelExperimentalDevEngineExampleScenario (§2.5.0 explicit-keep) NOT deprecated
+
+**Phase 3 — 3.3 docs (commit 02582b6)**
+- crates/ralph-e2e/docs/e2e/declarative-migration.md 新建 (145 行):
+  - TL;DR + 4 步骤添加 declarative + schema 字段速查表 + 5 个常见陷阱 +
+    21 个 deprecated scenarios 列表 + explicit-keep 标注 + 仓库级深度指南链接
+- crates/ralph-e2e/README.md "Adding New Scenarios" section 重写:
+  - 新段 "Adding New Scenarios — Declarative First" (主推)
+  - 旧段 "Adding New Scenarios (Legacy Imperative)" (历史, 仅 §2.5.0)
+
+**Phase 4 — 3.4 follow-up tracker (commit 02582b6)**
+- LATER_PLANS.md 加 "Wave 3.4 follow-up: physical removal of deprecated imperative
+  structs (target 2.3.0 release)" 条目 (40+ 行):
+  - 触发条件: 2.3.0 release day (1 release cycle after 2.2.x)
+  - 待执行: 21 个 struct + 5 个 #[allow(deprecated)] + 5 个 mod tests 块物理删除
+  - 验证步骤: cargo check 0 warning, 21 个 unit tests 减少, gate 仍 100% PASS
+  - 决策点: docs 历史表格保留 + Cargo.toml 升级到 2.3.0
+- openspec/changes/e2e-declarative-migration-plan/tasks.md §3.1-3.4 标记 [x] DONE
+  (with ✅ DONE 总结 + commit 引用 + 关键决策)
+
+### 总结感悟
+- **Wave 3 整体设计精炼**: 3.2 标 deprecation 但不删除 (1 release cycle 缓冲),
+  3.3 文档 declarative-first (new contributor experience), 3.4 跟踪物理删除
+  (release day 执行)。3 步协同避免 "Wave 2 完就全删" 的激进改动, 也避免
+  "Wave 2 完就留着不标" 的隐性 tech debt。
+- **"Declarative First" 措辞选择**: README 不是说 "Don't write imperative" (negation),
+  而是 "新场景请写 YAML" (positive instruction + 引用 docs); 这样 new contributor
+  看到的是鼓励 + 引导, 不是禁止; 加上 "Legacy Imperative" 段说明何时还可用
+  (§2.5.0 + 1 release cycle), 不留 ambiguity。
+- **297 warnings 不解决**: spec 接受 "deprecated code stays compile-able",
+  warnings 是 deprecation 的必然成本; 抑制在 pub use + mod tests 边界 = 减少
+  噪音但保留 (3.2 标记 + 未来 2.3.0 物理删除时 #[allow(deprecated)] 自然删除);
+  不是 "all 0 warning" 强迫症, 是 build 噪音可读性 + spec 合规的折中。
+- **3.4 不开 gh issue 改 LATER_PLANS**: 3 个理由 — gh CLI 不可写 origin (403) +
+  OpenSpec 是项目标准 + 2.3.0 删除是 mechanical follow-up 不需要完整 proposal/spec;
+  LATER_PLANS.md 条目提供 follow-up 跟踪 (触发条件 + 待执行 + 验证步骤 + 决策点),
+  足够 2.3.0 release day 的 implementer 重新拾起。
+- **`# ponytail:` 不需要**: 3.3 docs 是 145 行 comprehensive guide, 不是 lazy 简化;
+  5 个常见陷阱每条配 1 段示例, 引用 self-learning.* skill 完整版本; 不重复
+  docs/solutions/ 内容 (单源真相在 skill, docs/ 是发现入口)。
+- **3.2 deprecation 跨 5 文件的批量编辑**: 21 个 struct + 5 个 mod tests + 5 个 pub use
+  = 31 处修改, 一次性 Python 脚本批量完成; 验证 cargo check 仍通过 (deprecation
+  warnings 预期), cargo test 仍 536 passed, gate 仍 100% PASS。
