@@ -133,6 +133,26 @@ pub struct DeclarativeExpect {
     /// 输出必须命中至少一个文本(任一命中即通过, 如 [writer#1:out:job= / [writer#1:state])。
     #[serde(default)]
     pub output_contains_any: Vec<Vec<String>>,
+    /// 失败语义:`exit_code != Some(0) || !stderr.is_empty()`。
+    /// 覆盖 `BackendUnavailableScenario::execution_failed` 与
+    /// `AuthFailureScenario::execution_failed_with_error` 的 OR 语义;
+    /// 拆成 `exit_code_nonzero` + `stderr_nonempty` 会把命令式的 OR 退化成
+    /// AND(runner 的 `assertions.iter().all(|a| a.passed)` 是 AND),失真。
+    #[serde(default)]
+    pub failed: bool,
+    /// stderr 必须包含的文本(逐条独立断言, 类似 `output_contains` 但查 stderr)。
+    #[serde(default)]
+    pub stderr_contains: Vec<String>,
+    /// stderr 必须命中至少一个文本(任一命中即通过, 类似 `output_contains_any` 但查 stderr)。
+    /// 覆盖 `BackendUnavailableScenario::error_mentions_backend`(把 stderr 改成
+    /// 含任一关键词)与 `AuthFailureScenario::error_message_helpful`(stderr + stdout
+    /// 改成 stderr,接受 stderr-only 检查)。
+    #[serde(default)]
+    pub stderr_contains_any: Vec<Vec<String>>,
+    /// failure 时间预算: `result.duration < Duration::from_secs(N)`(secs)。
+    /// 覆盖 `BackendUnavailableScenario::failed_fast`(duration < 20s)。
+    #[serde(default)]
+    pub failed_within_secs: Option<u64>,
     /// 第一个 workflow entry 事件 topic(starting_event 未配置时的推测断言)。
     #[serde(default)]
     pub first_entry: Option<String>,
@@ -502,6 +522,20 @@ impl TestScenario for DeclarativeScenarioRunner {
         }
         for needles in &expect.output_contains_any {
             assertions.push(output_contains_any(&execution, needles));
+        }
+        // 新增失败族断言(为 backend-unavailable / auth-failure 等场景补全 schema 覆盖):
+        // failed/stderr_contains/stderr_contains_any/failed_within_secs。
+        if expect.failed {
+            assertions.push(failed(&execution));
+        }
+        for needle in &expect.stderr_contains {
+            assertions.push(stderr_contains(&execution, needle));
+        }
+        for needles in &expect.stderr_contains_any {
+            assertions.push(stderr_contains_any(&execution, needles));
+        }
+        if let Some(secs) = expect.failed_within_secs {
+            assertions.push(failed_within(&execution, secs));
         }
         for payload_expect in &expect.event_payload_contains {
             assertions.push(event_payload_contains(
@@ -912,6 +946,77 @@ fn output_contains_any(result: &ExecutionResult, needles: &[String]) -> crate::m
     } else {
         format!("matched {hits:?}")
     });
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: 失败语义, 即 `exit_code != Some(0) || !stderr.is_empty()`。
+///
+/// 设计要点:
+/// - 命令式 `BackendUnavailableScenario::execution_failed` 与
+///   `AuthFailureScenario::execution_failed_with_error` 都是这个 OR 语义。
+/// - 拆成两个独立字段会让 runner 的 AND 语义(`assertions.iter().all`)压扁
+///   命令式的 OR,失真;本函数保留 OR。
+/// - exit_code = None(被信号 kill)在该不等式下也判定为 "failed"("不是干净的 0"),
+///   与命令式 `!= Some(0)` 行为一致。
+fn failed(result: &ExecutionResult) -> crate::models::Assertion {
+    let ok = result.exit_code != Some(0) || !result.stderr.is_empty();
+    let builder = crate::scenarios::AssertionBuilder::new("Execution failed")
+        .expected("non-zero exit code or non-empty stderr")
+        .actual(format!(
+            "exit_code={:?} stderr_len={}",
+            result.exit_code,
+            result.stderr.len()
+        ));
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: stderr 命中单 needle(类似 `output_contains`, 但查 stderr 通道)。
+///
+/// 用法: `expect.stderr_contains: ["command not found"]` 等价于
+/// 命令式 `result.stderr.to_lowercase().contains("command not found")`。
+fn stderr_contains(result: &ExecutionResult, needle: &str) -> crate::models::Assertion {
+    let ok = result.stderr.contains(needle);
+    let builder = crate::scenarios::AssertionBuilder::new(format!("stderr contains {needle:?}"))
+        .expected(format!("stderr contains {needle:?}"))
+        .actual(if ok { "found".to_string() } else { "missing".to_string() });
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: stderr 命中任一 needle(类似 `output_contains_any`, 但查 stderr 通道)。
+///
+/// 用法: 覆盖 `BackendUnavailableScenario::error_mentions_backend` 与
+/// `AuthFailureScenario::error_message_helpful`(原本同时查 stderr + stdout,
+/// 这里改为只查 stderr;auth-failure 关键字应出现在 ralph 的错误输出流)。
+fn stderr_contains_any(result: &ExecutionResult, needles: &[String]) -> crate::models::Assertion {
+    let hits: Vec<&str> = needles
+        .iter()
+        .filter(|needle| result.stderr.contains(needle.as_str()))
+        .map(|needle| needle.as_str())
+        .collect();
+    let ok = !hits.is_empty();
+    let builder = crate::scenarios::AssertionBuilder::new(format!(
+        "stderr contains any of {needles:?}"
+    ))
+    .expected(format!("stderr contains at least one of {needles:?}"))
+    .actual(if hits.is_empty() {
+        "none matched".to_string()
+    } else {
+        format!("matched {hits:?}")
+    });
+    if ok { builder.passed() } else { builder.failed() }.build()
+}
+
+/// 断言: `result.duration < Duration::from_secs(secs)`。
+///
+/// 用法: 覆盖 `BackendUnavailableScenario::failed_fast`(duration < 20s)。
+/// 选择 "硬性 <" 而不是 "<=" 以兼容 `Duration::from_secs(20)` 边界:
+/// 命令式代码 `result.duration < Duration::from_secs(20)` 用 "<"。
+fn failed_within(result: &ExecutionResult, secs: u64) -> crate::models::Assertion {
+    let budget = std::time::Duration::from_secs(secs);
+    let ok = result.duration < budget;
+    let builder = crate::scenarios::AssertionBuilder::new(format!("Failed within {secs}s"))
+        .expected(format!("duration < {secs}s"))
+        .actual(format!("duration={:?}", result.duration));
     if ok { builder.passed() } else { builder.failed() }.build()
 }
 
@@ -1333,6 +1438,85 @@ mod tests {
         let r2 = sample_result(1, vec![], None);
         let missing = vec!["[ghost:out:job=".to_string()];
         assert!(!output_contains_any(&r2, &missing).passed);
+    }
+
+    #[test]
+    fn failed_passes_on_non_zero_exit() {
+        // 非零 exit_code 即视为 failed, 与命令式 `!= Some(0)` 一致(stderr 为空也通过)。
+        let r = sample_result(1, vec![], None);
+        let mut r = r;
+        r.exit_code = Some(1);
+        r.stderr = String::new();
+        assert!(failed(&r).passed);
+    }
+
+    #[test]
+    fn failed_passes_on_stderr_presence_even_when_exit_zero() {
+        // exit_code == 0 但 stderr 非空 → 仍视为 failed(OR 语义)。
+        // 模拟 ralph 写出警告/诊断但仍正常退出的场景。
+        let mut r = sample_result(1, vec![], None);
+        r.exit_code = Some(0);
+        r.stderr = "warning: deprecated config key\n".to_string();
+        assert!(failed(&r).passed);
+    }
+
+    #[test]
+    fn failed_fails_when_exit_zero_and_stderr_empty() {
+        // exit_code == 0 且 stderr 为空 → 干净成功, 不算 failed。
+        let mut r = sample_result(1, vec![], None);
+        r.exit_code = Some(0);
+        r.stderr = String::new();
+        assert!(!failed(&r).passed);
+    }
+
+    #[test]
+    fn failed_treats_signal_kill_as_failed() {
+        // exit_code = None(被信号 kill) 在 `!= Some(0)` 下也为 true,
+        // 与命令式 `execution_failed` 行为一致。
+        let mut r = sample_result(1, vec![], None);
+        r.exit_code = None;
+        r.stderr = String::new();
+        assert!(failed(&r).passed);
+    }
+
+    #[test]
+    fn stderr_contains_matches_needle() {
+        let mut r = sample_result(1, vec![], None);
+        r.stderr = "Error: command not found in PATH\n".to_string();
+        assert!(stderr_contains(&r, "command not found").passed);
+        assert!(!stderr_contains(&r, "unauthorized").passed);
+    }
+
+    #[test]
+    fn stderr_contains_any_matches_at_least_one_needle() {
+        let mut r = sample_result(1, vec![], None);
+        r.stderr = "auth failed: invalid API key\n".to_string();
+        let hits = vec![
+            "unauthorized".to_string(),
+            "invalid".to_string(),
+            "credential".to_string(),
+        ];
+        assert!(stderr_contains_any(&r, &hits).passed);
+        let miss = vec!["backend".to_string(), "cli".to_string()];
+        assert!(!stderr_contains_any(&r, &miss).passed);
+    }
+
+    #[test]
+    fn failed_within_passes_when_under_budget() {
+        let mut r = sample_result(1, vec![], None);
+        r.duration = std::time::Duration::from_secs(5);
+        assert!(failed_within(&r, 20).passed);
+    }
+
+    #[test]
+    fn failed_within_fails_at_or_over_budget() {
+        // 命令式 `duration < Duration::from_secs(20)` 用严格 <;
+        // 我们保留相同语义, 所以 20s 边界失败。
+        let mut r = sample_result(1, vec![], None);
+        r.duration = std::time::Duration::from_secs(20);
+        assert!(!failed_within(&r, 20).passed);
+        r.duration = std::time::Duration::from_secs(25);
+        assert!(!failed_within(&r, 20).passed);
     }
 
     #[test]
