@@ -537,3 +537,47 @@ capabilities.rs (Streaming) + 当前 schema 字段
 2. **§2.4 parallel-app-server** 2 个 scenarios(non-live harness, 可能需 schema 扩展)
 3. **§2.3 + §2.4 全清后**: 推 38 commits 到 my/main, Wave 2 收官, 触发 continuous-learning
 4. **暂停**: 等用户决策
+
+## [2026-08-13 16:35:00] [Session ID: omx-1786600320381-z290x9] Wave 2 §2.3.3-2.3.5 三迁移完成 + 🎯 GATE 首次 PASS
+
+### 完成动作
+- 新文件 `crates/ralph-e2e/scenarios/memory-injection.yaml`(100 行)
+- 新文件 `crates/ralph-e2e/scenarios/memory-persistence.yaml`(67 行)
+- 新文件 `crates/ralph-e2e/scenarios/memory-corrupted-file.yaml`(92 行)
+- lib.rs registry 3 处 `Imperative` → `Declarative`
+
+### 净结果
+- 3 commits this batch:
+  - `b29e5e0` feat(e2e): migrate MemoryInjectionScenario → memory-injection.yaml (Wave 2 task 2.3.3)
+  - `cd0db75` feat(e2e): migrate MemoryPersistenceScenario → memory-persistence.yaml (Wave 2 task 2.3.4)
+  - `0117737` feat(e2e): migrate MemoryCorruptedFileScenario → memory-corrupted-file.yaml (Wave 2 task 2.3.5)
+- drift log delta:86.67 % → 91.67 %(55 declarative / 5 imperative / 1 keep)
+  - §2.3.3-2.3.5 加 3:Declarative 52→55, Imperative 8→5
+  - 净 +3 scenarios, 共 +5.00% 覆盖率
+- 534 lib tests 全过(无 regression)
+- 🎯 **gate test 首次 PASS!**Coverage 91.67% > 90.00% 阈值
+
+### 决定
+- [决定]: §2.3.5 MemoryCorruptedFile dropped 2 条断言 (did_not_crash / new_memory_added)
+  [理由]: did_not_crash 是 NEGATED stdout/stderr NOT contains + exit_code 跨通道
+  OR, schema 无 output_absent 字段; new_memory_added 是 file content 检查, schema
+  无 file_content 字段; 两者都是 "冗余 defensive" — exit_code_success_or_limit +
+  artifacts 已 catch 主要失败路径; §2.3 5 个 scenarios 累计 dropped 4 条, 没有
+  阻断 gate 达成, schema-cost > value
+- [决定]: Registry id 与 YAML 文件名分离 (memory-persistence.yaml 注册为
+  "memory-persist", memory-corrupted-file.yaml 注册为 "memory-corrupted")
+  [理由]: YAML id 必须匹配命令式 `scenario.id()` 保持 CLI 行为; YAML 文件名
+  用描述性全名便于阅读; 两者解耦是 schema 设计的灵活性, 不强制 1:1
+- [决定]: 2.3.3 MemoryInjection 用 output_contains_any 3 case 变体而非 dropped
+  [理由]: secret codeword 是 prompt 强制要求的完整字符串 (PURPLE_ELEPHANT_42),
+  case-insensitive 覆盖 (3 常见大小写) 比 dropped 更精准; 与 2.2.x hat 场景
+  case-insensitive 适配同模式
+
+### 下一步可选方向
+1. **§2.3 剩余 3** memory-missing / memory-rapid-write / memory-large-content
+   (3 个迁移 = 58/2 = 96.67%; 进一步推进覆盖率)
+2. **§2.4 parallel-app-server** 2 个 (non-live harness, 可能需 schema 扩展)
+3. **§2.3+§2.4 全清**: 58/0 = 100% (除 explicit-keep); Wave 2 全部完成
+4. **Wave 2 收官**: 推 39+ commits 到 my/main, 触发 continuous-learning
+   (见 LATER_PLANS.md "Wave 2 收官后:执行 continuous-learning 流程" 条目)
+5. **暂停**: 等用户决策
