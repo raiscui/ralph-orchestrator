@@ -1,0 +1,62 @@
+# memory-persistence 声明化(候选 2.3.4: MemoryPersistenceScenario → memory-persistence.yaml)
+#
+# 与命令式 MemoryPersistenceScenario 等价性分析:
+# - 同 id `memory-persistence`, description / tier 一致
+# - 同 setup: ralph.yml (memories.enabled + memories.inject=manual) +
+#   inline prompt(要求 agent 用 Bash 跑 ralph tools memory add +
+#   输出 LOOP_COMPLETE) + max_iterations=2 + backend.default_timeout()
+# - supported_backends 显式 [Claude, Kiro, OpenCode]
+# - expect 6 条断言中 4 条 1:1 映射 + 2 条 dropped:
+#   response_received/exit_code_success_or_limit/no_timeout → 直接映射
+#   memory_persisted_to_disk  → expect.artifacts: [.agent/memories.md]
+#     (existence 检查; dropped "file 非空 content" 部分
+#      — schema 无 file_content 字段)
+#   persistence_marker_found  → DROPPED
+#     (file content 含 PERSIST_CHECK_12345/persistence; schema 无 file_content)
+#   memory_id_reported        → expect.output_contains: ["mem-"]
+#     (stdout 含 mem-; 命令式 case-sensitive 严格相等, schema 同语义)
+id: memory-persistence
+description: Verifies memories persist in .agent/memories.md across runs (declarative)
+tier: "Tier 6: Memory System"
+backends: [claude, kiro, opencode]
+setup:
+  config: |
+    # Memory persistence test config for {backend}
+    cli:
+      backend: {backend}
+
+    event_loop:
+      max_iterations: 2
+      completion_promise: "LOOP_COMPLETE"
+
+    memories:
+      enabled: true
+      inject: manual
+  prompt: |
+    You are testing Ralph's memory persistence.
+
+    Your task is to add a memory using the Bash tool.
+
+    STEP 1: Use the Bash tool to run this exact command:
+    ```
+    ralph tools memory add "Persistence test marker: PERSIST_CHECK_12345" --type context --tags persistence,e2e
+    ```
+
+    STEP 2: The command will output the memory ID (like "Memory stored: mem-1234...")
+
+    STEP 3: Output LOOP_COMPLETE
+
+    IMPORTANT: You MUST actually execute the command using the Bash tool.
+  max_iterations: 2
+  # timeout_secs 不写 → runner 落回 backend.default_timeout()
+expect:
+  response_received: true
+  exit_code_success_or_limit: true
+  no_timeout: true
+  # memory_persisted_to_disk: artifacts 检查文件存在
+  artifacts:
+    - .agent/memories.md
+  # memory_id_reported: stdout 严格含 mem- 模式
+  output_contains:
+    - "mem-"
+  # persistence_marker_found dropped — file content 检查

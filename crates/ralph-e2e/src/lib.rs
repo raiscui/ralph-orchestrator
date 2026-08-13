@@ -323,9 +323,12 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
             )),
         ),
         (
-            ScenarioKind::Imperative,
+            ScenarioKind::Declarative,
             "memory-persist",
-            Box::new(MemoryPersistenceScenario::new()),
+            Box::new(crate::declarative::from_yaml(
+                "memory-persist",
+                include_str!("../scenarios/memory-persistence.yaml"),
+            )),
         ),
         // Tier 6: Memory System (Chaos Tests)
         (
