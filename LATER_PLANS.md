@@ -905,3 +905,40 @@
       live 版已声明化, fake 版保留命令式作确定性回归
 - [x] {profile_args} 缩进 bug 修复(见 task_plan 2026-08-04 01:30)
 - [x] 候选6 全部完成, 本条目关闭
+
+## [2026-08-13 15:05:00] [Session ID: omx-1786600320381-z290x9] Schema 扩展:backend-unavailable 类型 scenarios 需要 3 个新字段
+
+### 来源
+- Wave 2 任务 2.1.3 迁移调研发现 `BackendUnavailableScenario`(OpenSpec §2.1.3 列为 Easy,
+  但 audit-p5-p1.md:73 明确指出需要 schema 扩展,OpenSpec tasks.md 分类与 audit 不一致)。
+
+### 阻塞点
+- 命令式 3 条断言在 declarative schema 中没有对应字段:
+  1. `execution_failed` = `exit_code != Some(0)` —— schema 只有 `exit_code_success_or_limit: bool`
+     (matches!(Some(0|2))),语义相反,反设会破坏等价。
+  2. `error_mentions_backend` = stderr + stdout 低位化后含任一关键词
+     (not found / command not found / no such file / cannot find / nonexistent / backend / cli)
+     —— schema 只有 `output_contains`(stdout only)和 `output_contains_any`(stdout only)。
+  3. `failed_fast` = `duration < 20s` —— schema 无 `duration_within_secs` 字段。
+- 此外,命令式 setup 设 `cli.command: nonexistent-cli-...` 试图触发 backend spawn 失败,
+  但 `crates/ralph-core/src/config.rs:795-803` 显示 `cli.command` 只在 `cli.backend == "custom"`
+  时生效;当 `backend: claude|kiro|opencode` 时,ralph 用 `self.adapters.<backend>` 跑真 CLI,
+  `command` 字段被静默忽略。这意味着命令式 test 即便跑 live scenario 也不一定真触发
+  "backend unavailable" —— 这本身就是个待澄清的语义问题。
+- 真正的修法(audit 建议):schema 加 `require_backend: <wrong>` 字段,显式声明"该 scenario
+  期望 ralph 报 backend 不可用",由 declarative runner 构造一个不可能成功的 backend 路径,
+  而不是依赖 `cli.command` 这个被忽略的字段。
+
+### 后续动作(本轮不做)
+- 在 OpenSpec 新增 delta spec(例如 `e2e-declarative-schema-extension-v1`)或在
+  `e2e-declarative-coverage-gate` 里追加 §2.6 "schema extension" 段,显式列出 3 个新字段:
+  - `expect.stderr_contains: Vec<String>`
+  - `expect.stderr_contains_any: Vec<Vec<String>>`
+  - `expect.exit_code_nonzero: bool`
+  - `expect.failed_within_secs: u64`
+- schema 实现 + 单元测试 + registry 重新接受 2.1.3 + 跑 live 验证
+- 完成后回头迁移 §2.1.3(估计需要重写命令式 setup,确认 audit 建议的 `require_backend` 语义)
+
+### 临时决策
+- 本轮跳过 2.1.3(不迁移、不动 lib.rs),直接进 §2.1.4 AuthFailureScenario 迁移。
+- OpenSpec tasks.md 暂不改(避免触动已绿 29/29 validate),等 schema 扩展 spec 起时一并改。

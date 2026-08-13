@@ -190,3 +190,36 @@ Pass / Fail:            FAIL
 4. **§2.3 memory**:8 个 memory scenarios(难度中等,需要 schema 扩展或保留命令式)
 5. **先 push**:把 14 commits 推到 my/main
 6. **暂停**:等用户决策
+
+## [2026-08-13 15:00:00] [Session ID: omx-1786600320381-z290x9] Wave 2 任务 2.1.3 启动:BackendUnavailableScenario → backend-unavailable.yaml
+
+### 目标
+- 读 errors.rs 中 BackendUnavailableScenario 完整定义(setup/run/assertions + supported_backends)
+- 查 executor.rs 中 backend unavailable 路径 detect_termination_reason 的返回值
+- 写 backend-unavailable.yaml,1:1 映射到 declarative schema 已有字段
+- 改 lib.rs registry
+- 跑 4 gate: cargo check / cargo test --lib / --list / declarative_coverage_gate
+- 预期 drift delta: 41/19/1 → 42/18/1 ≈ 70.00%
+- feat + chore 双 commit,沿用 2.1.1 / 2.1.2 模板
+
+### 状态
+**目前在阶段1(读命令式)** — 下一步:读 errors.rs:380-? + executor.rs:600-? 后写 YAML
+
+### 状态更新:2.1.3 暂停,改走 2.1.4
+**目前在 2.1.3 → 2.1.4 切换点**
+- 调研发现:
+  - audit-p5-p1.md:73 明确标记 `BackendUnavailableScenario` 需要 schema 扩展
+    (`require_backend: <wrong>`),OpenSpec tasks.md §2.1.3 列为 Easy 与 audit 不一致
+  - 命令式 setup 设的 `cli.command: nonexistent-cli-...` 在 `backend: claude|kiro|opencode`
+    时被 ralph 静默忽略(config.rs:795-803),命令式 test 即便 live run 也不一定真触发
+    backend-unavailable 路径
+  - schema 缺 3 字段:`exit_code_nonzero` / `stderr_contains` / `failed_within_secs`
+- 决议:不强行迁移。强行迁移 = 3 条断言全 fail,但 gate 仍计为 Declarative = 假阳性 = 违反
+  "做最正确修复/改动而不是最小修复/改动" 纪律
+- 已在 LATER_PLANS.md 记录 schema 扩展工作(待 §2.6 或新 delta spec)
+- 本轮直接进 §2.1.4 AuthFailureScenario 迁移(预计类似 2.1.1 难度)
+
+### 下一步
+1. **任务 2.1.4** AuthFailureScenario → auth-failure.yaml(沿用 2.1.1/2.1.2 pipeline)
+2. (延后) §2.6 schema 扩展 + 重写 2.1.3 setup
+3. (延后) push 现有 15 commits
