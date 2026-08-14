@@ -24,7 +24,6 @@ setup:
         {profile_args}
         - -m
         - {model}
-        - --full-auto
         - --sandbox
         - danger-full-access
         - -c

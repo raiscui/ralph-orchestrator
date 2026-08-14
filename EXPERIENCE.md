@@ -622,3 +622,38 @@
   (problem_type: external_resources, tags: codex, openai_billing)
 - 修 content assertion 假阳性 bug (区分 prompt input vs codex response)
 - 重新跑 3 个 live 场景验证 (充钱后)
+
+### exp-20260814-minimax-provider-incomplete-flags
+> minimax profile (provider via `~/.codex/minimax.config.toml`) 是 OpenAI codex CLI 的子集 wrapper:
+> 不支持 `--full-auto` flag (OpenAI 特有), 但支持 `exec / -p / -m / --sandbox / -c` 等基础 flags.
+> 去掉 `--full-auto` 后 minimax profile + MiniMax-M3 model + ralph live harness 可跑通 (46.9s emit-spawn-instance PASS).
+<!-- scope: project | source_topics: minimax_profile,codex_cli_compat,ralph_e2e | source_hats: codex | status: confirmed | confidence: high | created_at: 2026-08-14T01:30:00+08:00 | updated_at: 2026-08-14T01:30:00+08:00 | supersedes:  -->
+
+- 触发条件:
+  - 跑 ralph e2e live harness 用 `RALPH_E2E_CODEX_PROFILE=minimax RALPH_E2E_CODEX_MODEL=MiniMax-M3`
+  - yaml 场景使用 `args: [exec, {profile_args}, -m {model}, --full-auto, --sandbox ...]` 模板
+  - 期望 minimax 账户有余额 + MiniMax-M3 model 能用 + ralph live 协议跑通
+- 已验证规律:
+  - minimax profile 注入: ralph.yml 含 `-p minimax` (确认机制 work)
+  - minimax 账户有余额: 跑 emit-spawn-instance 不再 `insufficient_user_quota` (改用 MiniMax-M3 model 时)
+  - minimax 账户无余额时: 之前试 gpt-5.5 (RALPH_E2E_CODEX_MODEL=gpt-5.5) + minimax provider 会返 `high demand, temporary errors` (OpenAI 转发层 high load)
+  - 关键限制: minimax provider 不支持 `--full-auto` flag (实测: `error: unexpected argument '--full-auto' found`)
+  - 解决: 去掉 yaml 里的 `--full-auto` line (emit-spawn-instance.yaml line 27)
+  - 去掉后: minimax profile + MiniMax-M3 + emit-spawn-instance 在 46.9s PASSED
+- 证据缺口:
+  - minimax provider 还可能不支持哪些 flags? 没系统测试, 只验证 `--full-auto` 不支持
+  - minimax model (MiniMax-M3) 的能力 vs OpenAI 模型 (gpt-5.5 等) 对 ralph 协议 (spawn.task / spawn.done 等 structured event) 的兼容度? 已确认 MiniMax-M3 能输出正确事件 (spawn.done count >= 1 PASS)
+- 关键边界:
+  - 仅影响 minimax profile + MiniMax-M3 model 组合
+  - 不影响 OpenAI Codex 默认 profile + gpt-5.5 等组合
+  - `codex app-server` 子命令**根本不支持** `--profile` flag (codex CLI 限制), 不能用 minimax profile
+  - 只对 `codex exec` 子命令生效
+- 验证锚点:
+  - `RALPH_E2E_CODEX_PROFILE=minimax RALPH_E2E_CODEX_MODEL=MiniMax-M3 cargo run -p ralph-e2e -- codex --filter parallel-emit-spawn-instance --keep-workspace`
+  - 实测: 46.9s PASSED (1 passed / 0 failed)
+  - workspace 保留在 `.e2e-tests/parallel-emit-spawn-instance/` (gitignored)
+  - ralph.yml 确认 `-p minimax` + `-m MiniMax-M3`
+- 未来动作:
+  - 升级到 `docs/solutions/codex-cli/minimax-provider-incomplete-flags.md` formal capture
+  - 其它 live 场景用 minimax 重跑验证 (steer-multi-turn-live / app-server-idle-start-live 等)
+  - 监控 minimax provider 是否加 `--full-auto` 支持 (codex CLI upstream 更新)

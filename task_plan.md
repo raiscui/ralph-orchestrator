@@ -905,3 +905,49 @@ capabilities.rs (Streaming) + 当前 schema 字段
 2. **立即升级到 docs/solutions/** (formal capture)
 3. **充钱后重跑 live harness 验证修复** (充钱需用户操作)
 4. **暂停**: 等用户决策
+
+## [2026-08-14 00:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 行动计划] Work-around A: 跑 emit-spawn-instance 验证 minimax profile 账户余额
+
+### 上下文
+- 用户指令: "使用 -p minimax" → RALPH_E2E_CODEX_PROFILE=minimax
+- 试 1: app-server-idle-start-live (用 codex app-server 子命令) → minimax profile 不生效
+  (codex CLI 限制: app-server 不支持 --profile), 仍 insufficient_user_quota
+- 试 2 计划: emit-spawn-instance (用 codex exec 子命令, 支持 minimax profile)
+- 目的: 验证 minimax 账户 (HCT_CODE env_key) 是否有余额 + MiniMax-M3 model 是否兼容
+
+### 工作清单
+- [x] 登记行动计划 (本段)
+- [ ] 跑 `RALPH_E2E_CODEX_PROFILE=minimax cargo run -p ralph-e2e -- codex --filter parallel-emit-spawn-instance --keep-workspace`
+- [ ] 看 result:
+  - PASS → minimax 账户有余额 + MiniMax-M3 可用, Task 3 部分 resolve (live harness 可跑)
+  - FAIL → 看新根因 (minimax 账户也没余额 / model 不兼容 / MiniMax-M3 不支持 agent 协议)
+- [ ] 更新 EXP entry + LATER_PLANS
+- [ ] commit + ask push
+
+### 关键约束
+- emit-spawn-instance.yaml 用 codex exec + {profile_args} 占位符, minimax profile 能注入
+- HCT_CODE 已设置 (67 chars)
+- timeout_secs: 300 (yaml) → max 5 分钟
+
+## [2026-08-14 01:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] Work-around E: 去掉 --full-auto 让 minimax 跑通 emit-spawn-instance
+
+### 结果
+- ✅ parallel-emit-spawn-instance PASSED in 46.9s
+- 改动: crates/ralph-e2e/scenarios/emit-spawn-instance.yaml 删 `--full-auto` (line 27)
+
+### 关键发现
+- minimax provider 是 OpenAI codex CLI 的子集 wrapper
+- minimax provider 支持 flags: exec, -p, -m, --sandbox, -c
+- minimax provider 不支持 flags: --full-auto (OpenAI 特有)
+- 去掉 --full-auto 后 minimax 完整 stack (profile + MiniMax-M3) 能跑 ralph live harness
+
+### Task 3 验证状态
+- ✅ minimax profile 机制有效
+- ✅ minimax 账户有余额 (不再 insufficient_user_quota)
+- ✅ minimax provider + MiniMax-M3 兼容 ralph 协议
+- ✅ ralph spawn dynamic worker 实测跑通 (46.9s)
+
+### 未做 (LATER_PLANS 跟踪)
+- 升级到 docs/solutions/ formal capture (含 minimax provider 不兼容 flags 的发现)
+- 其它 live 场景也用 minimax 重跑验证 (steer-multi-turn-live 等)
+- app-server 模式 minimax profile 验证 (codex app-server 不支持 --profile, 待 codex CLI 更新)
