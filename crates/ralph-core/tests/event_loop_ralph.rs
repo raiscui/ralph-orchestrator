@@ -420,11 +420,15 @@ fn test_reads_actual_events_jsonl_with_object_payloads() {
     use ralph_core::EventHistory;
 
     let temp_dir = TempDir::new().unwrap();
-    let events_file = temp_dir.path().join("events.jsonl");
+    let ralph_dir = temp_dir.path().join(".ralph");
+    fs::create_dir_all(&ralph_dir).unwrap();
+
+    let events_file = ralph_dir.join("events.jsonl");
     fs::write(
         &events_file,
         r#"{"topic":"build.task","payload":{"objective":"object payload","priority":1},"ts":"2026-01-14T12:00:00Z"}
 {"topic":"build.done","payload":"string payload","ts":"2026-01-14T12:01:00Z"}
+
 "#,
     )
     .unwrap();

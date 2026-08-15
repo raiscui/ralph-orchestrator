@@ -932,3 +932,41 @@ registry 是 hand-maintained,也无法 grep/monitor 变化。proposal 把 5.1 �
   的 frontmatter / tracks / Category Mapping 三部分
 - 看 `/Users/cuiluming/.codex/skills/continuous-learning-skill/resources/solution-template.md`
   的 Bug Track + Knowledge Track 模板
+
+## [2026-08-15 13:35:00] [Session ID: omx-1786600320381-z290x9] [主题] 现象 — 4 轮 $grill-with-docs 提议的 cherry-pick 计划与已存在的 Q3 sync 评估大幅重叠
+
+### 发现来源
+- 用户:"对比 origin/main, 当前分支有什么值得跟进的吗" + "这些我觉得都可以一起都做了, 你来整体安排规划一下"
+- 我列出 14 个 cherry-pick → 4 轮 grilling → 执行 `git cherry-pick e88b7e3`
+- cherry-pick 落地只有 +3/-5 行(squash 移除了中文注释),意识到不对劲
+
+### 核心问题
+1. **my/main 上已有 `openspec/changes/archive/2026-08-12-sync-origin-main-features-q3-2026/`** —— 一份 2026-08-12 完成的完整 Q3 sync 评估,proposal.md + tasks.md + 5 个 audit 子报告,已经细致到附录 A/B 的 dry-run 结果表
+2. **我提议的 14 个 cherry-pick 中**:
+   - #357 (`e88b7e3`) 已在 `4624750` 手动端口(6/6 单元测试 green)
+   - #318 (`6aacc6b`) 已在 `8b27556` 部分端口
+   - #351 (`01dd250`) `mcp.rs` 已被本地删除,根本无文件可 cherry-pick
+   - #355 (`192f5f9`) `acp_executor.rs` 已被本地删除,同
+   - Group 2 全部 6 项已在 2026-08-12 dry-run 失败
+3. **我 grilling 时没意识到这些**:只看了 `git log` + `git diff --stat`,没扫 `openspec/changes/archive/` + `openspec/changes/`,也没在 `git log` 里 grep `Manual port`/`backport`
+
+### 为什么重要
+- 用户已经做过详细评估,再做一次是重复劳动
+- 用户历史偏好(从 memory): "In mixed worktrees, preserve unrelated/untracked artifacts and use staged scope as truth; do not use `git add .`" —— 暗示用户更愿意基于现有 plan 增量推进,而不是重起炉灶
+- 我 grilling 时把 14 个 PR 当成"未做"清单,没核对它们是不是已经在 fork 里有替代实现
+
+### 未来风险
+- 如果不立即纠正,我会在接下来的 11 个 cherry-pick 里继续犯同样错误,每个都做无效 squash 然后 reset
+- 我的执行已经触发了 1 次 reset (e88b7e3 #357)
+
+### 当前结论
+- 当前 branch: `sync/origin-v2.10.1` (从 my/main HEAD 拉出)
+- 已落地:`4437b6f chore(plan)` + `c4715b2 chore(sync)` (ADR-0001 + CONTEXT.md 3 条新术语)
+- 已 reset:无效的 cherry-pick e88b7e3
+- 已发现:用户的 Q3 sync plan 是真实且权威的 source of truth,我的 14 个 cherry-pick 大多已包含/已排除
+
+### 后续讨论入口
+- 下一步应直接基于 `openspec/changes/archive/2026-08-12-sync-origin-main-features-q3-2026/tasks.md` 推进,而不是按我刚提议的 4-wave plan
+- 真正的剩余工作:Group 2 (2.1-2.6) + Group 3 (3.1-3.5) 的 **重新 dry-run**(评估已过 3 天,本地可能已变),以及 Group 5 (5.3 P3 audit + 5.6 P6 bump)
+- ADR-0001 还是成立(策略决策不变),但具体落地范围需要按用户 Q3 plan 重新校准
+

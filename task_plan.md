@@ -980,3 +980,131 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - 整合不能引入新依赖 (除非明确要求)
 - 验收: cargo test 全过 + 至少一个 live 场景用 minimax profile 跑通
 
+
+## [2026-08-15 13:40:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 纠正] Grill 提议的 14 个 cherry-pick 与 my/main 已存在的 Q3 sync plan 大幅重叠,需要重新校准
+
+### 现象
+- 4 轮 grilling 提议 14 个 cherry-pick (4 wave × ~3-5 个)
+- 用户说 "按推荐" 3 轮 + "go"
+- 第一个 cherry-pick (e88b7e3 #357) 落地只有 +3/-5 行,无效操作
+- 检查发现用户 fork 已有完整 Q3 sync 评估(2026-08-12)
+
+### 假设(被推翻)
+- ~~"这 14 个 cherry-pick 还没做过"~~
+- ~~"e88b7e3 在 my/main 上没改动"~~
+- ~~"用户要我规划 = 用户没规划过"~~
+
+### 验证
+- git log --grep "Manual port" 找到 4624750 (e88b7e3 manual port)
+- git log --grep "cherry" 找到 c623abb (Q3 sync 分析记录)
+- openspec/changes/archive/2026-08-12-sync-origin-main-features-q3-2026/ 含完整 proposal + tasks + 5 个 audit
+
+### 已落地
+- [x] ADR-0001 创建 (策略正确,只是执行范围要重校)
+- [x] CONTEXT.md 3 条新术语已加
+- [x] e88b7e3 #357 reset (无效 cherry-pick,已回退)
+
+### 待用户决策
+- [ ] 是否按 Q3 plan 的 tasks.md 重新推进 (Group 2 重 dry-run + Group 3 dry-run + Group 5 剩余 P3/P6)
+- [ ] 是否新增 1-2 个未在 Q3 plan 里的新候选 (例如 fork HEAD 之后 2026-08-13 又推到 origin/main 的新 PR)
+- [ ] ADR-0001 是否需要修订 (策略不变,范围要明确指向 Q3 plan 路径)
+
+### 不动
+- ADR-0001 内容(策略决策仍然正确)
+- CONTEXT.md 新术语(可保留,只是来源更准确)
+- sync/origin-v2.10.1 分支(分支本身有用,只是计划要重校)
+
+
+## [2026-08-15 14:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: P3 verification] Q3 §5.3 runner.rs 反向 diff audit 验证完成
+
+### 现象
+- Q3 plan tasks.md §5.3 标记 P3 为 PENDING
+- 但 audit-p3-p4.md (2026-08-13) 已经包含完整 C1.1-C1.5 分析
+- runner.rs 最后修改: 2026-05-13,距 audit 91 天,audit 之后无变化
+
+### 验证内容
+- 重新跑 git diff origin/main..HEAD -- crates/ralph-e2e/src/runner.rs 确认 +197/-87 仍准确
+- spot-check 三个 deletion zone (doc comment, soft-skip block, configure_mock_mode body) 和三个 addition zone (hard-fail, configure rewrite, persist_e2e_artifacts)
+- 验证 local line 935 的测试 `test_configure_mock_mode_uses_stdin_prompt_mode_for_mock_cli` 是 origin `test_configure_mock_mode_uses_stdin_prompt_mode` 的 rename + 稍微 refactor,断言逻辑 (prompt_mode == "stdin") 完整保留
+
+### 结论
+- P3 可以标 COMPLETE (无代码改动需要做)
+- 写入了 audit-p3-verification-2026-08-15.md 作为 addendum,保留历史 audit 完整性
+- P6 (release bump) 是独立决策,不在本次 verification 范围
+
+### 输出文件
+- openspec/changes/archive/2026-08-12-sync-origin-main-features-q3-2026/audit-p3-verification-2026-08-15.md (65 行,纯文档)
+
+
+## [2026-08-15 15:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: Wave 1 完成] 4 个候选中 2 落地 / 2 DROP
+
+### 计划 vs 实际
+
+| 优先级 | commit | 计划 | 实际 | 原因 |
+|---|---|---|---|---|
+| 🟢 1 | `ee9fa67` hats validate --instructions (3.2) | 嫁接 | ✅ **落地** | 4 个 hats.rs 冲突 + 1 个 cli-reference 冲突,resolved per-case,本地 enum + 函数签名已就位 (本地先做了准备) |
+| 🟢 2 | `4a38b8d` Claude stream wait (3.1) | bug fix | ❌ **DROP** | 整套 stream 架构不同:本地用 `(StreamKind, line)` tuple,origin 用 `StreamEvent` enum (StdoutLine/StderrLine/StdoutEof/StderrEof)。冲突超出 per-case |
+| 🟡 3 | `cf0ec8d` fixture isolation (2.3) | test-only | ✅ **落地** | 2 个 test fixture 冲突,resolved per-case (取 origin 的 `.ralph/` 目录隔离 + HEAD 的更详细断言) |
+| 🟡 4 | `7b673cc` per-hat scratchpad (2.4) | semantic | ❌ **DROP** | prompt 构建流程根本不同:本地走 `build_custom_hat` + `prepend_memories` + `inject_hat_instance_id`,origin 走 `set_active_scratchpad` + 新的 `update_robot_guidance` + `persist_guidance_to_scratchpad`。100+ 行重构,超出 per-case |
+
+### 落地成果
+
+- `bc826749 feat(cli): opt-in hats validate --instructions checks (#356)`
+  - hats.rs +363 lines,新增 `check_instructions` + 3 helpers,7 个新 instruction 测试
+  - 嫁接到本地 `HatsCommands::Validate { instructions: bool }` (本地已加这个字段)
+- `e757475b test: isolate event history payload fixture`
+  - event_loop_ralph.rs fixture 用 `.ralph/events.jsonl` 隔离 + 保留本地详细断言
+
+### 验证
+
+- `cargo test --lib -p ralph-cli -j 2`: 6 passed (clean_events / clean_diagnostics)
+- `cargo test --bin ralph -p ralph-cli -- hats`: 42 passed (含 7 个新 validate_instructions 测试)
+- `cargo test -p ralph-core --test event_loop_ralph -- test_reads_actual_events_jsonl_with_object_payloads`: 1 passed
+- `cargo test --workspace -j 2`: 所有 test suite 0 failed (129 + 645 + 536 + 180 + ...)
+
+### Push 状态
+
+- 推到 my/sync/origin-v2.10.1: ✅ (force-with-lease fast-forward)
+- 本地 sync/origin-v2.10.1 已 ff merge 更新
+
+### DROP 原因备注 (供 LATER_PLANS 跟踪)
+
+- 3.1 Claude stream wait: 跟 local stream architecture 重构冲突,等价功能 (`stdout_done`/`stderr_done` 标志) 已隐式存在。如果将来需要 explicit Claude wait,需要在 `StreamEvent` 架构基础上重新设计。
+- 2.4 per-hat scratchpad: local 的 prompt 构建走 `instruction_builder` + `prepend_memories`,origin 想加 `set_active_scratchpad` 流程。两条路径在 `build_prompt` 函数里完全分叉,per-case 不现实,需要专门 PR。
+
+
+## [2026-08-15 16:00:00] [Session ID: omx-1786600320381-z290x9] [记录类型: Wave 2 尝试结果] 0207c8b DROP
+
+### 现象
+- 计划: Wave 2 = 2.1 (`0207c8b` continue state) only, ~30 min
+- 实际: ~30 min, 全 abort
+
+### 冲突发现
+- loop_runner.rs 3 个 conflict regions(其中 1 个 1942 行)
+- event_loop/mod.rs 3 个 conflict regions
+- event_loop/tests.rs 1 个 conflict region
+
+### 决定原因
+- origin #0207c8b 实际**捆绑**了多个独立的 feature:
+  1. Per-hat scratchpad 清理 (本地 `HatConfig` 没有 `scratchpad` 字段,无法编译)
+  2. RPC mode (新 feature,本地没有)
+  3. `replay_resume_events_from_jsonl` (本地已有此方法,但是单独的 cherry-pick 更合适)
+  4. Loop banner 打印 (样式变化)
+- 1942 行的 loop_runner.rs 重构远超 per-case
+- resolve 第一个 conflict 时发现 origin 引入了本地不存在的 `hat.scratchpad` 字段,无法编译
+
+### DROP 结论
+- `0207c8b` 不是一个真正的 bug fix,是包含多 feature 的重构 commit
+- 等价功能 local 已有 (`restore_loop_state`/`clear_loop_state`/`replay_resume_events_from_jsonl` 都已实现)
+- 进一步 cherry-pick 这个 commit 性价比为负
+
+### 剩余 per-case 候选重评估
+- 🔴 `a4b6d45` LOOP_COMPLETE guard (3.4) — 5 文件 event_loop 高危区,**风险类似 2.1**
+- 🟡 `4ba3d3a` pi-coding-agent name (2.6) — 3 文件 + 2 specs modify/delete,low value low risk
+- 🟡 `c9f2182` timeout test (2.2) — 1 文件 cli_executor test,low value low risk
+
+### 建议
+- 2.1 / 3.4 都属于 event_loop 重叠区,**很可能都无法干净 cherry-pick**
+- 2.6 + 2.2 是 low-stakes 选项,可以快速过一遍
+- 真正要做完 sync,需要专门的 PR 重写 (Group 4 rewrite),不是 cherry-pick
+

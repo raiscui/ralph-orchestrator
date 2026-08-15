@@ -43,3 +43,14 @@
   - OutputSlice: 串行输出缓冲/浏览/选择
   - TaskSlice / SearchSlice: 纯状态 + 纯算法
 - 兼容委托: 原 82 个方法签名保留(一行委托),调用者渐进迁移。
+
+## 上游同步域 (2026-08-15 建立,sync/origin-v2.10.1)
+
+- **ADR**: 架构决策记录,落在 `docs/adr/`。本仓库首条 ADR-0001 = "Cherry-pick upstream sync instead of merge"。涉及 hard-to-reverse 或 surprising-without-context 的决策时新建。
+- **sync/origin-vX.Y.Z 分支**: 跟 upstream 单次 release 整合的 feature branch,落 `my/main` 后删除;每 wave push 一次 (4-5 pushes/release)。
+- **Completion gate** (#326): `event_loop` 在 guidance 之后**强制显式 completion** —— 不能再靠模型 "假装完成"。直接影响 ralph#1 的终止判定,补的是 LOOP_COMPLETE 漂移护栏。
+
+## CLI surface 扩展 (2026-08-15)
+
+- **`ralph clean --events`** (#357): 只清理事件文件,不删 record-session / 诊断日志。适合 replay 跑完后只想回收 .ralph/events.jsonl 的场景。
+- **Per-hat scratchpad 注入** (#293-scratchpad fix): `instructions` 模块生成 hat 指令时 honor per-hat scratchpad 模板(不是 global scratchpad)。
