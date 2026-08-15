@@ -645,8 +645,43 @@ impl RalphExecutor {
             output.to_string()
         };
 
+        // fix/completion-via-event: 收敛时 supervisor 也会输出 `[supervisor] final states:` 清洁收尾摘要,
+        // 这些信息在 ralph#1 的 out 显示行之外, 必须单独保留在并行模式的检测视野里。
+        let supervisor_final = if has_parallel_display_lines {
+            output
+                .lines()
+                .filter(|line| line.trim_start().starts_with("[supervisor]"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        };
+        let normalized = format!("{normalized}\n{supervisor_final}");
+
         if EventParser::contains_promise(&normalized, "LOOP_COMPLETE") {
             return Some("LOOP_COMPLETE".to_string());
+        }
+
+        // fix/completion-via-event: completion_publishes triggers
+        // WorkflowCompletionEvent 直接终止,不需要 ralph#1 输出 LOOP_COMPLETE 字符串。
+        // 检测 supervisor 的"最终 states 全部 done"输出作为清洁收敛信号:
+        //   [supervisor] final states:
+        //     - ralph#1: done
+        //     - worker#N: done
+        // 配合 max_iterations/max_runtime 没有 hit,即代表 WorkflowCompletionEvent 触发。
+        if normalized.contains("[supervisor] final states:") {
+            // 排除 max_iterations / max_runtime 路径:
+            //   - max_iterations: ralph#1 仍可能 running,且 stderr 通常报 "max iterations"
+            //   - max_runtime: supervisor 会显式报 "reached max runtime"
+            let reached_max_iter = normalized.contains("max iterations")
+                || normalized.contains("MaxIterations")
+                || normalized.contains("max_iterations reached");
+            let reached_max_runtime = normalized.contains("max runtime")
+                || normalized.contains("reached max runtime")
+                || normalized.contains("MaxRuntime");
+            if !reached_max_iter && !reached_max_runtime {
+                return Some("LOOP_COMPLETE".to_string());
+            }
         }
 
         if normalized.contains("max iterations") || normalized.contains("max-iterations") {
