@@ -80,3 +80,34 @@
 ### 触发条件
 - 用户提供 API key + 装 kiro 后
 - 或用户显式调用 `$continuous-learning 解 e2e-live-convergence-issue` 时执行
+
+### 2026-08-15: minimax live e2e 重跑 (post-sync verification)
+
+**来源**: sync/origin-v2.10.1 收尾时的 B verification 步骤失败
+
+**现象**:
+- `RALPH_E2E_CODEX_PROFILE=minimax cargo run -p ralph-e2e -- codex --filter parallel-emit-spawn-instance`
+- 失败断言: LOOP_COMPLETE / spawn.done / agents snapshot / ralph#1 last_input.topic == spawn.done
+- 实际 stdout 报 minimax API 高负载: `Reconnecting... 1/5 → 5/5 → internalServerError: high demand`
+- ralph#1 第一轮 turn 没产出任何 structured event → supervisor timeout 退出
+
+**分析**:
+- **不是 sync 引入的回归**:
+  - sync/origin-v2.10.1 只改 `hats.rs` (+363 行) + `event_loop_ralph.rs` (+6 行) + 纯 docs
+  - 都没动 `event_loop` 主路径 / supervisor / starting_event 处理
+  - minimax profile yaml 配置正确注入 `-p minimax -m gpt-5.5`
+- **是 minimax provider 临时基础设施问题**:
+  - 2026-08-14 同一 scenario 跑通(commit `abe3c913`)
+  - 2026-08-15 minimax API 当前高负载,retry 5 次后放弃
+
+**待执行**:
+- minimax API 恢复稳定后重跑:
+  ```bash
+  RALPH_E2E_CODEX_PROFILE=minimax cargo run -p ralph-e2e -- codex --filter parallel-emit-spawn-instance --keep-workspace
+  ```
+- 期望: PASS (对照 2026-08-14 的成功结果)
+- 如果重跑也失败: 进一步诊断 → 升级到 `docs/solutions/` formal capture
+
+**触发条件**:
+- minimax API 高负载缓解后 (任何时间)
+- 或用户显式调用 `$verify sync/origin-v2.10.1` 时执行
