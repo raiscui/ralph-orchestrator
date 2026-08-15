@@ -1108,3 +1108,42 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - 2.6 + 2.2 是 low-stakes 选项,可以快速过一遍
 - 真正要做完 sync,需要专门的 PR 重写 (Group 4 rewrite),不是 cherry-pick
 
+
+## [2026-08-15 22:25:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] B verification 状态
+
+### 结果: ⚠️ minimax live e2e 跑通框架,但 spawn.done 未触发
+
+### 根因分析
+- 失败断言: LOOP_COMPLETE / spawn.done / agents snapshot / ralph#1 last_input.topic
+- 实际 stdout 显示 minimax provider API 在 retry 后报错:
+  ```
+  Reconnecting... 1/5 ... 5/5
+  internalServerError: "We're currently experiencing high demand, which may cause temporary errors."
+  willRetry: false
+  ```
+- 这是 **minimax provider 临时高负载**(上游容量问题),不是 sync 引入的回归
+- sync 改的代码路径:
+  - ADR-0001 (纯 docs)
+  - hats.rs +363 行 (`hats validate --instructions`)
+  - event_loop_ralph.rs +6 行 (test fixture isolation)
+- 都没有动 `event_loop` 主路径 / supervisor / starting_event 处理
+- 因此 minimax 上游 API 过载导致 ralph#1 第一轮 turn 没产出任何 structured event → supervisor timeout 退出
+
+### 结论
+- **sync/origin-v2.10.1 的代码改动没有引入回归**
+- minimax profile 路径仍然正确(从 yaml 配置和 codex CLI args 看,`-p minimax -m gpt-5.5` 正确注入)
+- 验证失败的原因完全是外部基础设施问题,不是 sync 问题
+
+### 建议
+- minimax API 恢复稳定后重跑 `parallel-emit-spawn-instance` 应该会过(对照昨天 2026-08-14 的 PASS)
+- 如果反复失败,记录到 LATER_PLANS 跟踪
+
+### sync/origin-v2.10.1 收尾状态
+- ✅ ADR-0001 创建 + 钉策略
+- ✅ 2 个低风险 cherry-pick 落地(ee9fa67 + cf0ec8d)
+- ✅ 6 个 cherry-pick 决策有据归档(3 modify/delete + 3 架构冲突)
+- ✅ P3 audit verification
+- ✅ cargo test --workspace 全绿
+- ⚠️ Live e2e 未通过(原因:外部 minimax API 过载,非代码回归)
+- ✅ Branch 已 squash merge 到 main + 已删除
+
