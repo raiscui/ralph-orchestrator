@@ -134,3 +134,51 @@
 - 不再重复重跑直到 minimax provider 状态变化
 - 下次手动触发时:先用一个轻量 minimax probe (例如 `codex -p minimax exec -m gpt-5.5 'say hi'`)验证 provider 是否可用,再跑完整 e2e
 
+
+### 2026-08-15 22:48: 第三次重跑结果 (Re-run #2 with MiniMax-M3)
+
+**根因修正**: minimax provider 一直可用,之前失败是因为 yaml 默认 `{model}` 占位符展开为 `gpt-5.5`(代码常量 `DEFAULT_RALPH_E2E_CODEX_MODEL = "gpt-5.5"`),minimax 没这个模型。错误信息被 minimax provider 包装成 "high demand"。
+
+**修复**: `RALPH_E2E_CODEX_MODEL=MiniMax-M3` 环境变量覆盖。
+
+**结果**: ⚠️ 仍 fail,但**根本问题变了**
+
+**事件流**(部分成功):
+- 14:47:58 task.start → ralph#1 running
+- 14:48:23 ralph#1 spawns **worker#2 (dynamic)** ✓
+- 14:48:23 spawn.task published ✓
+- 14:48:36 worker#2 done, publishes **spawn.done** ✓
+- 14:48:36 ralph#1 receives spawn.done, last_input.topic = "spawn.done" ✓
+- 14:49:45 ralph#1 idle (presumably after processing spawn.done)
+- 14:49:58 max_runtime_seconds=120 reached → supervisor_shutdown
+
+**Topic summary**:
+- 17 runtime.lifecycle
+- 3 runtime.delivery
+- 1 spawn.task
+- 1 spawn.done
+- 1 coordinator.no_event_first_turn
+
+**关键进步(对比 Re-run #1)**:
+- ✅ `spawn.task` 事件**真正 publish**了(Re-run #1 是 0)
+- ✅ **dynamic worker#2 被 spawn 出来了**(Re-run #1 是 0)
+- ✅ `spawn.done` 事件**真正 publish**了(Re-run #1 是 0)
+- ✅ agents.json 显示 `completed_dynamic_instances: [{instance_id: worker#2, last_input.topic: spawn.task, retirement_reason: dynamic_instance_unregistered_after_done}]`
+
+**剩余失败原因**(只剩这一条):
+- ✗ ralph#1 收到 spawn.done 后,**没有 emit LOOP_COMPLETE**,直接 idle
+- 测试 yaml 期望:ralph#1 收到 spawn.done → 立即 emit LOOP_COMPLETE → supervisor 终止
+- 实际:ralph#1 idle 25 秒 (14:48:36 → 14:49:45),然后被 max_runtime 强杀
+- **这是 MiniMax-M3 模型行为问题**(模型"lazy",收到事件后没强制 emit completion promise),不是 sync 回归
+
+**结论**:
+- sync/origin-v2.10.1 没破坏 minimax profile path
+- 动态 spawn 链路完全工作:ralph#1 → spawn.task → worker#2 → spawn.done → ralph#1
+- 唯一缺口:ralph#1 收到 spawn.done 后没有按 prompt 协议 emit LOOP_COMPLETE
+- 这是 MiniMax-M3 模型行为漂移(2026-08-14 同一 scenario 46.9s PASS,今天 120s timeout),不是 sync 引起
+
+**下一步可考虑**:
+- 强化 emit-spawn-instance.yaml 的 ralph_prompt,显式要求 "收到 spawn.done 后 MUST emit LOOP_COMPLETE"
+- 或者尝试不同模型(`gpt-5-mini` 等)看是否行为更稳定
+- 不在本次 sync 工作范围
+
