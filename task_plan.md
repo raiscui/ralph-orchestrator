@@ -951,3 +951,32 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - 升级到 docs/solutions/ formal capture (含 minimax provider 不兼容 flags 的发现)
 - 其它 live 场景也用 minimax 重跑验证 (steer-multi-turn-live 等)
 - app-server 模式 minimax profile 验证 (codex app-server 不支持 --profile, 待 codex CLI 更新)
+
+## [2026-08-15 09:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 行动计划] $grill-with-docs: 整体规划跟 origin/main 的整合
+
+### 上下文
+- 用户指令: "对比 origin/main, 当前分支有什么值得跟进的吗" + "这些我觉得都可以一起都做了, 你来整体安排规划一下"
+- 上一轮已识别 14 个候选 cherry-pick 项, 用户要求整体规划 (不是单条 cherry-pick)
+- 触发 skill: $grill-with-docs (grilling + domain-modeling 组合)
+
+### Fact-finding 已完成
+- 当前 main 跟踪 my/main, 与 origin/main 分叉:
+  - my/main 独有: 209 commits
+  - origin/main 独有: 248 commits
+- 596 个源文件在两侧都有修改 (true overlap)
+- 两侧 diff 都是 ~109K +/- 109K lines, 对称分歧
+- 0 个文件是单侧独有 (所有文件都两边动过)
+- 我们的 fork 删除了 kiro/claude/opencode/amp/gemini 的 fixture+preset (0ee6434), upstream 加了 Forge backend (2cfe7c9) + robot RPC domain (6972444)
+
+### 工作清单
+- [ ] Round 1: 整合策略选型 (merge / rebase / cherry-pick+replay / 选停)
+- [ ] Round 2: 高优先级 cherry-pick 顺序 (a4b6d45 / 246336f / ee9fa67 / 01dd250 / 0b61a78)
+- [ ] Round 3: 新 feature 接纳策略 (Forge / robot RPC / telemetry)
+- [ ] Round 4: 文档 / CONTEXT.md / ADR 同步
+- [ ] Round 5: 验证策略 (回归测试 + live harness)
+
+### 关键约束
+- 必须保留已 push 的 my/main history (用户偏好)
+- 整合不能引入新依赖 (除非明确要求)
+- 验收: cargo test 全过 + 至少一个 live 场景用 minimax profile 跑通
+
