@@ -1198,3 +1198,24 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - crates/ralph-core/src/parallel/supervisor/routing_tests.rs: parallel_default_publishes_injects 测试同上
 - crates/ralph-cli/src/display.rs / ralph-bench / summary_writer: 加新变体分支
 
+
+### ✅ 全部完成 (2026-08-16)
+
+**最终成果**:
+- fix/completion-via-event 分支:4 个 commit
+  - d275c7e6  fix(parallel): complete_publishes triggers WorkflowCompletionEvent termination
+  - 39c4a0df  fix(e2e): update termination detector for parallel completion-via-event path
+  - 3b870dd3  docs(sync): lazy-model completion formal capture + LATER_PLANS update
+- 代码改动: 8 个文件, 296 insertions(+), 17 deletions(-)
+- 新测试: 3 个 (workflow_completion_observed × 2 + 端到端 e2e)
+- 修复测试: 2 个 (integration_capability + parallel_default_publishes_injects)
+- docs/solutions/lazy-model-completion/README.md: formal capture
+
+**live e2e 验证**:
+- 修复前: 120s timeout, 4/7 assertions fail
+- 修复后: 13.7s PASS, 7/7 assertions ✅
+
+**不破坏**:
+- 现有的 completion_promise: "LOOP_COMPLETE" 路径仍然有效 (CompletionPromise)
+- 串行模式不订阅 complete_publishes,无需变更
+- 全 workspace cargo test --workspace -j 2 全绿(648 个 test)
