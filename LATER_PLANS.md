@@ -111,3 +111,26 @@
 **触发条件**:
 - minimax API 高负载缓解后 (任何时间)
 - 或用户显式调用 `$verify sync/origin-v2.10.1` 时执行
+
+### 2026-08-15 22:43: 第二次重跑结果 (Re-run #1)
+
+**结果**: ❌ 仍失败,**根因不变**
+
+**证据**:
+- stdout 显示 minimax provider 重试 5/5 后 `internalServerError`
+- 错误信息:`We're currently experiencing high demand, which may cause temporary errors.`
+- 时长:120.1s (与上次一致,卡在 supervisor_shutdown timeout)
+- events.jsonl topic summary:
+  - 10 runtime.lifecycle
+  - 1 runtime.delivery
+  - 1 coordinator.no_event_first_turn
+
+**结论**:
+- minimax provider 在 2026-08-15 全天持续高负载
+- 两次运行(22:25 和 22:43,间隔 18 分钟)都因同一原因失败
+- 重跑时机不合适:应当在 minimax provider 容量恢复后重试(无法预测具体时间)
+
+**下一步**:
+- 不再重复重跑直到 minimax provider 状态变化
+- 下次手动触发时:先用一个轻量 minimax probe (例如 `codex -p minimax exec -m gpt-5.5 'say hi'`)验证 provider 是否可用,再跑完整 e2e
+
