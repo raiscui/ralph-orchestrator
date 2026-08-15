@@ -167,6 +167,7 @@ pub fn print_termination(
         TerminationReason::ValidationFailure => (RED, "?", "Too many malformed JSONL events"),
         TerminationReason::Stopped => (CYAN, "?", "Manually stopped"),
         TerminationReason::Interrupted => (YELLOW, "?", "Interrupted by signal"),
+        TerminationReason::WorkflowCompletionEvent => (GREEN, "?", "Workflow completion event observed"),
     };
 
     let separator = "-".repeat(58);

@@ -34,6 +34,13 @@ const MEMORIES_SKILL: &str = include_str!("../../../../.claude/skills/ralph-memo
 pub enum TerminationReason {
     /// Completion promise was detected in output.
     CompletionPromise,
+    /// Workflow completion event was observed on the bus
+    /// (`event_loop.complete_publishes` topic published).
+    ///
+    /// Independent of whether the model emitted the completion promise
+    /// string in its output. Acts as a hard termination signal so lazy /
+    /// unreliable models can't hang the loop after the workflow is done.
+    WorkflowCompletionEvent,
     /// Maximum iterations reached.
     MaxIterations,
     /// Maximum runtime exceeded.
@@ -62,7 +69,8 @@ impl TerminationReason {
     /// - 130: User interrupt (SIGINT = 128 + 2)
     pub fn exit_code(&self) -> i32 {
         match self {
-            TerminationReason::CompletionPromise => 0,
+            TerminationReason::CompletionPromise
+            | TerminationReason::WorkflowCompletionEvent => 0,
             TerminationReason::ConsecutiveFailures
             | TerminationReason::LoopThrashing
             | TerminationReason::ValidationFailure
@@ -81,6 +89,7 @@ impl TerminationReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             TerminationReason::CompletionPromise => "completed",
+            TerminationReason::WorkflowCompletionEvent => "completion_event",
             TerminationReason::MaxIterations => "max_iterations",
             TerminationReason::MaxRuntime => "max_runtime",
             TerminationReason::MaxCost => "max_cost",
@@ -1524,5 +1533,6 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::ValidationFailure => "Too many consecutive malformed JSONL events.",
         TerminationReason::Stopped => "Manually stopped.",
         TerminationReason::Interrupted => "Interrupted by signal.",
+        TerminationReason::WorkflowCompletionEvent => "Workflow completion event observed on bus.",
     }
 }

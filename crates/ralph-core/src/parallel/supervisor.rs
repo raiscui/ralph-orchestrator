@@ -114,6 +114,14 @@ pub struct ParallelSupervisor {
     recoverable_failures: HashMap<String, RecoverableFailureSnapshot>,
     first_coordinator_turn_checked: bool,
 
+    /// `complete_publishes` topic observed during current run.
+    ///
+    /// When set, the supervisor will terminate after a drain window.
+    /// Acts as a hard termination signal independent of whether
+    /// the model emits the completion promise string, so lazy /
+    /// unreliable models can't hang the loop after the workflow is done.
+    workflow_completion_observed: bool,
+
     // 路由批次内的“乐观运行态”：
     // - 在同一个 job 输出里可能一次解析出多条事件。
     // - Supervisor 顺序路由这些事件时，无法同时消费 `StateChanged`，因此后续事件可能看不到
@@ -236,6 +244,7 @@ impl ParallelSupervisor {
             child_run_order: Vec::new(),
             recoverable_failures: HashMap::new(),
             first_coordinator_turn_checked: false,
+            workflow_completion_observed: false,
             routing_batch_depth: 0,
             routing_inflight_instances: HashSet::new(),
             dynamic_instances: HashSet::new(),
@@ -576,7 +585,7 @@ impl ParallelSupervisor {
                             let transition_status = transition.status;
                             self.record_recoverable_failure_transition(&instance_id, transition);
                             if Self::is_pending_recoverable_status(transition_status) {
-                                if matches!(termination, Some(TerminationReason::CompletionPromise)) {
+                                if matches!(termination, Some(TerminationReason::CompletionPromise | TerminationReason::WorkflowCompletionEvent)) {
                                     tracing::info!(
                                         instance = %instance_id,
                                         "Recoverable failure appeared during completion drain; reopening supervisor loop"
@@ -611,6 +620,21 @@ impl ParallelSupervisor {
                             for event in &events {
                                 let triggered = self.registry.find_by_trigger(event.topic.as_str());
                                 let _ = self.event_logger.log_event(0, hat_id.as_str(), event, triggered);
+                            }
+
+                            // 硬终止信号：observe `event_loop.complete_publishes` topic
+                            // 同样在 JobCompleted 路径里也要检测 —— 因为 hat 通过 stdout 输出
+                            // `<event topic="spawn.done">...</event>` 形式发布的事件是经由 JobCompleted
+                            // 通道投递的，不是 Published。
+                            if let Some(complete_topic) =
+                                self.config.event_loop.complete_publishes.as_deref()
+                            {
+                                for event in &events {
+                                    if event.topic.as_str() == complete_topic {
+                                        self.workflow_completion_observed = true;
+                                        break;
+                                    }
+                                }
                             }
 
                             let capability_return_events = self
@@ -674,7 +698,7 @@ impl ParallelSupervisor {
                             }
 
                             let stop_spawning =
-                                matches!(termination, Some(TerminationReason::CompletionPromise))
+                                matches!(termination, Some(TerminationReason::CompletionPromise | TerminationReason::WorkflowCompletionEvent))
                                     || completion_lockdown;
 
                             // 将新事件继续路由
@@ -700,6 +724,17 @@ impl ParallelSupervisor {
                             }
 
                             // 迭代上限：以 ralph#1 的 job 完成次数为准（见上方说明）。
+                                                        // 硬终止信号：在迭代上限检查之前,立即检查 workflow_completion_observed
+                            // 这样能保证 complete_publishes 一出现就触发终止,不等下一个 tick。
+                            if self.workflow_completion_observed
+                                && termination.is_none()
+                                && !completion_lockdown
+                            {
+                                self.freeze_pending_on_all_instances();
+                                termination = Some(TerminationReason::WorkflowCompletionEvent);
+                                completion_promise_seen_at = Some(std::time::Instant::now());
+                            }
+
                             if hat_id.as_str() == "ralph" {
                                 ralph_iterations = ralph_iterations.saturating_add(1);
                                 if ralph_iterations >= self.config.event_loop.max_iterations {
@@ -722,9 +757,19 @@ impl ParallelSupervisor {
                                 .event_logger
                                 .log_event(0, hat_id.as_str(), &event, triggered);
 
+                            // 硬终止信号：observe `event_loop.complete_publishes` topic
+                            // (works without depending on whether ralph#1 emits the
+                            // completion promise string).
+                            if let Some(complete_topic) =
+                                self.config.event_loop.complete_publishes.as_deref()
+                                && event.topic.as_str() == complete_topic
+                            {
+                                self.workflow_completion_observed = true;
+                            }
+
                             // completion promise（或 TUI 暂停态）之后不再派生新 job（但仍可落盘，便于排障）。
                             let stop_spawning =
-                                matches!(termination, Some(TerminationReason::CompletionPromise))
+                                matches!(termination, Some(TerminationReason::CompletionPromise | TerminationReason::WorkflowCompletionEvent))
                                     || completion_lockdown;
                             if !stop_spawning {
                                 self.route_event(event).await?;
@@ -743,8 +788,27 @@ impl ParallelSupervisor {
                         break;
                     }
 
-                    // completion_promise drain：给并行实例一个很短的“收尾窗口”，避免同轮输出的事件来不及触发下游。
-                    if matches!(termination, Some(TerminationReason::CompletionPromise))
+                    //                     // 硬终止信号:event_loop.complete_publishes topic 已被观察到。
+                    // - 不依赖 ralph#1 输出 LOOP_COMPLETE 字符串
+                    // - 即使有 pending recoverable failure,也尊重事件层的 workflow completion 语义
+                    //   (recoverable 失败应作为 next run 的诊断,不能阻塞当前 loop 关闭)
+                    if self.workflow_completion_observed
+                        && termination.is_none()
+                        && !completion_lockdown
+                    {
+                        self.freeze_pending_on_all_instances();
+                        termination = Some(TerminationReason::WorkflowCompletionEvent);
+                        completion_promise_seen_at = Some(std::time::Instant::now());
+                    }
+
+                    // completion drain (CompletionPromise | WorkflowCompletionEvent):
+                    // 给并行实例一个很短的"收尾窗口"，避免同轮输出的事件来不及触发下游。
+                    let is_completion_termination = matches!(
+                        termination,
+                        Some(TerminationReason::CompletionPromise
+                             | TerminationReason::WorkflowCompletionEvent)
+                    );
+                    if is_completion_termination
                         && let Some(at) = completion_promise_seen_at
                     {
                         // 最少等一小会儿，避免 race：下游还没来得及把 state 从 Created 切到 Running。
@@ -765,13 +829,13 @@ impl ParallelSupervisor {
                         }
                     }
 
-                    // completion promise 之后进入“收敛态”：
+
+                    // completion termination 之后进入"收敛态"：
                     // - 不再接收/派发任何新事件（包括 external/gate.timeout）
                     // - 只做 drain：等待在跑的 job 自然结束，或 hit completion_drain_max
-                    if matches!(termination, Some(TerminationReason::CompletionPromise)) {
+                    if is_completion_termination {
                         continue;
                     }
-
                     // 1) 读取外部事件（human/工具写入的 JSONL）
                     match external_event_reader.read_new_events() {
                         Ok(parse) => {

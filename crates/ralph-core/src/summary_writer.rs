@@ -135,6 +135,7 @@ impl SummaryWriter {
             TerminationReason::ValidationFailure => "Failed: too many malformed JSONL events",
             TerminationReason::Stopped => "Stopped manually",
             TerminationReason::Interrupted => "Interrupted by signal",
+            TerminationReason::WorkflowCompletionEvent => "Workflow completion event observed on bus",
         }
     }
 
