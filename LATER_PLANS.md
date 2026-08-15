@@ -177,8 +177,16 @@
 - 唯一缺口:ralph#1 收到 spawn.done 后没有按 prompt 协议 emit LOOP_COMPLETE
 - 这是 MiniMax-M3 模型行为漂移(2026-08-14 同一 scenario 46.9s PASS,今天 120s timeout),不是 sync 引起
 
-**下一步可考虑**:
-- 强化 emit-spawn-instance.yaml 的 ralph_prompt,显式要求 "收到 spawn.done 后 MUST emit LOOP_COMPLETE"
-- 或者尝试不同模型(`gpt-5-mini` 等)看是否行为更稳定
-- 不在本次 sync 工作范围
+**✅ 已修复 (2026-08-15 后续)**:
+- 分支: fix/completion-via-event
+- commits: d275c7e6 + 39c4a0df
+- fix/completion-via-event 落地后,parallel-emit-spawn-instance 在 minimax + MiniMax-M3 下
+  13.7s PASS, 7/7 assertions。完整方案见
+  docs/solutions/lazy-model-completion/README.md。
+- 核心改动:complete_publishes topic 升级为 supervisor 硬终止信号
+  (新增 TerminationReason::WorkflowCompletionEvent 变体),不再依赖模型
+  写 LOOP_COMPLETE 字符串。
+
+**历史记录保留**:本条 Re-run #2 之前的诊断仍然有效,作为
+lazy-model hang 现象的初始观察保留。
 
