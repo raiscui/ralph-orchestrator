@@ -1219,3 +1219,45 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - 现有的 completion_promise: "LOOP_COMPLETE" 路径仍然有效 (CompletionPromise)
 - 串行模式不订阅 complete_publishes,无需变更
 - 全 workspace cargo test --workspace -j 2 全绿(648 个 test)
+
+## [2026-08-16 18:00:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] 全部完成
+
+### Session 总结
+
+**初始问题**:用户问"对比 origin/main, 当前分支有什么值得跟进的吗"
+→ 经过 4 轮 $grill-with-docs,产出 sync/origin-v2.10.1 计划
+
+**Phase 1 — sync/origin-v2.10.1 (完成)**:
+- ADR-0001: cherry-pick upstream sync 策略
+- 2 个 cherry-picks 落地: ee9fa67 (hats validate) + cf0ec8d (fixture isolation)
+- 6 个 DROP 决策归档(3 modify/delete + 3 架构冲突)
+- P3 audit verification
+- 分支已 squash merge + 删除
+
+**Phase 2 — fix/completion-via-event (完成, merged to main)**:
+- 问题: minimax live e2e 在 lazy-model (MiniMax-M3) 上 hang 120s
+- 根因: termination 100% 押在模型输出 LOOP_COMPLETE 字符串上
+- 修复: `event_loop.complete_publishes` topic 升级为 supervisor 硬终止信号
+- 新增 `TerminationReason::WorkflowCompletionEvent` 变体
+- 3 个新测试 + 2 个回归测试更新
+- docs/solutions/lazy-model-completion/README.md formal capture
+- 5 个 commit 全部 merged (merge commit preserved history)
+
+**Phase 3 — verification (完成)**:
+- 单元测试: 176 个并行测试全部通过
+- minimax live: parallel-emit-spawn-instance 13.7s + 39.1s 双次 PASS
+
+### 数字
+
+- main 上新增 11 个 commit
+- 代码改动: 8 个文件(真代码)+ 文档 + 任务跟踪
+- 新增 1 个 ADR
+- 新增 1 个 docs/solutions
+- 修改 2 个 test 断言以接受新 termination reason
+
+### 后续(在 LATER_PLANS / 文档中跟踪)
+
+- 串行模式是否需要类似 lazy-model 修复(目前不订阅 complete_publishes,不需要)
+- Wave 3.4 declarative e2e follow-up(declarative coverage 63.93% < 90%, 仍 NO-GO)
+- parallel-hat-instances 的 `--full-auto` 兼容问题(独立 fix,跟本次 fix 无关)
+- minimax API 重跑跟踪(已 superseded by fix)
