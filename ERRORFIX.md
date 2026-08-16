@@ -244,3 +244,60 @@
 ### 验证
 - 修复后 ralph#1 恢复正常(idle/running 交替, app-server 通道工作)
 - demo 用 deepseek 模型仍无法稳定闭环(模型行为漂移: human.message 乱入/审计不完整) — 模型兼容性问题, 非本 bug
+
+## [2026-08-16 13:35:00] [Session ID: omx-1786600320381-z290x9] 错误修复: parallel-hat-instances `--full-auto` minimax 不兼容
+
+### 现象
+- 命令: `RALPH_E2E_CODEX_PROFILE=minimax cargo run -p ralph-e2e -- codex --filter parallel-hat-instances`
+- 失败: codex CLI 拒绝 `--full-auto` flag (minimax provider wrapper 不支持)
+- 影响: parallel-hat-instances + parallel-hat-instances-zh 在 minimax 下不能跑,只能用 default codex account
+
+### 根因
+- `crates/ralph-e2e/scenarios/hat-instances.yaml` line 21 与 `hat-instances-zh.yaml` line 20 残留 `- --full-auto`
+- `--full-auto` 是 OpenAI codex CLI 专属组合 flag (sandbox + ask-for-approval),minimax provider 不识别
+- 历史 task plan (2026-08-14) 已经 work-around 同样问题: emit-spawn-instance.yaml 删 `--full-auto` 替换 `--sandbox danger-full-access`
+- 该 fix 没覆盖 parallel-hat-instances (被标为 "独立 fix, 跟本次 fix 无关")
+
+### 修复
+- 跟 emit-spawn-instance 完全对称:
+  - `sed -i '' 's/        - --full-auto/        - --sandbox\
+        - danger-full-access/'` 在两个 YAML 上
+- 改动范围: 2 文件, 4 insertions, 2 deletions (最小对称 diff)
+- 不动 Rust: code-defined `parallel/hat_instances.rs` 不再注册, declarative YAML 是 source of truth
+
+### 验证
+- `cargo check -p ralph-e2e` 无 error (仅有 296 个无关的 deprecation warning)
+- `cargo run -p ralph-e2e -- --list` 仍列出 parallel-hat-instances + parallel-hat-instances-zh
+- `cargo test -p ralph-e2e --lib -- all_scenario_yamls` 1 passed (YAML schema 验证)
+- 未跑 live: 需要 minimax account 上有 minimax 模型可用 + minimax API 高负载缓解 (后置条件)
+
+### 结论
+- 上一次假设成立: 同样的 `--full-auto` 残留问题, 同样的 `--sandbox danger-full-access` 替代方案
+- 后续类似 bug pattern 已识别: `starting-event-inference.yaml` + `starting-event-inference-multi-candidate.yaml` 仍残留 `--full-auto`, 已在 LATER_PLANS 跟踪
+
+## [2026-08-16 13:45:00] [Session ID: omx-1786600320381-z290x9] 错误修复: starting-event-inference `--full-auto` minimax 不兼容 (平行 fix)
+
+### 现象
+- 同 parallel-hat-instances: minimax provider 不支持 `--full-auto`
+- 影响: `parallel-starting-event-inference` + `parallel-starting-event-inference-multi-candidate` 在 minimax 下不能跑
+
+### 根因
+- 跟前一次 fix (parallel-hat-instances) 同源, 都是 declarative YAML 残留 `--full-auto`
+- 是同一 git commit 周期的 scope 扩展
+
+### 修复
+- 跟前一次 fix 完全对称:
+  - `sed -i '' 's/        - --full-auto/        - --sandbox\
+        - danger-full-access/'` 在两个 YAML 上
+- 改动范围: 2 文件, 4 insertions, 2 deletions (最小对称 diff)
+- 当前 declarative YAML 路径下 `--full-auto` 残留 = 0
+
+### 验证
+- `cargo test -p ralph-e2e --lib -- all_scenario_yamls` 1 passed
+- `cargo run -p ralph-e2e -- --list` 正常列出两个场景
+- `grep -rln "        - --full-auto" crates/ralph-e2e/scenarios/` → 0 (全仓库 YAML 清理干净)
+
+### 结论
+- 上一假设成立: 也是 `--full-auto` 残留, 同一 `--sandbox danger-full-access` 替代方案
+- 后续: Rust code-defined scenarios (dead code) 仍有 `--full-auto` 残留, 但因为不再 Imperative 注册, 实际不会跑
+- 后续可清理: 4 个 Rust 文件 (parallel/hat_instances.rs, emit_spawn_instance.rs, starting_event_inference.rs, mod.rs, parallel_trigger_routing_example.rs) 在 Wave 3.4 物理删除时一并清理

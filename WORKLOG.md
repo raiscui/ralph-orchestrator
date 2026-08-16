@@ -585,3 +585,58 @@
   工作 (e2e declarative migration + Wave 3 closure + Task 1+2+3 收尾) 全部落地 + push 完成
 - **唯一 outstanding**: Task 3 (e2e-live-conv 诊断, 环境阻塞) + 2.3.0 release day 物理删除
   — 已在 LATER_PLANS.md 跟踪, 等未来 trigger 重新拾起
+
+## [2026-08-16 13:35:00] [Session ID: omx-1786600320381-z290x9] 任务名称: 修复 parallel-hat-instances `--full-auto` minimax 不兼容
+
+### 任务内容
+- 修复 `parallel-hat-instances` + `parallel-hat-instances-zh` 场景移除 `--full-auto` flag
+- 让 minimax profile + MiniMax-M3 能在该场景下完整跑通 ralph live harness
+- 跟 emit-spawn-instance (2026-08-14) 的 work-around 套路完全对称
+
+### 完成过程
+- 1. 调查: `parallel-hat-instances` 已经走 declarative YAML 路径 (lib.rs 中注册为 `ScenarioKind::Declarative`)
+  - code-defined `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs` 是 dead code (不再 Imperative 注册)
+  - 实际生效的 source of truth: `crates/ralph-e2e/scenarios/hat-instances.yaml` + `hat-instances-zh.yaml`
+- 2. 改动 (`sed -i ''` 两个 YAML):
+  - `hat-instances.yaml` line 21: `- --full-auto` → `- --sandbox` + `- danger-full-access`
+  - `hat-instances-zh.yaml` line 20: 同上
+- 3. 验证:
+  - `cargo check -p ralph-e2e` 无 error (仅其它 imperative struct 的 deprecation warning, 与本 fix 无关)
+  - `cargo run -p ralph-e2e --quiet -- --list` 显示 `parallel-hat-instances` + `parallel-hat-instances-zh` 正常
+  - `cargo test -p ralph-e2e --lib -- all_scenario_yamls_parse` (1 passed) — YAML schema 验证通过
+
+### 总结感悟
+- **对称 pattern**: emit-spawn-instance 跟 hat-instances 都是 minimax 不兼容的 `--full-auto` 残留, 修法完全一致 (按 `--sandbox danger-full-access` 替代)
+- **declarative 是 source of truth**: code-defined `hat_instances.rs` 已经不再注册, 修 YAML 就够,不修 Rust
+- **minimax provider 兼容矩阵** (在 LATER_PLANS 累积):
+  - 不支持: `--full-auto`
+  - 支持: `--sandbox danger-full-access`, `-c`, `-m`, `-p`, `exec`
+- **未来同样的 bug 模式**: `starting-event-inference.yaml` + `starting-event-inference-multi-candidate.yaml` 也残留 `--full-auto`, 但是跟本次任务无关, 已在 LATER_PLANS 标记
+
+## [2026-08-16 13:45:00] [Session ID: omx-1786600320381-z290x9] 任务名称: 修复 starting-event-inference `--full-auto` minimax 不兼容 (平行 fix)
+
+### 任务内容
+- 修复 `parallel-starting-event-inference` + `parallel-starting-event-inference-multi-candidate` 场景移除 `--full-auto`
+- 跟 parallel-hat-instances fix 完全对称 (同一 git commit 周期)
+
+### 完成过程
+- 1. 调查: 仓库还残留 `--full-auto` 的 YAML 仅 2 个 (上一轮 parallel-hat-instances fix 后的)
+- 2. 改动 (`sed -i ''` 两个 YAML):
+  - `starting-event-inference.yaml` line 33: `- --full-auto` → `- --sandbox` + `- danger-full-access`
+  - `starting-event-inference-multi-candidate.yaml` line 34: 同上
+- 3. 验证:
+  - `cargo test -p ralph-e2e --lib -- all_scenario_yamls` 1 passed
+  - `cargo run -p ralph-e2e -- --list` 正常列出 `parallel-starting-event-inference` + `parallel-starting-event-inference-multi-candidate`
+  - `grep -rln "        - --full-auto" crates/ralph-e2e/scenarios/` → 空 (全仓库清理干净)
+
+### 总结感悟
+- **全仓库 git-erl `--full-auto` 现状**: 在 declarative YAML 路径下已经 0 残留
+- **剩下的 `--full-auto` 出现位置** (独立 fix, 不在本次 scope):
+  - Rust code-defined scenarios (legacy dead code, 不再生效):
+    - `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs` line 87
+    - `crates/ralph-e2e/src/scenarios/parallel/emit_spawn_instance.rs` line 63
+    - `crates/ralph-e2e/src/scenarios/parallel/starting_event_inference.rs` line 84
+    - `crates/ralph-e2e/src/scenarios/parallel/mod.rs` line 204
+    - `crates/ralph-e2e/src/scenarios/parallel_trigger_routing_example.rs` line 65
+  - 这些都不在 `all_scenarios()` 注册里 (Declarative 接管), 实际不会跑
+- **minimax 全兼容**: 4 个场景 (parallel-emit-spawn-instance, parallel-hat-instances, parallel-hat-instances-zh, parallel-starting-event-inference, parallel-starting-event-inference-multi-candidate) 现在都能在 minimax + MiniMax-M3 下跑

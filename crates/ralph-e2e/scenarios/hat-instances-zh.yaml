@@ -17,7 +17,8 @@ setup:
         {profile_args}
         - -m
         - {model}
-        - --full-auto
+        - --sandbox
+        - danger-full-access
         # 降低推理强度/总结输出（避免 E2E 噪音与延迟）。
         - -c
         - 'model_reasoning_effort="low"'

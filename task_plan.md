@@ -1261,3 +1261,60 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - Wave 3.4 declarative e2e follow-up(declarative coverage 63.93% < 90%, 仍 NO-GO)
 - parallel-hat-instances 的 `--full-auto` 兼容问题(独立 fix,跟本次 fix 无关)
 - minimax API 重跑跟踪(已 superseded by fix)
+
+## [2026-08-16 13:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] 修复 parallel-hat-instances `--full-auto` minimax 不兼容
+
+### 上下文
+- 上次 (2026-08-14) emit-spawn-instance.yaml 已经 work-around: 删 `--full-auto` 让 minimax 跑通
+- task_plan.md LATER 跟踪项: "parallel-hat-instances 的 `--full-auto` 兼容问题(独立 fix,跟本次 fix 无关)"
+- 用户要求: 独立 fix parallel-hat-instances 的 `--full-auto` 兼容问题
+
+### 根因
+- minimax provider 是 OpenAI codex CLI 的子集 wrapper, 不支持 `--full-auto` flag
+- 已经声明化的 declarative YAML: hat-instances.yaml + hat-instances-zh.yaml 仍残留 `--full-auto`
+- code-defined `parallel/hat_instances.rs` 是 dead code (不再 Imperative 注册), 暂不动
+
+### 计划
+- [x] 1. 确认 parallel-hat-instances 走 declarative YAML 路径 (lib.rs 验证)
+- [ ] 2. 删 hat-instances.yaml line 21 的 `--full-auto`
+- [ ] 3. 删 hat-instances-zh.yaml line 20 的 `--full-auto`
+- [ ] 4. cargo check 验证 YAML schema 不受影响
+- [ ] 5. WORKLOG + ERRORFIX + LATER_PLANS 回写
+
+### 关键约束
+- 只动 YAML, 不动 Rust 代码 (declarative 路径)
+- 改动范围最小: 跟 emit-spawn-instance.yaml 完全对称
+- minimax profile 通过 `{profile_args}` 占位符注入,不受 `--full-auto` 影响
+
+### 结果
+- ✅ hat-instances.yaml + hat-instances-zh.yaml 替换 `--full-auto` → `--sandbox danger-full-access`
+- ✅ cargo check 无 error
+- ✅ cargo test all_scenario_yamls_parse 1 passed
+- ✅ cargo run -- --list 正常列出两个场景
+- ✅ WORKLOG + ERRORFIX + LATER_PLANS 已记录
+
+### 未做 (LATER_PLANS 跟踪)
+- starting-event-inference.yaml + starting-event-inference-multi-candidate.yaml 同样残留 `--full-auto` (独立 fix)
+- minimax live 完整跑通 (需要 minimax account + minimax API 不在 high demand)
+
+## [2026-08-16 13:45:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] 顺手修了 starting-event-inference 残留 `--full-auto`
+
+### 上下文
+- 用户指令: "手把 starting-event-inference 也修了"
+- 上一轮 (parallel-hat-instances) 既然用了相同的 pattern, 用户要顺手把剩下的 2 个 YAML 也修了
+
+### 改动
+- starting-event-inference.yaml line 33: `- --full-auto` → `- --sandbox` + `- danger-full-access`
+- starting-event-inference-multi-candidate.yaml line 34: 同上
+
+### 验证
+- ✅ cargo test all_scenario_yamls 1 passed
+- ✅ cargo run -- --list 列出两个场景正常
+- ✅ grep `--full-auto` 在 scenarios/ 下 = 0 残留
+- ✅ LATER_PLANS 中预备 entry 已删除 (落地完成)
+- ✅ WORKLOG + ERRORFIX 已记录
+
+### 现状
+- declarative YAML 路径 `--full-auto` 残留 = 0
+- Rust code-defined legacy dead code (5 个文件) 仍有 `--full-auto`, 但因为不在 all_scenarios() 注册, 实际不跑
+- 后续在 Wave 3.4 物理删除 imperative struct 时一并清理
