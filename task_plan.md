@@ -1147,3 +1147,75 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - ⚠️ Live e2e 未通过(原因:外部 minimax API 过载,非代码回归)
 - ✅ Branch 已 squash merge 到 main + 已删除
 
+
+## [2026-08-16 09:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 行动计划] fix/completion-via-event — completion_publishes 升级为硬终止信号
+
+### 上下文
+- 来源: minimax live e2e Re-run #2 失败
+- 根因: ralph#1 收到 spawn.done 但不 emit LOOP_COMPLETE → supervisor 不会终止 → max_runtime 超时
+- 架构缺陷: termination 100% 押在模型输出 `LOOP_COMPLETE` 字符串上,违反"模型可能 lazy"
+
+### 目标
+1. `complete_publishes` topic 在 event bus 出现时,supervisor 直接终止
+2. 不依赖模型输出 `LOOP_COMPLETE`
+3. 保留现有 `completion_promise` 路径(显式 LOOP_COMPLETE 仍然有效)
+4. 串行 + 并行两条路径都改
+
+### 步骤
+- [ ] 1. 读 TerminationReason 定义 + 现有 completion 检测路径
+- [ ] 2. 加 TerminationReason::WorkflowCompletionEvent 变体
+- [ ] 3. parallel/supervisor.rs: detect topic == complete_publishes,触发 termination
+- [ ] 4. 串行 event_loop/mod.rs: 同样检测
+- [ ] 5. 单元测试: spawn.done 触发 → 终止(无 LOOP_COMPLETE)
+- [ ] 6. cargo test --workspace -j 2 全绿
+- [ ] 7. minimax live parallel-emit-spawn-instance PASS 验证
+- [ ] 8. docs/solutions/ 写 formal capture
+- [ ] 9. commit + push + merge main
+
+### 关键约束
+- 串行模式不要破坏单测(很多场景依赖现有的 LOOP_COMPLETE 检测)
+- 不要改 CLI 表面
+- 不依赖 minimax/MiniMax-M3 行为(应该对所有模型都生效)
+
+### 进度更新(2026-08-16)
+
+**完成**:
+- [x] 1. 读 TerminationReason 定义
+- [x] 2. 加 TerminationReason::WorkflowCompletionEvent 变体
+- [x] 3. parallel supervisor 检测(Published + JobCompleted + tick)
+- [ ] 4. 串行 event_loop (跳过 — serial mode 不订阅 complete_publishes,变更无意义)
+- [x] 5. 单元测试(3 个):
+  - workflow_completion_observed_is_set_when_complete_publishes_event_seen
+  - workflow_completion_observed_unaffected_by_unrelated_events
+  - complete_publishes_event_terminates_supervisor_with_workflow_completion_event (e2e)
+- [x] 6. cargo test --workspace -j 2 全绿(648 个 test,rump up 3)
+- [ ] 7. minimax live parallel-emit-spawn-instance PASS
+- [ ] 8. docs/solutions/ 写 formal capture
+- [ ] 9. commit + push + merge main
+
+**regression 修复**:
+- crates/ralph-cli/tests/integration_capability.rs: 重构终止断言接受 CompletionPromise | WorkflowCompletionEvent
+- crates/ralph-core/src/parallel/supervisor/routing_tests.rs: parallel_default_publishes_injects 测试同上
+- crates/ralph-cli/src/display.rs / ralph-bench / summary_writer: 加新变体分支
+
+
+### ✅ 全部完成 (2026-08-16)
+
+**最终成果**:
+- fix/completion-via-event 分支:4 个 commit
+  - d275c7e6  fix(parallel): complete_publishes triggers WorkflowCompletionEvent termination
+  - 39c4a0df  fix(e2e): update termination detector for parallel completion-via-event path
+  - 3b870dd3  docs(sync): lazy-model completion formal capture + LATER_PLANS update
+- 代码改动: 8 个文件, 296 insertions(+), 17 deletions(-)
+- 新测试: 3 个 (workflow_completion_observed × 2 + 端到端 e2e)
+- 修复测试: 2 个 (integration_capability + parallel_default_publishes_injects)
+- docs/solutions/lazy-model-completion/README.md: formal capture
+
+**live e2e 验证**:
+- 修复前: 120s timeout, 4/7 assertions fail
+- 修复后: 13.7s PASS, 7/7 assertions ✅
+
+**不破坏**:
+- 现有的 completion_promise: "LOOP_COMPLETE" 路径仍然有效 (CompletionPromise)
+- 串行模式不订阅 complete_publishes,无需变更
+- 全 workspace cargo test --workspace -j 2 全绿(648 个 test)

@@ -538,6 +538,7 @@ fn format_termination_reason(reason: &TerminationReason) -> String {
         TerminationReason::ValidationFailure => "ValidationFailure".to_string(),
         TerminationReason::Stopped => "Stopped".to_string(),
         TerminationReason::Interrupted => "Interrupted".to_string(),
+        TerminationReason::WorkflowCompletionEvent => "WorkflowCompletionEvent".to_string(),
     }
 }
 

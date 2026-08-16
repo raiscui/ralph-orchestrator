@@ -606,8 +606,9 @@ fn tools_capability_invoke_workflow_execute_records_child_session_dogfood() -> R
         .as_str()
         .context("result summary")?;
     assert!(
-        result_summary.contains("termination=CompletionPromise"),
-        "workflow result summary should report termination, got: {result_summary}"
+        result_summary.contains("termination=CompletionPromise")
+            || result_summary.contains("termination=WorkflowCompletionEvent"),
+        "workflow result summary should report completion termination, got: {result_summary}"
     );
     assert!(
         result_summary.contains("workflow.complete"),
@@ -631,14 +632,25 @@ fn tools_capability_invoke_workflow_execute_records_child_session_dogfood() -> R
     );
 
     let child_record_session = fs::read_to_string(&child_record_session_path)?;
+    // Termination reason:
+    // - 旧路径: ralph#1 输出 LOOP_COMPLETE 字符串 → CompletionPromise
+    // - 新路径(fix/completion-via-event): `complete_publishes` topic 触发 WorkflowCompletionEvent
+    // 任一皆可,只要不是 MaxRuntime / Interrupted。
+    let has_completion_termination = child_record_session.contains("CompletionPromise")
+        || child_record_session.contains("WorkflowCompletionEvent");
+    assert!(
+        has_completion_termination,
+        "child record-session should contain a completion termination reason (CompletionPromise or WorkflowCompletionEvent):\n{child_record_session}"
+    );
+    assert!(
+        child_record_session.contains("_meta.termination"),
+        "child record-session should contain `_meta.termination`:\n{child_record_session}"
+    );
     for needle in [
-        "_meta.termination",
-        "CompletionPromise",
         "build.task",
         "build.done",
         "confession.clean",
         "workflow.complete",
-        "LOOP_COMPLETE",
     ] {
         assert!(
             child_record_session.contains(needle),
