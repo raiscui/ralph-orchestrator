@@ -1318,3 +1318,42 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - declarative YAML 路径 `--full-auto` 残留 = 0
 - Rust code-defined legacy dead code (5 个文件) 仍有 `--full-auto`, 但因为不在 all_scenarios() 注册, 实际不跑
 - 后续在 Wave 3.4 物理删除 imperative struct 时一并清理
+
+## [2026-08-16 23:15:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] minimax live E2E 验证 — 4/4 PASSED
+
+### 结果
+- ✅ parallel-hat-instances (72.8s)
+- ✅ parallel-hat-instances-zh (53.6s)
+- ✅ parallel-starting-event-inference (54.7s)
+- ✅ parallel-starting-event-inference-multi-candidate (47.2s)
+- 总耗时: 228.4s (2 batches)
+
+### 凭据
+- 4 个 workspace 在 `.e2e-tests/` 保留 (events.jsonl 都含完整 lifecycle)
+- minimax provider 稳定 (没遇到 2026-08-15 的 high demand)
+- 修复从 yaml 改动 → commit (e2977175) → push (my/main) → live 验证 全链路闭环
+
+### 落地状态
+- ✅ deliverable: 4 个 declarative YAML 兼容 minimax
+- ✅ evidence: live E2E 4/4 PASSED
+- ✅ LATER_PLANS "minimax live 完整跑通" 项目可以划掉
+- 后续: 写 docs/solutions/ formal capture (待用户触发)
+
+## [2026-08-16 23:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] docs/solutions/minimax-full-auto-compat/ 落地
+
+### 结果
+- ✅ docs/solutions/minimax-full-auto-compat/README.md (140 行)
+- ✅ AGENTS.md Project Knowledge Index 加 1 条
+- ✅ 模板跟 lazy-model-completion 对称
+
+### 关键内容
+- minimax provider flag 兼容矩阵 (实测)
+- 5 个 YAML 场景踩坑清单 (含 emit-spawn-instance 早期 work-around)
+- 4 阶段验证 (cargo check + yaml schema + list + minimax live)
+- minimax live 4/4 PASSED 详细结果表
+- 后续: 5 个 Rust code-defined legacy 文件 + Wave 3.4 关联
+
+### 现状
+- minimax `--full-auto` 知识已经沉淀到长期 docs
+- 任何后续写 minimax declarative YAML 都能查到
+- AGENTS.md 是发现机制入口

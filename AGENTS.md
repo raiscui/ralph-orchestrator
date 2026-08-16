@@ -27,6 +27,8 @@
 - `.codex/skills/self-learning.ralph-agent-cli-recoverable-failure-retry/SKILL.md`: Recoverable agent CLI failure retry playbook; use when debugging 429 / `exceeded retry limit`, `.ralph/recoverable-failures.jsonl`, manual continue, agents snapshot, record summary, or Evidence Inspect recoverable lifecycle states.
 - `archive/manifests/`: Archive batch manifests for six-file context moves; read the relevant manifest before reopening an archived branch context under `archive/branch_contexts/<topic>/`.
 - `docs/solutions/documentation-gaps/declarative-scenario-migration.md`: Q3 2026 Wave 2 (21 imperative → declarative migrations, Coverage 65%→100%) 的迁移套路综合指南; 6 个 schema 字段映射 patterns + dropped 决策 rubric + setup 字段映射 + audit 反预期 workflow + 验证 checklist。读这个再开始新的 declarative migration。
+- `docs/solutions/minimax-full-auto-compat/README.md`: minimax provider (OpenAI codex CLI 子集 wrapper) 不支持 `--full-auto` flag，必须替换成 `--sandbox danger-full-access`。含 5 个 YAML 场景踩坑清单 + minimax 兼容 flag 矩阵 + minimax live E2E 4/4 PASSED 凭据。读这个再写新的走 minimax profile 的 declarative YAML 场景。
+- `docs/solutions/lazy-model-completion/README.md`: parallel completion-via-event — ralph#1 收到 complete_publishes topic 后不再依赖写 LOOP_COMPLETE 字符串，由 supervisor 主动检测并产生硬终止信号 (新增 TerminationReason::WorkflowCompletionEvent)。修复 lazy model hang (minimax + MiniMax-M3)。读这个再改 supervisor 终止逻辑。
 - `.codex/skills/self-learning.yaml-schema-or-vs-and-semantics/SKILL.md`: 命令式 OR 断言 (`A || B`) 不能拆 2 个独立 schema 字段 (runner AND 压扁 OR); 单字段保留 OR 或 OR 折 AND 都要在 YAML 注释说明。
 - `.codex/skills/self-learning.yaml-duplicate-field-bug/SKILL.md`: Vec<Vec<T>> 字段在 YAML 顶层不能写多个同名 key (serde_yaml duplicate field); 写完每个 YAML 立刻跑 `cargo run -p ralph-e2e -- --list` 验证, 不要依赖 `cargo test --lib`。
 

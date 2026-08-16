@@ -640,3 +640,66 @@
     - `crates/ralph-e2e/src/scenarios/parallel_trigger_routing_example.rs` line 65
   - 这些都不在 `all_scenarios()` 注册里 (Declarative 接管), 实际不会跑
 - **minimax 全兼容**: 4 个场景 (parallel-emit-spawn-instance, parallel-hat-instances, parallel-hat-instances-zh, parallel-starting-event-inference, parallel-starting-event-inference-multi-candidate) 现在都能在 minimax + MiniMax-M3 下跑
+
+## [2026-08-16 23:15:00] [Session ID: omx-1786600320381-z290x9] 任务名称: minimax live E2E 验证 (post-fix 凭据)
+
+### 任务内容
+- 用 minimax + MiniMax-M3 跑 4 个 declarative parallel scenarios, 验证 `--sandbox danger-full-access` 替代 `--full-auto` 实际落地
+- 拿到 live evidence, 划掉 LATER_PLANS 那条 "minimax live 完整跑通"
+
+### 跑通结果 (minimax + MiniMax-M3)
+
+#### Batch 1: parallel-hat-instances*
+- ✅ parallel-hat-instances (72.8s)
+- ✅ parallel-hat-instances-zh (53.6s)
+- 总耗时: 126.5s, 2 passed
+
+#### Batch 2: parallel-starting-event-inference*
+- ✅ parallel-starting-event-inference (54.7s)
+- ✅ parallel-starting-event-inference-multi-candidate (47.2s)
+- 总耗时: 101.9s, 2 passed
+
+### Workspace 证据
+- `.e2e-tests/parallel-hat-instances/` (events.jsonl: 60 lines, 3 build.task / 2 build.done / 1 test.done / 1 routing.escalate)
+- `.e2e-tests/parallel-hat-instances-zh/`
+- `.e2e-tests/parallel-starting-event-inference/`
+- `.e2e-tests/parallel-starting-event-inference-multi-candidate/`
+
+### 关键观察
+- minimax provider 仍稳定 (没遇到 2026-08-15 的 high demand)
+- MiniMax-M3 对 `routing.escalate` 收尾信号处理正确
+- 4 个场景累计 ~228s 在 minimax 上跑通, 证明 --sandbox danger-full-access 是 minimax 兼容的等价替代
+
+### 累计验收
+- ✅ code 检查通过 (cargo check)
+- ✅ YAML schema 验证 (all_scenario_yamls_parse 1 passed)
+- ✅ minimax live 实证 (4/4 scenarios PASSED)
+- ✅ 提交 + push 落地 (commit e2977175 on my/main)
+
+## [2026-08-16 23:30:00] [Session ID: omx-1786600320381-z290x9] 任务名称: docs/solutions/minimax-full-auto-compat/ formal capture
+
+### 任务内容
+- 用户指令: "minimax-full-auto-compat 怎么做"
+- 把 minimax `--full-auto` 修复 + minimax live 验证证据固化成 formal capture
+- 模板: 跟 `docs/solutions/lazy-model-completion/README.md` 对称
+
+### 完成过程
+- 1. 调查: 已有 `docs/solutions/` 目录下两个目录 (lazy-model-completion, documentation-gaps)
+  - lazy-model-completion 用 frontmatter + 现象/根因/修复/改动/验证/兼容性/后续结构
+  - 我按这个模板写
+- 2. 创建:
+  - `docs/solutions/minimax-full-auto-compat/README.md` (140 行)
+  - 含: 现象表格 + 根因 (minimax wrapper 不透传组合 flag) + 修复 diff + minimax flag 兼容矩阵 + 改动清单 + 4 阶段验证 + minimax live E2E 详细结果 + 兼容性 + 后续 (5 个 Rust legacy 文件 + Wave 3.4 关联)
+- 3. 索引更新:
+  - `AGENTS.md` Project Knowledge Index 加一条: minimax-full-auto-compat README
+  - 加在 `declarative-scenario-migration.md` 后面 (顺序: 最近的修复在最下)
+- 4. 关键设计决策:
+  - minimax flag 矩阵: ✅/❌/⚠️ 三态, ⚠️ 项标注 "需实测"
+  - 改动清单: 引用 commit hash e2977175
+  - minimax live 凭据: workspace 路径 + events.jsonl + agents.json 都列出
+
+### 总结感悟
+- **formal capture 价值**: 现在任何后续的 minimax E2E 场景能直接查到 matrix + 修法
+- **AGENTS.md 索引是入口**: docs/solutions/ 目录文件多后只靠 ls 不够, AGENTS.md 是发现机制
+- **跟 lazy-model-completion 模板对齐**: 同样 problem_type capture, 同结构降低读者认知负担
+- **下个 minimax flag 想用时**: 先查 README 矩阵的 ⚠️ 行, 不要假设

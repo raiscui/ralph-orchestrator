@@ -440,3 +440,27 @@ path = "openspec/changes/archive/2026-05-12-ralph-state-cli-adapter/proposal.md"
 status = "archived"
 summary = "OpenSpec change adding a CLI adapter for runtime workflow state status/read/clear over StateOperationStore."
 required_in_agents_index = false
+
+[[assets]]
+id = "solution-minimax-full-auto-compat"
+type = "experience"
+path = "docs/solutions/minimax-full-auto-compat/README.md"
+status = "active"
+summary = "minimax provider (OpenAI codex CLI 子集 wrapper) 不透传 --full-auto 组合 flag，必须用 --sandbox danger-full-access 替代。含 minimax 兼容 flag 矩阵 + 5 个 YAML 场景踩坑清单 + minimax live E2E 4/4 PASSED 凭据。"
+required_in_agents_index = true
+
+[[assets]]
+id = "solution-lazy-model-completion"
+type = "experience"
+path = "docs/solutions/lazy-model-completion/README.md"
+status = "active"
+summary = "parallel completion-via-event — ralph#1 收到 complete_publishes topic 后不再依赖写 LOOP_COMPLETE 字符串，由 supervisor 主动检测并产生硬终止信号。修复 lazy model hang (minimax + MiniMax-M3)。"
+required_in_agents_index = true
+
+[[assets]]
+id = "solution-declarative-scenario-migration"
+type = "experience"
+path = "docs/solutions/documentation-gaps/declarative-scenario-migration.md"
+status = "active"
+summary = "Q3 2026 Wave 2 (21 imperative → declarative migrations, Coverage 65%→100%) 的迁移套路综合指南。6 个 schema 字段映射 patterns + dropped 决策 rubric + setup 字段映射 + audit 反预期 workflow + 验证 checklist。"
+required_in_agents_index = true
