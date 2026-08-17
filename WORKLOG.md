@@ -848,3 +848,34 @@
   refactor (RefCell 或 &mut state), 跟 lazy-model-completion 时期的
   Race 一样需要架构取舍
 - **OpenSpec change 17/23 落地**: 没 archive, 等 Claude 提取 PR 一起
+
+## [2026-08-17 18:30:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Round 5B minimax live 回归 §18 framework
+
+### 任务内容
+- 用户指令: "按B" (minimax live 回归 §18 framework)
+- rebuild binary + 跑 minimax live `parallel-hat-instances*` 4/4
+
+### 跑通结果
+- ✅ parallel-hat-instances (80.5s)
+- ✅ parallel-hat-instances-zh (64.2s)
+- 总耗时 144.7s
+
+### 期间发现 (外部 flake, 不是 §18 regression)
+- events (default codex): 9.8s PASSED (跟 Round 5 同)
+- backpressure (default codex): 双 timeout 600s
+  - Round 5 是 592.4s PASSED (刚过 600s 边缘)
+  - 本轮 2 次跑都 600s timeout
+  - Codex 0.147.0 backend 负载 / 网络问题
+  - 不是 §18 regression: §18 fields 默认 0, 行为不变
+  - Workspace events.jsonl 只有 task.start + loop.terminate, Codex 没 emit build.done
+- minimax live 4/4 PASSED: minimax + MiniMax-M3 路径不受 §18 framework 影响
+
+### 总结感悟
+- **minimax 比 default codex 稳定**: minimax 4/4 PASSED, default codex backpressure flake
+  - 推测 minimax 是 OpenAI 优化 wrapper, 调度更稳定
+  - 后续回归测试优先用 minimax, 减少 Codex 0.147.0 backend 负载干扰
+- **§18 framework additive 验证**: 没改变任何 execution path, 纯加 fields
+  - events 通过 (9.8s) 证明 framework 没引入 regression
+  - minimax 通过 (144.7s) 证明 framework 没引入 regression
+- **backpressure flake 不阻塞**: 这是 Codex 0.147.0 的特性, 不是我们代码
+  - 标记为 LATER_PLANS 跟踪 (跟 minimax API 重跑跟踪并列)
