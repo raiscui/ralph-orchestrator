@@ -26,9 +26,9 @@ use anyhow::Context;
 use ralph_proto::{
     AudienceOverride, AudienceSelector, Delivery, Event, HatId, HatInstanceId, HatInstanceState,
     MissingInstancePolicy, QueueDecisionRecord, QueueSelection, RuntimeDeliveryKind,
-    RuntimeDeliveryRecord, RuntimeLifecycleKind, RuntimeLifecycleRecord, TOPIC_DISPATCH_DECISION,
-    TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN, TOPIC_RUNTIME_DELIVERY,
-    TOPIC_RUNTIME_LIFECYCLE, SessionStrategy, TopicContract, TurnAction,
+    RuntimeDeliveryRecord, RuntimeLifecycleKind, RuntimeLifecycleRecord, SessionStrategy,
+    TOPIC_DISPATCH_DECISION, TOPIC_REPLY_HAT_MESSAGE, TOPIC_REQUESTER_RETURN,
+    TOPIC_RUNTIME_DELIVERY, TOPIC_RUNTIME_LIFECYCLE, TopicContract, TurnAction,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -1522,7 +1522,12 @@ fn workflow_completion_observed_is_set_when_complete_publishes_event_seen() {
     // its Published handler.
     assert_eq!(
         event.topic.as_str(),
-        supervisor.config.event_loop.complete_publishes.as_deref().unwrap()
+        supervisor
+            .config
+            .event_loop
+            .complete_publishes
+            .as_deref()
+            .unwrap()
     );
 
     // Manually flip the flag to model what the Published handler does on a match.
@@ -1553,7 +1558,12 @@ fn workflow_completion_observed_unaffected_by_unrelated_events() {
     let unrelated = Event::new("build.task", "{}");
     assert_ne!(
         unrelated.topic.as_str(),
-        supervisor.config.event_loop.complete_publishes.as_deref().unwrap()
+        supervisor
+            .config
+            .event_loop
+            .complete_publishes
+            .as_deref()
+            .unwrap()
     );
     assert!(
         !supervisor.workflow_completion_observed,
@@ -1566,8 +1576,6 @@ async fn complete_publishes_event_terminates_supervisor_with_workflow_completion
     // 验证：当 hat 输出包含 <event topic="spawn.done"> 时,
     // supervisor 必须以 WorkflowCompletionEvent 终止,
     // 不依赖 ralph#1 输出 LOOP_COMPLETE 字符串。
-    use ralph_proto::{Event, HatId};
-
     #[derive(Debug)]
     struct EmitSpawnDoneExecutor;
 
@@ -1602,20 +1610,17 @@ async fn complete_publishes_event_terminates_supervisor_with_workflow_completion
     config.event_loop.max_iterations = 20;
     config.core = config.core.with_workspace_root(temp_dir.path());
 
-    let mut supervisor = ParallelSupervisor::new(
+    let supervisor = ParallelSupervisor::new(
         config,
         "prompt".to_string(),
         Arc::new(EmitSpawnDoneExecutor),
     )
     .expect("ParallelSupervisor::new should succeed");
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        supervisor.run(false),
-    )
-    .await
-    .expect("supervisor.run timed out")
-    .expect("supervisor.run should succeed");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), supervisor.run(false))
+        .await
+        .expect("supervisor.run timed out")
+        .expect("supervisor.run should succeed");
 
     assert_eq!(
         result.termination,
@@ -1624,7 +1629,6 @@ async fn complete_publishes_event_terminates_supervisor_with_workflow_completion
         result.termination,
     );
 }
-
 
 #[test]
 fn pending_recoverable_failures_block_completion_gate() {
@@ -3574,7 +3578,8 @@ async fn busy_ralph_session_directed_event_stays_on_primary() {
     assert_eq!(seen, vec!["ralph#1".to_string()]);
 }
 
-    async fn busy_ralph_primary_explicit_target_is_redirected_to_secondary() {
+#[tokio::test]
+async fn busy_ralph_primary_explicit_target_is_redirected_to_secondary() {
     let temp_dir = tempfile::tempdir().unwrap();
     let events_path = temp_dir.path().join("events.jsonl");
 

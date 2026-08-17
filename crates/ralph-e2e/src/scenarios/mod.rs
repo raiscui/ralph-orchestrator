@@ -74,7 +74,6 @@ mod parallel_renewal_risk_calibration_example;
 mod parallel_revops_quote_desk_example;
 mod parallel_security_exception_review_example;
 mod parallel_support_escalation_desk_example;
-mod parallel_trigger_routing_example;
 mod parallel_vendor_security_procurement_example;
 mod tasks;
 
@@ -103,8 +102,7 @@ pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenari
 pub use parallel::{
     ParallelAppServerIdleStartLiveScenario, ParallelAppServerIdleStartScenario,
     ParallelAppServerSteerLiveReplyMultiTurnScenario, ParallelAppServerSteerMultiTurnLiveScenario,
-    ParallelAppServerSteerMultiTurnScenario, ParallelEmitSpawnInstanceScenario,
-    ParallelHatInstancesScenario, ParallelStartingEventInferenceScenario,
+    ParallelAppServerSteerMultiTurnScenario,
 };
 pub use parallel_audit_evidence_pack_example::ParallelAuditEvidencePackExampleScenario;
 pub use parallel_customer_advisory_board_prep_example::ParallelCustomerAdvisoryBoardPrepExampleScenario;
@@ -130,7 +128,6 @@ pub use parallel_renewal_risk_calibration_example::ParallelRenewalRiskCalibratio
 pub use parallel_revops_quote_desk_example::ParallelRevopsQuoteDeskExampleScenario;
 pub use parallel_security_exception_review_example::ParallelSecurityExceptionReviewExampleScenario;
 pub use parallel_support_escalation_desk_example::ParallelSupportEscalationDeskExampleScenario;
-pub use parallel_trigger_routing_example::ParallelTriggerRoutingExampleScenario;
 pub use parallel_vendor_security_procurement_example::ParallelVendorSecurityProcurementExampleScenario;
 pub use tasks::{TaskAddScenario, TaskCloseScenario, TaskCompletionScenario, TaskReadyScenario};
 

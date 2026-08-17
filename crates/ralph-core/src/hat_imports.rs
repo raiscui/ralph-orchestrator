@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Reason a non-local source cannot use `imports:`.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedImportSource {
     /// Builtin hat collections (compiled into the binary).
@@ -23,6 +24,7 @@ pub enum UnsupportedImportSource {
     Remote,
 }
 
+#[cfg(test)]
 impl UnsupportedImportSource {
     fn label(self) -> &'static str {
         match self {
@@ -44,6 +46,7 @@ pub enum HatImportError {
     Hat { message: String },
 
     /// Source-policy error (non-local source declares `imports:`).
+    #[cfg(test)]
     #[error("{message}")]
     UnsupportedSource { message: String },
 }
@@ -52,21 +55,13 @@ impl HatImportError {
     /// Build a hat-level error from its components.
     pub fn hat(hat: &str, source: &str, reason: impl AsRef<str>) -> Self {
         HatImportError::Hat {
-            message: format!(
-                "hat '{}' in '{}': {}",
-                hat,
-                source,
-                reason.as_ref()
-            ),
+            message: format!("hat '{}' in '{}': {}", hat, source, reason.as_ref()),
         }
     }
 
     /// Build a source-policy error.
-    pub fn unsupported_source(
-        reason: UnsupportedImportSource,
-        source: &str,
-        hat: &str,
-    ) -> Self {
+    #[cfg(test)]
+    pub fn unsupported_source(reason: UnsupportedImportSource, source: &str, hat: &str) -> Self {
         HatImportError::UnsupportedSource {
             message: format!(
                 "hat imports not allowed from {} source '{}': hat '{}' declares 'imports:'",
@@ -105,16 +100,14 @@ pub fn resolve_hat_imports_in_mapping(
 
     let mut replacements: Vec<(Value, Value)> = Vec::new();
 
-    for (hat_key, hat_value) in hats_map.iter() {
+    for (hat_key, hat_value) in &*hats_map {
         let Value::Mapping(hat_map) = hat_value else {
             continue;
         };
 
         let hat_label = hat_key_label(hat_key);
 
-        let imports_value = hat_map
-            .get(Value::String("imports".to_string()))
-            .cloned();
+        let imports_value = hat_map.get(Value::String("imports".to_string())).cloned();
 
         let Some(imports_value) = imports_value else {
             continue;
@@ -126,7 +119,10 @@ pub fn resolve_hat_imports_in_mapping(
                 return Err(HatImportError::hat(
                     &hat_label,
                     source_label,
-                    format!("'imports' must be a string path, found {}", value_kind(other)),
+                    format!(
+                        "'imports' must be a string path, found {}",
+                        value_kind(other)
+                    ),
                 ));
             }
         };
@@ -213,7 +209,10 @@ pub fn resolve_hat_imports_in_mapping(
             return Err(HatImportError::hat(
                 &hat_label,
                 source_label,
-                format!("imported hat in '{}' must not contain 'events:' field", imports_label),
+                format!(
+                    "imported hat in '{}' must not contain 'events:' field",
+                    imports_label
+                ),
             ));
         }
 
@@ -230,6 +229,7 @@ pub fn resolve_hat_imports_in_mapping(
 }
 
 /// Reject any `imports:` key found in a non-local source (builtin/remote).
+#[cfg(test)]
 pub fn reject_hat_imports_in_mapping(
     mapping: &Mapping,
     source_label: &str,
@@ -239,7 +239,7 @@ pub fn reject_hat_imports_in_mapping(
         return Ok(());
     };
 
-    for (hat_key, hat_value) in hats_map.iter() {
+    for (hat_key, hat_value) in hats_map {
         let hat_label = hat_key_label(hat_key);
         let Value::Mapping(hat_map) = hat_value else {
             continue;
@@ -259,11 +259,7 @@ pub fn reject_hat_imports_in_mapping(
 /// Resolve an import path string against a base directory.
 fn resolve_import_path(base_dir: &Path, import_str: &str) -> PathBuf {
     let p = PathBuf::from(import_str);
-    if p.is_absolute() {
-        p
-    } else {
-        base_dir.join(p)
-    }
+    if p.is_absolute() { p } else { base_dir.join(p) }
 }
 
 /// Merge an imported hat mapping with local override mapping.
@@ -272,7 +268,7 @@ fn resolve_import_path(base_dir: &Path, import_str: &str) -> PathBuf {
 /// - 导入字段作为底，本地字段覆盖（同 key 替换）。
 /// - 删除本地 `imports:` 字段（已解析完成）。
 fn merge_imported_hat(mut imported: Mapping, local_overrides: &Mapping) -> Mapping {
-    for (k, v) in local_overrides.iter() {
+    for (k, v) in local_overrides {
         if k == &Value::String("imports".to_string()) {
             continue;
         }
@@ -323,40 +319,41 @@ mod tests {
 
     #[test]
     fn resolve_hats_without_imports_is_noop() {
-        let mut m = parse(
-            "hats:\n  writer:\n    description: local\n    publishes: [build.done]\n",
-        );
+        let mut m =
+            parse("hats:\n  writer:\n    description: local\n    publishes: [build.done]\n");
         resolve_hat_imports_in_mapping(&mut m, Path::new("."), "test").unwrap();
         let hats = m.get(Value::String("hats".to_string())).unwrap();
         let hats_map = match hats {
             Value::Mapping(m) => m,
             _ => panic!(),
         };
-        let writer = hats_map
-            .get(Value::String("writer".to_string()))
-            .unwrap();
+        let writer = hats_map.get(Value::String("writer".to_string())).unwrap();
         let writer_map = match writer {
             Value::Mapping(m) => m,
             _ => panic!(),
         };
-        assert!(writer_map
-            .get(Value::String("imports".to_string()))
-            .is_none());
+        assert!(
+            writer_map
+                .get(Value::String("imports".to_string()))
+                .is_none()
+        );
     }
 
     #[test]
     fn reject_non_string_imports_returns_error() {
-        let mut m = parse(
-            "hats:\n  writer:\n    imports:\n      - ../shared/base.yml\n",
-        );
+        let mut m = parse("hats:\n  writer:\n    imports:\n      - ../shared/base.yml\n");
         let err = resolve_hat_imports_in_mapping(&mut m, Path::new("."), "test")
             .expect_err("must reject non-string imports");
         match err {
             HatImportError::Hat { message } => {
                 assert!(message.contains("writer"), "missing hat name: {}", message);
-                assert!(message.contains("must be a string"), "wrong reason: {}", message);
+                assert!(
+                    message.contains("must be a string"),
+                    "wrong reason: {}",
+                    message
+                );
             }
-            _ => panic!("expected Hat error"),
+            HatImportError::UnsupportedSource { .. } => panic!("expected Hat error"),
         }
     }
 
@@ -371,7 +368,7 @@ mod tests {
                 assert!(message.contains("writer"));
                 assert!(message.contains("failed to read"));
             }
-            _ => panic!("expected Hat error"),
+            HatImportError::UnsupportedSource { .. } => panic!("expected Hat error"),
         }
     }
 
@@ -390,23 +387,15 @@ mod tests {
             HatImportError::Hat { message } => {
                 assert!(message.contains("events"), "got: {}", message);
             }
-            _ => panic!("expected Hat error"),
+            HatImportError::UnsupportedSource { .. } => panic!("expected Hat error"),
         }
     }
 
     #[test]
     fn reject_transitive_imports_returns_error() {
         let tmp = tempdir();
-        std::fs::write(
-            tmp.join("a.yml"),
-            "hats:\n  writer:\n    imports: b.yml\n",
-        )
-        .unwrap();
-        std::fs::write(
-            tmp.join("b.yml"),
-            "hats:\n  writer:\n    description: b\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.join("a.yml"), "hats:\n  writer:\n    imports: b.yml\n").unwrap();
+        std::fs::write(tmp.join("b.yml"), "hats:\n  writer:\n    description: b\n").unwrap();
         let mut m = parse("hats:\n  writer:\n    imports: a.yml\n");
         let err = resolve_hat_imports_in_mapping(&mut m, &tmp, "test")
             .expect_err("must reject transitive imports");
@@ -414,7 +403,7 @@ mod tests {
             HatImportError::Hat { message } => {
                 assert!(message.contains("transitive"), "got: {}", message);
             }
-            _ => panic!("expected Hat error"),
+            HatImportError::UnsupportedSource { .. } => panic!("expected Hat error"),
         }
     }
 
@@ -426,9 +415,7 @@ mod tests {
             "hats:\n  writer:\n    description: base\n    publishes: [base.done]\n    triggers: [build.task]\n    instructions: base instr\n",
         )
         .unwrap();
-        let mut m = parse(
-            "hats:\n  writer:\n    imports: base.yml\n    publishes: [local.done]\n",
-        );
+        let mut m = parse("hats:\n  writer:\n    imports: base.yml\n    publishes: [local.done]\n");
         resolve_hat_imports_in_mapping(&mut m, &tmp, "test").unwrap();
 
         let hats = m.get(Value::String("hats".to_string())).unwrap();
@@ -436,17 +423,17 @@ mod tests {
             Value::Mapping(m) => m,
             _ => panic!(),
         };
-        let writer = hats_map
-            .get(Value::String("writer".to_string()))
-            .unwrap();
+        let writer = hats_map.get(Value::String("writer".to_string())).unwrap();
         let writer_map = match writer {
             Value::Mapping(m) => m,
             _ => panic!(),
         };
 
-        assert!(writer_map
-            .get(Value::String("imports".to_string()))
-            .is_none());
+        assert!(
+            writer_map
+                .get(Value::String("imports".to_string()))
+                .is_none()
+        );
         let publishes = writer_map
             .get(Value::String("publishes".to_string()))
             .unwrap();
@@ -472,25 +459,24 @@ mod tests {
 
     #[test]
     fn reject_builtin_source_with_imports_returns_error() {
-        let m = parse(
-            "hats:\n  writer:\n    imports: ../shared/base.yml\n    description: local\n",
-        );
-        let err = reject_hat_imports_in_mapping(&m, "builtin:core", UnsupportedImportSource::Builtin)
-            .expect_err("must reject builtin source");
+        let m =
+            parse("hats:\n  writer:\n    imports: ../shared/base.yml\n    description: local\n");
+        let err =
+            reject_hat_imports_in_mapping(&m, "builtin:core", UnsupportedImportSource::Builtin)
+                .expect_err("must reject builtin source");
         match err {
             HatImportError::UnsupportedSource { message } => {
                 assert!(message.contains("builtin"));
                 assert!(message.contains("writer"));
             }
-            _ => panic!("expected UnsupportedSource"),
+            HatImportError::Hat { .. } => panic!("expected UnsupportedSource"),
         }
     }
 
     #[test]
     fn reject_remote_source_with_imports_returns_error() {
-        let m = parse(
-            "hats:\n  writer:\n    imports: ../shared/base.yml\n    description: local\n",
-        );
+        let m =
+            parse("hats:\n  writer:\n    imports: ../shared/base.yml\n    description: local\n");
         let err = reject_hat_imports_in_mapping(
             &m,
             "https://example.com/hats.yml",
@@ -501,7 +487,7 @@ mod tests {
             HatImportError::UnsupportedSource { message } => {
                 assert!(message.contains("remote"));
             }
-            _ => panic!("expected UnsupportedSource"),
+            HatImportError::Hat { .. } => panic!("expected UnsupportedSource"),
         }
     }
 
@@ -520,7 +506,6 @@ mod tests {
 
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
     use crate::config::RalphConfig;
 
     fn write_files() -> std::path::PathBuf {
@@ -563,8 +548,7 @@ mod integration_tests {
             "hats:\n  reader:\n    name: Reader\n    description: standalone\n",
         )
         .unwrap();
-        let config =
-            RalphConfig::from_file(dir.join("standalone.yaml")).expect("must load");
+        let config = RalphConfig::from_file(dir.join("standalone.yaml")).expect("must load");
         assert_eq!(
             config.hats.get("reader").unwrap().description.as_deref(),
             Some("standalone")
@@ -579,8 +563,8 @@ mod integration_tests {
             "hats:\n  writer:\n    name: Writer\n    imports: nope.yml\n",
         )
         .unwrap();
-        let err = RalphConfig::from_file(dir.join("bad.yml"))
-            .expect_err("must fail on missing import");
+        let err =
+            RalphConfig::from_file(dir.join("bad.yml")).expect_err("must fail on missing import");
         let msg = err.to_string();
         assert!(msg.contains("writer"), "got: {}", msg);
         assert!(msg.contains("failed to read"), "got: {}", msg);

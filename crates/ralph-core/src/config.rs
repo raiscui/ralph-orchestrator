@@ -444,10 +444,8 @@ impl RalphConfig {
             "amp" => Some(&self.adapters.amp),
             _ => None,
         };
-        if let Some(s) = settings {
-            if let Some(tokens) = s.context_window_tokens {
-                return tokens as u64;
-            }
+        if let Some(tokens) = settings.and_then(|settings| settings.context_window_tokens) {
+            return u64::from(tokens);
         }
         0
     }
@@ -461,7 +459,8 @@ impl RalphConfig {
         // - Hat imports 在 serde 解析到 RalphConfig 之前解决。
         // - 仅本地 file source 才允许 imports; builtin/remote 应在它们自己的 source 入口拒绝。
         let base_dir = path_ref.parent().unwrap_or_else(|| Path::new("."));
-        let resolved = Self::resolve_hat_imports(&content, base_dir, &path_ref.display().to_string())?;
+        let resolved =
+            Self::resolve_hat_imports(&content, base_dir, &path_ref.display().to_string())?;
         Self::parse_yaml(&resolved)
     }
 
@@ -479,7 +478,7 @@ impl RalphConfig {
         let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(content)?;
         resolve_hat_imports_in_mapping(&mut mapping, base_dir, source_label)
             .map_err(|e| ConfigError::HatImport(e.to_string()))?;
-        serde_yaml::to_string(&mapping).map_err(|e| ConfigError::Yaml(e.into()))
+        serde_yaml::to_string(&mapping).map_err(ConfigError::Yaml)
     }
 
     /// Parses configuration from a YAML string.
@@ -1772,9 +1771,8 @@ mod tests {
             config.agent_cli_recoverable_failures.initial_delay_ms,
             30_000
         );
-        assert_eq!(
-            config.agent_cli_recoverable_failures.backoff_multiplier,
-            2.0
+        assert!(
+            (config.agent_cli_recoverable_failures.backoff_multiplier - 2.0).abs() < f64::EPSILON
         );
         assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 300_000);
     }
@@ -1794,9 +1792,8 @@ agent_cli_recoverable_failures:
         assert!(!config.agent_cli_recoverable_failures.enabled);
         assert_eq!(config.agent_cli_recoverable_failures.max_attempts, 5);
         assert_eq!(config.agent_cli_recoverable_failures.initial_delay_ms, 1000);
-        assert_eq!(
-            config.agent_cli_recoverable_failures.backoff_multiplier,
-            1.5
+        assert!(
+            (config.agent_cli_recoverable_failures.backoff_multiplier - 1.5).abs() < f64::EPSILON
         );
         assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 60_000);
         assert!(
@@ -1819,9 +1816,8 @@ agent_cli_recoverable_failures:
             config.agent_cli_recoverable_failures.initial_delay_ms,
             30_000
         );
-        assert_eq!(
-            config.agent_cli_recoverable_failures.backoff_multiplier,
-            2.0
+        assert!(
+            (config.agent_cli_recoverable_failures.backoff_multiplier - 2.0).abs() < f64::EPSILON
         );
         assert_eq!(config.agent_cli_recoverable_failures.max_delay_ms, 300_000);
     }
@@ -3061,7 +3057,9 @@ mod context_window_tests {
             backend,
             backend,
             backend,
-            tokens.map(|n| n.to_string()).unwrap_or_else(|| "~".to_string())
+            tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "~".to_string())
         );
         serde_yaml::from_str(&yaml).expect("yaml must parse")
     }

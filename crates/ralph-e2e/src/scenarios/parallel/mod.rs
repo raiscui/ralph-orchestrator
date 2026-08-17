@@ -11,19 +11,13 @@ mod app_server_idle_start_live;
 mod app_server_steer_live_reply_multi_turn;
 mod app_server_steer_multi_turn;
 mod app_server_steer_multi_turn_live;
-mod emit_spawn_instance;
-mod hat_instances;
 pub mod job_run_counts;
-mod starting_event_inference;
 
 pub use app_server_idle_start::ParallelAppServerIdleStartScenario;
 pub use app_server_idle_start_live::ParallelAppServerIdleStartLiveScenario;
 pub use app_server_steer_live_reply_multi_turn::ParallelAppServerSteerLiveReplyMultiTurnScenario;
 pub use app_server_steer_multi_turn::ParallelAppServerSteerMultiTurnScenario;
 pub use app_server_steer_multi_turn_live::ParallelAppServerSteerMultiTurnLiveScenario;
-pub use emit_spawn_instance::ParallelEmitSpawnInstanceScenario;
-pub use hat_instances::ParallelHatInstancesScenario;
-pub use starting_event_inference::ParallelStartingEventInferenceScenario;
 
 use crate::Backend;
 use crate::executor::{PromptSource, ScenarioConfig};
@@ -201,7 +195,8 @@ pub(in crate::scenarios) fn patch_example_config_for_codex_e2e(
 {profile_args}
     - -m
     - {model}
-    - --full-auto
+    - --sandbox
+    - danger-full-access
     - -c
     - 'model_reasoning_effort="low"'
     - -c
