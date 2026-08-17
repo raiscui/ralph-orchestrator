@@ -44,3 +44,42 @@
 - Re-evaluate per-case resolution vs full rewrite in a separate change (out of scope here)
 - P6 (release bump 5.6) remains pending — independent decision, see `tasks.md`
 - Group 4 §15-§18 are blockers for Q3 plan closure
+
+
+## §15 rewrite decision (2026-08-17, after Group 3 dry-runs)
+
+Read origin commit `4a38b8d` (4 files, 72+ / 13-):
+
+- `crates/ralph-adapters/src/cli_executor.rs` (+69/-8): rename `POST_EVENT_GRACE_TIMEOUT` → `TEXT_POST_EVENT_GRACE_TIMEOUT`, gate `post_event_deadline` set on `output_format == OutputFormat::Text`, add 2 Claude stream JSON tests
+- `crates/ralph-core/src/diagnostics/mod.rs` (+6/-6): trivial `assert!` → `assert_eq!` clippy lint
+- `crates/ralph-core/src/event_loop/mod.rs` (+1/-1): trivial `&malformed.content` → `malformed.content` clippy lint
+- `crates/ralph-core/src/memory_store.rs` (+1/-1): trivial `assert!` → `assert_eq!` clippy lint
+
+### Architecture mismatch
+
+Local main uses `(StreamKind, line)` tuple (cli_executor.rs:125), not origin's
+`StreamEvent` enum. Local main does NOT have:
+
+- `line_signals_event_emitted` function (zero matches in `crates/`)
+- `post_event_deadline` field / logic (zero matches)
+- `POST_EVENT_GRACE_TIMEOUT` constant (zero matches)
+
+Porting origin's fix would mean inventing the bug + adding 60+ lines of new
+conditional logic to a tuple-based stream architecture.
+
+### Claude stream JSON coverage
+
+- Local `OutputFormat` enum: Text (default), Json (3 callers in tests)
+- No fixtures use Claude stream JSON
+- No tests exercise Claude stream result-event timing
+
+### Decision: DROP §15
+
+Per "改良胜过新增" + "不保留向后兼容, 除非是生产环境项目":
+
+- Local main has no Claude stream JSON bug — adding the fix would be speculative
+- Origin's clippy lint cleanups (3 trivial lines) deferred to next `cargo clippy --fix`
+- If Claude stream JSON is later added (e.g., to a new preset), re-evaluate at that time
+
+§15 marked DROPPED in `tasks.md`. The architectural analysis above serves
+as a permanent record for future evaluation.

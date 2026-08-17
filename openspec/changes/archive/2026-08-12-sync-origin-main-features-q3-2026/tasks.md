@@ -100,7 +100,7 @@
 
 ## Group 4 §15-§18 follow-ups (from Group 3 dry-run 2026-08-17)
 
-- [ ] 4.15 **Rewrite `4a38b8d` (Claude stream wait)** — per-case resolve on cli_executor.rs + event_loop/mod.rs.
+- [x] 4.15 ~~**Rewrite `4a38b8d` (Claude stream wait)**~~ — **DROPPED (2026-08-17, user picked B)**: origin uses StreamEvent enum + line_signals_event_emitted/post_event_deadline logic that does not exist in local (StreamKind, line) tuple architecture. Porting = inventing the bug + adding 60+ lines for Claude stream JSON case local main does not exercise. Per 改良胜过新增, DROP. Origin clippy lint (assert! → assert_eq!) deferred to next cargo clippy --fix run. See group3-dryrun-log-2026-08-17.md §15 section.
 - [ ] 4.16 **Rewrite `25afeb0` (local hat imports in preflight)** — re-author preflight.rs + integration_preflight.rs, write tasks/issue-209-hat-imports.code-task.md (replacing the deleted .ralph/tasks/ path).
 - [ ] 4.17 **Rewrite `a4b6d45` (explicit completion after guidance)** — re-derive against current event_loop/* + hatless_ralph + summary_writer.
 - [ ] 4.18 **Rewrite `d631ef7` (context window telemetry)** — massive 16-file rewrite, consider separate OpenSpec change.
