@@ -1379,3 +1379,35 @@ capabilities.rs (Streaming) + 当前 schema 字段
 ### 下一步建议
 - Group 4 §15-§18 rewrite 工作量大 (尤其是 §18 telemetry 16 文件), 建议开新 OpenSpec change, 不在当前 change 内做
 - 5 个 Rust code-defined legacy `--full-auto` 残留还是 Wave 3.4 跟踪
+
+## [2026-08-17 15:30:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] Round 5 (验证策略) 完成 + cli_backend.rs critical fix
+
+### Q3 plan 3.6 (events, backpressure, parallel-hat-instances*) 5/5 PASSED
+
+### 修复
+- commit `005d840d`: `CliBackend::codex()` 去掉 `--full-auto`, 用 `--sandbox danger-full-access`
+- 验证: 129/129 ralph-adapters tests, 5/5 e2e 场景
+
+### grill-with-docs Round 1-5 状态
+- [x] Round 1: 整合策略选型 (隐含: 跟 Q3 plan = cherry-pick + per-case rewrite)
+- [x] Round 2: 高优先级 cherry-pick 顺序 (a4b6d45 → §17, ee9fa67 DROP, 01dd250/0b61a78 DROP)
+- [x] Round 3: 新 feature 接纳 (telemetry → §18, Forge / robot RPC 待评估)
+- [x] Round 4: 文档同步 (CONTEXT.md + ADR-0001) commit `a9cec181`
+- [x] Round 5: 验证策略 (Q3 plan 3.6 跑通 + cli_backend.rs critical fix)
+
+### 累计 commits on my/main (自从 minimax-full-auto fix)
+- e2977175 minimax-full-auto
+- 7eb270f2 docs(solutions) minimax-full-auto-compat
+- 6fa0075e chore(task-plan) housekeeping
+- d4263b97 chore(q3-plan) Group 3 dry-runs
+- 537aded3 hat-imports design
+- ef6d83e1 hat-imports impl
+- 079bf38d human-guidance design
+- 7de0d939 human-guidance impl
+- a9cec181 Round 4 docs
+- 005d840d cli_backend.rs critical fix
+
+### 仍 pending
+- §18 (d631ef7 context window telemetry) — 16 文件 massive, 开新 OpenSpec change
+- Forge / robot RPC 评估 — 待用户触发
+- 5 个 Rust code-defined legacy `--full-auto` 残留 (跟 Wave 3.4 一起清理)

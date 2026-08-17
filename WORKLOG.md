@@ -760,3 +760,47 @@
 - **3.5 (d631ef7) 16 文件冲突**: 远超 per-case resolve, 必须开新 OpenSpec change 整段重写
 - **3.2 (ee9fa67) 已落地**: Q3 plan 当时不知道我们已经手动 port 过, 现在确认 DROP
 - **Q3 plan 完整收口**: Group 1-3 全部 audit 完, 剩下是 Group 4 rewrite tasks §15-§18 4 个新条目 + §1-§3 3 个老条目 + P6 release bump
+
+## [2026-08-17 15:30:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Round 5 验证策略 — Q3 plan 3.6 + cli_backend.rs critical fix
+
+### 任务内容
+- 用户指令: "Round 5 (验证策略)"
+- 跑 Q3 plan 3.6 (events, backpressure, parallel-hat-instances 系列)
+- 发现 + 修复关键问题: `CliBackend::codex()` default 含 `--full-auto`,
+  codex-cli 0.147.0 已不支持
+
+### 关键发现
+- codex-cli 0.147.0 移除 `--full-auto` flag
+- minimax provider (wrapper) 也拒绝 `--full-auto`
+- minimax-full-auto-compat 修了 YAML 场景, 但 Rust `CliBackend::codex()` default 没动
+- 默认 codex profile 下 events/backpressure/parallel-hat-instances 全部 fail
+  (iteration 1 立即 error, 0 events emitted)
+
+### 修复 (commit `005d840d`)
+- `CliBackend::codex()` 改为 `--sandbox danger-full-access`
+- `filter_args_for_interactive` 也过滤 `--sandbox` / `danger-full-access`
+- 3 个 unit tests 更新断言
+
+### Q3 plan 3.6 验证 (5/5 PASSED)
+- events: 24.5s ✅
+- backpressure: 592.4s ✅
+- parallel-hat-instances: 109.5s ✅
+- parallel-hat-instances-zh: 137.9s ✅
+
+### 跟 minimax-full-auto-compat 闭环
+| 时间 | 修复 | 范围 |
+|---|---|---|
+| 2026-08-14 | YAML emit-spawn-instance | 部分 |
+| 2026-08-16 | YAML × 4 (hat-instances, hat-instances-zh, starting-event-inference × 2) | 4 个 |
+| 2026-08-17 | Rust `CliBackend::codex()` default | 全 default codex 调用 |
+
+完整覆盖:
+- minimax profile + minimax model → ✅
+- default codex + new codex-cli (0.147.0+) → ✅
+- 旧的 --full-auto (OpenAI 早期 codex CLI 组合快捷方式) 完全退役
+
+### 总结感悟
+- **回归测试发现 silent bug**: Q3 plan 3.6 一直没跑通, 是 Round 5 才暴露的
+- **cross-layer bug**: minimax-full-auto-compat 修了 1 层 (YAML), 留 1 层 (Rust default)
+- **future mitigation**: CI 应强制运行 `cargo run -p ralph-e2e -- codex --filter events`
+  防止 default codex 路径再次 silent 退化
