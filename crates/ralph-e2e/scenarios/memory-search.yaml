@@ -1,6 +1,6 @@
-# memory-search 声明化(候选 2.3.2: MemorySearchScenario → memory-search.yaml)
+# memory-search 声明化
 #
-# 与命令式 MemorySearchScenario 等价性分析:
+#
 # - 同 id `memory-search`, description / tier 一致
 # - 同 setup: ralph.yml + 预填充 .agent/memories.md (3 条测试记忆: JWT auth /
 #   database pool / docker ECONNREFUSED) + inline prompt(要求 agent 跑

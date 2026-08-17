@@ -1,4 +1,4 @@
-# connectivity 声明化(与命令式 ConnectivityScenario 等价)
+# connectivity 声明化 (Tier 1, declarative YAML)
 id: connectivity
 description: Verifies backend connectivity via PONG round-trip (declarative)
 tier: "Tier 1: Connectivity"

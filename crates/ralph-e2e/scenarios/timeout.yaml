@@ -1,6 +1,6 @@
-# timeout 声明化(候选 2.1.1: TimeoutScenario → timeout.yaml)
+# timeout 声明化
 #
-# 与命令式 TimeoutScenario 等价:
+#
 # - 同 id `timeout-handling`(scenario.id() 输出不变)
 # - 同 description / tier
 # - 同 setup: ralph.yml + inline prompt(写 10,000 字论文) + 5s 超时

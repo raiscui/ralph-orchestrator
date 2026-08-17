@@ -1,6 +1,6 @@
-# memory-large-content 声明化(候选 2.3.8: MemoryLargeContentScenario → memory-large-content.yaml)
+# memory-large-content 声明化
 #
-# 与命令式 MemoryLargeContentScenario 等价性分析:
+#
 # - 同 id `memory-large-content`, description / tier 一致
 # - 同 setup: ralph.yml (memories.enabled + memories.inject=manual) +
 #   inline prompt(要求 agent 用 Bash add 大段多行 memory + END_MARKER_12345) +

@@ -1,4 +1,4 @@
-# multi-iter 声明化(与命令式 MultiIterScenario 等价)
+# multi-iter 声明化 (Tier 2, declarative YAML)
 id: multi-iter
 description: Verifies multi-iteration event progression (declarative)
 tier: "Tier 2: Orchestration Loop"

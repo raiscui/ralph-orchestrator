@@ -1,6 +1,6 @@
-# hat-instructions 声明化(候选 2.2.2: HatInstructionsScenario → hat-instructions.yaml)
+# hat-instructions 声明化
 #
-# 与命令式 HatInstructionsScenario 等价性分析:
+#
 # - 同 id `hat-instructions`, description / tier 一致
 # - 同 setup: ralph.yml 含 hats.reviewer(triggers=[review.request],
 #   publishes=[review.done], instructions 含 "REVIEW CHECKLIST:" + 强制 verdict)

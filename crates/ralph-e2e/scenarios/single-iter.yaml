@@ -1,4 +1,4 @@
-# single-iter 声明式试点(与命令式 SingleIterScenario 等价)
+# single-iter 声明式试点
 id: single-iter
 description: Verifies a single iteration completes successfully (declarative)
 tier: "Tier 2: Orchestration Loop"

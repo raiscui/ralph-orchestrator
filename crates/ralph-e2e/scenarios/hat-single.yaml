@@ -1,11 +1,11 @@
-# hat-single 声明化(候选 2.2.1: HatSingleScenario → hat-single.yaml)
+# hat-single 声明化
 #
-# 与命令式 HatSingleScenario 等价性分析:
+#
 # - 同 id `hat-single`, description / tier 一致
 # - 同 setup: ralph.yml 含 hats.builder(name/description/triggers=[build.task]/
 #   publishes=[build.done]/instructions 含 "Builder role activated") + inline prompt
 #   (emit build.task + LOOP_COMPLETE) + max_iterations=2 + backend.default_timeout()
-# - supported_backends 走 TestScenario::supported_backends 默认 impl(返回全部 backend),
+
 #   不显式声明 backends(与命令式一致);declarative runner 在 backends 为空时返回
 #   全 backend(含 Codex),所以行为对齐
 # - expect 5 条断言全部 1:1 映射到 schema 字段(无折断言):

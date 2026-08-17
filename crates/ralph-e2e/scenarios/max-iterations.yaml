@@ -1,6 +1,6 @@
-# max-iterations 声明化(候选 2.1.2: MaxIterationsScenario → max-iterations.yaml)
+# max-iterations 声明化
 #
-# 与命令式 MaxIterationsScenario 等价:
+#
 # - 同 id `max-iterations`(scenario.id() 输出不变)
 # - 同 description / tier
 # - 同 setup: ralph.yml + inline prompt(逐轮 step 推进但永远不达 promise) + max_iterations=2

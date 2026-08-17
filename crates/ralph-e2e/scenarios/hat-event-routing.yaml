@@ -1,6 +1,6 @@
-# hat-event-routing 声明化(候选 2.2.3: HatEventRoutingScenario → hat-event-routing.yaml)
+# hat-event-routing 声明化
 #
-# 与命令式 HatEventRoutingScenario 等价性分析:
+#
 # - 同 id `hat-event-routing`, description / tier 一致
 # - 同 setup: ralph.yml 含 hats.tester(triggers=[test.run], publishes=[test.done])
 #   + hats.deployer(triggers=[deploy.request], publishes=[deploy.done]) +

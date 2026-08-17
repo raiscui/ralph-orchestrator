@@ -1,6 +1,6 @@
-# parallel-app-server-steer-multi-turn 声明化(候选 2.4.2: ParallelAppServerSteerMultiTurnScenario → parallel-app-server-steer-multi-turn.yaml)
+# parallel-app-server-steer-multi-turn 声明化
 #
-# 与命令式 ParallelAppServerSteerMultiTurnScenario 等价性分析:
+#
 # - 同 id, description, tier, supported_backends(默认 all, 实际仅 Codex)
 # - 同 setup: ralph.yml + 写入 fake codex shim (Python, .e2e/bin/codex,
 #   支持 turn/steer JSON-RPC) + prompt_source=Config + extra_args=[--no-tui] +

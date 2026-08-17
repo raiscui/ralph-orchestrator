@@ -1,6 +1,6 @@
-# tool-use 声明化(候选 2.4.1: ToolUseScenario → tool-use.yaml)
+# tool-use 声明化
 #
-# 与命令式 ToolUseScenario 等价性分析:
+#
 # - 同 id `tool-use`, description / tier 一致
 # - 同 setup: ralph.yml (基础, 无 hats/memories) + 写入 test-data.txt
 #   (内容 "Secret content: E2E_TEST_MARKER_42") + inline prompt (要求 agent 用

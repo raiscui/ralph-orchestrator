@@ -1,6 +1,6 @@
-# memory-missing 声明化(候选 2.3.6: MemoryMissingFileScenario → memory-missing-file.yaml)
+# memory-missing 声明化
 #
-# 与命令式 MemoryMissingFileScenario 等价性分析:
+#
 # - 同 id `memory-missing-file`, description / tier 一致
 # - 同 setup: 不预填充 memories.md (这是测试点!) + ralph.yml (memories.enabled +
 #   memories.inject=auto) + inline prompt(要求 agent 用 Bash add memory) +

@@ -1,6 +1,6 @@
-# hat-backend-override 声明化(候选 2.2.4: HatBackendOverrideScenario → hat-backend-override.yaml)
+# hat-backend-override 声明化
 #
-# 与命令式 HatBackendOverrideScenario 等价性分析:
+#
 # - 同 id `hat-backend-override`, description / tier 一致
 # - 同 setup: ralph.yml 含 hats.specialist(triggers=[special.task],
 #   publishes=[special.done], 显式 backend: {backend} override) + inline prompt

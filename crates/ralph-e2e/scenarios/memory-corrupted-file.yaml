@@ -1,6 +1,6 @@
-# memory-corrupted 声明化(候选 2.3.5: MemoryCorruptedFileScenario → memory-corrupted-file.yaml)
+# memory-corrupted 声明化
 #
-# 与命令式 MemoryCorruptedFileScenario 等价性分析:
+#
 # - 同 id `memory-corrupted-file`, description / tier 一致
 # - 同 setup: ralph.yml (memories.enabled + memories.inject=auto) + 预填充
 #   .agent/memories.md 含 corrupted 内容(invalid ID / binary garbage /

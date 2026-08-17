@@ -1,6 +1,6 @@
-# hat-multi-workflow 声明化(候选 2.2.5: HatMultiWorkflowScenario → hat-multi-workflow.yaml)
+# hat-multi-workflow 声明化
 #
-# 与命令式 HatMultiWorkflowScenario 等价性分析:
+#
 # - 同 id `hat-multi-workflow`, description / tier 一致
 # - 同 setup: ralph.yml 含 hats.planner(triggers=[plan.request], publishes=[build.task])
 #   + hats.builder(triggers=[build.task], publishes=[build.done]) + inline prompt

@@ -1,4 +1,4 @@
-# events 声明化(与命令式 EventsScenario 等价)
+# events 声明化 (Tier 3, declarative YAML)
 id: events
 description: Verifies event parsing via XML emission (declarative)
 tier: "Tier 3: Events"

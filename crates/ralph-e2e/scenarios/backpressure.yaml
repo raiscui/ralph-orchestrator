@@ -1,4 +1,4 @@
-# backpressure 声明化(与命令式 BackpressureScenario 等价)
+# backpressure 声明化 (Tier 3, declarative YAML)
 id: backpressure
 description: Verifies backpressure evidence in build.done (declarative)
 tier: "Tier 3: Events"

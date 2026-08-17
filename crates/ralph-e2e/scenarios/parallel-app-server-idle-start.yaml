@@ -1,6 +1,6 @@
-# parallel-app-server-idle-start 声明化(候选 2.4.1: ParallelAppServerIdleStartScenario → parallel-app-server-idle-start.yaml)
+# parallel-app-server-idle-start 声明化
 #
-# 与命令式 ParallelAppServerIdleStartScenario 等价性分析:
+#
 # - 同 id, description, tier, supported_backends=[Codex]
 # - 同 setup: ralph.yml + 写入 fake codex shim (Python, .e2e/bin/codex) +
 #   prompt_source=Config + extra_args=[--no-tui, --idle-start] + path_prefix

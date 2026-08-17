@@ -1,6 +1,6 @@
-# streaming 声明化(候选 2.4.2: StreamingScenario → streaming.yaml)
+# streaming 声明化
 #
-# 与命令式 StreamingScenario 等价性分析:
+#
 # - 同 id `streaming`, description / tier 一致
 # - 同 setup: ralph.yml (cli.backend + cli.args ["--output-format", "stream-json"])
 #   + inline prompt("Say 'Hello from streaming test!' + LOOP_COMPLETE") +

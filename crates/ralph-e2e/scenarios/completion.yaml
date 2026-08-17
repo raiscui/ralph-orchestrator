@@ -1,4 +1,4 @@
-# completion 声明化(与命令式 CompletionScenario 等价)
+# completion 声明化 (Tier 2, declarative YAML)
 id: completion
 description: Verifies completion promise detection (declarative)
 tier: "Tier 2: Orchestration Loop"

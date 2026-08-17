@@ -1,6 +1,6 @@
-# auth-failure 声明化(候选 2.1.4: AuthFailureScenario → auth-failure.yaml)
+# auth-failure 声明化
 #
-# 与命令式 AuthFailureScenario 等价性分析(由 schema 扩展 commit 4531b9a 启用):
+# declarative YAML (Wave 2 migration complete)
 # - 同 id `auth-failure`, description / tier / supported_backends 一致
 # - 同 setup: ralph.yml + inline prompt "Say hello." + max_iterations=1 + timeout=30s
 #   + extra_args = ["--api-key", "invalid-key-12345"]
