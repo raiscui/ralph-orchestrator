@@ -16,6 +16,7 @@ mod agents_snapshot;
 pub mod capability;
 mod cli_capture;
 mod config;
+mod hat_imports;
 pub mod diagnostics;
 mod event_emission_protocol;
 mod event_logger;

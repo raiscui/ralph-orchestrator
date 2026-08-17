@@ -431,7 +431,29 @@ impl RalphConfig {
         let path_ref = path.as_ref();
         debug!(path = %path_ref.display(), "Loading configuration from file");
         let content = std::fs::read_to_string(path_ref)?;
-        Self::parse_yaml(&content)
+        // 说明：
+        // - Hat imports 在 serde 解析到 RalphConfig 之前解决。
+        // - 仅本地 file source 才允许 imports; builtin/remote 应在它们自己的 source 入口拒绝。
+        let base_dir = path_ref.parent().unwrap_or_else(|| Path::new("."));
+        let resolved = Self::resolve_hat_imports(&content, base_dir, &path_ref.display().to_string())?;
+        Self::parse_yaml(&resolved)
+    }
+
+    /// 解析 hat imports（本地 file source only）.
+    ///
+    /// 说明:
+    /// - builtin / remote source 的 imports 拒绝交给它们自己的 source 入口处理,
+    ///   本函数只处理本地 file source.
+    pub(crate) fn resolve_hat_imports(
+        content: &str,
+        base_dir: &Path,
+        source_label: &str,
+    ) -> std::result::Result<String, ConfigError> {
+        use crate::hat_imports::resolve_hat_imports_in_mapping;
+        let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(content)?;
+        resolve_hat_imports_in_mapping(&mut mapping, base_dir, source_label)
+            .map_err(|e| ConfigError::HatImport(e.to_string()))?;
+        serde_yaml::to_string(&mapping).map_err(|e| ConfigError::Yaml(e.into()))
     }
 
     /// Parses configuration from a YAML string.
@@ -1702,6 +1724,9 @@ pub enum ConfigError {
 
     #[error("Invalid value for '{field}': {message}")]
     InvalidValue { field: String, message: String },
+
+    #[error("Hat import error: {0}")]
+    HatImport(String),
 }
 
 #[cfg(test)]
