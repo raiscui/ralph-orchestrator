@@ -1025,3 +1025,64 @@
   用 cat <<'EOF' 要么用 single-quote shell args, 防止 message 被命令行解释
 - **CI release workflow**: tag 推到 fork 后 release.yml 自动跑, 后续
   需要监控 .github/workflows 是否配置了 publish-to-crates + npm
+
+## [2026-08-18 00:35:00] [Session ID: omx-1786600320381-z290x9] 任务名称: §18 context-window telemetry wire (resolves §18 framework TODO)
+
+### 任务内容
+- 用户选 A: lazy 事件总线方案接 §18 framework 留下的 TODO marker
+- 后向通道: Arc<Mutex<Option<(HatId, u64)>>> 投到队列,.run() 返回后 cli 层 take + record_iteration_tokens
+
+### 完成过程
+1. 查看 loop_state.rs 现状: peak_input_tokens / hat_peak_input_tokens 字段已存在,
+   record_iteration_tokens 方法已存在,3 个 unit test 已 PASS。但没人调它
+   (loop_runner.rs:408 TODO)
+2. 看 loop_runner.rs 上下文: after_execute closure 是 FnMut(u32, &HatId, &PromptOutput),
+   .run() 期间 &mut self 被借走 → closure 内不能调 record_iteration_tokens
+3. 加 EventLoop::state_mut() (1 行 + 8 行 doc) — 仅 .run() 返回后能用
+4. loop_runner.rs:
+   - use std::sync::Mutex + Arc<Mutex<Option<...>>> queue
+   - session_recorder_for_hook = Arc::clone (closure move-capture 不影响 run 后再用)
+   - closure body: 旧 record-session 逻辑 + 新: out.context_window > 0 时入队
+   - .run() 返回后 drain queue + state_mut().record_iteration_tokens(...)
+5. cargo build -p ralph-cli 第一次 E0382 (closure move-capture 拿走了 session_recorder,
+   后续 line 461+ 还要再借用) → Arc::clone 拆出来
+6. cargo build 通过,cargo test --workspace 全 pass
+
+### 关键决策
+- **选 Arc<Mutex<>> 后向通道而非 API 改签名**: Return type 是 
+  FnMut(u32, &HatId, &PromptOutput), 后端零 API 改动,
+  prompt_executor_contract.rs 测试不需要改
+- **0 token 不入队**: record_iteration_tokens(0) 是 no-op,
+  但不入队更清晰, 避免 last_input_tokens 误置 None 时模糊语义
+- **session_recorder Arc::clone**: 复用已有 Mutex 模式, 第二个 Arc
+  既给 closure 用, 也保留原 session_recorder 在 run() 返回后
+  record_meta(record_termination)。
+
+### 净 diff
+- 2 files, +48 / -10
+- crate 不变, prompt_executor 不变, prompt_executor_contract tests 不变
+
+### 验证
+- cargo build -p ralph-core + ralph-cli: 0 error, 0 new warning
+- cargo test --workspace: 全 pass, 0 failed
+- 3 个 §18 unit test (ralph-core::event_loop::loop_state::context_window_tests):
+  - record_iteration_tokens_tracks_per_hat_and_global_peak ✓
+  - record_iteration_tokens_zero_tokens_is_noop ✓
+  - record_iteration_tokens_per_hat_peak_independent_of_global ✓
+- ralph-core: 670 passed (含上述 3 个)
+- ralph-e2e: 325 passed (declarative coverage 仍 100%)
+
+### 总结感悟
+- **Borrow conflict 永远有 workaround**: 用 Arc<Mutex<>> 是最便宜的回避方式
+- **不需要改 API 也能加后向通信**: closure 投数据,外部 take 数据,本质就是 ring buffer 但更轻
+- **0 token 处理是关键**: keep "no-op" 语义, 把上游无 metadata 的 backend (ACP/headless)
+  与下游数据流分开
+- **3 个 §18 unit test 早就 PASS 的事实**: 说明 framework 部分早就 ready,
+  只是没人调它 (TODO marker)。这意味着 §18 commit `3ff89212` 时就已经完整设计,
+  只是接线的 bug 留到 commit `687ed666` 之后还有 1 处 (loop_runner)
+
+### 后续 follow-up (留 LATER_PLANS)
+- 真实 token metadata 提取需要 PtyExecutor 在 backend stdout 解析
+  (Claude stream JSON / Codex app server 消息)
+- Claude session peak extraction PR (origin 452 行) 是真正的数据来源
+- 没有真实 token 数据时, summary_writer 看到的是 0 状态 (无影响)
