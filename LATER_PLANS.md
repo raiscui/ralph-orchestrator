@@ -240,3 +240,38 @@ Forge 实际新增的真实代码:
 - Robot RPC: 哲学层面分歧, 不复活 ralph-api/ 就无法动手
 
 不要在 PR 里再讨论这两个, LATER_PLANS 这条已经记录所有原因。
+
+## [2026-08-17 14:10:00] [Session ID: omx-1786600320381-z290x9] §19 Round 6 数据收集结果 + Wave 3.4 续
+
+### 关键事实
+1. **declarative coverage gate 早就过线**:
+   - 当前: 60 declarative + 0 imperative + 1 explicit keep (`parallel-experimental-dev-engine-example`)
+   - 分母: 60 (explicit keep 扣除)
+   - 覆盖率: **100.00%** (过 90.0% 阈值, PASS)
+   - 验证命令: `cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture`
+   - drift log 输出在 ralph-e2e/test 过程中自动打印
+
+2. **handoff 写的 63.93% (39/61) 是 2026-08-13 Wave 2 之前的数据**: Wave 2 + Wave 3.4 推进后, 当前所有 imperative 已迁移完, gate 转 green。
+
+3. **剩下的 22 个 deprecated struct 都是纯 dead code**:
+   - 分布在 6 个 .rs 文件里 (capabilities/errors/hats/memory/parallel/app_server_*)
+   - 在 `mod.rs` 里有 `mod xxx;` 编译 + `pub use` 加 `#[allow(deprecated)]` 标记, 编译还能过
+   - 在 `lib.rs` 的 `all_scenarios()` 里**完全不注册** (declarative 走 `from_yaml` 路径, 与这些 struct 无关)
+   - 6 个文件外部零调用方, 删除后零外部破坏
+   - 越早物理删除越好 - 继续保留就是累积技术债 + 297+ 编译 warning 噪音
+
+4. **非 deprecated 但仍是 legacy code 的 5 个文件**:
+   - connectivity.rs / events.rs / orchestration.rs / incremental.rs / tasks.rs
+   - 这些在 `pub use` 还在用 (`ConnectivityScenario` 等), 但 `all_scenarios()` 走 declarative 路径
+   - 是否也清掉需要决策 (它们被 `lib.rs` 的 `pub use` 引用, 删除前要先确认)
+
+### 下一步可做
+- [高 ROI, 低风险] **物理删除 capabilities.rs (2 个 deprecated struct, 698 行, 最小最容易)**: 验证 pattern 后批量推
+- [中 ROI, 中风险] **物理删除 errors.rs + hats.rs (10 个 struct, 共 3000 行)**: 测试和错误处理场景
+- [中 ROI, 中风险] **物理删除 memory.rs (8 个 struct, 2287 行)**: 内存系统场景
+- [中 ROI, 中风险] **物理删除 parallel/app_server_*.rs (2 个 struct, 1700 行)**: app-server 路径
+- [高 ROI, 高风险] **同样思路清理 connectivity/events/orchestration/incremental/tasks 5 个文件** (需先做 lib.rs pub use 影响分析)
+
+### 这一轮的最小动作
+**只动 capabilities.rs**: 698 行 / 2 struct / 最干净 / 验证 pattern。
+其他 5 个文件按本轮 pattern 复制, 单开 commit, 不要混。
