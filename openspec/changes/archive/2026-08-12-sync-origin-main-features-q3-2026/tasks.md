@@ -34,12 +34,12 @@
 > Same dry-run gate as Group 2. Many of these touch files that local main
 > rewrote. Expect partial ports or rewrites, not clean cherry-picks.
 
-- [ ] 3.1 cherry-pick `4a38b8d fix(adapters): wait for Claude stream result events (#355)` — **pending dry-run**
-- [ ] 3.2 cherry-pick `ee9fa67 feat(cli): opt-in hats validate --instructions checks (#356)` — **pending dry-run**
-- [ ] 3.3 cherry-pick `25afeb0 feat(hats): support local hat imports in preflight` — **pending dry-run**
-- [ ] 3.4 cherry-pick `a4b6d45 fix(runtime): require explicit completion after guidance (#326)` — **pending dry-run, depends on P2 contract test**
-- [ ] 3.5 cherry-pick `d631ef7 feat(telemetry): track context window utilization` — **pending dry-run**
-- [ ] 3.6 run `cargo run -p ralph-e2e -- codex --filter events,backpressure,hat-instances`
+- [x] 3.1 cherry-pick `4a38b8d fix(adapters): wait for Claude stream result events (#355)` — **dry-run CONFLICT (2 files), moved to Group 4 §15 (see group3-dryrun-log-2026-08-17.md)**
+- [x] 3.2 cherry-pick `ee9fa67 feat(cli): opt-in hats validate --instructions checks (#356)` — **already landed as manual port in 620411ce parent — DROP**
+- [x] 3.3 cherry-pick `25afeb0 feat(hats): support local hat imports in preflight` — **dry-run CONFLICT (3 files, .ralph/ → tasks/ rename), moved to Group 4 §16**
+- [x] 3.4 cherry-pick `a4b6d45 fix(runtime): require explicit completion after guidance (#326)` — **dry-run CONFLICT (5 files), moved to Group 4 §17**
+- [x] 3.5 cherry-pick `d631ef7 feat(telemetry): track context window utilization` — **dry-run CONFLICT (16 files, massive), moved to Group 4 §18**
+- [ ] 3.6 run `cargo run -p ralph-e2e -- codex --filter events,backpressure,hat-instances` — pending (rerun after Group 4 §15-§18 resolve)
 
 ## 4. Group 4 — Rewrite tasks (out of scope for this change; tracked here for visibility)
 
@@ -97,6 +97,13 @@
 
 - `cargo check -p ralph-cli --quiet` → exit 0 (no regressions from a clean no-op round, HEAD still `8b27556`).
 - 6 dry-runs all aborted via `git reset --hard HEAD`. Working tree is clean (only untracked items).
+
+## Group 4 §15-§18 follow-ups (from Group 3 dry-run 2026-08-17)
+
+- [ ] 4.15 **Rewrite `4a38b8d` (Claude stream wait)** — per-case resolve on cli_executor.rs + event_loop/mod.rs.
+- [ ] 4.16 **Rewrite `25afeb0` (local hat imports in preflight)** — re-author preflight.rs + integration_preflight.rs, write tasks/issue-209-hat-imports.code-task.md (replacing the deleted .ralph/tasks/ path).
+- [ ] 4.17 **Rewrite `a4b6d45` (explicit completion after guidance)** — re-derive against current event_loop/* + hatless_ralph + summary_writer.
+- [ ] 4.18 **Rewrite `d631ef7` (context window telemetry)** — massive 16-file rewrite, consider separate OpenSpec change.
 
 ## Group 4 follow-ups after Group 2 re-classification
 

@@ -729,3 +729,34 @@
 - **housekeeping 不是修 bug**: 不动 status 而让 [ ] 永远挂着会让下一次 context restore 误判
 - **per-line sed 比 grep-replace 安全**: 39 个 [ ] 上下文都不一样, 一次 sed 只针对明确行号
 - **保留历史**: 决策 (line 1186 跳过 serial mode) 标 [x] 不是 [ ] 因为决策本身已落地
+
+## [2026-08-17 10:00:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Q3 plan Group 3 dry-runs (5/5 CONFLICT)
+
+### 任务内容
+- 用户指令: "B. 跟 Q3 plan 重推进 ⭐ 推荐" (option B from ralplan)
+- 把 Q3 plan `tasks.md` Group 3 5 个 pending dry-run 全部跑一遍
+- 按 Q3 plan dry-run gate 流程: `git cherry-pick --no-commit <sha>` + abort + 文档化
+
+### 流程安全改进
+- **第一轮失误**: 直接在 main 上跑 cherry-pick, abort 失败, index unmerged, 我用 `git reset --hard HEAD` 才恢复 — 但这把 C housekeeping 改动丢了
+- **第二轮重做 C** (sed 31 行 + WORKLOG), commit `6fa0075e`, push 到 my/main
+- **第三轮用 scratch 分支**: `q3-grp3-dryrun-2026-08-17` 上跑 dry-runs, 跑完 `git reset --hard HEAD` + 删除分支 — 安全
+
+### 5 个 dry-runs 结果
+| ID | SHA | 文件数 | 决策 |
+|---|---|---|---|
+| 3.1 | `4a38b8d` Claude stream wait | 2 | → Group 4 §15 |
+| 3.2 | `ee9fa67` hats validate --instructions | 2 | DROP (already landed as manual port in 620411ce parent) |
+| 3.3 | `25afeb0` local hat imports in preflight | 3 | → Group 4 §16 |
+| 3.4 | `a4b6d45` explicit completion after guidance | 5 | → Group 4 §17 |
+| 3.5 | `d631ef7` context window telemetry | 16 (massive) | → Group 4 §18 |
+
+### 落地
+- `openspec/changes/archive/2026-08-12-sync-origin-main-features-q3-2026/group3-dryrun-log-2026-08-17.md` (46 行)
+- `tasks.md` Group 3 全部标 `[x]` + 加 Group 4 §15-§18 新条目
+
+### 总结感悟
+- **scratch branch 救命**: 主分支直接 cherry-pick 高风险, 应该用临时分支隔离
+- **3.5 (d631ef7) 16 文件冲突**: 远超 per-case resolve, 必须开新 OpenSpec change 整段重写
+- **3.2 (ee9fa67) 已落地**: Q3 plan 当时不知道我们已经手动 port 过, 现在确认 DROP
+- **Q3 plan 完整收口**: Group 1-3 全部 audit 完, 剩下是 Group 4 rewrite tasks §15-§18 4 个新条目 + §1-§3 3 个老条目 + P6 release bump

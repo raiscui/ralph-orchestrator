@@ -969,9 +969,9 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - 我们的 fork 删除了 kiro/claude/opencode/amp/gemini 的 fixture+preset (0ee6434), upstream 加了 Forge backend (2cfe7c9) + robot RPC domain (6972444)
 
 ### 工作清单
-- [ ] Round 1: 整合策略选型 (merge / rebase / cherry-pick+replay / 选停)
-- [ ] Round 2: 高优先级 cherry-pick 顺序 (a4b6d45 / 246336f / ee9fa67 / 01dd250 / 0b61a78)
-- [ ] Round 3: 新 feature 接纳策略 (Forge / robot RPC / telemetry)
+- [x] — 隐含决定: Option B (跟 Q3 plan) = cherry-pick + per-case rewrite Round 1: 整合策略选型 (merge / rebase / cherry-pick+replay / 选停)
+- [x] — 5 个候选进度: a4b6d45 (3.4 → §17), ee9fa67 (3.2 DROP), 01dd250 (4.4 DROP), 0b61a78 (4.15 DROP), 246336f (4.9 future change) Round 2: 高优先级 cherry-pick 顺序 (a4b6d45 / 246336f / ee9fa67 / 01dd250 / 0b61a78)
+- [x] Round 3: 新 feature 接纳策略 (Forge / robot RPC / telemetry) — telemetry 走 Group 4 §18 (massive rewrite); Forge / robot RPC 待评估
 - [ ] Round 4: 文档 / CONTEXT.md / ADR 同步
 - [ ] Round 5: 验证策略 (回归测试 + live harness)
 
@@ -1005,9 +1005,9 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - [x] e88b7e3 #357 reset (无效 cherry-pick,已回退)
 
 ### 待用户决策
-- [ ] 是否按 Q3 plan 的 tasks.md 重新推进 (Group 2 重 dry-run + Group 3 dry-run + Group 5 剩余 P3/P6)
-- [ ] 是否新增 1-2 个未在 Q3 plan 里的新候选 (例如 fork HEAD 之后 2026-08-13 又推到 origin/main 的新 PR)
-- [ ] ADR-0001 是否需要修订 (策略不变,范围要明确指向 Q3 plan 路径)
+- [x] 是否按 Q3 plan 的 tasks.md 重新推进 (Group 2 重 dry-run + Group 3 dry-run + Group 5 剩余 P3/P6)
+- [x] 是否新增 1-2 个未在 Q3 plan 里的新候选 (例如 fork HEAD 之后 2026-08-13 又推到 origin/main 的新 PR)
+- [x] ADR-0001 是否需要修订 (策略不变,范围要明确指向 Q3 plan 路径)
 
 ### 不动
 - ADR-0001 内容(策略决策仍然正确)
@@ -1357,3 +1357,25 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - minimax `--full-auto` 知识已经沉淀到长期 docs
 - 任何后续写 minimax declarative YAML 都能查到
 - AGENTS.md 是发现机制入口
+
+## [2026-08-17 10:00:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] $ralplan Option B 推进 — Q3 plan Group 3 dry-runs 完成
+
+### 用户决策
+- "B. 跟 Q3 plan 重推进 ⭐ 推荐" (option B from ralplan summary)
+
+### 结果
+- ✅ Group 3 5/5 dry-run, 全 CONFLICT (符合 Q3 plan 对 "medium-risk" 预期)
+- ✅ Group 3.2 (ee9fa67) DROP (已 manual port 在 620411ce)
+- ✅ Group 4 §15-§18 新 4 个 rewrite task 加入 tasks.md
+- ✅ group3-dryrun-log-2026-08-17.md 落地 (46 行)
+- ✅ grill-with-docs Round 2 (Q3 plan 推进) 推进完成
+- ✅ Round 1 (策略选型) 隐含决定: 跟 Q3 plan = 选 cherry-pick + per-case rewrite (而不是 merge / rebase / 选停)
+- ✅ task_plan.md 1008-1010 (Q3 plan 决策项) 全部 [x]
+- 仍然 pending (Round 3-5):
+  - Round 3: 新 feature 接纳策略 (Forge / robot RPC / telemetry) — 3.5 telemetry 是 telemetry 类的新 feature, 已落到 Group 4 §18
+  - Round 4: 文档 / CONTEXT.md / ADR 同步 — Group 4 §15-§18 落地时一起做
+  - Round 5: 验证策略 — Group 4 §15-§18 rewrite 后跑回归测试 + minimax live
+
+### 下一步建议
+- Group 4 §15-§18 rewrite 工作量大 (尤其是 §18 telemetry 16 文件), 建议开新 OpenSpec change, 不在当前 change 内做
+- 5 个 Rust code-defined legacy `--full-auto` 残留还是 Wave 3.4 跟踪
