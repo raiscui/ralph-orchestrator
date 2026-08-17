@@ -1,5 +1,5 @@
 ---
-status: pending
+status: in_progress
 created: 2026-08-17
 started: 2026-08-17
 ---
