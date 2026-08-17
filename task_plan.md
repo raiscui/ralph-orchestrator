@@ -1456,3 +1456,16 @@ capabilities.rs (Streaming) + 当前 schema 字段
 12. a4c6e8d3 OpenSpec change spec (context-window-utilization)
 13. 3ff89212 framework impl
 14. 2dd66231 OpenSpec tasks 进度
+
+## [2026-08-17 19:00:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] Wave 3.4 partial cleanup (4 file removal)
+
+### 结果
+- ✅ 4 dead-code files 删除 (-2474 行)
+- ✅ --full-auto 在 repo 0 残留
+- ✅ cargo test --workspace 全部 PASS
+- ✅ commit `ca54fb3b` (force-push 修正了 .scratch 误加)
+
+### 代码任务
+- tasks/wave-3.4-legacy-cleanup.code-task.md: status: completed
+
+### 累计 16 commits since e2977175

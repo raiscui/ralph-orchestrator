@@ -879,3 +879,45 @@
   - minimax 通过 (144.7s) 证明 framework 没引入 regression
 - **backpressure flake 不阻塞**: 这是 Codex 0.147.0 的特性, 不是我们代码
   - 标记为 LATER_PLANS 跟踪 (跟 minimax API 重跑跟踪并列)
+
+## [2026-08-17 19:00:00] [Session ID: omx-1786600320381-z290x9] 任务名称: Wave 3.4 legacy cleanup — physical remove 4 dead-code scenarios
+
+### 任务内容
+- 用户指令: "D" (5 个 Rust code-defined legacy --full-auto 清理)
+- 不止 mechanical fix, 走 physical removal: 4 个 dead-code 文件整个删
+- spec-first: tasks/wave-3.4-legacy-cleanup.code-task.md
+
+### 改动 (commit `ca54fb3b`)
+- 4 个文件 delete: emit_spawn_instance.rs (761) + hat_instances.rs (816) +
+  starting_event_inference.rs (528) + parallel_trigger_routing_example.rs (369)
+- 总共 -2474 行 Rust code (5% 仓库)
+- 连锁清理:
+  - parallel/mod.rs: 删 3 mod + 3 pub use + 1 helper --full-auto → --sandbox danger-full-access
+  - scenarios/mod.rs: 删 1 mod + 1 pub use + 改 1 pub use block
+  - lib.rs: 删 4 pub use 行
+- cargo fix 顺带清掉 5 个 ralph-core 文件 (test-only 字段标 #[cfg(test)])
+
+### 累计 commits on my/main
+- ca54fb3b Wave 3.4 legacy cleanup (本次, 含 force-push 修正)
+- 16 commits since e2977175 (5 天连续工作)
+
+### 验证
+- cargo test --workspace: 全部 PASS
+- rg --full-auto in crates/: 0 残留
+- cargo check -p ralph-e2e: 0 error
+- minimax live 回归 (下轮再跑, 走 YAML 路径应该不受影响)
+
+### 总结感悟
+- **dead code + deprecated flag = physical removal**: 不保留向后兼容
+  符合"改良胜过新增"。Wave 3.4 等 2.3.0 release 才删, 我们提前做。
+- **cargo fix 是 friends**: --tests 自动清理 test-only 字段, 减少 diff
+- **patch_example_config_for_codex_e2e helper 保留**: 30+ example scenarios
+  还在用它, 单纯替换 flag 即可, 不删函数
+- **5 个 ralph-core 文件的 cargo fix cleanup 是意外收益**: 提前把 test-only
+ 字段标好, 后面写 summary_writer 测试时不用再补
+
+### 仍 pending
+- minimax live 回归 (parallel-hat-instances* 2/2)
+- Wave 3.4 21 个 deprecated imperative structs (等 declarative coverage ≥ 90%)
+- backpressure flake (Codex 0.147.0 backend 负载)
+- §18 Claude 提取 (新 OpenSpec change)

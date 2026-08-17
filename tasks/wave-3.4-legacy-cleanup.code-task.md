@@ -1,7 +1,8 @@
 ---
-status: in_progress
+status: completed
 created: 2026-08-17
 started: 2026-08-17
+completed: 2026-08-17
 ---
 # Task: Wave 3.4 legacy code-defined scenario cleanup (subset)
 
