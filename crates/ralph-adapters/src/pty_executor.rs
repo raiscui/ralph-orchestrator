@@ -53,6 +53,13 @@ pub struct PtyExecutionResult {
     pub exit_code: Option<i32>,
     /// How the process was terminated.
     pub termination: TerminationType,
+    /// Context window peak (Claude `usage.input_tokens`) for this execution.
+    ///
+    /// 说明:
+    /// - 0 表示 backend 不报告 token 用量 (ACP, headless 等)。
+    /// - 报告后由上游 `loop_runner` 调 `LoopState::record_iteration_tokens`。
+    /// - Defaults to 0 (suppresses the suffix when unset by the caller).
+    pub context_window: u64,
 }
 
 /// How the PTY process was terminated.
@@ -192,6 +199,9 @@ pub struct PtyExecutor {
     // This replaces the previous inference via output_rx.is_none() which broke
     // after the streaming refactor (handle() is no longer called in TUI mode).
     tui_mode: bool,
+    /// Context window limit (Claude `usage.input_tokens` peak).
+    /// 0 表示未配置 / 不报告 (ACP, headless 等不写)。
+    context_window: u64,
 }
 
 impl PtyExecutor {
@@ -214,7 +224,17 @@ impl PtyExecutor {
             terminated_tx,
             terminated_rx: Some(terminated_rx),
             tui_mode: false,
+            context_window: 0,
         }
+    }
+
+    /// Sets the context window limit (Claude `usage.input_tokens` peak).
+    ///
+    /// 说明：
+    /// - 通常在启动时由 `resolve_context_window(backend)` 调一次。
+    /// - 0 表示未配置 / 不报告。
+    pub fn set_context_window(&mut self, context_window: u64) {
+        self.context_window = context_window;
     }
 
     /// Sets the TUI mode flag.
@@ -1603,6 +1623,8 @@ fn build_result(
         success,
         exit_code,
         termination,
+        // TODO: extract Claude session peak via fixtures; default 0 for now.
+        context_window: 0,
     }
 }
 
@@ -1751,6 +1773,7 @@ mod tests {
             success: true,
             exit_code: Some(0),
             termination: TerminationType::Natural,
+            context_window: 0,
         };
 
         assert!(

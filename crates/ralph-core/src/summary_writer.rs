@@ -98,6 +98,24 @@ impl SummaryWriter {
             content.push_str(&format!("**Cost:** ${:.2}\n", state.cumulative_cost));
         }
 
+        // Context window peak (if telemetry active)
+        if state.peak_input_tokens > 0 {
+            content.push_str(&format!(
+                "**Context peak:** {} tokens\n",
+                state.peak_input_tokens
+            ));
+            if let Some((hat_id, hat_peak)) = state
+                .hat_peak_input_tokens
+                .iter()
+                .max_by_key(|(_, v)| **v)
+            {
+                content.push_str(&format!(
+                    "**Top hat:** {} ({} tokens)\n",
+                    hat_id, hat_peak
+                ));
+            }
+        }
+
         // Tasks section (read from scratchpad if available)
         content.push('\n');
         content.push_str("## Tasks\n\n");
@@ -231,6 +249,9 @@ mod tests {
             consecutive_malformed_events: 0,
             hat_activation_counts: std::collections::HashMap::new(),
             exhausted_hats: std::collections::HashSet::new(),
+            peak_input_tokens: 0,
+            last_input_tokens: None,
+            hat_peak_input_tokens: std::collections::HashMap::new(),
             unacknowledged_guidance: Vec::new(),
         }
     }

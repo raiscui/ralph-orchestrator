@@ -149,6 +149,8 @@ impl PromptExecutor for PtyPromptExecutor {
                 timed_out: false,
                 canceled: false,
                 success: result.success,
+                // CliExecutor 非 PTY 路径不报告 context window (Gemini 等)
+                context_window: 0,
             });
         }
 
@@ -223,6 +225,7 @@ fn to_prompt_output(
         timed_out,
         canceled,
         success: result.success,
+        context_window: result.context_window,
     }
 }
 
@@ -239,6 +242,7 @@ mod tests {
             success: true,
             exit_code: Some(0),
             termination,
+            context_window: 0,
         }
     }
 

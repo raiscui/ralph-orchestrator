@@ -52,6 +52,15 @@ pub struct LoopState {
     /// - 这与 lazy-model-completion (complete_publishes 硬终止) 正交,
     ///   跟本地 2-strike pattern 协同工作。
     pub unacknowledged_guidance: Vec<String>,
+
+    /// Session-scoped peak context-token count across all iterations.
+    pub peak_input_tokens: u64,
+
+    /// Last iteration's context-token count (if any).
+    pub last_input_tokens: Option<u64>,
+
+    /// Per-hat session-scoped peak context-token count.
+    pub hat_peak_input_tokens: HashMap<HatId, u64>,
 }
 
 impl Default for LoopState {
@@ -71,6 +80,9 @@ impl Default for LoopState {
             consecutive_malformed_events: 0,
             hat_activation_counts: HashMap::new(),
             exhausted_hats: HashSet::new(),
+            peak_input_tokens: 0,
+            last_input_tokens: None,
+            hat_peak_input_tokens: HashMap::new(),
             unacknowledged_guidance: Vec::new(),
         }
     }
@@ -82,8 +94,76 @@ impl LoopState {
         Self::default()
     }
 
+    /// Record this iteration's context-token usage for the hat that ran it.
+    ///
+    /// 说明:
+    /// - `tokens` 是 iteration 的 adapter-reported live context occupancy。
+    /// - 当 `tokens == 0` 时 no-op (ACP / non-token backends suppressed)。
+    /// - Peaks session-scoped — 从不在 iteration boundary 重置。
+    pub fn record_iteration_tokens(&mut self, hat: &HatId, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        let entry = self.hat_peak_input_tokens.entry(hat.clone()).or_insert(0);
+        *entry = (*entry).max(tokens);
+        self.peak_input_tokens = self.peak_input_tokens.max(tokens);
+        self.last_input_tokens = Some(tokens);
+    }
+
     /// Returns the elapsed time since the loop started.
     pub fn elapsed(&self) -> Duration {
         self.started_at.elapsed()
+    }
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::*;
+
+    #[test]
+    fn record_iteration_tokens_tracks_per_hat_and_global_peak() {
+        let mut state = LoopState::new();
+        let builder = HatId::new("builder");
+        let critic = HatId::new("critic");
+
+        state.record_iteration_tokens(&builder, 10_000);
+        assert_eq!(state.hat_peak_input_tokens.get(&builder).copied(), Some(10_000));
+        assert_eq!(state.peak_input_tokens, 10_000);
+        assert_eq!(state.last_input_tokens, Some(10_000));
+
+        // Critic peaks higher than builder — global peak tracks max, per-hat stays independent
+        state.record_iteration_tokens(&critic, 20_000);
+        assert_eq!(state.hat_peak_input_tokens.get(&critic).copied(), Some(20_000));
+        assert_eq!(state.peak_input_tokens, 20_000);
+        assert_eq!(state.last_input_tokens, Some(20_000));
+    }
+
+    #[test]
+    fn record_iteration_tokens_zero_tokens_is_noop() {
+        let mut state = LoopState::new();
+        let builder = HatId::new("builder");
+
+        // Non-token backend (ACP, etc.) reports 0
+        state.record_iteration_tokens(&builder, 0);
+        assert_eq!(state.peak_input_tokens, 0);
+        assert_eq!(state.last_input_tokens, None);
+        assert!(state.hat_peak_input_tokens.is_empty());
+    }
+
+    #[test]
+    fn record_iteration_tokens_per_hat_peak_independent_of_global() {
+        let mut state = LoopState::new();
+        let writer = HatId::new("writer");
+        let tester = HatId::new("tester");
+
+        // writer spikes high once, then goes back down
+        state.record_iteration_tokens(&writer, 50_000);
+        state.record_iteration_tokens(&writer, 1_000);
+        assert_eq!(state.hat_peak_input_tokens.get(&writer).copied(), Some(50_000));
+
+        // tester reports a smaller value — global peak should still be 50_000 (from writer)
+        state.record_iteration_tokens(&tester, 5_000);
+        assert_eq!(state.peak_input_tokens, 50_000);
+        assert_eq!(state.hat_peak_input_tokens.get(&tester).copied(), Some(5_000));
     }
 }

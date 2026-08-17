@@ -19,6 +19,10 @@ pub struct PromptOutput {
     pub canceled: bool,
     /// 进程是否成功(exit 0 且未超时/未取消)。
     pub success: bool,
+    /// Context window peak tokens for this iteration (Claude `usage.input_tokens`)。
+    ///
+    /// 0 表示 backend 不报告 (ACP, headless 等) — `record_iteration_tokens` 看到 0 时 no-op。
+    pub context_window: u64,
 }
 
 /// 串行模式执行器 port。

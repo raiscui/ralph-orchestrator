@@ -426,6 +426,32 @@ impl Default for AdapterSettings {
 }
 
 impl RalphConfig {
+    /// Resolves the context window token limit for the active backend.
+    ///
+    /// 说明：
+    /// - Reads `adapters.<backend>.context_window_tokens` if explicitly set.
+    /// - Returns 0 if unset (signals: no telemetry / suppress suffix)。
+    /// - Caller uses this to initialize `PtyExecutor::set_context_window`。
+    pub fn resolve_context_window(&self, backend: &str) -> u64 {
+        // 说明：
+        // - AdaptersConfig 是结构体, 不是 HashMap, 用 match 直接字段访问
+        // - 没显式配置时返回 0 (suppress suffix)
+        let settings = match backend {
+            "claude" => Some(&self.adapters.claude),
+            "gemini" => Some(&self.adapters.gemini),
+            "kiro" => Some(&self.adapters.kiro),
+            "codex" => Some(&self.adapters.codex),
+            "amp" => Some(&self.adapters.amp),
+            _ => None,
+        };
+        if let Some(s) = settings {
+            if let Some(tokens) = s.context_window_tokens {
+                return tokens as u64;
+            }
+        }
+        0
+    }
+
     /// Loads configuration from a YAML file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path_ref = path.as_ref();
@@ -3022,5 +3048,35 @@ hats:
             reviewer.default_publishes,
             Some("review.complete".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::*;
+
+    fn config_with_context_window(backend: &str, tokens: Option<u32>) -> RalphConfig {
+        let yaml = format!(
+            "cli:\n  backend: {}\n  command: {}\n  args: []\nadapters:\n  {}:\n    context_window_tokens: {}\n",
+            backend,
+            backend,
+            backend,
+            tokens.map(|n| n.to_string()).unwrap_or_else(|| "~".to_string())
+        );
+        serde_yaml::from_str(&yaml).expect("yaml must parse")
+    }
+
+    #[test]
+    fn resolve_context_window_prefers_explicit_override() {
+        let config = config_with_context_window("codex", Some(200_000));
+        let resolved = config.resolve_context_window("codex");
+        assert_eq!(resolved, 200_000);
+    }
+
+    #[test]
+    fn resolve_context_window_returns_zero_when_unset() {
+        let config = config_with_context_window("codex", None);
+        let resolved = config.resolve_context_window("codex");
+        assert_eq!(resolved, 0);
     }
 }

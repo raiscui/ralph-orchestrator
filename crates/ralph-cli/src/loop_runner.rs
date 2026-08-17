@@ -404,7 +404,14 @@ pub async fn run_loop_impl(
                     }
                 })),
                 after_execute: Some(Box::new(|iteration, hat_id, out| {
-                    // record-session 迭代记录(stdout-only)
+                    // 说明:
+                    // - TODO: wire `record_iteration_tokens(hat_id, out.context_window)`
+                    //   当 Claude session peak extraction 在 PtyExecutor 中落地时。
+                    // - 当前 borrow checker 冲突: after_execute closure 捕获 &event_loop,
+                    //   但 .run() 持有 &mut self。Refactor hook 签名后再 wire。
+                    // - 现在 PromptOutput.context_window 已就位 (默认 0),
+                    //   record_iteration_tokens(0) 是 no-op, 不影响行为。
+                    // - record-session 迭代记录(stdout-only)
                     if let Some(recorder) = &session_recorder
                         && !out.output.is_empty()
                     {
