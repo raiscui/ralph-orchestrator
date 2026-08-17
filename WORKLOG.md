@@ -948,3 +948,44 @@
 - §18 Claude 提取 (新 OpenSpec change)
 - backpressure flake (Codex 0.147.0 负载)
 - Forge / robot RPC 评估 (Round 3 部分)
+
+## [2026-08-17 20:45:00] [Session ID: omx-1786600320381-z290x9] 任务名称: §19 Wave 3.4 / Round 6 / Forge-RPC 评估 / 一系列 docs 收尾
+
+### 任务内容
+连续 5 天工作的最后一段收尾:
+1. Forge CLI backend + Robot RPC domain 评估 (DEFER / DROP 决议)
+2. Round 6 数据点发现 (declarative coverage 实际是 100%, handoff 的 63.93% 是 2026-08-13 旧快照)
+3. Round 6 物理清 22 个 deprecated + 12 个 legacy struct (-7674 行)
+4. Follow-up #1: 物理清 5 个非 deprecated 但 dead code 的 .rs 文件 (-3783 行)
+5. Follow-up #2: README + 28 个 YAML header 文档清理 (-11457 累计代码 + 新增 doc)
+6. CONTEXT.md 同步两条新事实 (100% gate + #[deprecated] = dead code 判定规则)
+7. `$continuous-learning` 完整复盘 + 2 个 solution Scoped Refresh + 1 个 manifest + 1 个 task_plan 归档
+
+### 完成过程
+- 跑 `cargo run -p ralph-e2e -- --list` 收集 61 个 scenario 当前状态
+- 跑 `cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture` 验证 gate 实际 PASS (drift log 60+0+1)
+- 阅读 origin/main 上 2cfe7c9b (Forge) 和 69724442 (robot RPC) 两个 commit 的实际改动,
+  判断 ralph-api/ 整 crate 已删 (ADR-0001) 后 robot RPC 是 blocked
+- 5 个独立 commit push:
+  - ee73fcf8: 物理清 capabilities.rs (-648)
+  - 03fab390: 物理清 5 个 deprecated .rs 文件 (-7026)
+  - e1edf762: 物理清 5 个 legacy .rs 文件 (-3783)
+  - 933e3e86: §19 session bookkeeping (+115)
+  - 971e5710: README + 28 YAML doc cleanup
+- $continuous-learning 通过 validate-solution-frontmatter.py + claims.py
+  验证 2 个 solution 的所有 frontmatter 重写
+- rename task_plan.md → archive/default_history/task_plan_2026-08-17_pre_continuous_learning_wave3_4_complete.md
+  + 新 task_plan.md (43 行索引跳点) + 新 manifest (85 行)
+
+### 总结感悟
+- **handoff 数字不能盲信**: 63.93% 是历史, 实际 100%。 gate 早就 PASS,
+  物理删除解锁条件已具备, 没有这一刀就还在等 90% 闸门
+- **"已 deprecated" + 未注册 = safe to delete**: 不是 dangerous move
+- **同一 file 的同 pattern 可以一次净清**: 5 个 deprecated + 5 个 legacy
+  + 28 个 doc noise 单档走完, 比逐文件 commit 节省 review 成本
+- **drift log 永远打印当前状态**: declarative_coverage_gate 这条 CI 后背
+  pressure 值 refer always to live tree, 不依赖历史快照
+- **#[allow(deprecated)] 是技术债的免费信号**: Round 6 之后 0 个,
+  新增 deprecation 立刻可见, 不会被 297+ warning 噪音淹没
+- **CONTEXT.md 是新事实的真出口**: 当 handoff 数字与实际不符时,
+  锁到 glossary 防止下次重复犯错

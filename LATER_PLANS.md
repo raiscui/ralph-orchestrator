@@ -275,3 +275,32 @@ Forge 实际新增的真实代码:
 ### 这一轮的最小动作
 **只动 capabilities.rs**: 698 行 / 2 struct / 最干净 / 验证 pattern。
 其他 5 个文件按本轮 pattern 复制, 单开 commit, 不要混。
+
+## [2026-08-17 20:50:00] [Session ID: omx-1786600320381-z290x9] 待办同步: $continuous-learning 后的下一档
+
+### §18 Claude session peak extraction PR (续 §18 framework TODO)
+- **现况**: 上轮 §18 framework commit `2dd66231` 留了 `loop_runner` 的 TODO marker (borrow conflict with .run()), 没动
+- **origin 改动**: 452 行重写, 涉及 ralph-core::event_loop + ralph-adapters::pty_executor + ralph-adapters::prompt_executor + Claude session peak 提取
+- **本地架构差异**: 删了 StreamEvent enum, 重构到 (StreamKind, line) tuple, 删了 stream_handler.rs / json_rpc_handler.rs / claude_stream.rs 等
+- **建议**: 单独 OpenSpec change 走 spec → dogfood spec → impl → dogfood 完整流程, 不混入当前 sync 整合
+- **依赖**: 需要 origin 重写里关键算法的算法提取 (peak 求最值 + token 计数 + sampling 频率控制)
+
+### backpressure flake (Codex 0.147.0 backend 偶发)
+- **现况**: R5 跑 backpressure 撞 double 600s timeout (Codex 0.147.0 backend load flake)
+- **建议**: 等 Codex 0.148.x 升级 + 加重试 + 把该单测标 `retry/max=3` 而不是单次跑; 不算第一优先, 不会阻塞 release
+
+### `docs/solutions/lazy-model-completion/README.md` 前置字段修复 (pre-existing drift)
+- **现况**: frontmatter 用了 schema v3 之外字段 (`resolution_type` 不需要 + `problem_type: architecture_flaw` 不在 enum + 缺 5 个必填字段)
+- **触发**: 本轮 refresh 校验时发现 validator 报告不一致
+- **建议**: 单开一个 commit 把 frontmatter 升到 schema v3 合规,
+  然后跑 `validate-solution-frontmatter.py` + `validate-solution-claims.py` 验证
+
+### Forge / Robot RPC 长期决议
+- Forge CLI 后端: 走 clean cherry-pick 单 PR (避免 2cfe7c9b 的不相关重构), 用户实际安装了 forge 再启动
+- Robot RPC: 等新 ADR 批准恢复 ralph-api/ crate 再讨论
+
+### task_plan.md 状态 (再次 索引跳点)
+- 新 task_plan.md 43 行, 是 active 任务索引指针
+- 历史 1551 行已归档到 archive/default_history/task_plan_2026-08-17_pre_continuous_learning_wave3_4_complete.md
+- 不再超 1000 行阈值, 暂时干净
+- 未来的"长时间主题"切换时 (>5 天 active 或文件再次触及 800+ 行) 重复续档

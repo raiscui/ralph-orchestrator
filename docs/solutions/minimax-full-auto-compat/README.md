@@ -1,15 +1,33 @@
 ---
-title: minimax provider 不支持 `--full-auto` flag
-problem_type: provider_compatibility
-symptoms:
-  - 跑 minimax profile + MiniMax-M3 的 E2E 场景时报 "unknown flag: --full-auto"
-  - 失败的 5 个 declarative YAML 场景 stderr 含 minimax CLI reject 行
-root_cause: minimax provider 是 OpenAI codex CLI 的子集 wrapper，不透传 `--full-auto` 组合 flag
+title: minimax provider + codex-cli ≥ 0.147.0 不支持 `--full-auto` flag
+problem_type: integration_issue
+component: ralph-e2e + ralph-adapters::cli_backend
+module: crates/ralph-e2e/scenarios/ and crates/ralph-adapters/src/cli_backend.rs
+severity: high
+status: active
+date: 2026-08-16
+last_updated: 2026-08-17
+discovered: 2026-08-16
+root_cause: minimax provider 只透传认识的 flag(`--full-auto` 不在白名单),codex-cli ≥ 0.147.0 升级时也移除了 `--full-auto`;两条 path 都必须改用 `--sandbox danger-full-access`。
+resolution_type: schema+code dual fix (YAML custom backend args + cli_backend.rs default args)
 fix_branch: main
 fix_commits:
-  - e2977175: fix(e2e): replace --full-auto with --sandbox danger-full-access for minimax compatibility
-discovered: 2026-08-16
-applies_to: ralph-e2e declarative YAML scenarios using `codex exec` custom backend
+  - "e2977175: fix(e2e): replace --full-auto with --sandbox danger-full-access for minimax compatibility (declarative YAML side)"
+  - "005d840d: fix(cli_backend): codex default args --full-auto → --sandbox danger-full-access (Rust code path side)"
+tags:
+  - codex-cli-compat
+  - minimax
+  - cli-backend
+  - sandbox-mode
+  - wave3-q3-2026
+verified_by:
+  - "rg '\\-\\-full-auto' crates/ → 0 matches (both code-defined + declarative paths clean)"
+  - "cargo run -p ralph-e2e -- codex --filter parallel-hat-instances (default codex) → PASSED"
+  - "cargo test -p ralph-e2e --lib (336+ passed; no regression)"
+  - "RALPH_E2E_CODEX_PROFILE=minimax RALPH_E2E_CODEX_MODEL=MiniMax-M3 cargo run -p ralph-e2e -- codex --filter parallel-hat-instances* → 2/2 PASSED"
+related_solutions:
+  - ../documentation-gaps/declarative-scenario-migration.md (Wave 3.4 cleanup + 100% gate)
+applies_to: 'ralph-e2e YAML scenarios with `cli.backend: codex` custom backend; ralph-adapters::cli_backend::CliBackend::codex() default args'
 ---
 
 # minimax `--full-auto` 不兼容：用 `--sandbox danger-full-access` 替代
@@ -86,7 +104,7 @@ flag 透传，不做语义翻译。
 
 | 文件 | 改动 |
 |---|---|
-| `crates/ralph-e2e/scenarios/parallel-hat-instances.yaml` | `- --full-auto` → `- --sandbox` + `- danger-full-access` |
+| `crates/ralph-e2e/scenarios/hat-instances.yaml` | `- --full-auto` → `- --sandbox` + `- danger-full-access` |
 | `crates/ralph-e2e/scenarios/hat-instances-zh.yaml` | 同上 |
 | `crates/ralph-e2e/scenarios/starting-event-inference.yaml` | 同上 |
 | `crates/ralph-e2e/scenarios/starting-event-inference-multi-candidate.yaml` | 同上 |
@@ -112,28 +130,61 @@ flag 透传，不做语义翻译。
 | parallel-starting-event-inference | 54.7s | ✅ |
 | parallel-starting-event-inference-multi-candidate | 47.2s | ✅ |
 
-workspace 证据保留在 `.e2e-tests/parallel-hat-instances*/` 4 个目录
+workspace 证据保留在 `.e2e-tests/hat-instances*/` 4 个目录
 (events.jsonl + agents.json + ralph.yml 都完整)。
 
 ## 兼容性
 
-- 不破坏 default Codex profile (用真 OpenAI Codex account 时 `--full-auto` 仍可用)
-- 不破坏 minimax 之外的 provider (其他 provider 透传 `--full-auto`)
-- 不引入新依赖
-- 不改 Rust 代码 (declarative YAML 是 source of truth，code-defined
-  legacy Rust 文件仍有 `--full-auto` 残留但已不再 Imperative注册， 不会跑)
+**这是关键 — 2026-08-17 Round 5 更新**:
+
+- **default Codex (codex-cli ≥ 0.147.0)** 现在也 reject `--full-auto`,必须用
+  `--sandbox danger-full-access`。**CLI 后端唯一支持的两条路径都用这个 flag**。
+- **minimax provider** 仍按上面矩阵,`--full-auto` 不透传,必须用
+  `--sandbox danger-full-access`。
+- **不引入新依赖**。
+- **Rust 代码路径已修复**(2026-08-17 commit `005d840d`):
+  `crates/ralph-adapters/src/cli_backend.rs::CliBackend::codex()` 的默认
+  `args` 已经把 `--full-auto` 替换成 `--sandbox danger-full-access`,
+  `filter_args_for_interactive()` 同步把 `--sandbox danger-full-access`
+  也加入安全过滤列表。**所以**不论走 declarative YAML 还是 Rust
+  code-defined scenario,遇到 minimax / 新版 Codex 都自动走对的 flag。
+
+## Rust code path 修复 (Round 5, commit `005d840d`)
+
+origin/mikeyobrien 在 `codex-cli 0.147.0` 升级时移除了 `--full-auto`,
+minimax provider 早就 reject。现在 default `CliBackend::codex()` hardcode
+的 args 也被 reject。这条修复加在 cli_backend.rs:
+
+```diff
+ // crates/ralph-adapters/src/cli_backend.rs
+- Vec::from(["exec", "--sandbox", "workspace-write", "--full-auto",
+-            "--ask-for-approval", "on-request"]),
++ Vec::from(["exec", "--sandbox", "danger-full-access"]),
+```
+
+并同步 `filter_args_for_interactive` 把 `--sandbox danger-full-access`
+也加入可安全交互的 arg 列表。
+
+验证:
+
+| 阶段 | 命令 | 结果 |
+|---|---|---|
+| codex live | `cargo run -p ralph-e2e -- codex --filter parallel-hat-instances*` | 2/2 PASSED |
+| minimax live | `RALPH_E2E_CODEX_PROFILE=minimax RALPH_E2E_CODEX_MODEL=MiniMax-M3 cargo run -p ralph-e2e -- codex --filter parallel-hat-instances*` | 2/2 PASSED |
 
 ## 后续
 
-- **5 个 Rust code-defined legacy 文件** (dead code，不再 Imperative 注册) 仍
-  残留 `--full-auto`:
-  - `crates/ralph-e2e/src/scenarios/parallel/hat_instances.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel/emit_spawn_instance.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel/starting_event_inference.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel/mod.rs`
-  - `crates/ralph-e2e/src/scenarios/parallel_trigger_routing_example.rs`
-  - 跟随 Wave 3.4 物理删除 imperative struct 时一起清理
-  (LATER_PLANS 已跟踪，Wave 3.4 NO-GO 状态前不动)
+- ✅ **(已落地 2026-08-17)** 5 个 Rust code-defined legacy 文件全部物理删除
+  (Wave 3.4 cleanup commit `ca54fb3b`) + 11 个 legacy .rs struct + 22 个
+  deprecated struct 也全部清完 (Round 6 commit `ee73fcf8` + `03fab390` +
+  `e1edf762`)。
+- **新增场景 checklist** (继续生效):任何走 minimax profile **或** default
+  Codex (≥ 0.147.0) 的 declarative YAML 都必须用 `--sandbox danger-full-access`
+  替代 `--full-auto`。这是当前两条 path 共用的唯一合规 flag。
+- **minimax `--ask-for-approval` / `--json`**: 矩阵中标 `⚠️` 的 flag 如要
+  使用，需先做 live 测试再行。
+- **CI enforcement (TODO)**: 把 `rg '\-\-full-auto' crates/` 加进 CI,
+  一旦回归立刻 fail。当前仓库扫描已是 0 命中,但没有 CI 卡口。
 - **新增场景 checklist**: 任何走 minimax profile 的 declarative YAML 必须
   用 `--sandbox danger-full-access` 替代 `--full-auto`。
 - **minimax `--ask-for-approval` / `--json`**: 矩阵中标 `⚠️` 的 flag 如要

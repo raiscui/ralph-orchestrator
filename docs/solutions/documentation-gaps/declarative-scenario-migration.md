@@ -1,7 +1,7 @@
 ---
 title: E2E Declarative Scenario Migration Guide
 date: 2026-08-13
-last_updated: 2026-08-13
+last_updated: 2026-08-17
 module: crates/ralph-e2e/src/scenarios/
 component: declarative migration
 problem_type: documentation_gap
@@ -14,11 +14,12 @@ tags:
   - migration-guide
   - wave2-q3-2026
 verified_by:
-  - "cargo test -p ralph-e2e --lib (534+ passed; this round 536 passed)"
+  - "cargo test -p ralph-e2e --lib (325 passed after Wave 3.4 cleanup; 396 before, deletion removed 71 unit tests)"
   - "cargo test -p ralph-e2e --test declarative_coverage_gate (Coverage 100.00% PASS)"
-  - "cargo run -p ralph-e2e --quiet -- --list (60 declarative scenarios)"
+  - "cargo run -p ralph-e2e --quiet -- --list (61 scenarios, 60 Declarative + 1 ImperativeExplicitKeep)"
 related_solutions:
   - ../EXPERIENCE.md (4 exp-20260813 entries)
+  - ../minimax-full-auto-compat/README.md (Q3 plan 3.6 cli_backend.rs fix + minimax live E2E)
 related_skills:
   - self-learning.yaml-schema-or-vs-and-semantics
   - self-learning.yaml-duplicate-field-bug
@@ -177,10 +178,64 @@ cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture  # gate 
 4. 跑 4 个验证 (见上)。
 5. chore commit 记录 decision + drift delta + 决定 + 下一 menu。
 
+
+
+## Wave 3.4 收尾 (2026-08-17) — post-migration dead code 物理删除
+
+**关键判断 (供未来同类任务复用)**:
+- 当 `all_scenarios()` 完全迁移到 declarative 路径之后,任何**未被注册**的
+  Rust `TestScenario` impl 都是 dead code。
+- 即使它们仍 `pub use` 暴露在外(`lib.rs` re-export 还在),也只是
+  公开 API surface 上的死皮。
+- 物理删除它们的判定信号:`#[deprecated(since = "2.3.0", ...)]` 是 Wave 2
+  时打的"下个 release 删"标记,Wave 3.4 + Round 6 直接提前清零。
+
+### Wave 3.4 cleanup (commit `ca54fb3b`): 4 个 parallel code-defined scenarios
+物理删除 `parallel/{emit_spawn_instance, hat_instances, starting_event_inference}.rs`
++ `parallel_trigger_routing_example.rs` 共 ~2470 行。这些是 Wave 2 期间以
+code-defined 形式存在的最后一批 imperative parallel 场景,YAML 替代版
+已经稳定运行。
+
+### Round 6 (commit `ee73fcf8` + `03fab390` + `e1edf762`): 22 + 12 = 34 个 legacy struct
+
+- `ee73fcf8`: 删除 `capabilities.rs` (ToolUseScenario + StreamingScenario, 698 行)。
+- `03fab390`: 删除 5 个 deprecated `.rs` 文件 (`errors.rs` / `hats.rs` /
+  `memory.rs` 以及 parallel/ 子目录下两个 app_server 场景代码文件 (3 个 Round 6 物理删除, 此处为历史引用),共 19 个 `#[deprecated]` struct
+  + 7057 行。
+- `e1edf762`: 删除 5 个非 deprecated 但同样的 dead code `.rs` 文件
+  (`connectivity.rs` / `events.rs` / `orchestration.rs` / `incremental.rs` /
+  `tasks.rs`),共 12 个 struct + 3865 行。
+
+### 关键 pattern (复用机会)
+
+**当 `all_scenarios()` 是注册真相源,`pub use` 只是 re-export 时,删除流程是机械的 4 步**:
+
+1. `grep -rn '\b<StructName>\b' crates/ralph-e2e/src/ --include='*.rs' | rg -v 'lib.rs\|scenarios/mod.rs\|<StructName 定义所在文件>'`
+   - 期望: 0 命中(除了自身文件 + lib.rs/scena rios/mod.rs 的 `pub use`)
+   - 若非零: 先看是不是 doctest 引用 (`runner.rs`, `crates/ralph-e2e/src/scenarios/mod.rs` 顶部),删之前修改 doctest
+2. `scenarios/<file>.rs`: `mod` 声明 + `#[allow(deprecated)] pub use <file>::{...};` 删除
+3. `lib.rs`: 类型 re-export + 空 Tier 注释删除
+4. `rm scenarios/<file>.rs` 后跑:
+   - `cargo build -p ralph-e2e`(应该 0 error,deprecation warning 减 N)
+   - `cargo test -p ralph-e2e --test declarative_coverage_gate`(gate 仍 100% PASS)
+   - `cargo test -p ralph-e2e --lib`(regression)
+   - `cargo test -p ralph-e2e --doc`(doctest 编译通过)
+   - `cargo run -p ralph-e2e --quiet -- --list`(61 scenarios 不变)
+
+### Drift log 净效应
+
+```text
+Round 6 起点:  60 Declarative + 0 Imperative + 1 ExplicitKeep = 61
+Round 6 终点:  60 Declarative + 0 Imperative + 1 ExplicitKeep = 61
+```
+
+注册表**没变**(删除的都是未注册的 dead struct),但场景实现层
+清理掉了 ~11K 行业务/技术债。
+
 ## 相关资源
 
 - 详细 skills: `.codex/skills/self-learning.*`
 - 项目级经验: `EXPERIENCE.md` (搜索 `exp-20260813-*`)
 - 当前规划: `task_plan.md` (最末 entry 通常是 Wave 进度)
 - 长期待办: `LATER_PLANS.md`
-- OpenSpec change: `openspec/changes/e2e-declarative-migration-plan/`
+- OpenSpec change: `openspec/changes/archive/2026-08-13-e2e-declarative-migration-plan/` (已归档)
