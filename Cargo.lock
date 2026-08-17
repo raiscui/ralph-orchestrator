@@ -3142,7 +3142,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ralph-adapters"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3163,7 +3163,7 @@ dependencies = [
 
 [[package]]
 name = "ralph-bench"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3179,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "ralph-cli"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3210,7 +3210,7 @@ dependencies = [
 
 [[package]]
 name = "ralph-core"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3231,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "ralph-display"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -3255,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "ralph-e2e"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3276,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "ralph-proto"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -3288,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "ralph-tui"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "base64",
