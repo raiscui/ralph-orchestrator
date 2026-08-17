@@ -921,3 +921,30 @@
 - Wave 3.4 21 个 deprecated imperative structs (等 declarative coverage ≥ 90%)
 - backpressure flake (Codex 0.147.0 backend 负载)
 - §18 Claude 提取 (新 OpenSpec change)
+
+## [2026-08-17 19:15:00] [Session ID: omx-1786600320381-z290x9] 任务名称: minimax live 回归 Wave 3.4 cleanup
+
+### 任务内容
+- 用户指令: "A" (minimax live 回归)
+- 验证 4 file removal 没破 minimax + MiniMax-M3 路径
+- 顺手清 cargo fix 漏接的 unused import
+
+### 跑通结果
+- ✅ parallel-hat-instances (51.0s)
+- ✅ parallel-hat-instances-zh (77.2s)
+- 总耗时 128.2s
+
+### 结论
+- 4 file removal 完全不影响 YAML 路径 ✅
+- patch_example_config_for_codex_e2e helper (--sandbox danger-full-access)
+  对 minimax 没影响 (helper 不用在 minimax 路径)
+
+### 累计 commits on my/main
+- 31d512ae chore(workspace) Wave 3.4 cleanup 收尾 (上轮)
+- **+ a small import cleanup commit (本轮)**
+
+### 仍 pending
+- Wave 3.4 21 个 deprecated imperative structs (等 declarative coverage ≥ 90%)
+- §18 Claude 提取 (新 OpenSpec change)
+- backpressure flake (Codex 0.147.0 负载)
+- Forge / robot RPC 评估 (Round 3 部分)
