@@ -304,3 +304,24 @@ Forge 实际新增的真实代码:
 - 历史 1551 行已归档到 archive/default_history/task_plan_2026-08-17_pre_continuous_learning_wave3_4_complete.md
 - 不再超 1000 行阈值, 暂时干净
 - 未来的"长时间主题"切换时 (>5 天 active 或文件再次触及 800+ 行) 重复续档
+
+## [2026-08-17 21:00:00] [Session ID: omx-1786600320381-z290x9] ✅ Done: docs/solutions/lazy-model-completion/ schema drift 修复
+
+### 完成动作
+- `problem_type: architecture_flaw` → `logic_error`
+- 补 `component / module / severity / status / date / last_updated / tags / verified_by` 8 个必填字段
+- 加 `resolution_type`
+- inline path 修正 + `related_solutions` 链 minimax-full-auto-compat
+
+### 验证
+- commit `755d8241 fix(solutions): bring lazy-model-completion README.md to schema v3 compliance`
+- `validate-solution-frontmatter.py`: OK
+- `validate-solution-claims.py`: OK (0 flags)
+
+### 状态
+**3 个 docs/solutions/ 入口全部 schema v3 合规**:
+- `documentation-gaps/declarative-scenario-migration.md`
+- `lazy-model-completion/README.md`
+- `minimax-full-auto-compat/README.md`
+
+`EXPERIENCE.md` 539 行 (capture 是入口, 不参与 schema)。
