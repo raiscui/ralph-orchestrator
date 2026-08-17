@@ -41,7 +41,6 @@
 //! }
 //! ```
 
-mod capabilities;
 mod connectivity;
 mod errors;
 mod events;
@@ -77,8 +76,6 @@ mod parallel_support_escalation_desk_example;
 mod parallel_vendor_security_procurement_example;
 mod tasks;
 
-#[allow(deprecated)]
-pub use capabilities::{StreamingScenario, ToolUseScenario};
 pub use connectivity::ConnectivityScenario;
 #[allow(deprecated)]
 pub use errors::{

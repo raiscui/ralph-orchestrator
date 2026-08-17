@@ -120,8 +120,6 @@ pub use crate::scenarios::{
     ParallelVendorSecurityProcurementExampleScenario,
     ScenarioError,
     SingleIterScenario,
-    // Tier 4: Capabilities (backend-agnostic)
-    StreamingScenario,
     // Tier 6: Task System (backend-agnostic)
     TaskAddScenario,
     TaskCloseScenario,
@@ -129,7 +127,6 @@ pub use crate::scenarios::{
     TaskReadyScenario,
     TestScenario,
     TimeoutScenario,
-    ToolUseScenario,
 };
 pub use crate::workspace::WorkspaceManager;
 
