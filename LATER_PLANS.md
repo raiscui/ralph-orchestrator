@@ -190,3 +190,53 @@
 **历史记录保留**:本条 Re-run #2 之前的诊断仍然有效,作为
 lazy-model hang 现象的初始观察保留。
 
+
+## [2026-08-17 13:50:00] [Session ID: omx-1786600320381-z290x9] 评估记录: Forge backend / Robot RPC 候选
+
+### 候选 1: Forge CLI backend (origin commit 2cfe7c9b)
+
+**最终结论: DEFER (DROP 当前轮次)**
+
+实际 Forge 净代码量: ~50 行 (origin commit 名义 254 lines 但混合了大量不相关重构)。
+Forge 实际新增的真实代码:
+- `auto_detect.rs`: `forge` 加进 DEFAULT_PRIORITY + doctor 错误信息
+- `cli_backend.rs`: 一个 9 行的 `forge()` 构造函数 (`command: "forge"`, `args: vec![]`, `-p` flag, `Text` 输出) + `forge_interactive()` (空 args) + 4 个测试
+- `init.rs`: `generate_template("forge")` + 一个测试
+- `sop_runner.rs`: 12 行 forge 专属的 "no initial prompt injection" 提示
+- `doctor.rs`/`backend_support.rs`: forge 加进合法 backend 名单
+
+判定 DEFER 的原因:
+1. **commit 不可 cherry-pick**: 同一个 commit 还把 `cli_backend.rs`/`hats.rs`/`init.rs`/`main.rs`/`doctor.rs`/`sop_runner.rs` 全改了一遍, 包含 claude `--print`/`--setting-sources` 重写, `kiro-acp`/`pi`/`roo` 三个无关 backend, `PromptMode::NoPrompt` 枚举变体, `env_vars` 字段, `ScratchpadConfig` 130 行重写, hats.rs 里 GraphView 移除 + AI 生成 graph 后端 + ListPresets 子命令等。
+2. **本地已经和 origin 严重分叉**: 上轮 Round 5 才把 `cli_backend.rs` 的 `--full-auto` 改成 `--sandbox danger-full-access`, 本地的 `from_config` 结构和 origin 的不一样。
+3. **本地环境无 forge CLI**: `command -v forge` 返回 none (本机未装)。
+4. **目前没有真实用户需求信号**。
+5. 真正"加 Forge"的话工作量极小, 待真有需求时单独 cherry-pick 一个 PR (这样 commit 干净), 或者手写 15 行 (1 个 backend + 1 个 DEFAULT_PRIORITY + 1 个 doctor) 直接写。
+
+如果未来用户安装了 forge 并需要它, 重新评估; 现在不动作。
+
+### 候选 2: Robot RPC domain (origin commit 69724442, closes #243)
+
+**最终结论: DROP**
+
+实际改动: 11 个文件, 1022 行新增, 但全部落在 `crates/ralph-api/` 已被 ADR-0001 删除的 crate 里 (`protocol.rs` 268 行 全新, `runtime.rs` +87, `runtime/dispatch.rs` +33, `stream_domain/rpc_side_effects.rs` +23, `data/rpc-v1-*.json` schema, `tests/rpc_v1_robot.rs` 474 行 websocket 集成测试)。
+
+判定 DROP 的原因:
+1. **硬阻塞**: 本地 `crates/ralph-api/` 整个 crate 已经删除 (per `docs/adr/0001-cherry-pick-upstream-sync.md`), 不先复活这个 crate 就无法落地任何东西。
+2. **robot domain 只是 1/8 的 RPC v1 协议**: KNOWN_METHODS 有 50+ 个方法, robot.* 只是 4 个 (robot.question / respond / guidance / checkin)。要做就得带 task.* loop.* planning.* config.* preset.* collection.* stream.* 这一整套。
+3. **robot RPC 提供的核心能力本地已有等价实现**: `human.guidance` 事件上轮 §17 human-guidance 已经能处理原始事件总线; 文件级 `.ralph/api/robot-*.json` 写入到 event bus 的桥接也是 30 行代码就能写。本地哲学是 file-based 事件总线 + raw emit (不用 JSON-RPC schema 验证层)。
+4. 本地没有 axum HTTP server, 不打算引入 (会与 file-based 事件总线重复)。
+
+复活条件:
+- 用户明确要求 HTTP/JSON-RPC API 服务 (会和文件总线冲突, 要权衡) 
+- robot 客户端用例出现 (CI / 自动化测试运行器) 但又不能直接写 event bus
+- 新 ADR 批准恢复 `ralph-api/` crate
+
+现在不动作。如果未来真想搞 robot RPC, 改用本地文件总线 + JSON 直写的 30 行 helper 就够了, 不需要 JSON-RPC schema 验证层。
+
+### 综合建议
+
+后续 Q3 plan 不必把这两个塞进去。它们各自的原因不同:
+- Forge: 现在技术债, 等待需求信号后再单独 cherry-pick 一个干净的 PR
+- Robot RPC: 哲学层面分歧, 不复活 ralph-api/ 就无法动手
+
+不要在 PR 里再讨论这两个, LATER_PLANS 这条已经记录所有原因。
