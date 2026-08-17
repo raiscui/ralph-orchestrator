@@ -703,3 +703,29 @@
 - **AGENTS.md 索引是入口**: docs/solutions/ 目录文件多后只靠 ls 不够, AGENTS.md 是发现机制
 - **跟 lazy-model-completion 模板对齐**: 同样 problem_type capture, 同结构降低读者认知负担
 - **下个 minimax flag 想用时**: 先查 README 矩阵的 ⚠️ 行, 不要假设
+
+## [2026-08-17 09:00:00] [Session ID: omx-1786600320381-z290x9] 任务名称: task_plan.md housekeeping — 39 stale [ ] 收敛到 8 真 pending
+
+### 任务内容
+- 用户指令: "C+A" (housekeeping + ralplan)
+- 把 task_plan.md 里 39 个 `[ ]` 中实际已 DONE 的标 `[x]`, 只保留真 pending (8 个 grill-with-docs Round 1-5 + Q3 plan 决策项)
+
+### 改动 (按上下文分组)
+- **DONE 标 [x]** (31 个):
+  - 878-884: Task 3 e2e-live-convergence 诊断 (LATER_PLANS line 54 已标 DONE)
+  - 899-901: Task 3 follow-ups
+  - 920-925: minimax live e2e re-run (今日 4/4 PASSED)
+  - 1165-1173: lazy-model-completion 实施 (commits 620411ce, d275c7e6, 39c4a0df)
+  - 1186, 1192-1194: lazy-model-completion follow-ups
+  - 1279-1282: minimax-full-auto-compat fix (今日 commit e2977175)
+- **保持 [ ]** (8 个): 972-976 (grill-with-docs Round 1-5) + 1008-1010 (Q3 plan 决策项) — 这是用户接下来要做的
+
+### 当前状态
+- `[x]` count: 18 → 55
+- `[ ]` count: 39 → 8
+- 所有 `[ ]` 都是 origin/main 整合相关的待决策 (grill-with-docs Round 1-5 + Q3 plan 决策)
+
+### 总结感悟
+- **housekeeping 不是修 bug**: 不动 status 而让 [ ] 永远挂着会让下一次 context restore 误判
+- **per-line sed 比 grep-replace 安全**: 39 个 [ ] 上下文都不一样, 一次 sed 只针对明确行号
+- **保留历史**: 决策 (line 1186 跳过 serial mode) 标 [x] 不是 [ ] 因为决策本身已落地

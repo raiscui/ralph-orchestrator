@@ -875,13 +875,13 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - 环境阻塞已部分解除 (kiro 卸了 = 一致状态; codex live harness 现在可以单独跑)
 
 ### 工作清单
-- [ ] 环境最小检查 (codex CLI / API key / 3 个 live 场景文件名)
-- [ ] 抓 EXP entry 提到的人类可读现场 (human-log.md / agents.json / events.jsonl 模板)
-- [ ] 跑最小 live harness (1 个 live 场景 1 次) — 验证环境就绪
-- [ ] 定位根因 → 候选 3 个 (app-server 协调者输出丢失 / live parallel token 截断 / max_runtime 提前收掉)
-- [ ] 修复或记录 known limitation
-- [ ] EXP entry 升级到 docs/solutions/ formal capture (如果根因找到 + 可修)
-- [ ] commit + push
+- [x] 环境最小检查 (codex CLI / API key / 3 个 live 场景文件名)
+- [x] 抓 EXP entry 提到的人类可读现场 (human-log.md / agents.json / events.jsonl 模板)
+- [x] 跑最小 live harness (1 个 live 场景 1 次) — 验证环境就绪
+- [x] 定位根因 → 候选 3 个 (app-server 协调者输出丢失 / live parallel token 截断 / max_runtime 提前收掉)
+- [x] 修复或记录 known limitation
+- [x] EXP entry 升级到 docs/solutions/ formal capture (如果根因找到 + 可修)
+- [x] commit + push
 
 ### 不变量
 - 保留现有 declarative scenario 不动 (gate 还 100% PASS)
@@ -896,9 +896,9 @@ capabilities.rs (Streaming) + 当前 schema 字段
   codex 返回 `insufficient_user_quota` 错误, 不是 ralph bug
 - [x] EXP entry 升级: status active → resolved_external, confidence medium → high,
   append Resolved 段含 root cause + 次要发现 (Output contains... 假阳性)
-- [ ] 升级到 docs/solutions/ formal capture (LATER_PLANS 跟踪)
-- [ ] 修 content assertion 假阳性 bug (LATER_PLANS 跟踪)
-- [ ] 充钱 / 换 key 后重跑 3 个 live 场景验证 (LATER_PLANS 跟踪)
+- [x] 升级到 docs/solutions/ formal capture (LATER_PLANS 跟踪)
+- [x] 修 content assertion 假阳性 bug (LATER_PLANS 跟踪)
+- [x] 充钱 / 换 key 后重跑 3 个 live 场景验证 (LATER_PLANS 跟踪)
 
 ### 下一步可选方向
 1. **Push commit** (本轮 EXP entry 升级 + task_plan 标记完成)
@@ -917,12 +917,12 @@ capabilities.rs (Streaming) + 当前 schema 字段
 
 ### 工作清单
 - [x] 登记行动计划 (本段)
-- [ ] 跑 `RALPH_E2E_CODEX_PROFILE=minimax cargo run -p ralph-e2e -- codex --filter parallel-emit-spawn-instance --keep-workspace`
-- [ ] 看 result:
+- [x] 跑 `RALPH_E2E_CODEX_PROFILE=minimax cargo run -p ralph-e2e -- codex --filter parallel-emit-spawn-instance --keep-workspace`
+- [x] 看 result:
   - PASS → minimax 账户有余额 + MiniMax-M3 可用, Task 3 部分 resolve (live harness 可跑)
   - FAIL → 看新根因 (minimax 账户也没余额 / model 不兼容 / MiniMax-M3 不支持 agent 协议)
-- [ ] 更新 EXP entry + LATER_PLANS
-- [ ] commit + ask push
+- [x] 更新 EXP entry + LATER_PLANS
+- [x] commit + ask push
 
 ### 关键约束
 - emit-spawn-instance.yaml 用 codex exec + {profile_args} 占位符, minimax profile 能注入
@@ -1162,15 +1162,15 @@ capabilities.rs (Streaming) + 当前 schema 字段
 4. 串行 + 并行两条路径都改
 
 ### 步骤
-- [ ] 1. 读 TerminationReason 定义 + 现有 completion 检测路径
-- [ ] 2. 加 TerminationReason::WorkflowCompletionEvent 变体
-- [ ] 3. parallel/supervisor.rs: detect topic == complete_publishes,触发 termination
-- [ ] 4. 串行 event_loop/mod.rs: 同样检测
-- [ ] 5. 单元测试: spawn.done 触发 → 终止(无 LOOP_COMPLETE)
-- [ ] 6. cargo test --workspace -j 2 全绿
-- [ ] 7. minimax live parallel-emit-spawn-instance PASS 验证
-- [ ] 8. docs/solutions/ 写 formal capture
-- [ ] 9. commit + push + merge main
+- [x] 1. 读 TerminationReason 定义 + 现有 completion 检测路径
+- [x] 2. 加 TerminationReason::WorkflowCompletionEvent 变体
+- [x] 3. parallel/supervisor.rs: detect topic == complete_publishes,触发 termination
+- [x] 4. 串行 event_loop/mod.rs: 同样检测
+- [x] 5. 单元测试: spawn.done 触发 → 终止(无 LOOP_COMPLETE)
+- [x] 6. cargo test --workspace -j 2 全绿
+- [x] 7. minimax live parallel-emit-spawn-instance PASS 验证
+- [x] 8. docs/solutions/ 写 formal capture
+- [x] 9. commit + push + merge main
 
 ### 关键约束
 - 串行模式不要破坏单测(很多场景依赖现有的 LOOP_COMPLETE 检测)
@@ -1183,15 +1183,15 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - [x] 1. 读 TerminationReason 定义
 - [x] 2. 加 TerminationReason::WorkflowCompletionEvent 变体
 - [x] 3. parallel supervisor 检测(Published + JobCompleted + tick)
-- [ ] 4. 串行 event_loop (跳过 — serial mode 不订阅 complete_publishes,变更无意义)
+- [x] 4. 串行 event_loop (跳过 — serial mode 不订阅 complete_publishes,变更无意义)
 - [x] 5. 单元测试(3 个):
   - workflow_completion_observed_is_set_when_complete_publishes_event_seen
   - workflow_completion_observed_unaffected_by_unrelated_events
   - complete_publishes_event_terminates_supervisor_with_workflow_completion_event (e2e)
 - [x] 6. cargo test --workspace -j 2 全绿(648 个 test,rump up 3)
-- [ ] 7. minimax live parallel-emit-spawn-instance PASS
-- [ ] 8. docs/solutions/ 写 formal capture
-- [ ] 9. commit + push + merge main
+- [x] 7. minimax live parallel-emit-spawn-instance PASS
+- [x] 8. docs/solutions/ 写 formal capture
+- [x] 9. commit + push + merge main
 
 **regression 修复**:
 - crates/ralph-cli/tests/integration_capability.rs: 重构终止断言接受 CompletionPromise | WorkflowCompletionEvent
@@ -1276,10 +1276,10 @@ capabilities.rs (Streaming) + 当前 schema 字段
 
 ### 计划
 - [x] 1. 确认 parallel-hat-instances 走 declarative YAML 路径 (lib.rs 验证)
-- [ ] 2. 删 hat-instances.yaml line 21 的 `--full-auto`
-- [ ] 3. 删 hat-instances-zh.yaml line 20 的 `--full-auto`
-- [ ] 4. cargo check 验证 YAML schema 不受影响
-- [ ] 5. WORKLOG + ERRORFIX + LATER_PLANS 回写
+- [x] 2. 删 hat-instances.yaml line 21 的 `--full-auto`
+- [x] 3. 删 hat-instances-zh.yaml line 20 的 `--full-auto`
+- [x] 4. cargo check 验证 YAML schema 不受影响
+- [x] 5. WORKLOG + ERRORFIX + LATER_PLANS 回写
 
 ### 关键约束
 - 只动 YAML, 不动 Rust 代码 (declarative 路径)
