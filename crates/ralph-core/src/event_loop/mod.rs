@@ -210,6 +210,17 @@ impl EventLoop {
         &self.state
     }
 
+    /// Returns a mutable reference to the loop state.
+    ///
+    /// 主要用途: 让 cli 层在 `event_loop.run()` 返回后写回 after_execute
+    /// 收集到的 context_window / cumulative_cost 等指标
+    /// (避免在 after_execute closure 内 borrow &mut self)。
+    /// 注: 必须在 `event_loop.run()` 完全返回后调用 (run() 期间 &mut self
+    /// 被借走)。
+    pub fn state_mut(&mut self) -> &mut LoopState {
+        &mut self.state
+    }
+
     /// Returns the configuration.
     pub fn config(&self) -> &RalphConfig {
         &self.config

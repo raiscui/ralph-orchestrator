@@ -365,6 +365,19 @@ pub async fn run_loop_impl(
         tui_lines_provider,
     );
 
+    // §18 context-window telemetry 后向通道:
+    // after_execute closure 不能借 &mut event_loop (它运行在 .run() 的 &mut self
+    // 借用期内)。改为 closure 把收集到的 (hat_id, context_window) 写到
+    // Arc<Mutex<Option<...>>>,run() 返回后由 cli 层 take + 写 LoopState。
+    use std::sync::Mutex;
+    // §18 后向通道 (token) 队列
+    let token_usage_queue: Arc<Mutex<Option<(ralph_proto::HatId, u64)>>> =
+        Arc::new(Mutex::new(None));
+    let token_queue_for_hook = Arc::clone(&token_usage_queue);
+    // record-session recorder 用同样模式: closure 需要 move-capture,
+    // 但 run() 返回后还要再用一次 (line 461+), 所以先 clone 一次 Arc 进 closure。
+    let session_recorder_for_hook = session_recorder.as_ref().map(Arc::clone);
+
     let mut last_hat_for_display: Option<HatId> = None;
     let reason = event_loop
         .run(
@@ -403,16 +416,11 @@ pub async fn run_loop_impl(
                         eprintln!("{}\n", "=".repeat(80));
                     }
                 })),
-                after_execute: Some(Box::new(|iteration, hat_id, out| {
-                    // 说明:
-                    // - TODO: wire `record_iteration_tokens(hat_id, out.context_window)`
-                    //   当 Claude session peak extraction 在 PtyExecutor 中落地时。
-                    // - 当前 borrow checker 冲突: after_execute closure 捕获 &event_loop,
-                    //   但 .run() 持有 &mut self。Refactor hook 签名后再 wire。
-                    // - 现在 PromptOutput.context_window 已就位 (默认 0),
-                    //   record_iteration_tokens(0) 是 no-op, 不影响行为。
-                    // - record-session 迭代记录(stdout-only)
-                    if let Some(recorder) = &session_recorder
+                after_execute: Some(Box::new(move |iteration, hat_id, out| {
+                    // §18 context-window 后向通道 (替代 borrow-conflict 的直接调用):
+                    // 1) record-session record_meta + record_ux_event (保留原行为)
+                    // 2) 非零 context_window 写到 token_usage_queue (run 返回后由 cli 层 take)
+                    if let Some(recorder) = session_recorder_for_hook.as_ref()
                         && !out.output.is_empty()
                     {
                         let offset_ms = recorder.elapsed().as_millis() as u64;
@@ -427,10 +435,29 @@ pub async fn run_loop_impl(
                             offset_ms,
                         )));
                     }
+                    // §18 context-window 收集
+                    if out.context_window > 0 {
+                        let mut slot = token_queue_for_hook.lock().expect("token queue poisoned");
+                        *slot = Some((hat_id.clone(), out.context_window));
+                    }
                 })),
             },
         )
         .await;
+
+    // §18 context-window telemetry: drain queue produced by after_execute hook.
+    // run() 已返回,event_loop 不再被 &mut 借用,可调 state_mut() 写 LoopState。
+    // 队列里 None 表示该轮 context_window == 0 (no-op backend, 例如 ACP/headless),
+    // 跳过即可。
+    if let Some((hat_id, tokens)) = token_usage_queue
+        .lock()
+        .expect("token queue poisoned")
+        .take()
+    {
+        event_loop
+            .state_mut()
+            .record_iteration_tokens(&hat_id, tokens);
+    }
 
     // ------------------------------------------------------------------
     // 善后: 终止元信息 / summary / 终端展示 / TUI 退出
