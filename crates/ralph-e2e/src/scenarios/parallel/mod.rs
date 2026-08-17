@@ -6,17 +6,13 @@
 //!   - E2E 会覆盖真实 CLI、真实认证、真实网络与真实模型漂移带来的风险
 //!   - 代价更高、速度更慢，因此场景应尽量“短、稳、可排障”
 
-mod app_server_idle_start;
 mod app_server_idle_start_live;
 mod app_server_steer_live_reply_multi_turn;
-mod app_server_steer_multi_turn;
 mod app_server_steer_multi_turn_live;
 pub mod job_run_counts;
 
-pub use app_server_idle_start::ParallelAppServerIdleStartScenario;
 pub use app_server_idle_start_live::ParallelAppServerIdleStartLiveScenario;
 pub use app_server_steer_live_reply_multi_turn::ParallelAppServerSteerLiveReplyMultiTurnScenario;
-pub use app_server_steer_multi_turn::ParallelAppServerSteerMultiTurnScenario;
 pub use app_server_steer_multi_turn_live::ParallelAppServerSteerMultiTurnLiveScenario;
 
 use crate::Backend;

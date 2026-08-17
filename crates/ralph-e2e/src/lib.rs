@@ -57,9 +57,6 @@ pub use crate::runner::{
 pub use crate::scenarios::{
     // Core traits and helpers
     Assertions,
-    // Tier 8: Error Handling (backend-agnostic)
-    AuthFailureScenario,
-    BackendUnavailableScenario,
     // Tier 3: Events (backend-agnostic)
     BackpressureScenario,
     // Tier 7: Incremental Development (backend-agnostic)
@@ -69,30 +66,12 @@ pub use crate::scenarios::{
     // Tier 1: Connectivity (backend-agnostic)
     ConnectivityScenario,
     EventsScenario,
-    // Tier 5: Hat Collections (backend-agnostic)
-    HatBackendOverrideScenario,
-    HatEventRoutingScenario,
-    HatInstructionsScenario,
-    HatMultiWorkflowScenario,
-    HatSingleScenario,
     IncrementalFeatureScenario,
-    MaxIterationsScenario,
-    // Tier 6: Memory System (backend-agnostic)
-    MemoryAddScenario,
-    MemoryCorruptedFileScenario,
-    MemoryInjectionScenario,
-    MemoryLargeContentScenario,
-    MemoryMissingFileScenario,
-    MemoryPersistenceScenario,
-    MemoryRapidWriteScenario,
-    MemorySearchScenario,
     MultiIterScenario,
     // Tier 8: Parallel Runtime (experimental)
     ParallelAppServerIdleStartLiveScenario,
-    ParallelAppServerIdleStartScenario,
     ParallelAppServerSteerLiveReplyMultiTurnScenario,
     ParallelAppServerSteerMultiTurnLiveScenario,
-    ParallelAppServerSteerMultiTurnScenario,
     ParallelAuditEvidencePackExampleScenario,
     ParallelCustomerAdvisoryBoardPrepExampleScenario,
     ParallelCustomerOnboardingActivationExampleScenario,
@@ -126,7 +105,6 @@ pub use crate::scenarios::{
     TaskCompletionScenario,
     TaskReadyScenario,
     TestScenario,
-    TimeoutScenario,
 };
 pub use crate::workspace::WorkspaceManager;
 
@@ -249,8 +227,7 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
                 include_str!("../scenarios/streaming.yaml"),
             )),
         ),
-        // Tier 5: Hat Collections (backend-agnostic)
-        (
+            (
             ScenarioKind::Declarative,
             "hat-single",
             Box::new(crate::declarative::from_yaml(
@@ -290,8 +267,7 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
                 include_str!("../scenarios/hat-backend-override.yaml"),
             )),
         ),
-        // Tier 6: Memory System (backend-agnostic)
-        (
+            (
             ScenarioKind::Declarative,
             "memory-add",
             Box::new(crate::declarative::from_yaml(

@@ -42,11 +42,8 @@
 //! ```
 
 mod connectivity;
-mod errors;
 mod events;
-mod hats;
 mod incremental;
-mod memory;
 mod orchestration;
 pub mod parallel;
 mod parallel_audit_evidence_pack_example;
@@ -77,29 +74,13 @@ mod parallel_vendor_security_procurement_example;
 mod tasks;
 
 pub use connectivity::ConnectivityScenario;
-#[allow(deprecated)]
-pub use errors::{
-    AuthFailureScenario, BackendUnavailableScenario, MaxIterationsScenario, TimeoutScenario,
-};
 pub use events::{BackpressureScenario, EventsScenario};
-#[allow(deprecated)]
-pub use hats::{
-    HatBackendOverrideScenario, HatEventRoutingScenario, HatInstructionsScenario,
-    HatMultiWorkflowScenario, HatSingleScenario,
-};
 pub use incremental::{ChainedLoopScenario, IncrementalFeatureScenario};
-#[allow(deprecated)]
-pub use memory::{
-    MemoryAddScenario, MemoryCorruptedFileScenario, MemoryInjectionScenario,
-    MemoryLargeContentScenario, MemoryMissingFileScenario, MemoryPersistenceScenario,
-    MemoryRapidWriteScenario, MemorySearchScenario,
-};
 pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
 #[allow(deprecated)]
 pub use parallel::{
-    ParallelAppServerIdleStartLiveScenario, ParallelAppServerIdleStartScenario,
+    ParallelAppServerIdleStartLiveScenario,
     ParallelAppServerSteerLiveReplyMultiTurnScenario, ParallelAppServerSteerMultiTurnLiveScenario,
-    ParallelAppServerSteerMultiTurnScenario,
 };
 pub use parallel_audit_evidence_pack_example::ParallelAuditEvidencePackExampleScenario;
 pub use parallel_customer_advisory_board_prep_example::ParallelCustomerAdvisoryBoardPrepExampleScenario;
