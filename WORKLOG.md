@@ -989,3 +989,39 @@
   新增 deprecation 立刻可见, 不会被 297+ warning 噪音淹没
 - **CONTEXT.md 是新事实的真出口**: 当 handoff 数字与实际不符时,
   锁到 glossary 防止下次重复犯错
+
+## [2026-08-18 00:10:00] [Session ID: omx-1786600320381-z290x9] 任务名称: 第一个 fork release — v2.3.0
+
+### 任务内容
+- 用户选 A (release tag 推送)
+- 完成第一个 raiscui/ralph-orchestrator fork 的正式 release
+
+### 完成过程
+1. Cargo.toml: 8 处 2.2.2 → 2.3.0 (1 workspace + 7 crate deps)
+2. cargo build (BUILD_EXIT=0, ~25s with -j 2)
+3. cargo test --workspace: 全部 PASS, 0 failed (大集合 670 + 325 + 129 + 74 + ...)
+4. cargo test -p ralph-e2e --test declarative_coverage_gate: 2/2 PASS, 100%
+5. git commit + force-amend (zsh 把 '--' 解释成了 flag, 重写 message)
+6. git push my main (commit 45eb9c9e)
+7. 发现 v2.3.0 tag 在本地存在 (origin orphan 携带, 2026-01-28, 不相关)
+   → git tag -d v2.3.0 删除 orphan, git tag -a v2.3.0 HEAD 重建
+8. git push my v2.3.0 → 推到 raiscui/ralph-orchestrator fork
+
+### 关键决策
+- **v2.3.0 而非我之前说的 v2.11.0**: fork baseline 是 2.2.2 (f904c8ee),
+  直接跳到 2.11.0 跳过 9 个 minor 不合理; 况且 deprecated marker
+  since='2.3.0' 自然指向 2.3.0, 本次 release 兑现该承诺
+
+### 验证
+- HEAD = 45eb9c9e (force-amend 后, 之前是 a57a0126)
+- v2.3.0 = 2e7c222... = HEAD → tag 在最末 commit 上
+- my remote 有 v2.3.0 tag, 触发 release.yml CI 自动 publish
+
+### 总结感悟
+- **release skill 按 6 步跑通**: bump → build → test → commit → push main → tag + push tag
+- **orphan tag 是 fork 常态**: 携带自 origin 的 tag 不能直接 reuse name,
+  必须先 -d 再 -a re-tag
+- **zsh heredoc 把 '--' 当 flag**: 写 commit message / tag message 要么
+  用 cat <<'EOF' 要么用 single-quote shell args, 防止 message 被命令行解释
+- **CI release workflow**: tag 推到 fork 后 release.yml 自动跑, 后续
+  需要监控 .github/workflows 是否配置了 publish-to-crates + npm
