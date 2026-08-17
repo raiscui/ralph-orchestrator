@@ -245,10 +245,22 @@ impl CliBackend {
     }
 
     /// Creates the Codex backend.
+    ///
+    /// 说明:
+    /// - 早期版本默认包含 `--full-auto` (OpenAI codex CLI 的组合快捷方式)。
+    /// - codex-cli 0.147.0+ 不再支持该 flag (`--full-auto` removed in favor of
+    ///   explicit `--sandbox danger-full-access`).
+    /// - 同时 minimax provider (OpenAI codex CLI 子集 wrapper) 也拒绝 `--full-auto`。
+    /// - 改用显式 `--sandbox danger-full-access` 与 `minimax-full-auto-compat`
+    ///   解决方案对齐 (见 `docs/solutions/minimax-full-auto-compat/README.md`)。
     pub fn codex() -> Self {
         Self {
             command: "codex".to_string(),
-            args: vec!["exec".to_string(), "--full-auto".to_string()],
+            args: vec![
+                "exec".to_string(),
+                "--sandbox".to_string(),
+                "danger-full-access".to_string(),
+            ],
             prompt_mode: PromptMode::Arg,
             prompt_flag: None, // Positional argument
             output_format: OutputFormat::Text,
@@ -655,7 +667,10 @@ impl CliBackend {
                 .into_iter()
                 .filter(|a| a != "--no-interactive")
                 .collect(),
-            "codex" => args.into_iter().filter(|a| a != "--full-auto").collect(),
+            "codex" => args
+                .into_iter()
+                .filter(|a| a != "--full-auto" && a != "--sandbox" && a != "danger-full-access")
+                .collect(),
             "amp" => args
                 .into_iter()
                 .filter(|a| a != "--dangerously-allow-all")
@@ -837,7 +852,10 @@ mod tests {
         let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
 
         assert_eq!(cmd, "codex");
-        assert_eq!(args, vec!["exec", "--full-auto", "test prompt"]);
+        assert_eq!(
+            args,
+            vec!["exec", "--sandbox", "danger-full-access", "test prompt"]
+        );
         assert!(stdin.is_none());
     }
 
@@ -854,7 +872,8 @@ mod tests {
             backend.args,
             vec![
                 "exec".to_string(),
-                "--full-auto".to_string(),
+                "--sandbox".to_string(),
+                "danger-full-access".to_string(),
                 "--config".to_string(),
                 "model_reasoning_effort=\"medium\"".to_string(),
             ]
@@ -939,7 +958,8 @@ mod tests {
             backend.args,
             vec![
                 "exec".to_string(),
-                "--full-auto".to_string(),
+                "--sandbox".to_string(),
+                "danger-full-access".to_string(),
                 "-c".to_string(),
                 "features.hooks=false".to_string(),
             ]
