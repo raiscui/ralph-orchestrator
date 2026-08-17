@@ -41,6 +41,17 @@ pub struct LoopState {
 
     /// Hats for which `<hat_id>.exhausted` has been emitted.
     pub exhausted_hats: HashSet<HatId>,
+
+    /// Human guidance messages that must be acknowledged before completion.
+    ///
+    /// 说明：
+    /// - `human.guidance` 事件 push 到这个队列。
+    /// - `human.guidance.ack` 事件清空这个队列。
+    /// - 队列非空时, 终止信号 (completion_promise / complete_publishes) 被拒,
+    ///   走 reset → 重新下一轮。
+    /// - 这与 lazy-model-completion (complete_publishes 硬终止) 正交,
+    ///   跟本地 2-strike pattern 协同工作。
+    pub unacknowledged_guidance: Vec<String>,
 }
 
 impl Default for LoopState {
@@ -60,6 +71,7 @@ impl Default for LoopState {
             consecutive_malformed_events: 0,
             hat_activation_counts: HashMap::new(),
             exhausted_hats: HashSet::new(),
+            unacknowledged_guidance: Vec::new(),
         }
     }
 }

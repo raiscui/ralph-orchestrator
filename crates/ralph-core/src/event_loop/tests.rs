@@ -2059,3 +2059,112 @@ hats:
         "legacy memories path should remain visible while scoped experience migrates\n{prompt}"
     );
 }
+
+// 说明：
+// - 下面 4 个 tests 覆盖 origin #326 的核心行为:
+//   1. human.guidance 事件 push 到 unacknowledged_guidance
+//   2. human.guidance.ack 清空队列
+//   3. 有未 ack guidance 时 completion 被拒
+//   4. 没未 ack guidance 时 completion 走 2-strike 正常路径
+//   5. default_publishes == completion_promise 时不沉默注入
+//
+// - 跟随本地 2-strike pattern, completion 必须两次连续 confirm 才终止。
+// - 测试用 scratchpad / memory 关闭 (默认), verify_scratchpad_complete 视为 OK。
+
+#[test]
+fn test_human_guidance_event_pushes_to_queue() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+hats:
+  ralph:
+    name: "Ralph"
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut event_loop = EventLoop::new(config);
+
+    assert!(event_loop.state.unacknowledged_guidance.is_empty());
+
+    let output = r#"<event topic="human.guidance">please refactor module X</event>"#;
+    let _ = event_loop.process_output(&HatId::new("ralph"), output, true);
+
+    assert_eq!(event_loop.state.unacknowledged_guidance.len(), 1);
+    assert_eq!(event_loop.state.unacknowledged_guidance[0], "please refactor module X");
+}
+
+#[test]
+fn test_human_guidance_ack_clears_queue() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+hats:
+  ralph:
+    name: "Ralph"
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut event_loop = EventLoop::new(config);
+
+    let output = r#"<event topic="human.guidance">please refactor module X</event>
+<event topic="human.guidance.ack">refactored</event>"#;
+    let _ = event_loop.process_output(&HatId::new("ralph"), output, true);
+
+    assert!(event_loop.state.unacknowledged_guidance.is_empty());
+}
+
+#[test]
+fn test_completion_rejected_when_guidance_unacknowledged() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+hats:
+  ralph:
+    name: "Ralph"
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    let mut event_loop = EventLoop::new(config);
+
+    // 说明：
+    // - 第一轮注入 guidance (unack 队列非空)
+    // - 第二轮尝试 completion -> 被拒 (task.resume published, counter reset)
+    let r1 = r#"<event topic="human.guidance">fix the bug</event>"#;
+    event_loop.process_output(&HatId::new("ralph"), r1, true);
+    assert_eq!(event_loop.state.unacknowledged_guidance.len(), 1);
+
+    let r2 = "all done LOOP_COMPLETE\n";
+    let term = event_loop.process_output(&HatId::new("ralph"), r2, true);
+    assert!(term.is_none(), "completion should be rejected, got {:?}", term);
+    assert_eq!(event_loop.state.completion_confirmations, 0);
+    assert_eq!(event_loop.state.unacknowledged_guidance.len(), 1);
+}
+
+#[test]
+fn test_completion_allowed_after_ack() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+hats:
+  ralph:
+    name: "Ralph"
+"#;
+    let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+    config.core.workspace_root = temp_dir.path().to_path_buf();
+    // 说明: scratchpad 设为绝对路径,verification 直接找到
+    let scratchpad_path = temp_dir.path().join("scratchpad.md");
+    std::fs::write(&scratchpad_path, "# Tasks\n- [x] done\n").unwrap();
+    config.core.scratchpad = scratchpad_path.to_string_lossy().to_string();
+    let mut event_loop = EventLoop::new(config);
+
+    let r1 = r#"<event topic="human.guidance">refactor X</event>
+<event topic="human.guidance.ack">done</event>"#;
+    event_loop.process_output(&HatId::new("ralph"), r1, true);
+    assert!(event_loop.state.unacknowledged_guidance.is_empty());
+
+    let r2 = "LOOP_COMPLETE\n";
+    let term = event_loop.process_output(&HatId::new("ralph"), r2, true);
+    // 2-strike: 第一轮 confirmation = 1, 不终止
+    assert!(term.is_none(), "first confirmation should not terminate");
+
+    let r3 = "LOOP_COMPLETE\n";
+    let term = event_loop.process_output(&HatId::new("ralph"), r3, true);
+    // 第二轮 confirmation = 2, 终止
+    assert!(matches!(term, Some(TerminationReason::CompletionPromise)));
+}

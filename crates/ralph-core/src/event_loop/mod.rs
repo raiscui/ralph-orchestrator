@@ -817,6 +817,29 @@ impl EventLoop {
             && let Some(config) = self.registry.get_config(hat_id)
             && let Some(default_topic) = &config.default_publishes
         {
+            // 说明：
+            // - default_publishes 等于 completion_promise 时,禁止沉默完成
+            //   (origin #326 的 guard)。Ralph 不会因为 hat 没产出事件
+            //   而被默认事件骗着完成,必须显式发出 evidence。
+            if default_topic.as_str() == self.config.event_loop.completion_promise {
+                warn!(
+                    hat = %hat_id.as_str(),
+                    topic = %default_topic,
+                    "default_publishes matches completion_promise — requiring explicit agent event"
+                );
+                let resume_event = Event::new(
+                    "task.resume",
+                    format!(
+                        "Recovery: hat `{}` produced no events, and its default_publishes is the completion promise `{}`. Emit explicit completion evidence or a non-terminal event.",
+                        hat_id.as_str(),
+                        default_topic
+                    ),
+                )
+                .with_target(hat_id.clone());
+                self.bus.publish(resume_event);
+                return;
+            }
+
             // No new events written - inject default event
             let default_event = Event::new(default_topic.as_str(), "").with_source(hat_id.clone());
 
@@ -881,6 +904,26 @@ impl EventLoop {
 
             match verification_result {
                 Ok(true) => {
+                    // 说明：
+                    // - 即使 verification 通过,如果 unacknowledged_guidance 非空,
+                    //   仍然拒绝完成 (对齐 origin #326 的 guard)。
+                    // - 复用 Ok(false) / Err 的失败语义: reset 计数器 + 不进入终止分支。
+                    if !self.state.unacknowledged_guidance.is_empty() {
+                        let count = self.state.unacknowledged_guidance.len();
+                        warn!(
+                            guidance_count = count,
+                            "Completion rejected: unacknowledged human.guidance"
+                        );
+                        self.state.completion_confirmations = 0;
+                        self.bus.publish(Event::new(
+                            "task.resume",
+                            format!(
+                                "Completion rejected: {count} human.guidance message(s) unacknowledged. Acknowledge via human.guidance.ack before emitting the completion promise."
+                            ),
+                        ));
+                        return None;
+                    }
+
                     // All tasks complete - increment confirmation counter
                     self.state.completion_confirmations += 1;
 
@@ -938,6 +981,27 @@ impl EventLoop {
         // Validate build.done events have backpressure evidence
         let mut validated_events = Vec::new();
         for event in events {
+            // 说明:
+            // - `human.guidance` 收集到 unacknowledged_guidance 队列,
+            //   阻止下一轮完成信号。
+            // - `human.guidance.ack` 清空该队列,允许下一轮完成。
+            // - 这跟本地 2-strike pattern + lazy-model-completion 正交,
+            //   配合使用。
+            if event.topic.as_str() == "human.guidance" {
+                self.state.unacknowledged_guidance.push(event.payload.clone());
+                validated_events.push(event);
+                continue;
+            }
+            if event.topic.as_str() == "human.guidance.ack" {
+                info!(
+                    payload = %event.payload,
+                    guidance_count = self.state.unacknowledged_guidance.len(),
+                    "human.guidance acknowledged"
+                );
+                self.state.unacknowledged_guidance.clear();
+                validated_events.push(event);
+                continue;
+            }
             if event.topic.as_str() == "build.done" {
                 if let Some(evidence) = EventParser::parse_backpressure_evidence(&event.payload) {
                     if evidence.all_passed() {
