@@ -54,3 +54,46 @@
 
 - **`ralph clean --events`** (#357): 只清理事件文件,不删 record-session / 诊断日志。适合 replay 跑完后只想回收 .ralph/events.jsonl 的场景。
 - **Per-hat scratchpad 注入** (#293-scratchpad fix): `instructions` 模块生成 hat 指令时 honor per-hat scratchpad 模板(不是 global scratchpad)。
+
+## Provider 域 (2026-08-16 建立)
+
+- **minimax provider**: OpenAI codex CLI 的子集 wrapper,只透传认识的 flag。完整矩阵见 `docs/solutions/minimax-full-auto-compat/README.md`。
+- **`--sandbox danger-full-access`**: minimax 兼容的"无沙箱 + 全权"等价于 OpenAI CLI 的 `--full-auto` 组合 flag。
+- **minimax live E2E 凭据**: `.e2e-tests/parallel-*-instances*/` workspace 目录4,events.jsonl + agents.json + ralph.yml 完整保留。
+
+## Hat imports 域 (2026-08-16 建立)
+
+- **`imports:` 键**: `hats:` block 内每个 hat 可声明的本地相对路径;值必须是 string,。详细 schema 见 `specs/hat-imports/design.md`。
+- **`HatImportError`**: `crates/ralph-core/src/hat_imports.rs` 的错误类型;`Hat` (解析/读文件/YAML/merge 失败) + `UnsupportedSource` (builtin/remote source 不允许 imports)。
+- **预解析模式**: `RalphConfig::from_file` 先把 YAML parse 到 `serde_yaml::Mapping`,resolve imports,序列化回 string,再 `parse_yaml` 到 `RalphConfig`。`parse_yaml(content: &str)` 自身不变。
+- **限制**: 本地 file source only。Builtin / remote / override source 必须在它们自己的 source 入口调 `reject_hat_imports_in_mapping`。
+- **不接受**: 传递性 imports (A → B → C)、imported `events:` 字段、非 string `imports` 值、缺失文件、YAML 错误。
+
+## Event topic 扩展 (2026-08-17 建立)
+
+- **`human.guidance`**: 操作员注入的中途指引;payload 推到 `LoopState::unacknowledged_guidance` 队列,阻止下一轮完成信号。
+- **`human.guidance.ack`**: 清空队列,允许完成;无 payload 必填要求。
+- **`unacknowledged_guidance`**: `LoopState` 新字段,默认空 `Vec<String>`。
+- **completion guard**: 完成检测通过 verification 后, 若 `unacknowledged_guidance` 非空, reset `completion_confirmations = 0` 并 publish `task.resume`。`这跟本地 2-strike pattern + lazy-model-completion (complete_publishes) 正交`。
+- **`default_publishes` collision guard**: 当 `default_publishes == completion_promise` 时, `check_default_publishes` 不沉默注入,改为 publish `task.resume` 提示显式 evidence。
+
+## Q3 plan 整合状态 (2026-08-17)
+
+- **Group 1**: 全部 DONE (1.1 manual port, 1.6 partial port, 1.2-1.5 dropped / rewritten to Group 4 §1-§4)。
+- **Group 2**: 6/6 dry-run CONFLICT (2026-08-12),全部 moved to Group 4 rewrite §5-§8。
+- **Group 3**: 5/5 dry-run CONFLICT (2026-08-17),3.2 (ee9fa67) DROP (已 manual port), 其余 → Group 4 §15-§18。
+- **Group 4 §15** (4a38b8d Claude stream wait): **DROPPED 2026-08-17**。origin 用 `StreamEvent` enum + `line_signals_event_emitted` / `post_event_deadline` 逻辑,本地 `(StreamKind, line)` tuple 不存在这些。Porting = 发明需求 + 加 60+ 行条件逻辑给 Claude stream JSON (本地不跑)。Per 改良胜过新增,DROP。
+- **Group 4 §16** (25afeb0 local hat imports): **DONE 2026-08-16** (commit `ef6d83e1`)。实现见 `crates/ralph-core/src/hat_imports.rs`,` `design.md` 文档。
+- **Group 4 §17** (a4b6d45 explicit completion after guidance): **DONE 2026-08-17** (commit `7de0d939`)。实现见 `crates/ralph-core/src/event_loop/{loop_state,mod}.rs`,` `specs/human-guidance/design.md` 文档。
+- **Group 4 §18** (d631ef7 context window telemetry): 16 文件 massive, 涉及 proto/adapters/event_loop + frontend React。建议开新 OpenSpec change,不在当前 change 内做。
+- **Round 4 (本文档同步)**: 2026-08-17 完成。
+
+## Architectural drift 提示
+
+- **Provider 兼容矩阵的"非发明需求"原则**: origin 引入某 flag 不等于本地需要该 flag。本地 minmax 不跑 Claude stream JSON,所以 `--full-auto` 的 Claude result-event wait 不落地 (Group 4 §15)。通用规则:port 一个 fix 前确认本地有该 use case。
+- **Hat imports 的 schema-first 约束**: `HatConfig` Rust struct 不变,所有新逻辑在 `serde_yaml::Mapping` 空间。这样未来 origin 升级 HatConfig 时不会冲突。
+- **Completion 信号的多源组合**: 当前有 3 条独立 termination 路径, 必须正交协同:
+  1. **`completion_promise` + 2-strike pattern** (主): 本地基本 termination 信号
+  2. **`complete_publishes` (lazy-model-completion)**: supervisor 硬终止信号, lazy model 不写 LOOP_COMPLETE 时启用
+  3. **`unacknowledged_guidance` guard**: 操作员中途指引未 ack 时拒绝完成
+  任何一条单独都不够;运行时三者都参与判定,详见 `event_loop/mod.rs` `process_output`。
