@@ -29,7 +29,7 @@ use std::time::Duration;
 // 说明：
 // - 这些 helper 目前会被 `parallel_trigger_routing_example` 复用。
 // - 可见性限制在 `crate::scenarios`，避免扩散到整个 crate。
-pub(in crate::scenarios) use job_run_counts::{JobRunCounts, parse_parallel_job_line};
+pub(in crate::scenarios) use job_run_counts::{parse_parallel_job_line};
 
 const RALPH_E2E_CODEX_MODEL_ENV: &str = "RALPH_E2E_CODEX_MODEL";
 const DEFAULT_RALPH_E2E_CODEX_MODEL: &str = "gpt-5.5";
