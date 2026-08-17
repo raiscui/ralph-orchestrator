@@ -1,16 +1,32 @@
 ---
 title: parallel completion-via-event — 让 `complete_publishes` 真正 complete
-problem_type: architecture_flaw
-symptoms:
-  - minmax profile + MiniMax-M3 在 spawn-after-start workflow 上 max_runtime 120s 超时
-  - 失败原因:"ralph#1 收到 spawn.done 但不 emit LOOP_COMPLETE 字符串"
-root_cause: termination 100% 押在 ralph#1 输出 LOOP_COMPLETE 字符串上
+problem_type: logic_error
+component: ralph-core::parallel::supervisor
+module: crates/ralph-core/src/parallel/ and crates/ralph-cli/src/capability.rs
+severity: high
+status: active
+date: 2026-08-15
+last_updated: 2026-08-17
+discovered: 2026-08-15
+root_cause: termination 100% 押在 ralph#1 输出 LOOP_COMPLETE 字符串上;lazy / unreliable 模型(hang / 静默完成)走完全部 max_runtime 才强制 shutdown。
+resolution_type: 新增 TerminationReason::WorkflowCompletionEvent + supervisor 主动检测 publish 路径
 fix_branch: fix/completion-via-event
 fix_commits:
-  - d275c7e6: parallel supervisor adds WorkflowCompletionEvent
-  - 39c4a0df: e2e detector updated for new termination reason
-discovered: 2026-08-15
-applies_to: ralph-core/parallel/supervisor
+  - "d275c7e6: parallel supervisor adds WorkflowCompletionEvent"
+  - "39c4a0df: e2e detector updated for new termination reason"
+tags:
+  - parallel-supervisor
+  - termination
+  - lazy-model-completion
+  - workflow-event
+  - minimax
+verified_by:
+  - "cargo run -p ralph-e2e -- codex --filter parallel-emit-spawn-instance (default codex) → PASSED"
+  - "RALPH_E2E_CODEX_PROFILE=minimax RALPH_E2E_CODEX_MODEL=MiniMax-M3 cargo run -p ralph-e2e -- codex --filter parallel-emit-spawn-instance → PASSED within max_runtime (no hang)"
+related_solutions:
+  - ../minimax-full-auto-compat/README.md (minimax + MiniMax-M3 同 provider/model 下的 --full-auto 兼容)
+
+applies_to: ralph-core parallel supervisor 终止逻辑;任何 ralph#1 + spawn 实例的 workflow
 ---
 
 # Lazy-model completion: ralph#1 不写 LOOP_COMPLETE 导致整个 loop 卡死
@@ -97,7 +113,7 @@ reason 字符串 "completion_event"),复用现有的 completion drain 流程
 
 ## 后续
 
-- `ralph-cli/src/capability.rs:920` 现在显式 `config.event_loop.complete_publishes = None;`,
+- `crates/ralph-cli/src/capability.rs` (line 920) 现在显式 `config.event_loop.complete_publishes = None;`,
   让 capability 子流程走旧路径(只 LOOP_COMPLETE)。如果某些子 capability 想要
   workflow completion 语义,可以重新启用。
 - 串行模式是否需要同样修复,见 `LATER_PLANS.md` 跟踪。串行架构不订阅
