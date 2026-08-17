@@ -97,3 +97,29 @@
   2. **`complete_publishes` (lazy-model-completion)**: supervisor 硬终止信号, lazy model 不写 LOOP_COMPLETE 时启用
   3. **`unacknowledged_guidance` guard**: 操作员中途指引未 ack 时拒绝完成
   任何一条单独都不够;运行时三者都参与判定,详见 `event_loop/mod.rs` `process_output`。
+
+## Wave 3.4 收尾 + §19 Round 6 (2026-08-17, commit `ee73fcf8` + `03fab390`)
+
+### declarative coverage gate:实际状态
+
+- **当前真实值:100.00% (PASS)** —— 不是 handoff 写的 63.93% (那是 2026-08-13 快照,Wave 2 之前)。
+- 注册表 `crates/ralph-e2e/src/lib.rs::all_scenarios()` 始终包含:
+  - 60 个 `ScenarioKind::Declarative` (走 `declarative::from_yaml()`, 与 `scenarios/*.rs` 里的 Rust TestScenario impl 无关)
+  - 0 个 `ScenarioKind::Imperative`
+  - 1 个 `ScenarioKind::ImperativeExplicitKeep` (`parallel-experimental-dev-engine-example`)
+- 阈值 `THRESHOLD = 0.90` 在 `crates/ralph-e2e/tests/declarative_coverage_gate.rs` 里硬编码 (无 env override 路径)。
+- 验证命令: `cargo test -p ralph-e2e --test declarative_coverage_gate -- --nocapture` —— drift log 自动打印。
+
+### `#[deprecated]` (= dead code) 判定规则
+
+- **规则:Wave 3.4 之后, E2E crate 里出现的任何 `#[deprecated(since = "2.3.0")]` struct 都是 dead code**, 因为:
+  1. `all_scenarios()` 只通过 `from_yaml()` 注册 declarative scenario,完全不走 Rust TestScenario impl;
+  2. 22 个 `#[deprecated]` 标记 (capabilities/errors/hats/memory/parallel/app_server_*) Round 6 已经物理清零;
+  3. future deprecation: 如果再出现一个 `#[deprecated]` 标记,默认假设它是 dead,先查 `all_scenarios()` 是否注册,再决定是否保留。
+- 防止机制:
+  - Gate test `explicit_keep_is_exactly_parallel_experimental_dev_engine_example` 保证 `ImperativeExplicitKeep` 永远只有 1 项,新增必须 `audit-p5-p1.md §A.5` justify。
+  - 编译警告数 = 0 (Round 6 净效应),新增 `#[deprecated]` 会被立刻看到,而不是藏在 297+ 的噪声里。
+
+### 5 个 "非 deprecated 但 legacy" .rs 文件(待决策,不阻塞)
+
+`connectivity.rs` (360) / `events.rs` (722) / `orchestration.rs` (956) / `incremental.rs` (1016) / `tasks.rs` (811) 共 ~3865 行。这些 struct **不在 `#[deprecated]` 标记里**,但 `all_scenarios()` 也不引用 —— 同样的 dead code 模式,但因为 `lib.rs::pub use` 还在 export 它们,物理删除前需要决定是否 binary/main 还依赖它们。结论:binary main.rs 不引用 → 可清。Round 6 没动是因为决策未一拍即合,留 follow-up。
