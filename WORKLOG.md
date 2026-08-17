@@ -804,3 +804,47 @@
 - **cross-layer bug**: minimax-full-auto-compat 修了 1 层 (YAML), 留 1 层 (Rust default)
 - **future mitigation**: CI 应强制运行 `cargo run -p ralph-e2e -- codex --filter events`
   防止 default codex 路径再次 silent 退化
+
+## [2026-08-17 16:00:00] [Session ID: omx-1786600320381-z290x9] 任务名称: §18 (origin #218) context window telemetry 框架
+
+### 任务内容
+- 用户指令: "继续 §18"
+- 落地 origin d631ef7 的 context window telemetry 框架
+- spec-first: 创建 OpenSpec change + tasks + design + code-task
+- 实现: LoopState telemetry + config helper + PtyExecutionResult 字段 + summary_writer 显示
+
+### 改动 (commit `3ff89212` + `2dd66231`)
+- 7 个文件 +196/-1 行
+- 5 个新 unit tests (3 loop_state + 2 config), 全部 PASS
+- LoopState: peak_input_tokens / last_input_tokens / hat_peak_input_tokens + record_iteration_tokens()
+- PtyExecutionResult: context_window: u64 + set_context_window setter
+- PromptOutput: context_window: u64 字段 (PTY 透传 / Cli 路径 = 0)
+- config.rs: resolve_context_window(backend) helper (struct-based)
+- summary_writer: "**Context peak:** N tokens" + "**Top hat:** ..."
+- loop_runner: TODO 标记 (borrow conflict with .run() + 依赖 Claude 提取)
+
+### 累计 commits
+- a4c6e8d3 OpenSpec change spec
+- 3ff89212 framework 落地 (7 files)
+- 2dd66231 OpenSpec tasks.md 进度更新
+
+### Deferred (6 个, 单独 PR)
+- 2.3 Claude session peak JSONL 提取 (origin 452 行, 跨 5 个 deleted adapter files)
+  需要新 OpenSpec change 重写
+- 2.4-2.5 fixture + tests (依赖 2.3)
+- 3.1-3.2 loop_runner wire record_iteration_tokens (依赖 2.3 + hook 签名 refactor)
+- 6.5 minimax live regression (需用户显式 trigger)
+
+### 验证
+- cargo test -p ralph-core --lib: 667 passed (+5 new)
+- cargo test -p ralph-adapters --lib: 129 passed
+- cargo clippy -p ralph-core --all-targets --all-features: 0 error (only pre-existing warnings)
+- cargo check -p ralph-cli: 0 error
+
+### 总结感悟
+- **frame 优先, extraction 后**: telemetry 数据流需要 Claude 提取, 但 framework
+  (field / signature / tests) 可以独立落地 + 测试, 不阻塞后续
+- **borrow conflict 揭示 hook 设计**: after_execute FnMut 接受 &state 需
+  refactor (RefCell 或 &mut state), 跟 lazy-model-completion 时期的
+  Race 一样需要架构取舍
+- **OpenSpec change 17/23 落地**: 没 archive, 等 Claude 提取 PR 一起

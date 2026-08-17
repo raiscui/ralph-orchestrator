@@ -1411,3 +1411,48 @@ capabilities.rs (Streaming) + 当前 schema 字段
 - §18 (d631ef7 context window telemetry) — 16 文件 massive, 开新 OpenSpec change
 - Forge / robot RPC 评估 — 待用户触发
 - 5 个 Rust code-defined legacy `--full-auto` 残留 (跟 Wave 3.4 一起清理)
+
+## [2026-08-17 16:00:00] [Session ID: omx-1786600320381-z290x9] [记录类型: 收尾] §18 framework 落地, Claude 提取 deferred
+
+### spec
+- openspec/changes/context-window-utilization/{proposal.md, tasks.md}
+- specs/context-window-utilization/design.md
+- tasks/context-window-utilization.code-task.md (status: in_progress)
+
+### 实现
+- commit `3ff89212` (7 files, +196/-1): framework
+- commit `2dd66231` (2 files): tasks 进度
+
+### Q3 plan §18 状态
+- [x] Group 4 §18 framework 落地 (Phase 1, 2.1, 2.2, 4, 5, 6.1-6.3)
+- [ ] Group 4 §18 Claude 提取 (Phase 2.3-2.5) - DEFERRED
+- [ ] Group 4 §18 loop_runner wire (Phase 3.1-3.2) - DEFERRED
+- [ ] Group 4 §18 minimax live 回归 (Phase 6.5) - DEFERRED
+
+### Q3 plan 4/4 状态
+- [x] Group 1: 全部 DONE
+- [x] Group 2: 全部 dry-run + 处理 (6/6 conflict → Group 4)
+- [x] Group 3: 5/5 dry-run + 处理 (3.2 DROP, 其余 → Group 4)
+- [x] Group 4 §15 (4a38b8d): **DROPPED 2026-08-17**
+- [x] Group 4 §16 (25afeb0 local hat imports): **DONE 2026-08-16** (ef6d83e1)
+- [x] Group 4 §17 (a4b6d45 explicit completion after guidance): **DONE 2026-08-17** (7de0d939)
+- [/] Group 4 §18 (d631ef7 context window telemetry): **framework done 2026-08-17, Claude 提取 deferred**
+- [x] Round 4 (文档同步): DONE 2026-08-17 (a9cec181)
+- [x] Round 5 (验证策略): DONE 2026-08-17 (005d840d + b86d7cdb)
+
+### 累计 commits on my/main (since minimax-full-auto fix e2977175)
+12 commits, 4 天连续工作:
+1. e2977175 minimax-full-auto
+2. 7eb270f2 docs(solutions) minimax-full-auto-compat
+3. 6fa0075e chore(task-plan) housekeeping
+4. d4263b97 chore(q3-plan) Group 3 dry-runs
+5. 537aded3 hat-imports design
+6. ef6d83e1 hat-imports impl
+7. 079bf38d human-guidance design
+8. 7de0d939 human-guidance impl
+9. a9cec181 Round 4 docs
+10. 005d840d cli_backend.rs critical fix
+11. b86d7cdb Round 5 收尾
+12. a4c6e8d3 OpenSpec change spec (context-window-utilization)
+13. 3ff89212 framework impl
+14. 2dd66231 OpenSpec tasks 进度
