@@ -58,16 +58,6 @@ pub use crate::scenarios::{
     // Core traits and helpers
     Assertions,
     // Tier 3: Events (backend-agnostic)
-    BackpressureScenario,
-    // Tier 7: Incremental Development (backend-agnostic)
-    ChainedLoopScenario,
-    // Tier 2: Orchestration Loop (backend-agnostic)
-    CompletionScenario,
-    // Tier 1: Connectivity (backend-agnostic)
-    ConnectivityScenario,
-    EventsScenario,
-    IncrementalFeatureScenario,
-    MultiIterScenario,
     // Tier 8: Parallel Runtime (experimental)
     ParallelAppServerIdleStartLiveScenario,
     ParallelAppServerSteerLiveReplyMultiTurnScenario,
@@ -98,12 +88,6 @@ pub use crate::scenarios::{
     ParallelSupportEscalationDeskExampleScenario,
     ParallelVendorSecurityProcurementExampleScenario,
     ScenarioError,
-    SingleIterScenario,
-    // Tier 6: Task System (backend-agnostic)
-    TaskAddScenario,
-    TaskCloseScenario,
-    TaskCompletionScenario,
-    TaskReadyScenario,
     TestScenario,
 };
 pub use crate::workspace::WorkspaceManager;
@@ -153,8 +137,7 @@ pub enum ScenarioKind {
 
 pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>)> {
     vec![
-        // Tier 1: Connectivity (backend-agnostic)
-        // connectivity 已声明化(候选6)
+            // connectivity 已声明化(候选6)
         (
             ScenarioKind::Declarative,
             "connectivity",
@@ -163,8 +146,7 @@ pub fn all_scenarios() -> Vec<(ScenarioKind, &'static str, Box<dyn TestScenario>
                 include_str!("../scenarios/connectivity.yaml"),
             )),
         ),
-        // Tier 2: Orchestration Loop (backend-agnostic)
-        // single-iter 已声明化(候选6 试点)
+            // single-iter 已声明化(候选6 试点)
         (
             ScenarioKind::Declarative,
             "single-iter",

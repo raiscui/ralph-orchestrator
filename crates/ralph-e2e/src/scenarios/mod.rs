@@ -19,32 +19,21 @@
 //!
 //! # Example
 //!
+//! The canonical way to construct a `TestScenario` in production code is via
+//! [`ralph_e2e::all_scenarios`], which returns every registered scenario as a
+//! boxed `TestScenario`. Per-scenario struct constructors (e.g. the historical
+//! `ConnectivityScenario`) are no longer exposed; see the [`declarative`] module
+//! for the YAML-driven scenario adapters that back the registry.
+//!
 //! ```no_run
-//! use ralph_e2e::scenarios::{TestScenario, ConnectivityScenario};
-//! use ralph_e2e::executor::RalphExecutor;
-//! use ralph_e2e::Backend;
-//! use std::path::Path;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let scenario = ConnectivityScenario::new();
-//!     let workspace = Path::new(".e2e-tests/connect");
-//!
-//!     // Setup creates config files for the target backend
-//!     let config = scenario.setup(workspace, Backend::Claude).unwrap();
-//!
-//!     // Run executes and validates
-//!     let executor = RalphExecutor::new(workspace.to_path_buf());
-//!     let result = scenario.run(&executor, &config).await.unwrap();
-//!
-//!     println!("Test passed: {}", result.passed);
-//! }
+//! # use ralph_e2e::TestScenario;
+//! # use ralph_e2e::all_scenarios;
+//! let scenarios: Vec<Box<dyn TestScenario>> = all_scenarios()
+//!     .into_iter()
+//!     .map(|(_kind, _id, scenario)| scenario)
+//!     .collect();
 //! ```
 
-mod connectivity;
-mod events;
-mod incremental;
-mod orchestration;
 pub mod parallel;
 mod parallel_audit_evidence_pack_example;
 mod parallel_customer_advisory_board_prep_example;
@@ -71,12 +60,7 @@ mod parallel_revops_quote_desk_example;
 mod parallel_security_exception_review_example;
 mod parallel_support_escalation_desk_example;
 mod parallel_vendor_security_procurement_example;
-mod tasks;
 
-pub use connectivity::ConnectivityScenario;
-pub use events::{BackpressureScenario, EventsScenario};
-pub use incremental::{ChainedLoopScenario, IncrementalFeatureScenario};
-pub use orchestration::{CompletionScenario, MultiIterScenario, SingleIterScenario};
 #[allow(deprecated)]
 pub use parallel::{
     ParallelAppServerIdleStartLiveScenario,
@@ -107,7 +91,6 @@ pub use parallel_revops_quote_desk_example::ParallelRevopsQuoteDeskExampleScenar
 pub use parallel_security_exception_review_example::ParallelSecurityExceptionReviewExampleScenario;
 pub use parallel_support_escalation_desk_example::ParallelSupportEscalationDeskExampleScenario;
 pub use parallel_vendor_security_procurement_example::ParallelVendorSecurityProcurementExampleScenario;
-pub use tasks::{TaskAddScenario, TaskCloseScenario, TaskCompletionScenario, TaskReadyScenario};
 
 use crate::Backend;
 use crate::executor::{ExecutionResult, RalphExecutor, ScenarioConfig};

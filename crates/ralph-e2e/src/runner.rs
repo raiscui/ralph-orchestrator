@@ -6,15 +6,17 @@
 //! # Example
 //!
 //! ```no_run
-//! use ralph_e2e::{TestRunner, RunConfig, ConnectivityScenario, TestScenario, WorkspaceManager};
+//! use ralph_e2e::{TestRunner, TestScenario, WorkspaceManager, all_scenarios};
 //! use std::path::PathBuf;
 //!
 //! #[tokio::main]
 //! async fn main() {
 //!     let workspace_mgr = WorkspaceManager::new(PathBuf::from(".e2e-tests"));
-//!     let scenarios: Vec<Box<dyn TestScenario>> = vec![
-//!         Box::new(ConnectivityScenario::new()),
-//!     ];
+//!     // Get all registered scenarios from the lib as the canonical example.
+//!     let scenarios: Vec<Box<dyn TestScenario>> = all_scenarios()
+//!         .into_iter()
+//!         .map(|(_, _, scenario)| scenario)
+//!         .collect();
 //!
 //!     let runner = TestRunner::new(workspace_mgr, scenarios);
 //!     let results = runner.run_all().await.unwrap();
